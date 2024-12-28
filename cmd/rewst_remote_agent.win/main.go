@@ -93,7 +93,9 @@ func (m *AgentService) Execute(args []string, req <-chan svc.ChangeRequest, stat
 				return true, 0
 			}
 		case msg := <-sub.C():
-			Execute(msg.Payload)
+			if err = Execute(msg.Payload); err != nil {
+				log.Println("Failed to execute message:", err)
+			}
 		}
 	}
 }
