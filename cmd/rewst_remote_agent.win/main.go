@@ -2,17 +2,37 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"log"
 	"os"
 	"path/filepath"
 
+	"golang.org/x/text/encoding/unicode"
+
+	"golang.org/x/text/transform"
+
 	"golang.org/x/sys/windows/svc"
 
 	"github.com/amenzhinsky/iothub/iotdevice"
 	iotmqtt "github.com/amenzhinsky/iothub/iotdevice/transport/mqtt"
 )
+
+type ExecuteMessage struct {
+	PostId              string  `json:"post_id"`
+	Commands            string  `json:"commands"`
+	InterpreterOverride *string `json:"interpreter_override"`
+}
+
+func (m ExecuteMessage) GetCommands() (string, error) {
+	content, err := base64.StdEncoding.DecodeString(m.Commands)
+	if err != nil {
+		return "", nil
+	}
+
+	return string(content), nil
+}
 
 type AgentService struct {
 	Configuration Config
@@ -73,7 +93,7 @@ func (m *AgentService) Execute(args []string, req <-chan svc.ChangeRequest, stat
 				return true, 0
 			}
 		case msg := <-sub.C():
-			log.Println(msg.To, string(msg.Payload))
+			Execute(msg.Payload)
 		}
 	}
 }
@@ -126,6 +146,38 @@ func load(configFilePath string, out *Config) error {
 	return nil
 }
 
+func Execute(data []byte) error {
+	var message ExecuteMessage
+	err := json.Unmarshal(data, &message)
+	if err != nil {
+		return err
+	}
+
+	// Print contents of message
+	log.Println("Received message:")
+	log.Println("post_id", message.PostId)
+	log.Println("commands", message.Commands)
+	log.Println("interpreter_override", message.InterpreterOverride)
+
+	// Parse the commands
+	commandBytes, err := message.GetCommands()
+	if err != nil {
+		return err
+	}
+
+	// Decode using UTF16LE
+	decoder := unicode.UTF16(unicode.LittleEndian, unicode.IgnoreBOM).NewDecoder()
+	commands, _, err := transform.String(decoder, string(commandBytes))
+	if err != nil {
+		return err
+	}
+
+	// Print commands
+	log.Println(commands)
+
+	return nil
+}
+
 func main() {
 	dir := baseDirectory()
 
@@ -168,6 +220,6 @@ func main() {
 		svc.Run("AgentSmithGoService", &service)
 	} else {
 		// Run as a console application
-		log.Println("Running interactively. This is not a Windows service.")
+		log.Fatalln("Running interactively. This is not a Windows service.")
 	}
 }
