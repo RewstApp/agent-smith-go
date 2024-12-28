@@ -5,6 +5,7 @@ go 1.23.3
 require (
 	github.com/amenzhinsky/iothub v0.9.1
 	golang.org/x/sys v0.28.0
+	golang.org/x/text v0.21.0
 )
 
 require (
