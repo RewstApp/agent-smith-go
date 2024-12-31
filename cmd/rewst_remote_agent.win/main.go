@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
 
 	"golang.org/x/text/encoding/unicode"
@@ -45,6 +46,7 @@ func (m *AgentService) Execute(args []string, req <-chan svc.ChangeRequest, stat
 	status <- svc.Status{State: svc.StartPending}
 
 	// TODO: Perform the initialization step
+	// TODO: Refactor with graceful exit
 
 	connStr := m.Configuration.ConnectionString()
 	log.Println("Connecting to Iot Hub: ", connStr)
@@ -167,15 +169,23 @@ func Execute(data []byte) error {
 		return err
 	}
 
+	// TODO: Add support for other interpreters
 	// Decode using UTF16LE
 	decoder := unicode.UTF16(unicode.LittleEndian, unicode.IgnoreBOM).NewDecoder()
 	commands, _, err := transform.String(decoder, string(commandBytes))
 	if err != nil {
 		return err
 	}
+	log.Println("parsed commands:", commands)
 
-	// Print commands
-	log.Println(commands)
+	// Run the command in the system using powershell
+	cmd := exec.Command("powershell", "-Command", commands)
+	err = cmd.Run()
+	if err != nil {
+		return err
+	}
+
+	log.Println("Execution completed")
 
 	return nil
 }
