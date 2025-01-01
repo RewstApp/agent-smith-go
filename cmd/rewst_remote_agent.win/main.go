@@ -9,6 +9,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+
+	"github.com/RewstApp/agent-smith-go/pkg/version"
 
 	"golang.org/x/text/encoding/unicode"
 
@@ -200,6 +203,10 @@ func main() {
 	}
 	defer logFile.Close()
 	log.SetOutput(logFile)
+
+	// Show info
+	log.Println("Version:", version.Version)
+	log.Println("Running on:", runtime.GOOS)
 
 	// Load the configuration file
 	var config Config
