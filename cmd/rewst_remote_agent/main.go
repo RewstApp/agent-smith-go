@@ -4,21 +4,20 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
-	"fmt"
 	"io"
 	"log"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"runtime"
+	"syscall"
 
 	"github.com/RewstApp/agent-smith-go/pkg/version"
 
 	"golang.org/x/text/encoding/unicode"
 
 	"golang.org/x/text/transform"
-
-	"golang.org/x/sys/windows/svc"
 
 	"github.com/amenzhinsky/iothub/iotdevice"
 	iotmqtt "github.com/amenzhinsky/iothub/iotdevice/transport/mqtt"
@@ -37,78 +36,6 @@ func (m ExecuteMessage) GetCommands() (string, error) {
 	}
 
 	return string(content), nil
-}
-
-type AgentService struct {
-	Configuration Config
-}
-
-// Execute is the main entry point for your service logic
-func (m *AgentService) Execute(args []string, req <-chan svc.ChangeRequest, status chan<- svc.Status) (bool, uint32) {
-
-	// Notify Windows that the service is starting
-	status <- svc.Status{State: svc.StartPending}
-
-	connStr := m.Configuration.ConnectionString()
-	log.Println("Connecting to Iot Hub:", connStr)
-
-	// Create a new device client
-	client, err := iotdevice.NewFromConnectionString(iotmqtt.New(), m.Configuration.ConnectionString())
-	if err != nil {
-		log.Println("Failed to create client:", err)
-		status <- svc.Status{State: svc.Stopped}
-		return true, 1
-	}
-	log.Println("Client created")
-
-	// Connect to IoT Hub
-	if err = client.Connect(context.Background()); err != nil {
-		log.Println("Failed to connect to Iot Hub:", err)
-		status <- svc.Status{State: svc.Stopped}
-		return true, 1
-	}
-	log.Println("Connected to Iot Hub")
-
-	// Indicate the service is running
-	status <- svc.Status{State: svc.Running, Accepts: svc.AcceptStop | svc.AcceptShutdown}
-
-	log.Println("Service is running...")
-
-	// Subscribe to events
-	sub, err := client.SubscribeEvents(context.Background())
-	if err != nil {
-		log.Println("Failed to subscribe events:", err)
-		status <- svc.Status{State: svc.Stopped}
-		return true, 1
-	}
-	log.Println("Subscribed to events")
-
-	// Main service loop
-	for {
-		select {
-		case r := <-req:
-			switch r.Cmd {
-			case svc.Stop, svc.Shutdown:
-				log.Println("Service is stopping...")
-				status <- svc.Status{State: svc.StopPending}
-
-				if err = client.Close(); err != nil {
-					log.Println("Closing client failed:", err)
-					return true, 1
-				}
-
-				log.Println("Client closed")
-
-				status <- svc.Status{State: svc.Stopped}
-
-				return true, 0
-			}
-		case msg := <-sub.C():
-			if err = Execute(msg.Payload); err != nil {
-				log.Println("Failed to execute message:", err)
-			}
-		}
-	}
 }
 
 type Config struct {
@@ -188,7 +115,12 @@ func Execute(data []byte) error {
 	log.Println("parsed commands:", commands)
 
 	// Run the command in the system using powershell
-	cmd := exec.Command("powershell", "-Command", commands)
+	shell := "powershell"
+	if runtime.GOOS != "windows" {
+		shell = "pwsh"
+	}
+
+	cmd := exec.Command(shell, "-Command", commands)
 	err = cmd.Run()
 	if err != nil {
 		return err
@@ -200,14 +132,24 @@ func Execute(data []byte) error {
 }
 
 func main() {
+	// Create a channel to monitor incoming signals to closes
+	signalChan := make(chan os.Signal, 1)
+
+	if runtime.GOOS == "windows" {
+		// Windows only supports os.Interrupt signal
+		signal.Notify(signalChan, os.Interrupt)
+	} else {
+		signal.Notify(signalChan, syscall.SIGINT, syscall.SIGTERM)
+	}
+
 	dir, err := baseDirectory()
 	if err != nil {
-		log.Println("Failed to get base directoyr:", err)
+		log.Println("Failed to get base directory:", err)
 		return
 	}
 
 	// Setup the log file
-	logFile, err := os.OpenFile(dir+"\\rewst.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	logFile, err := os.OpenFile(dir+"//rewst.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
 		log.Println("Failed to open log:", err)
 		return
@@ -221,7 +163,7 @@ func main() {
 
 	// Load the configuration file
 	var config Config
-	err = load(dir+"\\config.json", &config)
+	err = load(dir+"//config.json", &config)
 	if err != nil {
 		log.Println("Failed to load the config file:", err)
 		return
@@ -236,23 +178,54 @@ func main() {
 	log.Printf("shared_access_key=%s\n", config.SharedAccessKey)
 	log.Printf("azure_iot_hub_host=%s\n", config.AzureIotHubHost)
 
-	// Check if the window service is run
-	isWindowsService, err := svc.IsWindowsService()
+	// Run the agent here
+	connStr := config.ConnectionString()
+	log.Println("Connecting to Iot Hub:", connStr)
+
+	// Create a new device client
+	client, err := iotdevice.NewFromConnectionString(iotmqtt.New(), config.ConnectionString())
 	if err != nil {
-		log.Println("Failed to determine session type:", err)
+		log.Println("Failed to create client:", err)
 		return
 	}
+	log.Println("Client created")
 
-	if !isWindowsService {
-		// Run as a console application
-		fmt.Println("This executable should be run as a Windows service.")
+	// Connect to IoT Hub
+	if err = client.Connect(context.Background()); err != nil {
+		log.Println("Failed to connect to Iot Hub:", err)
 		return
 	}
+	log.Println("Connected to Iot Hub")
 
-	// Run as a Windows service
-	log.Println("Running Windows service")
-	service := AgentService{
-		Configuration: config,
+	// Indicate the service is running
+	log.Println("Agent is running...")
+
+	// Subscribe to events
+	sub, err := client.SubscribeEvents(context.Background())
+	if err != nil {
+		log.Println("Failed to subscribe events:", err)
+		return
 	}
-	svc.Run("AgentSmithGoService", &service)
+	log.Println("Subscribed to events")
+
+	// Main agent loop
+	for {
+		select {
+		case msg := <-sub.C():
+			if err = Execute(msg.Payload); err != nil {
+				log.Println("Failed to execute message:", err)
+			}
+		case <-signalChan:
+			// Received signal to stop the agent
+			log.Println("Agent is stopping...")
+
+			if err = client.Close(); err != nil {
+				log.Println("Closing client failed:", err)
+				return
+			}
+
+			log.Println("Client closed")
+			return
+		}
+	}
 }
