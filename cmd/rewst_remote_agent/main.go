@@ -29,13 +29,13 @@ type ExecuteMessage struct {
 	InterpreterOverride *string `json:"interpreter_override"`
 }
 
-func (m ExecuteMessage) GetCommands() (string, error) {
+func (m ExecuteMessage) GetCommandBytes() ([]byte, error) {
 	content, err := base64.StdEncoding.DecodeString(m.Commands)
 	if err != nil {
-		return "", nil
+		return []byte{}, nil
 	}
 
-	return string(content), nil
+	return content, nil
 }
 
 type Config struct {
@@ -100,7 +100,7 @@ func Execute(data []byte) error {
 	log.Println("interpreter_override", message.InterpreterOverride)
 
 	// Parse the commands
-	commandBytes, err := message.GetCommands()
+	commandBytes, err := message.GetCommandBytes()
 	if err != nil {
 		return err
 	}
