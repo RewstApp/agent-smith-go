@@ -1,6 +1,6 @@
 module github.com/RewstApp/agent-smith-go
 
-go 1.23.3
+go 1.23
 
 require (
 	github.com/amenzhinsky/iothub v0.9.1
