@@ -13,12 +13,11 @@ import (
 	"runtime"
 	"syscall"
 
-	"github.com/RewstApp/agent-smith-go/pkg/version"
-
 	"golang.org/x/text/encoding/unicode"
 
 	"golang.org/x/text/transform"
 
+	"github.com/RewstApp/agent-smith-go/internal/version"
 	"github.com/amenzhinsky/iothub/iotdevice"
 	iotmqtt "github.com/amenzhinsky/iothub/iotdevice/transport/mqtt"
 )
@@ -32,7 +31,7 @@ type ExecuteMessage struct {
 func (m ExecuteMessage) GetCommandBytes() ([]byte, error) {
 	content, err := base64.StdEncoding.DecodeString(m.Commands)
 	if err != nil {
-		return []byte{}, nil
+		return []byte{}, err
 	}
 
 	return content, nil
@@ -131,6 +130,10 @@ func Execute(data []byte) error {
 	return nil
 }
 
+// Constants
+var logFileName = "rewst_agent.log"
+var configFileName = "config.json"
+
 func main() {
 	// Create a channel to monitor incoming signals to closes
 	signalChan := make(chan os.Signal, 1)
@@ -149,7 +152,7 @@ func main() {
 	}
 
 	// Setup the log file
-	logFile, err := os.OpenFile(dir+"//rewst.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	logFile, err := os.OpenFile(filepath.Join(dir, logFileName), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
 		log.Println("Failed to open log:", err)
 		return
@@ -163,7 +166,7 @@ func main() {
 
 	// Load the configuration file
 	var config Config
-	err = load(dir+"//config.json", &config)
+	err = load(filepath.Join(dir, configFileName), &config)
 	if err != nil {
 		log.Println("Failed to load the config file:", err)
 		return
