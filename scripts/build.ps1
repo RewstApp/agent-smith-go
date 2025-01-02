@@ -1,3 +1,5 @@
+#! /usr/bin/pwsh
+
 # Get the operating system description
 $osDescription = [System.Runtime.InteropServices.RuntimeInformation]::OSDescription
 
