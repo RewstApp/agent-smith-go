@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"os"
@@ -48,22 +49,23 @@ func (m *AgentService) Execute(args []string, req <-chan svc.ChangeRequest, stat
 	// Notify Windows that the service is starting
 	status <- svc.Status{State: svc.StartPending}
 
-	// TODO: Perform the initialization step
-	// TODO: Refactor with graceful exit
-
 	connStr := m.Configuration.ConnectionString()
-	log.Println("Connecting to Iot Hub: ", connStr)
+	log.Println("Connecting to Iot Hub:", connStr)
 
 	// Create a new device client
 	client, err := iotdevice.NewFromConnectionString(iotmqtt.New(), m.Configuration.ConnectionString())
 	if err != nil {
-		log.Fatalf("Failed to create client: %v", err)
+		log.Println("Failed to create client:", err)
+		status <- svc.Status{State: svc.Stopped}
+		return true, 1
 	}
 	log.Println("Client created")
 
 	// Connect to IoT Hub
 	if err = client.Connect(context.Background()); err != nil {
-		log.Fatalf("Failed to connect to Iot Hub: %v", err)
+		log.Println("Failed to connect to Iot Hub:", err)
+		status <- svc.Status{State: svc.Stopped}
+		return true, 1
 	}
 	log.Println("Connected to Iot Hub")
 
@@ -75,7 +77,9 @@ func (m *AgentService) Execute(args []string, req <-chan svc.ChangeRequest, stat
 	// Subscribe to events
 	sub, err := client.SubscribeEvents(context.Background())
 	if err != nil {
-		log.Fatalf("Failed to subscribe events: %v", err)
+		log.Println("Failed to subscribe events:", err)
+		status <- svc.Status{State: svc.Stopped}
+		return true, 1
 	}
 	log.Println("Subscribed to events")
 
@@ -90,7 +94,9 @@ func (m *AgentService) Execute(args []string, req <-chan svc.ChangeRequest, stat
 
 				if err = client.Close(); err != nil {
 					log.Println("Closing client failed:", err)
+					return true, 1
 				}
+
 				log.Println("Client closed")
 
 				status <- svc.Status{State: svc.Stopped}
@@ -117,15 +123,15 @@ func (c Config) ConnectionString() string {
 	return "HostName=" + c.AzureIotHubHost + ";DeviceId=" + c.DeviceId + ";SharedAccessKey=" + c.SharedAccessKey
 }
 
-func baseDirectory() string {
+func baseDirectory() (string, error) {
 	// Get the path of the current executable
 	exePath, err := os.Executable()
 	if err != nil {
-		log.Fatalf("Failed to get executable path")
+		return "", err
 	}
 
 	// Get the directory from the executable path
-	return filepath.Dir(exePath)
+	return filepath.Dir(exePath), nil
 }
 
 func load(configFilePath string, out *Config) error {
@@ -194,12 +200,17 @@ func Execute(data []byte) error {
 }
 
 func main() {
-	dir := baseDirectory()
+	dir, err := baseDirectory()
+	if err != nil {
+		log.Println("Failed to get base directoyr:", err)
+		return
+	}
 
 	// Setup the log file
 	logFile, err := os.OpenFile(dir+"\\rewst.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
-		log.Fatal(err)
+		log.Println("Failed to open log:", err)
+		return
 	}
 	defer logFile.Close()
 	log.SetOutput(logFile)
@@ -212,7 +223,8 @@ func main() {
 	var config Config
 	err = load(dir+"\\config.json", &config)
 	if err != nil {
-		log.Fatalf("Failed to load the config file: %v", err)
+		log.Println("Failed to load the config file:", err)
+		return
 	}
 	log.Println("Configuration file loaded")
 
@@ -227,18 +239,20 @@ func main() {
 	// Check if the window service is run
 	isWindowsService, err := svc.IsWindowsService()
 	if err != nil {
-		log.Fatalf("Failed to determine session type: %v", err)
+		log.Println("Failed to determine session type:", err)
+		return
 	}
 
-	if isWindowsService {
-		// Run as a Windows service
-		log.Println("Running Windows service")
-		service := AgentService{
-			Configuration: config,
-		}
-		svc.Run("AgentSmithGoService", &service)
-	} else {
+	if !isWindowsService {
 		// Run as a console application
-		log.Fatalln("Running interactively. This is not a Windows service.")
+		fmt.Println("This executable should be run as a Windows service.")
+		return
 	}
+
+	// Run as a Windows service
+	log.Println("Running Windows service")
+	service := AgentService{
+		Configuration: config,
+	}
+	svc.Run("AgentSmithGoService", &service)
 }
