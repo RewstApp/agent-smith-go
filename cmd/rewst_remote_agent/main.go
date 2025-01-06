@@ -145,6 +145,9 @@ func main() {
 		select {
 		case msg := <-messageChan:
 			log.Println("Message received:", string(msg))
+			if err := Execute(msg); err != nil {
+				log.Println("Failed to execute message:", err)
+			}
 		case <-signalChan:
 			// Received signal to stop the agent
 			log.Println("Agent is stopping...")

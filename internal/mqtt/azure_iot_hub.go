@@ -61,9 +61,12 @@ func SubscribeToAzureIotHub(config utils.Config) (<-chan []byte, error) {
 	opts := mqtt.NewClientOptions()
 	opts.AddBroker(fmt.Sprintf("tls://%s:8883", config.AzureIotHubHost)) // Use port 8883 for MQTT over TLS
 	opts.SetClientID(config.DeviceId)
-	opts.SetUsername(fmt.Sprintf("%s/%s/?api-version=2020-09-30", config.AzureIotHubHost, config.DeviceId))
+	opts.SetUsername(fmt.Sprintf("%s/%s/?api-version=2021-04-12", config.AzureIotHubHost, config.DeviceId))
 	opts.SetPassword(sasToken)
-	opts.SetTLSConfig(&tls.Config{RootCAs: rootCAs}) // Use proper TLS validation in production
+	opts.SetTLSConfig(&tls.Config{
+		RootCAs:    rootCAs,
+		MinVersion: tls.VersionTLS12,
+	}) // Use proper TLS validation in production
 
 	// Create the channel here
 	messageChan := make(chan []byte)
@@ -82,7 +85,7 @@ func SubscribeToAzureIotHub(config utils.Config) (<-chan []byte, error) {
 			log.Println("Failed to subscribe to topic:", token.Error())
 			return
 		}
-		fmt.Println("Subscribed to C2D message topic.")
+		log.Println("Subscribed to C2D message topic.")
 	}
 	opts.OnConnectionLost = func(client mqtt.Client, err error) {
 		log.Println("Connection lost:", err)
