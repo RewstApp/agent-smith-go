@@ -14,10 +14,7 @@ type Config struct {
 	RewstEngineHost string `json:"rewst_engine_host"`
 	SharedAccessKey string `json:"shared_access_key"`
 	AzureIotHubHost string `json:"azure_iot_hub_host"`
-}
-
-func (c Config) ConnectionString() string {
-	return "HostName=" + c.AzureIotHubHost + ";DeviceId=" + c.DeviceId + ";SharedAccessKey=" + c.SharedAccessKey
+	Broker          string `json:"broker"`
 }
 
 func (c *Config) Load(configFilePath string) error {

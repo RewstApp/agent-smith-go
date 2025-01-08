@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"syscall"
+	"time"
 
 	"golang.org/x/text/encoding/unicode"
 
@@ -128,30 +129,55 @@ func main() {
 	log.Printf("rewst_engine_host=%s\n", conf.RewstEngineHost)
 	log.Printf("shared_access_key=%s\n", conf.SharedAccessKey)
 	log.Printf("azure_iot_hub_host=%s\n", conf.AzureIotHubHost)
+	log.Printf("broker=%v\n", conf.Broker)
 
-	log.Println("Connecting to IoT Hub...")
+	reconnTimeout := 1
+	reconnBaseTimeout := 2
 
-	messageChan, err := mqtt.SubscribeToAzureIotHub(conf)
-	if err != nil {
-		log.Println("Failed to connect to Iot Hub:", err)
-		return
-	}
-
-	// Indicate the service is running
-	log.Println("Agent is running...")
-
-	// Main agent loop
 	for {
-		select {
-		case msg := <-messageChan:
-			log.Println("Message received:", string(msg))
-			if err := Execute(msg); err != nil {
-				log.Println("Failed to execute message:", err)
-			}
-		case <-signalChan:
-			// Received signal to stop the agent
-			log.Println("Agent is stopping...")
-			return
+		log.Println("Connecting to IoT Hub...")
+		// TODO: Capture signal anywhere in the process here
+
+		conn, err := mqtt.Subscribe(conf)
+		if err != nil {
+			log.Println("Failed to connect to Iot Hub:", err)
+
+			reconnTimeout *= reconnBaseTimeout
+			log.Println("Reconnecting in", reconnTimeout, "seconds")
+			time.Sleep(time.Duration(reconnTimeout) * time.Second)
+			continue
 		}
+
+		// Indicate the service is running
+		reconnTimeout = 1 // Reset the reconnection timeout
+		log.Println("Agent is running...")
+
+		// Main agent loop
+	agent_loop:
+		for {
+			select {
+			case msg, ok := <-conn.MessageChannel():
+				if !ok {
+					// TODO: Establish a reconnection process
+					log.Println("Disconnected")
+					break agent_loop
+				}
+				log.Println("Message received:", string(msg))
+				if err := Execute(msg); err != nil {
+					log.Println("Failed to execute message:", err)
+				}
+			case <-signalChan:
+				// Received signal to stop the agent
+				log.Println("Agent is stopping...")
+				conn.Close()
+				log.Println("Agent stopped")
+				return
+			}
+		}
+
+		// Loop broken, reconnect
+		reconnTimeout *= reconnBaseTimeout
+		log.Println("Reconnecting in", reconnTimeout, "seconds")
+		time.Sleep(time.Duration(reconnTimeout) * time.Second)
 	}
 }

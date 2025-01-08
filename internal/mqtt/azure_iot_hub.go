@@ -13,6 +13,22 @@ import (
 	mqtt "github.com/eclipse/paho.mqtt.golang"
 )
 
+type AzureIotHubConnection struct {
+	client  mqtt.Client
+	topic   string
+	channel chan []byte
+}
+
+func (c AzureIotHubConnection) MessageChannel() <-chan []byte {
+	return c.channel
+}
+
+func (c AzureIotHubConnection) Close() {
+	c.client.Disconnect(250)
+	close(c.channel)
+	log.Println("Disconnected from Azure IoT Hub")
+}
+
 // generateSASToken generates a SAS token for Azure IoT Hub
 func generateSASToken(resourceURI, key string, duration time.Duration) (string, error) {
 	// Set expiration time
@@ -37,24 +53,18 @@ func generateSASToken(resourceURI, key string, duration time.Duration) (string, 
 	return token, nil
 }
 
-func emptyChannel() <-chan []byte {
-	ch := make(chan []byte)
-	close(ch)
-	return ch
-}
-
-func SubscribeToAzureIotHub(config utils.Config) (<-chan []byte, error) {
+func SubscribeToAzureIotHub(config utils.Config) (AzureIotHubConnection, error) {
 	// Create a tls connection to broker
 	rootCAs, err := utils.RootCAs()
 	if err != nil {
-		return emptyChannel(), err
+		return AzureIotHubConnection{}, err
 	}
 
 	// Generate SAS token
 	resourceURI := fmt.Sprintf("%s/devices/%s", config.AzureIotHubHost, config.DeviceId)
 	sasToken, err := generateSASToken(resourceURI, config.SharedAccessKey, time.Hour)
 	if err != nil {
-		return emptyChannel(), err
+		return AzureIotHubConnection{}, err
 	}
 
 	// Initialize MQTT options
@@ -68,8 +78,9 @@ func SubscribeToAzureIotHub(config utils.Config) (<-chan []byte, error) {
 		MinVersion: tls.VersionTLS12,
 	}) // Use proper TLS validation in production
 
-	// Create the channel here
-	messageChan := make(chan []byte)
+	// Create the connection here
+	var conn AzureIotHubConnection
+	conn.channel = make(chan []byte)
 
 	// Define message handlers
 	// TODO: Handle these events properly
@@ -77,25 +88,28 @@ func SubscribeToAzureIotHub(config utils.Config) (<-chan []byte, error) {
 		log.Println("Connected to Azure IoT Hub!")
 
 		// Subscribe to the cloud-to-device (C2D) message topic
-		topic := fmt.Sprintf("devices/%s/messages/devicebound/#", config.DeviceId)
-		if token := client.Subscribe(topic, 1, func(client mqtt.Client, msg mqtt.Message) {
+		conn.topic = fmt.Sprintf("devices/%s/messages/devicebound/#", config.DeviceId)
+		if token := client.Subscribe(conn.topic, 1, func(client mqtt.Client, msg mqtt.Message) {
 			log.Println("Received message on topic:", msg.Topic(), string(msg.Payload()))
-			messageChan <- msg.Payload()
+			conn.channel <- msg.Payload()
 		}); token.Wait() && token.Error() != nil {
 			log.Println("Failed to subscribe to topic:", token.Error())
+			conn.Close()
 			return
 		}
 		log.Println("Subscribed to C2D message topic.")
 	}
 	opts.OnConnectionLost = func(client mqtt.Client, err error) {
 		log.Println("Connection lost:", err)
+		conn.Close()
 	}
 
 	// Create and connect the MQTT client
 	client := mqtt.NewClient(opts)
 	if token := client.Connect(); token.Wait() && token.Error() != nil {
-		return emptyChannel(), token.Error()
+		return AzureIotHubConnection{}, token.Error()
 	}
+	conn.client = client
 
-	return messageChan, nil
+	return conn, nil
 }
