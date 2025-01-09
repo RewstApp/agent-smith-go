@@ -1,6 +1,7 @@
 package mqtt
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"crypto/tls"
@@ -53,7 +54,7 @@ func generateSASToken(resourceURI, key string, duration time.Duration) (string, 
 	return token, nil
 }
 
-func SubscribeToAzureIotHub(config utils.Config) (AzureIotHubConnection, error) {
+func SubscribeToAzureIotHub(ctx context.Context, config utils.Config) (AzureIotHubConnection, error) {
 	// Create a tls connection to broker
 	rootCAs, err := utils.RootCAs()
 	if err != nil {
@@ -106,10 +107,21 @@ func SubscribeToAzureIotHub(config utils.Config) (AzureIotHubConnection, error) 
 
 	// Create and connect the MQTT client
 	client := mqtt.NewClient(opts)
-	if token := client.Connect(); token.Wait() && token.Error() != nil {
-		return AzureIotHubConnection{}, token.Error()
-	}
-	conn.client = client
+	token := client.Connect()
 
-	return conn, nil
+	select {
+	case <-token.Done():
+		// Check if connect failed
+		if token.Error() != nil {
+			return AzureIotHubConnection{}, token.Error()
+		}
+
+		// Move to next step
+		conn.client = client
+		return conn, nil
+	case <-ctx.Done():
+		// Context has been closed
+		// TODO: Properly disconnect
+		return AzureIotHubConnection{}, ctx.Err()
+	}
 }
