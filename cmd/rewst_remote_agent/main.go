@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"log"
@@ -131,25 +132,24 @@ func main() {
 	log.Printf("azure_iot_hub_host=%s\n", conf.AzureIotHubHost)
 	log.Printf("broker=%v\n", conf.Broker)
 
-	reconnTimeout := 1
-	reconnBaseTimeout := 2
+	rg := utils.ReconnectTimeoutGenerator{}
 
 	for {
 		log.Println("Connecting to IoT Hub...")
 		// TODO: Capture signal anywhere in the process here
 
-		conn, err := mqtt.Subscribe(conf)
+		conn, err := mqtt.Subscribe(context.Background(), conf)
 		if err != nil {
 			log.Println("Failed to connect to Iot Hub:", err)
 
-			reconnTimeout *= reconnBaseTimeout
-			log.Println("Reconnecting in", reconnTimeout, "seconds")
-			time.Sleep(time.Duration(reconnTimeout) * time.Second)
+			timeout := rg.Next()
+			log.Println("Reconnecting in", timeout)
+			time.Sleep(timeout)
 			continue
 		}
 
 		// Indicate the service is running
-		reconnTimeout = 1 // Reset the reconnection timeout
+		rg.Clear()
 		log.Println("Agent is running...")
 
 		// Main agent loop
@@ -168,6 +168,7 @@ func main() {
 				}
 			case <-signalChan:
 				// Received signal to stop the agent
+				// TODO: Notify MQTT about client initiated shutdown
 				log.Println("Agent is stopping...")
 				conn.Close()
 				log.Println("Agent stopped")
@@ -176,8 +177,8 @@ func main() {
 		}
 
 		// Loop broken, reconnect
-		reconnTimeout *= reconnBaseTimeout
-		log.Println("Reconnecting in", reconnTimeout, "seconds")
-		time.Sleep(time.Duration(reconnTimeout) * time.Second)
+		timeout := rg.Next()
+		log.Println("Reconnecting in", timeout)
+		time.Sleep(timeout)
 	}
 }
