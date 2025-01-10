@@ -2,85 +2,19 @@ package main
 
 import (
 	"context"
-	"encoding/base64"
-	"encoding/json"
 	"log"
 	"os"
-	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"runtime"
 	"syscall"
 	"time"
 
-	"golang.org/x/text/encoding/unicode"
-
-	"golang.org/x/text/transform"
-
+	"github.com/RewstApp/agent-smith-go/internal/interpreter"
 	"github.com/RewstApp/agent-smith-go/internal/mqtt"
 	"github.com/RewstApp/agent-smith-go/internal/utils"
 	"github.com/RewstApp/agent-smith-go/internal/version"
 )
-
-type ExecuteMessage struct {
-	PostId              string  `json:"post_id"`
-	Commands            string  `json:"commands"`
-	InterpreterOverride *string `json:"interpreter_override"`
-}
-
-func (m ExecuteMessage) GetCommandBytes() ([]byte, error) {
-	content, err := base64.StdEncoding.DecodeString(m.Commands)
-	if err != nil {
-		return []byte{}, err
-	}
-
-	return content, nil
-}
-
-func Execute(data []byte) error {
-	var message ExecuteMessage
-	err := json.Unmarshal(data, &message)
-	if err != nil {
-		return err
-	}
-
-	// Print contents of message
-	log.Println("Received message:")
-	log.Println("post_id", message.PostId)
-	log.Println("commands", message.Commands)
-	log.Println("interpreter_override", message.InterpreterOverride)
-
-	// Parse the commands
-	commandBytes, err := message.GetCommandBytes()
-	if err != nil {
-		return err
-	}
-
-	// TODO: Add support for other interpreters
-	// Decode using UTF16LE
-	decoder := unicode.UTF16(unicode.LittleEndian, unicode.IgnoreBOM).NewDecoder()
-	commands, _, err := transform.String(decoder, string(commandBytes))
-	if err != nil {
-		return err
-	}
-	log.Println("parsed commands:", commands)
-
-	// Run the command in the system using powershell
-	shell := "powershell"
-	if runtime.GOOS != "windows" {
-		shell = "pwsh"
-	}
-
-	cmd := exec.Command(shell, "-Command", commands)
-	err = cmd.Run()
-	if err != nil {
-		return err
-	}
-
-	log.Println("Execution completed")
-
-	return nil
-}
 
 func main() {
 	// Create a channel to monitor incoming signals to closes
@@ -158,12 +92,14 @@ func main() {
 			select {
 			case msg, ok := <-conn.MessageChannel():
 				if !ok {
+					// Channel is closed
 					// TODO: Establish a reconnection process
 					log.Println("Disconnected")
 					break agent_loop
 				}
+
 				log.Println("Message received:", string(msg))
-				if err := Execute(msg); err != nil {
+				if err := interpreter.Execute(msg, &conf); err != nil {
 					log.Println("Failed to execute message:", err)
 				}
 			case <-signalChan:
