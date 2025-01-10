@@ -15,3 +15,11 @@ func BaseDirectory() (string, error) {
 	// Get the directory from the executable path
 	return filepath.Dir(exePath), nil
 }
+
+func DirExists(path string) bool {
+	info, err := os.Stat(path)
+	if os.IsNotExist(err) {
+		return false
+	}
+	return info.IsDir()
+}
