@@ -11,12 +11,12 @@ type ReconnectTimeoutGenerator struct {
 
 func (g *ReconnectTimeoutGenerator) Next() time.Duration {
 	if g.timeout == 0 {
-		g.timeout = time.Duration(2) * time.Second
+		g.timeout = time.Second
 	}
 
 	g.timeout *= 2
 
-	max := time.Duration(64) * time.Second
+	max := 64 * time.Second
 	if g.timeout > max {
 		g.timeout = max
 	}
