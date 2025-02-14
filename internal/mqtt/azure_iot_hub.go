@@ -1,7 +1,6 @@
 package mqtt
 
 import (
-	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"crypto/tls"
@@ -54,74 +53,106 @@ func generateSASToken(resourceURI, key string, duration time.Duration) (string, 
 	return token, nil
 }
 
-func SubscribeToAzureIotHub(ctx context.Context, config utils.Config) (AzureIotHubConnection, error) {
-	// Create a tls connection to broker
-	rootCAs, err := utils.RootCAs()
-	if err != nil {
-		return AzureIotHubConnection{}, err
-	}
+func subscribeToAzureIotHub(config utils.Config, stop <-chan struct{}) <-chan Message {
+	// Create the channel to send data
+	channel := make(chan Message)
 
-	// Generate SAS token
-	resourceURI := fmt.Sprintf("%s/devices/%s", config.AzureIotHubHost, config.DeviceId)
-	sasToken, err := generateSASToken(resourceURI, config.SharedAccessKey, time.Hour)
-	if err != nil {
-		return AzureIotHubConnection{}, err
-	}
-
-	// Initialize MQTT options
-	opts := mqtt.NewClientOptions()
-	opts.AddBroker(fmt.Sprintf("tls://%s:8883", config.AzureIotHubHost)) // Use port 8883 for MQTT over TLS
-	opts.SetClientID(config.DeviceId)
-	opts.SetUsername(fmt.Sprintf("%s/%s/?api-version=2021-04-12", config.AzureIotHubHost, config.DeviceId))
-	opts.SetPassword(sasToken)
-	opts.SetTLSConfig(&tls.Config{
-		RootCAs:    rootCAs,
-		MinVersion: tls.VersionTLS12,
-	}) // Use proper TLS validation in production
-
-	// Create the connection here
-	var conn AzureIotHubConnection
-	conn.channel = make(chan []byte)
-
-	// Define message handlers
-	// TODO: Handle these events properly
-	opts.OnConnect = func(client mqtt.Client) {
-		log.Println("Connected to Azure IoT Hub!")
-
-		// Subscribe to the cloud-to-device (C2D) message topic
-		conn.topic = fmt.Sprintf("devices/%s/messages/devicebound/#", config.DeviceId)
-		if token := client.Subscribe(conn.topic, 1, func(client mqtt.Client, msg mqtt.Message) {
-			log.Println("Received message on topic:", msg.Topic(), string(msg.Payload()))
-			conn.channel <- msg.Payload()
-		}); token.Wait() && token.Error() != nil {
-			log.Println("Failed to subscribe to topic:", token.Error())
-			conn.Close()
+	// Connect
+	go func() {
+		// Create a tls connection to broker
+		rootCAs, err := utils.RootCAs()
+		if err != nil {
+			channel <- Message{nil, err}
+			close(channel)
 			return
 		}
-		log.Println("Subscribed to C2D message topic.")
-	}
-	opts.OnConnectionLost = func(client mqtt.Client, err error) {
-		log.Println("Connection lost:", err)
-		conn.Close()
-	}
 
-	// Create and connect the MQTT client
-	client := mqtt.NewClient(opts)
-	token := client.Connect()
-
-	select {
-	case <-token.Done():
-		// Check if connect failed
-		if token.Error() != nil {
-			return AzureIotHubConnection{}, token.Error()
+		// Generate SAS token
+		resourceURI := fmt.Sprintf("%s/devices/%s", config.AzureIotHubHost, config.DeviceId)
+		sasToken, err := generateSASToken(resourceURI, config.SharedAccessKey, time.Hour)
+		if err != nil {
+			channel <- Message{nil, err}
+			close(channel)
+			return
 		}
 
-		// Move to next step
-		conn.client = client
-		return conn, nil
-	case <-ctx.Done():
-		// Context has been closed
-		// TODO: Properly disconnect
-		return AzureIotHubConnection{}, ctx.Err()
-	}
+		// Initialize MQTT options
+		opts := mqtt.NewClientOptions()
+		opts.AddBroker(fmt.Sprintf("tls://%s:8883", config.AzureIotHubHost)) // Use port 8883 for MQTT over TLS
+		opts.SetClientID(config.DeviceId)
+		opts.SetUsername(fmt.Sprintf("%s/%s/?api-version=2021-04-12", config.AzureIotHubHost, config.DeviceId))
+		opts.SetPassword(sasToken)
+		opts.SetTLSConfig(&tls.Config{
+			RootCAs:    rootCAs,
+			MinVersion: tls.VersionTLS12,
+		}) // Use proper TLS validation in production
+
+		// Define message handlers
+		opts.OnConnect = func(client mqtt.Client) {
+			log.Println("Connected to Azure IoT Hub!")
+
+			// Subscribe to the cloud-to-device (C2D) message topic
+			topic := fmt.Sprintf("devices/%s/messages/devicebound/#", config.DeviceId)
+			token := client.Subscribe(topic, 1, func(client mqtt.Client, msg mqtt.Message) {
+				log.Println("Received message on topic:", msg.Topic(), string(msg.Payload()))
+				channel <- Message{msg.Payload(), nil}
+			})
+
+			// Wait for the subscribe function to finish
+			select {
+			case <-token.Done():
+				if token.Error() != nil {
+					// Failed to subscribe to message topic
+					channel <- Message{nil, token.Error()}
+					client.Disconnect(0)
+					close(channel)
+					return
+				}
+
+				// Successfullyl connectd to the message topic
+				log.Println("Subscribed to C2D message topic.")
+			case <-stop:
+				// Disconnect the client
+				log.Println("Subscription cancelled")
+				client.Disconnect(0)
+				close(channel)
+			}
+		}
+
+		// Handle the case when the connection was lost
+		opts.OnConnectionLost = func(client mqtt.Client, err error) {
+			log.Println("Connection lost")
+			channel <- Message{nil, err}
+			close(channel)
+		}
+
+		// Create and connect the MQTT client
+		client := mqtt.NewClient(opts)
+		token := client.Connect()
+
+		// Wait for connection to finish
+		select {
+		case <-token.Done():
+			if token.Error() != nil {
+				// Failed connecting to client
+				channel <- Message{nil, token.Error()}
+				close(channel)
+				return
+			}
+
+			// Wait for the stop message to arrive
+			<-stop
+			log.Println("Stop trigger received")
+			client.Disconnect(0)
+			close(channel)
+
+		case <-stop:
+			// Cancel the connection process
+			log.Println("Connection cancelled")
+			client.Disconnect(0)
+			close(channel)
+		}
+	}()
+
+	return channel
 }
