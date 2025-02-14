@@ -1,21 +1,19 @@
 package mqtt
 
 import (
-	"context"
-
 	"github.com/RewstApp/agent-smith-go/internal/utils"
 )
 
-type Connection interface {
-	MessageChannel() <-chan []byte
-	Close()
+type Message struct {
+	Payload []byte
+	Error   error
 }
 
-func Subscribe(ctx context.Context, config utils.Config) (Connection, error) {
+func Subscribe(config utils.Config, stop <-chan struct{}) <-chan Message {
 	switch config.Broker {
 	// TODO: Support other brokers here
 	default:
 		// Azure IoT Hub is the default
-		return SubscribeToAzureIotHub(ctx, config)
+		return subscribeToAzureIotHub(config, stop)
 	}
 }

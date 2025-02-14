@@ -1,14 +1,12 @@
 package main
 
 import (
-	"context"
 	"log"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"runtime"
 	"syscall"
-	"time"
 
 	"github.com/RewstApp/agent-smith-go/internal/interpreter"
 	"github.com/RewstApp/agent-smith-go/internal/mqtt"
@@ -66,55 +64,87 @@ func main() {
 	log.Printf("azure_iot_hub_host=%s\n", conf.AzureIotHubHost)
 	log.Printf("broker=%v\n", conf.Broker)
 
-	rg := utils.ReconnectTimeoutGenerator{}
+	// Refactor the code below
+	// FREAKING SIMPLIFY IT!
+	log.Println("Connecting to IoT Hub...")
 
-	for {
-		log.Println("Connecting to IoT Hub...")
-		// TODO: Capture signal anywhere in the process here
+	stopChannel := make(chan struct{})
 
-		conn, err := mqtt.Subscribe(context.Background(), conf)
-		if err != nil {
-			log.Println("Failed to connect to Iot Hub:", err)
+	// Run a waiting goroutine for the signal
+	go func() {
+		<-signalChan
+		stopChannel <- struct{}{}
+	}()
 
-			timeout := rg.Next()
-			log.Println("Reconnecting in", timeout)
-			time.Sleep(timeout)
-			continue
+	channel := mqtt.Subscribe(conf, stopChannel)
+
+	for msg := range channel {
+		// Error occured
+		if msg.Error != nil {
+			log.Printf("An error occured: %v\n", msg.Error)
+			return
 		}
 
-		// Indicate the service is running
-		rg.Clear()
-		log.Println("Agent is running...")
-
-		// Main agent loop
-	agent_loop:
-		for {
-			select {
-			case msg, ok := <-conn.MessageChannel():
-				if !ok {
-					// Channel is closed
-					// TODO: Establish a reconnection process
-					log.Println("Disconnected")
-					break agent_loop
-				}
-
-				log.Println("Message received:", string(msg))
-				if err := interpreter.Execute(msg, &conf); err != nil {
-					log.Println("Failed to execute message:", err)
-				}
-			case <-signalChan:
-				// Received signal to stop the agent
-				// TODO: Notify MQTT about client initiated shutdown
-				log.Println("Agent is stopping...")
-				conn.Close()
-				log.Println("Agent stopped")
-				return
-			}
+		// Execute the payload
+		if err := interpreter.Execute(msg.Payload, &conf); err != nil {
+			log.Println("Failed to execute message:", err)
 		}
-
-		// Loop broken, reconnect
-		timeout := rg.Next()
-		log.Println("Reconnecting in", timeout)
-		time.Sleep(timeout)
 	}
+
+	log.Println("Agent closed")
+
+	/*
+		rg := utils.ReconnectTimeoutGenerator{}
+
+
+
+			for {
+
+				// TODO: Capture signal anywhere in the process here
+
+				conn, err := mqtt.Subscribe(context.Background(), conf)
+				if err != nil {
+					log.Println("Failed to connect to Iot Hub:", err)
+
+					timeout := rg.Next()
+					log.Println("Reconnecting in", timeout)
+					time.Sleep(timeout)
+					continue
+				}
+
+				// Indicate the service is running
+				rg.Clear()
+				log.Println("Agent is running...")
+
+				// Main agent loop
+			agent_loop:
+				for {
+					select {
+					case msg, ok := <-conn.MessageChannel():
+						if !ok {
+							// Channel is closed
+							// TODO: Establish a reconnection process
+							log.Println("Disconnected")
+							break agent_loop
+						}
+
+						log.Println("Message received:", string(msg))
+						if err := interpreter.Execute(msg, &conf); err != nil {
+							log.Println("Failed to execute message:", err)
+						}
+					case <-signalChan:
+						// Received signal to stop the agent
+						// TODO: Notify MQTT about client initiated shutdown
+						log.Println("Agent is stopping...")
+						conn.Close()
+						log.Println("Agent stopped")
+						return
+					}
+				}
+
+				// Loop broken, reconnect
+				timeout := rg.Next()
+				log.Println("Reconnecting in", timeout)
+				time.Sleep(timeout)
+			}*/
 }
