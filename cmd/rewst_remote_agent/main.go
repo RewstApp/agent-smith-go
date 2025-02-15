@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"log"
 	"os"
 	"os/signal"
@@ -64,40 +65,51 @@ func main() {
 	log.Printf("azure_iot_hub_host=%s\n", conf.AzureIotHubHost)
 	log.Printf("broker=%v\n", conf.Broker)
 
-	// Refactor the code below
-	// FREAKING SIMPLIFY IT!
-	log.Println("Connecting to IoT Hub...")
+	log.Println("Go Routines:", runtime.NumGoroutine())
 
-	stopChannel := make(chan struct{})
-
-	// Run a waiting goroutine for the signal
+	// Create context for cancellation
+	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
+		// Run a waiting goroutine for the signal
 		<-signalChan
-		stopChannel <- struct{}{}
+
+		log.Println("Signal received")
+		cancel()
 	}()
 
-	channel := mqtt.Subscribe(conf, stopChannel)
+	channel := mqtt.Subscribe(conf, ctx)
 
-	for msg := range channel {
-		// Error occured
-		if msg.Error != nil {
-			log.Printf("An error occured: %v\n", msg.Error)
-			return
-		}
+	for ev := range channel {
+		switch ev.Type {
+		case mqtt.OnMessageReceived:
+			// Received message
+			log.Println("Received message:", ev.Message)
 
-		// Execute the payload
-		if err := interpreter.Execute(msg.Payload, &conf); err != nil {
-			log.Println("Failed to execute message:", err)
+			// Execute the payload
+			if err := interpreter.Execute(ev.Message, &conf); err != nil {
+				log.Println("Failed to execute message:", err)
+			}
+		case mqtt.OnError:
+			log.Println("Error occurred:", ev.Error)
+		case mqtt.OnConnecting:
+			log.Println("Connecting to broker...")
+		case mqtt.OnConnect:
+			log.Println("Connected to broker")
+		case mqtt.OnSubscribed:
+			log.Println("Subscribed to message topic")
+		case mqtt.OnConnectionLost:
+			log.Println("Connection lost:", ev.Error)
+		case mqtt.OnCancelled:
+			log.Println("Subscription cancelled")
 		}
 	}
 
 	log.Println("Agent closed")
 
+	log.Println("Go Routines:", runtime.NumGoroutine())
+
 	/*
 		rg := utils.ReconnectTimeoutGenerator{}
-
-
-
 			for {
 
 				// TODO: Capture signal anywhere in the process here
