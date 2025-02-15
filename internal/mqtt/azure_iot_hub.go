@@ -1,33 +1,17 @@
 package mqtt
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"crypto/tls"
 	"encoding/base64"
 	"fmt"
-	"log"
 	"time"
 
 	"github.com/RewstApp/agent-smith-go/internal/utils"
 	mqtt "github.com/eclipse/paho.mqtt.golang"
 )
-
-type AzureIotHubConnection struct {
-	client  mqtt.Client
-	topic   string
-	channel chan []byte
-}
-
-func (c AzureIotHubConnection) MessageChannel() <-chan []byte {
-	return c.channel
-}
-
-func (c AzureIotHubConnection) Close() {
-	c.client.Disconnect(250)
-	close(c.channel)
-	log.Println("Disconnected from Azure IoT Hub")
-}
 
 // generateSASToken generates a SAS token for Azure IoT Hub
 func generateSASToken(resourceURI, key string, duration time.Duration) (string, error) {
@@ -53,17 +37,62 @@ func generateSASToken(resourceURI, key string, duration time.Duration) (string, 
 	return token, nil
 }
 
-func subscribeToAzureIotHub(config utils.Config, stop <-chan struct{}) <-chan Message {
-	// Create the channel to send data
-	channel := make(chan Message)
+func onError(channel chan<- Event, err error) {
+	channel <- Event{OnError, nil, err}
+	close(channel)
+}
 
-	// Connect
+func onConnectionLost(channel chan<- Event, err error) {
+	channel <- Event{OnConnectionLost, nil, err}
+	close(channel)
+}
+
+func onCancelled(channel chan<- Event, err error) {
+	channel <- Event{OnCancelled, nil, err}
+	close(channel)
+}
+
+func onConnecting(channel chan<- Event) {
+	channel <- Event{OnConnecting, nil, nil}
+}
+
+func onConnect(channel chan<- Event) {
+	channel <- Event{OnConnect, nil, nil}
+}
+
+func onSubscribed(channel chan<- Event) {
+	channel <- Event{OnSubscribed, nil, nil}
+}
+
+func onMessageReceived(channel chan<- Event, payload []byte) {
+	channel <- Event{OnMessageReceived, payload, nil}
+}
+
+func disconnect(client mqtt.Client) {
+	client.Disconnect(250)
+}
+
+func waitToken(token mqtt.Token, ctx context.Context) (bool, error) {
+	select {
+	case <-token.Done():
+		// Token completed before cancelling
+		return false, token.Error()
+	case <-ctx.Done():
+		// Cancelled before the token is done
+		return true, ctx.Err()
+	}
+}
+
+func subscribeToAzureIotHub(config utils.Config, ctx context.Context) <-chan Event {
+	// Create the channels for the subscription
+	channel := make(chan Event)
+	stop := make(chan struct{})
+
 	go func() {
 		// Create a tls connection to broker
 		rootCAs, err := utils.RootCAs()
 		if err != nil {
-			channel <- Message{nil, err}
-			close(channel)
+			onError(channel, err)
 			return
 		}
 
@@ -71,86 +100,92 @@ func subscribeToAzureIotHub(config utils.Config, stop <-chan struct{}) <-chan Me
 		resourceURI := fmt.Sprintf("%s/devices/%s", config.AzureIotHubHost, config.DeviceId)
 		sasToken, err := generateSASToken(resourceURI, config.SharedAccessKey, time.Hour)
 		if err != nil {
-			channel <- Message{nil, err}
-			close(channel)
+			onError(channel, err)
 			return
 		}
 
 		// Initialize MQTT options
 		opts := mqtt.NewClientOptions()
 		opts.AddBroker(fmt.Sprintf("tls://%s:8883", config.AzureIotHubHost)) // Use port 8883 for MQTT over TLS
+		opts.AddBroker(fmt.Sprintf("wss://%s", config.AzureIotHubHost))
 		opts.SetClientID(config.DeviceId)
 		opts.SetUsername(fmt.Sprintf("%s/%s/?api-version=2021-04-12", config.AzureIotHubHost, config.DeviceId))
 		opts.SetPassword(sasToken)
 		opts.SetTLSConfig(&tls.Config{
-			RootCAs:    rootCAs,
-			MinVersion: tls.VersionTLS12,
+			RootCAs:       rootCAs,
+			MinVersion:    tls.VersionTLS12,
+			Renegotiation: tls.RenegotiateOnceAsClient,
 		}) // Use proper TLS validation in production
-
-		// Define message handlers
-		opts.OnConnect = func(client mqtt.Client) {
-			log.Println("Connected to Azure IoT Hub!")
-
-			// Subscribe to the cloud-to-device (C2D) message topic
-			topic := fmt.Sprintf("devices/%s/messages/devicebound/#", config.DeviceId)
-			token := client.Subscribe(topic, 1, func(client mqtt.Client, msg mqtt.Message) {
-				log.Println("Received message on topic:", msg.Topic(), string(msg.Payload()))
-				channel <- Message{msg.Payload(), nil}
-			})
-
-			// Wait for the subscribe function to finish
-			select {
-			case <-token.Done():
-				if token.Error() != nil {
-					// Failed to subscribe to message topic
-					channel <- Message{nil, token.Error()}
-					client.Disconnect(0)
-					close(channel)
-					return
-				}
-
-				// Successfullyl connectd to the message topic
-				log.Println("Subscribed to C2D message topic.")
-			case <-stop:
-				// Disconnect the client
-				log.Println("Subscription cancelled")
-				client.Disconnect(0)
-				close(channel)
-			}
-		}
+		opts.SetAutoReconnect(false)
 
 		// Handle the case when the connection was lost
 		opts.OnConnectionLost = func(client mqtt.Client, err error) {
-			log.Println("Connection lost")
-			channel <- Message{nil, err}
-			close(channel)
+			go func() {
+				onConnectionLost(channel, err)
+
+				// Send this signal to stop waiting for messages
+				stop <- struct{}{}
+			}()
+		}
+
+		// Define message handlers
+		opts.OnConnect = func(client mqtt.Client) {
+			go func() {
+				// Trigger on connect event
+				onConnect(channel)
+
+				// Subscribe to the cloud-to-device (C2D) message topic
+				topic := fmt.Sprintf("devices/%s/messages/devicebound/#", config.DeviceId)
+				token := client.Subscribe(topic, 1, func(client mqtt.Client, msg mqtt.Message) {
+					go onMessageReceived(channel, msg.Payload())
+				})
+
+				cancelled, err := waitToken(token, ctx)
+
+				if cancelled {
+					disconnect(client)
+					onCancelled(channel, err)
+					return
+				}
+
+				if err != nil {
+					// Failed to subscribe to message topic
+					onError(channel, err)
+					disconnect(client)
+					return
+				}
+
+				// Trigger on subscribed event
+				onSubscribed(channel)
+
+				// Wait for stop or cancel signal
+				select {
+				case <-ctx.Done():
+					disconnect(client)
+					onCancelled(channel, ctx.Err())
+				case <-stop:
+					disconnect(client)
+				}
+			}()
 		}
 
 		// Create and connect the MQTT client
 		client := mqtt.NewClient(opts)
+		onConnecting(channel)
 		token := client.Connect()
+		cancelled, err := waitToken(token, ctx)
 
-		// Wait for connection to finish
-		select {
-		case <-token.Done():
-			if token.Error() != nil {
-				// Failed connecting to client
-				channel <- Message{nil, token.Error()}
-				close(channel)
-				return
-			}
+		if cancelled {
+			disconnect(client)
+			onCancelled(channel, err)
+			return
+		}
 
-			// Wait for the stop message to arrive
-			<-stop
-			log.Println("Stop trigger received")
-			client.Disconnect(0)
-			close(channel)
-
-		case <-stop:
-			// Cancel the connection process
-			log.Println("Connection cancelled")
-			client.Disconnect(0)
-			close(channel)
+		if err != nil {
+			// Failed to connect
+			onError(channel, err)
+			disconnect(client)
+			return
 		}
 	}()
 
