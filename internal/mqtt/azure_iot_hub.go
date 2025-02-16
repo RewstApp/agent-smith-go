@@ -37,41 +37,6 @@ func generateSASToken(resourceURI, key string, duration time.Duration) (string, 
 	return token, nil
 }
 
-func onError(channel chan<- Event, err error) {
-	channel <- Event{OnError, nil, err}
-	close(channel)
-}
-
-func onConnectionLost(channel chan<- Event, err error) {
-	channel <- Event{OnConnectionLost, nil, err}
-	close(channel)
-}
-
-func onCancelled(channel chan<- Event, err error) {
-	channel <- Event{OnCancelled, nil, err}
-	close(channel)
-}
-
-func onConnecting(channel chan<- Event) {
-	channel <- Event{OnConnecting, nil, nil}
-}
-
-func onConnect(channel chan<- Event) {
-	channel <- Event{OnConnect, nil, nil}
-}
-
-func onSubscribed(channel chan<- Event) {
-	channel <- Event{OnSubscribed, nil, nil}
-}
-
-func onMessageReceived(channel chan<- Event, payload []byte) {
-	channel <- Event{OnMessageReceived, payload, nil}
-}
-
-func disconnect(client mqtt.Client) {
-	client.Disconnect(250)
-}
-
 func waitToken(token mqtt.Token, ctx context.Context) (bool, error) {
 	select {
 	case <-token.Done():
@@ -86,13 +51,17 @@ func waitToken(token mqtt.Token, ctx context.Context) (bool, error) {
 func subscribeToAzureIotHub(config utils.Config, ctx context.Context) <-chan Event {
 	// Create the channels for the subscription
 	channel := make(chan Event)
-	stop := make(chan struct{})
 
 	go func() {
+		defer close(channel)
+
+		childCtx, cancel := context.WithCancel(ctx)
+
 		// Create a tls connection to broker
 		rootCAs, err := utils.RootCAs()
 		if err != nil {
-			onError(channel, err)
+			channel <- Event{OnError, nil, err}
+			cancel()
 			return
 		}
 
@@ -100,7 +69,8 @@ func subscribeToAzureIotHub(config utils.Config, ctx context.Context) <-chan Eve
 		resourceURI := fmt.Sprintf("%s/devices/%s", config.AzureIotHubHost, config.DeviceId)
 		sasToken, err := generateSASToken(resourceURI, config.SharedAccessKey, time.Hour)
 		if err != nil {
-			onError(channel, err)
+			channel <- Event{OnError, nil, err}
+			cancel()
 			return
 		}
 
@@ -121,72 +91,70 @@ func subscribeToAzureIotHub(config utils.Config, ctx context.Context) <-chan Eve
 		// Handle the case when the connection was lost
 		opts.OnConnectionLost = func(client mqtt.Client, err error) {
 			go func() {
-				onConnectionLost(channel, err)
-
-				// Send this signal to stop waiting for messages
-				stop <- struct{}{}
+				channel <- Event{OnConnectionLost, nil, err}
+				cancel()
 			}()
 		}
 
 		// Define message handlers
 		opts.OnConnect = func(client mqtt.Client) {
 			go func() {
-				// Trigger on connect event
-				onConnect(channel)
+				// Trigger on connect events
+				channel <- Event{OnConnect, nil, nil}
 
 				// Subscribe to the cloud-to-device (C2D) message topic
 				topic := fmt.Sprintf("devices/%s/messages/devicebound/#", config.DeviceId)
 				token := client.Subscribe(topic, 1, func(client mqtt.Client, msg mqtt.Message) {
-					go onMessageReceived(channel, msg.Payload())
+					go func() {
+						channel <- Event{OnMessageReceived, msg.Payload(), err}
+					}()
 				})
 
 				cancelled, err := waitToken(token, ctx)
 
 				if cancelled {
-					disconnect(client)
-					onCancelled(channel, err)
+					channel <- Event{OnCancelled, nil, err}
+					cancel()
 					return
 				}
 
 				if err != nil {
 					// Failed to subscribe to message topic
-					onError(channel, err)
-					disconnect(client)
+					channel <- Event{OnError, nil, err}
+					cancel()
 					return
 				}
 
 				// Trigger on subscribed event
-				onSubscribed(channel)
-
-				// Wait for stop or cancel signal
-				select {
-				case <-ctx.Done():
-					disconnect(client)
-					onCancelled(channel, ctx.Err())
-				case <-stop:
-					disconnect(client)
-				}
+				channel <- Event{OnSubscribed, nil, nil}
 			}()
 		}
 
 		// Create and connect the MQTT client
 		client := mqtt.NewClient(opts)
-		onConnecting(channel)
+
+		channel <- Event{OnConnecting, nil, nil}
+
 		token := client.Connect()
+		defer client.Disconnect(250)
+
 		cancelled, err := waitToken(token, ctx)
 
 		if cancelled {
-			disconnect(client)
-			onCancelled(channel, err)
+			channel <- Event{OnCancelled, nil, err}
+			cancel()
 			return
 		}
 
 		if err != nil {
 			// Failed to connect
-			onError(channel, err)
-			disconnect(client)
+			channel <- Event{OnError, nil, err}
+			cancel()
 			return
 		}
+
+		// Wait for the context to be cancelled
+		<-childCtx.Done()
 	}()
 
 	return channel
