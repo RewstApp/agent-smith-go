@@ -3,31 +3,42 @@ package interpreter
 import (
 	"bytes"
 	"fmt"
-	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 
 	"github.com/RewstApp/agent-smith-go/internal/utils"
 	"golang.org/x/text/encoding/unicode"
 	"golang.org/x/text/transform"
 )
 
-func executeUsingPowershell(message *CommandDispatchMessage, conf utils.Config) error {
+func sanitizeFilename(filename string) string {
+	return strings.Map(func(r rune) rune {
+		// Replace prohibited characters in windows
+		if r == '<' || r == '>' || r == ':' || r == '"' || r == '/' || r == '\\' || r == '|' || r == '?' || r == '*' {
+			return '_'
+		}
+
+		// Do not replace the character
+		return r
+	}, filename)
+}
+
+func executeUsingPowershell(message *CommandDispatchMessage) (CommandDispatchResult, error) {
 	// Parse the commands
 	commandBytes, err := message.GetCommandBytes()
 	if err != nil {
-		return err
+		return CommandDispatchResult{}, err
 	}
 
 	// Decode using UTF16LE
 	decoder := unicode.UTF16(unicode.LittleEndian, unicode.IgnoreBOM).NewDecoder()
 	commands, _, err := transform.String(decoder, string(commandBytes))
 	if err != nil {
-		return err
+		return CommandDispatchResult{}, err
 	}
-	log.Println("parsed commands:", commands)
 
 	// Run the command in the system using powershell
 	shell := "powershell"
@@ -38,28 +49,27 @@ func executeUsingPowershell(message *CommandDispatchMessage, conf utils.Config) 
 	// Save commands to temporary file
 	baseDir, err := utils.BaseDirectory()
 	if err != nil {
-		return err
+		return CommandDispatchResult{}, err
 	}
 
 	scriptsDir := filepath.Join(baseDir, "scripts")
 	if !utils.DirExists(scriptsDir) {
 		err = os.Mkdir(scriptsDir, 0755)
 		if err != nil {
-			return err
+			return CommandDispatchResult{}, err
 		}
 	}
 
-	tempfile, err := os.CreateTemp(scriptsDir, fmt.Sprintf("%s-*.ps1", message.PostId))
+	tempfile, err := os.CreateTemp(scriptsDir, fmt.Sprintf("%s-*.ps1", sanitizeFilename(message.PostId)))
 	if err != nil {
-		return err
+		return CommandDispatchResult{}, err
 	}
 	defer os.Remove(tempfile.Name())
 
 	_, err = tempfile.WriteString(commands)
 	if err != nil {
-		return err
+		return CommandDispatchResult{}, err
 	}
-	log.Println("Commands saved to temporary file:", tempfile.Name())
 
 	// Close the temporary file
 	tempfile.Close()
@@ -71,13 +81,15 @@ func executeUsingPowershell(message *CommandDispatchMessage, conf utils.Config) 
 
 	err = cmd.Run()
 	if err != nil {
-		log.Print("Stderr:", errb.String())
-		log.Print("Stdout:", outb.String())
-		return err
+		return CommandDispatchResult{}, err
 	}
 
-	log.Print("Stdout:", outb.String())
-	log.Println("Execution completed:", tempfile.Name())
-
-	return nil
+	return CommandDispatchResult{
+		message.PostId,
+		shell,
+		tempfile.Name(),
+		cmd.ProcessState.ExitCode(),
+		errb.String(),
+		outb.String(),
+	}, nil
 }

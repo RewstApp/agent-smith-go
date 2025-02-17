@@ -86,15 +86,19 @@ func main() {
 		for ev := range channel {
 			switch ev.Type {
 			case mqtt.OnMessageReceived:
-				// Received message
-				log.Println("Received message:", ev.Message)
-
-				// Execute the payload
+				// Execute the payload on a goroutine so it won't block the receiver
 				go func() {
-					err := interpreter.Execute(ev.Message, conf)
+					result, err := interpreter.Execute(ev.Message)
 					if err != nil {
 						log.Println("Failed to execute message:", err)
+						return
 					}
+
+					// Display results
+					log.Println("Commands saved to temp file:", result.TempFilename)
+					log.Println("Commands", result.PostId, "executed using", result.Interpreter, "with status code", result.ExitCode)
+					log.Println("Stderr:", result.Stderr)
+					log.Println("Stdout:", result.Stdout)
 				}()
 			case mqtt.OnError:
 				log.Println("Error:", ev.Error)
