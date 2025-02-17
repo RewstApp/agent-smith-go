@@ -2,10 +2,10 @@ package main
 
 import (
 	"context"
+	"flag"
 	"log"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"runtime"
 	"syscall"
 	"time"
@@ -27,35 +27,39 @@ func main() {
 		signal.Notify(signalChan, syscall.SIGINT, syscall.SIGTERM)
 	}
 
+	// Parse command-line arguments
+	var configFilePath string
+	var logFilePath string
+
+	flag.StringVar(&configFilePath, "config", "", "Config file path")
+	flag.StringVar(&logFilePath, "log", "", "Log file path")
+	flag.Parse()
+
 	log.SetPrefix("[rewst_remote_agent] ")
 
-	dir, err := utils.BaseDirectory()
-	if err != nil {
-		log.Println("Failed to get base directory:", err)
-		return
+	// Setup the log file if present
+	if len(logFilePath) > 0 {
+		logFile, err := os.OpenFile(logFilePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+		if err != nil {
+			log.Println("Failed to open log:", err)
+			return
+		}
+		defer logFile.Close()
+		log.SetOutput(logFile)
 	}
 
-	// Setup the log file
-	logFile, err := os.OpenFile(filepath.Join(dir, utils.LogFileName), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	// Load the configuration file
+	conf := utils.Config{}
+	err := conf.Load(configFilePath)
 	if err != nil {
-		log.Println("Failed to open log:", err)
+		log.Println("Load config file failed:", err)
 		return
 	}
-	defer logFile.Close()
-	log.SetOutput(logFile)
+	log.Println("Configuration file loaded")
 
 	// Show info
 	log.Println("Version:", version.Version)
 	log.Println("Running on:", runtime.GOOS)
-
-	// Load the configuration file
-	conf := utils.Config{}
-	err = conf.Load(filepath.Join(dir, utils.ConfigFileName))
-	if err != nil {
-		log.Println("Failed to load the config file:", err)
-		return
-	}
-	log.Println("Configuration file loaded")
 
 	// Output the code
 	log.Println("Loaded Configuration: ")
