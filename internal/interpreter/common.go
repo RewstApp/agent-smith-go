@@ -6,9 +6,9 @@ import (
 )
 
 type CommandDispatchMessage struct {
-	PostId              string  `json:"post_id"`
-	Commands            string  `json:"commands"`
-	InterpreterOverride *string `json:"interpreter_override"`
+	PostId              string `json:"post_id"`
+	Commands            string `json:"commands"`
+	InterpreterOverride string `json:"interpreter_override"`
 }
 
 type CommandDispatchResult struct {

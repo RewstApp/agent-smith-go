@@ -2,29 +2,15 @@ package interpreter
 
 import (
 	"bytes"
-	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"strings"
 
 	"github.com/RewstApp/agent-smith-go/internal/utils"
 	"golang.org/x/text/encoding/unicode"
 	"golang.org/x/text/transform"
 )
-
-func sanitizeFilename(filename string) string {
-	return strings.Map(func(r rune) rune {
-		// Replace prohibited characters in windows
-		if r == '<' || r == '>' || r == ':' || r == '"' || r == '/' || r == '\\' || r == '|' || r == '?' || r == '*' {
-			return '_'
-		}
-
-		// Do not replace the character
-		return r
-	}, filename)
-}
 
 func executeUsingPowershell(message *CommandDispatchMessage) (CommandDispatchResult, error) {
 	// Parse the commands
@@ -60,11 +46,10 @@ func executeUsingPowershell(message *CommandDispatchMessage) (CommandDispatchRes
 		}
 	}
 
-	tempfile, err := os.CreateTemp(scriptsDir, fmt.Sprintf("%s-*.ps1", sanitizeFilename(message.PostId)))
+	tempfile, err := os.CreateTemp(scriptsDir, "exec-*.ps1")
 	if err != nil {
 		return CommandDispatchResult{}, err
 	}
-	defer os.Remove(tempfile.Name())
 
 	_, err = tempfile.WriteString(commands)
 	if err != nil {
@@ -83,6 +68,9 @@ func executeUsingPowershell(message *CommandDispatchMessage) (CommandDispatchRes
 	if err != nil {
 		return CommandDispatchResult{}, err
 	}
+
+	// Remove successfully executed temporary filename
+	defer os.Remove(tempfile.Name())
 
 	return CommandDispatchResult{
 		message.PostId,
