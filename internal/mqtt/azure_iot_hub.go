@@ -24,7 +24,7 @@ func generateSASToken(resourceURI, key string, duration time.Duration) (string, 
 	// Decode the base64 key
 	keyBytes, err := base64.StdEncoding.DecodeString(key)
 	if err != nil {
-		return "", fmt.Errorf("failed to decode key: %w", err)
+		return "", fmt.Errorf("Failed to decode key: %w", err)
 	}
 
 	// Create the HMAC-SHA256 signature
@@ -35,17 +35,6 @@ func generateSASToken(resourceURI, key string, duration time.Duration) (string, 
 	// Create the SAS token
 	token := fmt.Sprintf("SharedAccessSignature sr=%s&sig=%s&se=%d", resourceURI, signature, expiration)
 	return token, nil
-}
-
-func waitToken(token mqtt.Token, ctx context.Context) (bool, error) {
-	select {
-	case <-token.Done():
-		// Token completed before cancelling
-		return false, token.Error()
-	case <-ctx.Done():
-		// Cancelled before the token is done
-		return true, ctx.Err()
-	}
 }
 
 func subscribeToAzureIotHub(config utils.Config, ctx context.Context) <-chan Event {
@@ -77,7 +66,7 @@ func subscribeToAzureIotHub(config utils.Config, ctx context.Context) <-chan Eve
 		// Initialize MQTT options
 		opts := mqtt.NewClientOptions()
 		opts.AddBroker(fmt.Sprintf("tls://%s:8883", config.AzureIotHubHost)) // Use port 8883 for MQTT over TLS
-		opts.AddBroker(fmt.Sprintf("wss://%s", config.AzureIotHubHost))
+		opts.AddBroker(fmt.Sprintf("wss://%s", config.AzureIotHubHost))      // Add websocket as a backup for Azure Iot Hub
 		opts.SetClientID(config.DeviceId)
 		opts.SetUsername(fmt.Sprintf("%s/%s/?api-version=2021-04-12", config.AzureIotHubHost, config.DeviceId))
 		opts.SetPassword(sasToken)
