@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"syscall"
+	"time"
 
 	"github.com/RewstApp/agent-smith-go/internal/interpreter"
 	"github.com/RewstApp/agent-smith-go/internal/mqtt"
@@ -77,86 +78,69 @@ func main() {
 		cancel()
 	}()
 
-	channel := mqtt.Subscribe(conf, ctx)
+	// Create the reconnect generator
+	rg := utils.ReconnectTimeoutGenerator{}
 
-	for ev := range channel {
-		switch ev.Type {
-		case mqtt.OnMessageReceived:
-			// Received message
-			log.Println("Received message:", ev.Message)
+	for {
+		channel := mqtt.Subscribe(conf, ctx)
+		reconnect := false
 
-			// Execute the payload
-			if err := interpreter.Execute(ev.Message, &conf); err != nil {
-				log.Println("Failed to execute message:", err)
+		for ev := range channel {
+			switch ev.Type {
+			case mqtt.OnMessageReceived:
+				// Received message
+				log.Println("Received message:", ev.Message)
+
+				// Execute the payload
+				go func() {
+					err := interpreter.Execute(ev.Message, &conf)
+					if err != nil {
+						log.Println("Failed to execute message:", err)
+					}
+				}()
+			case mqtt.OnError:
+				log.Println("Error occurred:", ev.Error)
+				reconnect = true
+			case mqtt.OnConnecting:
+				log.Println("Connecting to broker...")
+			case mqtt.OnConnect:
+				log.Println("Connected to broker")
+			case mqtt.OnSubscribed:
+				log.Println("Subscribed to message topic")
+
+				// Reset the reconnect once subscription is successful
+				rg.Clear()
+			case mqtt.OnConnectionLost:
+				log.Println("Connection lost:", ev.Error)
+				reconnect = true
+			case mqtt.OnCancelled:
+				log.Println("Subscription cancelled")
 			}
-		case mqtt.OnError:
-			log.Println("Error occurred:", ev.Error)
-		case mqtt.OnConnecting:
-			log.Println("Connecting to broker...")
-		case mqtt.OnConnect:
-			log.Println("Connected to broker")
-		case mqtt.OnSubscribed:
-			log.Println("Subscribed to message topic")
-		case mqtt.OnConnectionLost:
-			log.Println("Connection lost:", ev.Error)
-		case mqtt.OnCancelled:
-			log.Println("Subscription cancelled")
+		}
+
+		// Stop the main loop if reconnect is set as false
+		if !reconnect {
+			break
+		}
+
+		// Wait for timeout or cancelled to happen
+		timeout := rg.Next()
+		log.Println("Reconnecting in", timeout)
+
+		select {
+		case <-time.After(timeout):
+			reconnect = true
+		case <-ctx.Done():
+			reconnect = false
+		}
+
+		// Stop the main loop if reconnect is set as false
+		if !reconnect {
+			break
 		}
 	}
 
 	log.Println("Agent closed")
 
 	log.Println("Go Routines:", runtime.NumGoroutine())
-
-	/*
-		rg := utils.ReconnectTimeoutGenerator{}
-			for {
-
-				// TODO: Capture signal anywhere in the process here
-
-				conn, err := mqtt.Subscribe(context.Background(), conf)
-				if err != nil {
-					log.Println("Failed to connect to Iot Hub:", err)
-
-					timeout := rg.Next()
-					log.Println("Reconnecting in", timeout)
-					time.Sleep(timeout)
-					continue
-				}
-
-				// Indicate the service is running
-				rg.Clear()
-				log.Println("Agent is running...")
-
-				// Main agent loop
-			agent_loop:
-				for {
-					select {
-					case msg, ok := <-conn.MessageChannel():
-						if !ok {
-							// Channel is closed
-							// TODO: Establish a reconnection process
-							log.Println("Disconnected")
-							break agent_loop
-						}
-
-						log.Println("Message received:", string(msg))
-						if err := interpreter.Execute(msg, &conf); err != nil {
-							log.Println("Failed to execute message:", err)
-						}
-					case <-signalChan:
-						// Received signal to stop the agent
-						// TODO: Notify MQTT about client initiated shutdown
-						log.Println("Agent is stopping...")
-						conn.Close()
-						log.Println("Agent stopped")
-						return
-					}
-				}
-
-				// Loop broken, reconnect
-				timeout := rg.Next()
-				log.Println("Reconnecting in", timeout)
-				time.Sleep(timeout)
-			}*/
 }
