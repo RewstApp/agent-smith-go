@@ -14,7 +14,7 @@ import (
 	"golang.org/x/text/transform"
 )
 
-func executeUsingPowershell(message *CommandDispatchMessage, conf *utils.Config) error {
+func executeUsingPowershell(message *CommandDispatchMessage, conf utils.Config) error {
 	// Parse the commands
 	commandBytes, err := message.GetCommandBytes()
 	if err != nil {
@@ -49,7 +49,7 @@ func executeUsingPowershell(message *CommandDispatchMessage, conf *utils.Config)
 		}
 	}
 
-	tempfile, err := os.CreateTemp(scriptsDir, fmt.Sprintf("%s-%s-*.ps1", conf.RewstOrgId, conf.DeviceId))
+	tempfile, err := os.CreateTemp(scriptsDir, fmt.Sprintf("%s-*.ps1", message.PostId))
 	if err != nil {
 		return err
 	}

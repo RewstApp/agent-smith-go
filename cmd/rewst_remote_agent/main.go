@@ -66,8 +66,6 @@ func main() {
 	log.Printf("azure_iot_hub_host=%s\n", conf.AzureIotHubHost)
 	log.Printf("broker=%v\n", conf.Broker)
 
-	log.Println("Go Routines:", runtime.NumGoroutine())
-
 	// Create context for cancellation
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
@@ -93,13 +91,13 @@ func main() {
 
 				// Execute the payload
 				go func() {
-					err := interpreter.Execute(ev.Message, &conf)
+					err := interpreter.Execute(ev.Message, conf)
 					if err != nil {
 						log.Println("Failed to execute message:", err)
 					}
 				}()
 			case mqtt.OnError:
-				log.Println("Error occurred:", ev.Error)
+				log.Println("Error:", ev.Error)
 				reconnect = true
 			case mqtt.OnConnecting:
 				log.Println("Connecting to broker...")
@@ -140,7 +138,5 @@ func main() {
 		}
 	}
 
-	log.Println("Agent closed")
-
-	log.Println("Go Routines:", runtime.NumGoroutine())
+	log.Println("Closed")
 }

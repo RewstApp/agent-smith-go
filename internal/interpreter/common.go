@@ -27,7 +27,7 @@ func (m *CommandDispatchMessage) Parse(data []byte) error {
 	return json.Unmarshal(data, m)
 }
 
-func Execute(data []byte, conf *utils.Config) error {
+func Execute(data []byte, conf utils.Config) error {
 	var message CommandDispatchMessage
 	err := message.Parse(data)
 	if err != nil {
