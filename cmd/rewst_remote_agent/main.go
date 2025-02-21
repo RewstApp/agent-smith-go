@@ -5,11 +5,10 @@ import (
 	"flag"
 	"log"
 	"os"
-	"os/signal"
 	"runtime"
-	"syscall"
 	"time"
 
+	"github.com/RewstApp/agent-smith-go/internal/agent"
 	"github.com/RewstApp/agent-smith-go/internal/interpreter"
 	"github.com/RewstApp/agent-smith-go/internal/mqtt"
 	"github.com/RewstApp/agent-smith-go/internal/utils"
@@ -18,14 +17,7 @@ import (
 
 func main() {
 	// Create a channel to monitor incoming signals to closes
-	signalChan := make(chan os.Signal, 1)
-
-	if runtime.GOOS == "windows" {
-		// Windows only supports os.Interrupt signal
-		signal.Notify(signalChan, os.Interrupt)
-	} else {
-		signal.Notify(signalChan, syscall.SIGINT, syscall.SIGTERM)
-	}
+	signalChan := utils.MonitorSignal()
 
 	// Parse command-line arguments
 	var configFilePath string
@@ -34,6 +26,11 @@ func main() {
 	flag.StringVar(&configFilePath, "config", "", "Config file path")
 	flag.StringVar(&logFilePath, "log", "", "Log file path")
 	flag.Parse()
+
+	// Validate command-line arguments
+	if len(configFilePath) == 0 {
+		log.Fatalln("Error: Missing config parameter")
+	}
 
 	log.SetPrefix("[rewst_remote_agent] ")
 
@@ -49,8 +46,8 @@ func main() {
 	}
 
 	// Load the configuration file
-	conf := utils.Config{}
-	err := conf.Load(configFilePath)
+	device := agent.Device{}
+	err := device.Load(configFilePath)
 	if err != nil {
 		log.Println("Load config file failed:", err)
 		return
@@ -63,12 +60,12 @@ func main() {
 
 	// Output the code
 	log.Println("Loaded Configuration: ")
-	log.Printf("device_id=%s\n", conf.DeviceId)
-	log.Printf("rewst_org_id=%s\n", conf.RewstOrgId)
-	log.Printf("rewst_engine_host=%s\n", conf.RewstEngineHost)
-	log.Printf("shared_access_key=%s\n", conf.SharedAccessKey)
-	log.Printf("azure_iot_hub_host=%s\n", conf.AzureIotHubHost)
-	log.Printf("broker=%v\n", conf.Broker)
+	log.Printf("device_id=%s\n", device.DeviceId)
+	log.Printf("rewst_org_id=%s\n", device.RewstOrgId)
+	log.Printf("rewst_engine_host=%s\n", device.RewstEngineHost)
+	log.Printf("shared_access_key=%s\n", device.SharedAccessKey)
+	log.Printf("azure_iot_hub_host=%s\n", device.AzureIotHubHost)
+	log.Printf("broker=%v\n", device.Broker)
 
 	// Create context for cancellation
 	ctx, cancel := context.WithCancel(context.Background())
@@ -84,7 +81,7 @@ func main() {
 	rg := utils.ReconnectTimeoutGenerator{}
 
 	for {
-		channel := mqtt.Subscribe(conf, ctx)
+		channel := device.Subscribe(ctx)
 		reconnect := false
 
 		for ev := range channel {
@@ -92,17 +89,26 @@ func main() {
 			case mqtt.OnMessageReceived:
 				// Execute the payload on a goroutine so it won't block the receiver
 				go func() {
-					result, err := interpreter.Execute(ev.Message)
+					var msg interpreter.Message
+					err := msg.Parse(ev.Message)
+					if err != nil {
+						log.Println("Parse failed:", err)
+						return
+					}
+
+					res, err := msg.Execute(ctx, &device)
 					if err != nil {
 						log.Println("Failed to execute message:", err)
 						return
 					}
 
-					// Display results
-					log.Println("Commands saved to temp file:", result.TempFilename)
-					log.Println("Commands", result.PostId, "executed using", result.Interpreter, "with status code", result.ExitCode)
-					log.Println("Stderr:", result.Stderr)
-					log.Println("Stdout:", result.Stdout)
+					if res.Commands != nil {
+						// Display command results
+						log.Println("Commands saved to temp file:", res.Commands.TempFilename)
+						log.Println("Commands", res.PostId, "executed using", res.Commands.Interpreter, "with status code", res.Commands.ExitCode)
+						log.Println("Stderr:", res.Commands.Stderr)
+						log.Println("Stdout:", res.Commands.Stdout)
+					}
 				}()
 			case mqtt.OnError:
 				log.Println("Error:", ev.Error)
