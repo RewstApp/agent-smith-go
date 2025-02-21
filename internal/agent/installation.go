@@ -20,7 +20,7 @@ func getOrCreateProgramDirectory(orgId string) (string, error) {
 
 	// Check it exists
 	if !utils.DirExists(dir) {
-		err := os.Mkdir(dir, defaultDirChmod)
+		err := os.MkdirAll(dir, defaultDirChmod)
 		if err != nil {
 			return "", err
 		}
@@ -38,7 +38,7 @@ func getOrCreateConfigDirectory(orgId string) (string, error) {
 
 	// Check it exists
 	if !utils.DirExists(dir) {
-		err := os.Mkdir(dir, defaultDirChmod)
+		err := os.MkdirAll(dir, defaultDirChmod)
 		if err != nil {
 			return "", err
 		}
@@ -85,6 +85,24 @@ func GetConfigFilePath(orgId string) (string, error) {
 	}
 
 	return filepath.Join(dir, "config.json"), nil
+}
+
+func GetScriptsDirectory(orgId string) (string, error) {
+	// Get program files directory
+	scriptsDir := os.Getenv("SYSTEMROOT")
+
+	// Build the program directory based on organization id
+	dir := filepath.Join(scriptsDir, fmt.Sprintf("../RewstRemoteAgent/scripts/%s", orgId))
+
+	// Check it exists
+	if !utils.DirExists(dir) {
+		err := os.MkdirAll(dir, defaultDirChmod)
+		if err != nil {
+			return "", err
+		}
+	}
+
+	return dir, nil
 }
 
 type PathsData struct {
