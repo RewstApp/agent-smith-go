@@ -3,21 +3,80 @@
 package main
 
 import (
+	"context"
+	"fmt"
 	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 
 	"github.com/RewstApp/agent-smith-go/internal/agent"
-	"github.com/RewstApp/agent-smith-go/internal/utils"
 	"golang.org/x/sys/windows/svc"
 )
 
-type Service struct{}
+type Service struct {
+	OrgId string
+}
 
-func (s Service) Execute(args []string, request <-chan svc.ChangeRequest, response chan<- svc.Status) (bool, uint32) {
+func (service *Service) Execute(args []string, request <-chan svc.ChangeRequest, response chan<- svc.Status) (bool, uint32) {
 	response <- svc.Status{State: svc.StartPending}
 
-	return true, 0
+	// Get paths
+	agentExecutablePath, err := agent.GetAgentExecutablePath(service.OrgId)
+	if err != nil {
+		log.Println("Failed GetAgentExecutablePath():", err)
+		response <- svc.Status{State: svc.Stopped}
+		return false, 1
+	}
+
+	configFilePath, err := agent.GetConfigFilePath(service.OrgId)
+	if err != nil {
+		log.Println("Failed GetConfigFilePath():", err)
+		response <- svc.Status{State: svc.Stopped}
+		return false, 1
+	}
+
+	logFilePath, err := agent.GetLogFilePath(service.OrgId)
+	if err != nil {
+		log.Println("Failed GetLogFilePath():", err)
+		response <- svc.Status{State: svc.Stopped}
+		return false, 1
+	}
+
+	// Create a context to cancel the command
+	ctx, cancel := context.WithCancel(context.Background())
+	cmd := exec.CommandContext(ctx, agentExecutablePath, "--config", configFilePath, "--log", logFilePath)
+
+	// Start the remote agent executable and notify
+	cmd.Start()
+	response <- svc.Status{State: svc.Running, Accepts: svc.AcceptStop | svc.AcceptShutdown}
+
+	// Monitor when the executable stops on its own
+	stopped := make(chan struct{})
+	go func() {
+		// Wait for the executable to finish
+		cmd.Wait()
+
+		// Trigger the stopped channel
+		stopped <- struct{}{}
+	}()
+
+	for {
+		select {
+		case change := <-request:
+			switch change.Cmd {
+			case svc.Stop, svc.Shutdown:
+				// Cancel the executable and update the status
+				cancel()
+				response <- svc.Status{State: svc.StopPending}
+			}
+		case <-stopped:
+			response <- svc.Status{State: svc.Stopped}
+			cancel()
+			return true, 0
+		}
+	}
 }
 
 func main() {
@@ -34,15 +93,24 @@ func main() {
 		return
 	}
 
-	// Get the base directory of the executable
-	dir, err := utils.BaseDirectory()
+	// Get organization id from executable name
+	exec, err := os.Executable()
 	if err != nil {
-		log.Println("Failed to get base directory:", err)
+		log.Println("Executable name not found:", err)
 		return
 	}
 
+	filename := filepath.Base(exec)
+	orgId := strings.Split(strings.Split(filename, ".")[0], "_")[3]
+
 	// Configure logging output
-	logFile, err := os.OpenFile(filepath.Join(dir, utils.LogFileName), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	logFilePath, err := agent.GetLogFilePath(orgId)
+	if err != nil {
+		log.Println("Failed to get log file path:", err)
+		return
+	}
+
+	logFile, err := os.OpenFile(logFilePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
 		log.Println("Failed to open log:", err)
 		return
@@ -50,17 +118,9 @@ func main() {
 	defer logFile.Close()
 	log.SetOutput(logFile)
 
-	// Load the configuration
-	conf := agent.Device{}
-	err = conf.Load(filepath.Join(dir, "config.json"))
-	if err != nil {
-		log.Println("Failed to load config file:", err)
-		return
-	}
-	log.Println("Configuration file loaded")
-
 	// Start the windows service
-	err = svc.Run("AgentSmithGoService", &Service{})
+	name := fmt.Sprintf("RewstRemoteAgent_%s", orgId)
+	err = svc.Run(name, &Service{OrgId: orgId})
 	if err != nil {
 		log.Println("Failed to run the service:", err)
 		return
