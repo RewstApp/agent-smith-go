@@ -13,6 +13,12 @@ import (
 	mqtt "github.com/eclipse/paho.mqtt.golang"
 )
 
+type AzureIotHubDevice struct {
+	DeviceId        string
+	Host            string
+	SharedAccessKey string
+}
+
 // generateSASToken generates a SAS token for Azure IoT Hub
 func generateSASToken(resourceURI, key string, duration time.Duration) (string, error) {
 	// Set expiration time
@@ -37,7 +43,7 @@ func generateSASToken(resourceURI, key string, duration time.Duration) (string, 
 	return token, nil
 }
 
-func subscribeToAzureIotHub(config utils.Config, ctx context.Context) <-chan Event {
+func SubscribeToAzureIotHub(ctx context.Context, device *AzureIotHubDevice) <-chan Event {
 	// Create the channels for the subscription
 	channel := make(chan Event)
 
@@ -55,8 +61,8 @@ func subscribeToAzureIotHub(config utils.Config, ctx context.Context) <-chan Eve
 		}
 
 		// Generate SAS token
-		resourceURI := fmt.Sprintf("%s/devices/%s", config.AzureIotHubHost, config.DeviceId)
-		sasToken, err := generateSASToken(resourceURI, config.SharedAccessKey, time.Hour)
+		resourceURI := fmt.Sprintf("%s/devices/%s", device.Host, device.DeviceId)
+		sasToken, err := generateSASToken(resourceURI, device.SharedAccessKey, time.Hour)
 		if err != nil {
 			channel <- Event{OnError, nil, err}
 			cancel()
@@ -65,10 +71,10 @@ func subscribeToAzureIotHub(config utils.Config, ctx context.Context) <-chan Eve
 
 		// Initialize MQTT options
 		opts := mqtt.NewClientOptions()
-		opts.AddBroker(fmt.Sprintf("tls://%s:8883", config.AzureIotHubHost)) // Use port 8883 for MQTT over TLS
-		opts.AddBroker(fmt.Sprintf("wss://%s", config.AzureIotHubHost))      // Add websocket as a backup for Azure Iot Hub
-		opts.SetClientID(config.DeviceId)
-		opts.SetUsername(fmt.Sprintf("%s/%s/?api-version=2021-04-12", config.AzureIotHubHost, config.DeviceId))
+		opts.AddBroker(fmt.Sprintf("tls://%s:8883", device.Host)) // Use port 8883 for MQTT over TLS
+		opts.AddBroker(fmt.Sprintf("wss://%s", device.Host))      // Add websocket as a backup for Azure Iot Hub
+		opts.SetClientID(device.DeviceId)
+		opts.SetUsername(fmt.Sprintf("%s/%s/?api-version=2021-04-12", device.Host, device.DeviceId))
 		opts.SetPassword(sasToken)
 		opts.SetTLSConfig(&tls.Config{
 			RootCAs:       rootCAs,
@@ -92,7 +98,7 @@ func subscribeToAzureIotHub(config utils.Config, ctx context.Context) <-chan Eve
 				channel <- Event{OnConnect, nil, nil}
 
 				// Subscribe to the cloud-to-device (C2D) message topic
-				topic := fmt.Sprintf("devices/%s/messages/devicebound/#", config.DeviceId)
+				topic := fmt.Sprintf("devices/%s/messages/devicebound/#", device.DeviceId)
 				token := client.Subscribe(topic, 1, func(client mqtt.Client, msg mqtt.Message) {
 					go func() {
 						channel <- Event{OnMessageReceived, msg.Payload(), err}

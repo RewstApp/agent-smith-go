@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/RewstApp/agent-smith-go/internal/agent"
 	"github.com/RewstApp/agent-smith-go/internal/utils"
 	"golang.org/x/sys/windows/svc"
 )
@@ -50,8 +51,8 @@ func main() {
 	log.SetOutput(logFile)
 
 	// Load the configuration
-	conf := utils.Config{}
-	err = conf.Load(filepath.Join(dir, utils.ConfigFileName))
+	conf := agent.Device{}
+	err = conf.Load(filepath.Join(dir, "config.json"))
 	if err != nil {
 		log.Println("Failed to load config file:", err)
 		return

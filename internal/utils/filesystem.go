@@ -23,3 +23,7 @@ func DirExists(path string) bool {
 	}
 	return info.IsDir()
 }
+
+type InstallationData struct {
+	ServiceExecutablePath string
+}
