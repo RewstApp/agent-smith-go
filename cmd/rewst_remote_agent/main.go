@@ -96,18 +96,10 @@ func main() {
 						return
 					}
 
-					res, err := msg.Execute(ctx, &device)
+					err = msg.Execute(ctx, &device)
 					if err != nil {
 						log.Println("Failed to execute message:", err)
 						return
-					}
-
-					if res.Commands != nil {
-						// Display command results
-						log.Println("Commands saved to temp file:", res.Commands.TempFilename)
-						log.Println("Commands", res.PostId, "executed using", res.Commands.Interpreter, "with status code", res.Commands.ExitCode)
-						log.Println("Stderr:", res.Commands.Stderr)
-						log.Println("Stdout:", res.Commands.Stdout)
 					}
 				}()
 			case mqtt.OnError:
