@@ -61,19 +61,9 @@ func (service *Service) Execute(args []string, request <-chan svc.ChangeRequest,
 func main() {
 	log.SetPrefix("[rewst_windows_service] ")
 
-	// Check if the executable is running as a windows service
-	isWinSvc, err := svc.IsWindowsService()
-	if err != nil {
-		log.Println("Failed to query execution status:", err)
-		return
-	}
-	if !isWinSvc {
-		log.Println("Executable should be run as a service")
-		return
-	}
-
 	// Create service instance
 	var service Service
+	var err error
 
 	// Get organization id from executable name
 	service.OrgId, err = agent.GetOrgIdFromExceutable()
@@ -92,6 +82,40 @@ func main() {
 	service.ConfigFilePath, err = agent.GetConfigFilePath(service.OrgId)
 	if err != nil {
 		log.Println("GetConfigFilePath() failed:", err)
+		return
+	}
+
+	serviceManagerPath, err := agent.GetServiceManagerPath(service.OrgId)
+	if err != nil {
+		log.Println("GetServiceManagerPath() failed:", err)
+		return
+	}
+
+	// Check if the executable is running as a windows service
+	isWinSvc, err := svc.IsWindowsService()
+	if err != nil {
+		log.Println("Failed to query execution status:", err)
+		return
+	}
+	if !isWinSvc {
+		if len(os.Args) == 2 {
+			// Check if we start the service
+			// This is used to align with the installation script
+			if os.Args[1] == "start" {
+				cmd := exec.Command(serviceManagerPath, "--org-id", service.OrgId, "--start")
+				cmd.Stdout = os.Stdout
+				cmd.Stdin = os.Stdin
+				err = cmd.Run()
+				if err != nil {
+					log.Println("Failed to start service:", err)
+					return
+				}
+
+				return
+			}
+		}
+
+		log.Println("Executable should be run as a service")
 		return
 	}
 
