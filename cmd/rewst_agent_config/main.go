@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"io"
 	"log"
@@ -18,6 +19,46 @@ import (
 
 type FetchConfigurationResponse struct {
 	Configuration agent.Device `json:"configuration"`
+}
+
+func getOldFilePath(filePath string) (string, error) {
+	oldFilePath := filePath
+
+	for {
+		oldFilePath = oldFilePath + "_oldver"
+
+		_, err := os.Stat(oldFilePath)
+		if errors.Is(err, os.ErrNotExist) {
+			return oldFilePath, nil
+		}
+
+		if err != nil {
+			return "", nil
+		}
+	}
+}
+
+func moveFileToOld(filePath string) error {
+	// Verify first if the file exists
+	_, err := os.Stat(filePath)
+	if errors.Is(err, os.ErrNotExist) {
+		// Do nothing
+		return nil
+	}
+
+	if err != nil {
+		// An error occurred
+		return err
+	}
+
+	oldFilePath, err := getOldFilePath(filePath)
+	if err != nil {
+		return err
+	}
+
+	// Move file
+	log.Println("Moving", filePath, "to", oldFilePath)
+	return os.Rename(filePath, oldFilePath)
 }
 
 func main() {
@@ -57,27 +98,28 @@ func main() {
 		cancel()
 	}()
 
-	// Build the host info
-	var hostInfo agent.HostInfo
-	err := hostInfo.Load(ctx, orgId)
+	// Get installation paths data
+	var pathsData agent.PathsData
+	err := pathsData.Load(ctx, orgId)
 	if err != nil {
-		log.Fatal(err)
-	}
-
-	hostInfoBytes, err := json.Marshal(hostInfo)
-	if err != nil {
-		log.Fatal(err)
+		log.Println(err)
+		return
 	}
 
 	// Fetch configuration
+	hostInfoBytes, err := json.MarshalIndent(pathsData.Tags, "", "  ")
+	if err != nil {
+		log.Println(err)
+		return
+	}
+
 	// Prepare http request and send
-	log.Println("Sending")
-	log.Println(string(hostInfoBytes))
-	log.Println("to", configUrl)
+	log.Println("Sending", string(hostInfoBytes), "to", configUrl)
 
 	req, err := http.NewRequestWithContext(ctx, "POST", configUrl, bytes.NewReader(hostInfoBytes))
 	if err != nil {
-		log.Fatal(err)
+		log.Println(err)
+		return
 	}
 	req.Header.Set("x-rewst-secret", configSecret)
 	req.Header.Set("Content-Type", "application/json")
@@ -85,47 +127,72 @@ func main() {
 	client := &http.Client{}
 	res, err := client.Do(req)
 	if err != nil {
-		log.Fatal(err)
+		log.Println(err)
+		return
 	}
 	defer res.Body.Close()
 
 	if res.StatusCode != http.StatusOK {
-		log.Fatalln("Request failed with status code:", res.StatusCode)
+		log.Println("Request failed with status code:", res.StatusCode)
+		return
 	}
 
 	bodyBytes, err := io.ReadAll(res.Body)
 	if err != nil {
-		log.Fatal(err)
+		log.Println(err)
+		return
 	}
 
 	// Parse the fetch configuration response
 	var response FetchConfigurationResponse
 	err = json.Unmarshal(bodyBytes, &response)
 	if err != nil {
-		log.Fatal(err)
+		log.Println(err)
+		return
 	}
-
-	// Got configuration
-	log.Println("Received configuration:")
-	log.Println(string(bodyBytes))
 
 	// Save the configuration file
 	configFilePath, err := agent.GetConfigFilePath(orgId)
 	if err != nil {
-		log.Fatal(err)
+		log.Println(err)
+		return
 	}
 
-	configBytes, err := json.Marshal(response.Configuration)
+	configBytes, err := json.MarshalIndent(response.Configuration, "", "  ")
 	if err != nil {
-		log.Fatal(err)
+		log.Println(err)
+		return
 	}
+
+	// Got configuration
+	log.Println("Received configuration:", string(configBytes))
 
 	err = os.WriteFile(configFilePath, configBytes, 0644)
 	if err != nil {
-		log.Fatal(err)
+		log.Println(err)
+		return
 	}
 
 	log.Println("Configuration saved to", configFilePath)
+
+	// Rename files to old versions before downloading the new ones
+	err = moveFileToOld(pathsData.ServiceExecutablePath)
+	if err != nil {
+		log.Println(err)
+		return
+	}
+
+	err = moveFileToOld(pathsData.AgentExecutablePath)
+	if err != nil {
+		log.Println(err)
+		return
+	}
+
+	err = moveFileToOld(pathsData.ServiceManagerPath)
+	if err != nil {
+		log.Println(err)
+		return
+	}
 
 	// Connect to the receive the device configuration script
 	channel := response.Configuration.Subscribe(ctx)
@@ -153,25 +220,19 @@ func main() {
 					return
 				}
 
+				// Prevent the commands data from execution
+				if msg.Commands != nil {
+					log.Println("STOPPED HERE FOR TESTING")
+					cancel()
+					return
+				}
+
 				// Execute the command
-				result, err := msg.Execute(ctx, &response.Configuration)
+				err = msg.Execute(ctx, &response.Configuration)
 				if err != nil {
 					log.Println("Failed to execute message:", err)
 					return
 				}
-
-				// Display results
-				if result.Commands != nil {
-					log.Println("Commands saved to temp file:", result.Commands.TempFilename)
-					log.Println("Commands", result.PostId, "executed using", result.Commands.Interpreter, "with status code", result.Commands.ExitCode)
-					log.Println("Stderr:", result.Commands.Stderr)
-					log.Println("Stdout:", result.Commands.Stdout)
-				}
-
-				if result.GetInstallation != nil {
-					log.Println("Installation data sent with status code:", result.GetInstallation.StatusCode)
-				}
-
 			}()
 		}
 	}

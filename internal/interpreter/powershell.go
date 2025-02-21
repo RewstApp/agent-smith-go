@@ -1,9 +1,9 @@
 package interpreter
 
 import (
-	"bytes"
 	"context"
 	"encoding/base64"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -15,18 +15,18 @@ import (
 	"golang.org/x/text/transform"
 )
 
-func executeUsingPowershell(ctx context.Context, message *Message, device *agent.Device) (*Result, error) {
+func executeUsingPowershell(ctx context.Context, message *Message, device *agent.Device) error {
 	// Parse the commands
 	commandBytes, err := base64.StdEncoding.DecodeString(*message.Commands)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	// Decode using UTF16LE
 	decoder := unicode.UTF16(unicode.LittleEndian, unicode.IgnoreBOM).NewDecoder()
 	commands, _, err := transform.String(decoder, string(commandBytes))
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	// Run the command in the system using powershell
@@ -38,52 +38,44 @@ func executeUsingPowershell(ctx context.Context, message *Message, device *agent
 	// Save commands to temporary file
 	baseDir, err := utils.BaseDirectory()
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	scriptsDir := filepath.Join(baseDir, "scripts")
 	if !utils.DirExists(scriptsDir) {
 		err = os.Mkdir(scriptsDir, 0755)
 		if err != nil {
-			return nil, err
+			return err
 		}
 	}
 
 	tempfile, err := os.CreateTemp(scriptsDir, "exec-*.ps1")
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	_, err = tempfile.WriteString(commands)
 	if err != nil {
-		return nil, err
+		return err
 	}
+
+	log.Println("Commands saved to", tempfile.Name())
 
 	// Close the temporary file
 	tempfile.Close()
 	cmd := exec.CommandContext(ctx, shell, "-File", tempfile.Name())
-
-	var errb, outb bytes.Buffer
-	cmd.Stdout = &outb
-	cmd.Stderr = &errb
+	cmd.Stdout = log.Writer()
+	cmd.Stderr = log.Writer()
 
 	err = cmd.Run()
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	// Remove successfully executed temporary filename
 	defer os.Remove(tempfile.Name())
 
-	return &Result{
-		PostId: message.PostId,
-		Commands: &CommandsResult{
-			Interpreter:  shell,
-			TempFilename: tempfile.Name(),
-			ExitCode:     cmd.ProcessState.ExitCode(),
-			Stderr:       errb.String(),
-			Stdout:       outb.String(),
-		},
-		GetInstallation: nil,
-	}, nil
+	log.Println("Command", message.PostId, "completed with exit code", cmd.ProcessState.ExitCode())
+
+	return nil
 }

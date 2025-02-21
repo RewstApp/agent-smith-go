@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"strings"
 
@@ -40,7 +41,7 @@ func (msg *Message) Parse(data []byte) error {
 	return json.Unmarshal(data, msg)
 }
 
-func (msg *Message) Execute(ctx context.Context, device *agent.Device) (*Result, error) {
+func (msg *Message) Execute(ctx context.Context, device *agent.Device) error {
 	// Execute commands if given
 	if msg.Commands != nil {
 		// Select the correct interpreter
@@ -60,44 +61,39 @@ func (msg *Message) Execute(ctx context.Context, device *agent.Device) (*Result,
 		var paths agent.PathsData
 		err := paths.Load(ctx, device.RewstOrgId)
 		if err != nil {
-			return nil, err
+			return err
 		}
 
 		// Convert to bytes in json
-		pathsBytes, err := json.Marshal(&paths)
+		pathsBytes, err := json.MarshalIndent(&paths, "", "  ")
 		if err != nil {
-			return nil, err
+			return err
 		}
 
 		// Create an http request
 		req, err := http.NewRequestWithContext(ctx, "POST", postBackUrl, bytes.NewReader(pathsBytes))
 		if err != nil {
-			return nil, err
+			return err
 		}
 		req.Header.Set("Content-Type", "application/json")
 
 		// Send the postback
+		log.Println("Sending", string(pathsBytes), "to", postBackUrl)
 		client := &http.Client{}
 		res, err := client.Do(req)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		defer res.Body.Close()
 
 		if res.StatusCode != http.StatusOK {
-			return nil, fmt.Errorf("postback failed with status code: %d", res.StatusCode)
+			return fmt.Errorf("postback failed with status code: %d", res.StatusCode)
 		}
 
 		// Return the result
-		return &Result{
-			PostId:   msg.PostId,
-			Commands: nil,
-			GetInstallation: &GetInstallationResult{
-				StatusCode: res.StatusCode,
-			},
-		}, nil
+		return nil
 	}
 
 	// No command
-	return nil, fmt.Errorf("noop")
+	return fmt.Errorf("noop")
 }
