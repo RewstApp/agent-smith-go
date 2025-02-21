@@ -44,6 +44,8 @@ func (msg *Message) Parse(data []byte) error {
 func (msg *Message) Execute(ctx context.Context, device *agent.Device) error {
 	// Execute commands if given
 	if msg.Commands != nil {
+		log.Println("Executing commands...")
+
 		// Select the correct interpreter
 		switch msg.InterpreterOverride {
 		// TODO: Support other interpreter
@@ -54,6 +56,8 @@ func (msg *Message) Execute(ctx context.Context, device *agent.Device) error {
 
 	// Get installation data if given
 	if msg.GetInstallation != nil && *msg.GetInstallation {
+		log.Println("Executing get_installation...")
+
 		// Create a postback url
 		postBackUrl := fmt.Sprintf("https://%s/webhooks/custom/action/%s", device.RewstEngineHost, strings.ReplaceAll(msg.PostId, ":", "/"))
 
