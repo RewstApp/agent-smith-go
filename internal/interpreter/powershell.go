@@ -6,11 +6,9 @@ import (
 	"log"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"runtime"
 
 	"github.com/RewstApp/agent-smith-go/internal/agent"
-	"github.com/RewstApp/agent-smith-go/internal/utils"
 	"golang.org/x/text/encoding/unicode"
 	"golang.org/x/text/transform"
 )
@@ -36,17 +34,9 @@ func executeUsingPowershell(ctx context.Context, message *Message, device *agent
 	}
 
 	// Save commands to temporary file
-	baseDir, err := utils.BaseDirectory()
+	scriptsDir, err := agent.GetScriptsDirectory(device.RewstOrgId)
 	if err != nil {
 		return err
-	}
-
-	scriptsDir := filepath.Join(baseDir, "scripts")
-	if !utils.DirExists(scriptsDir) {
-		err = os.Mkdir(scriptsDir, 0755)
-		if err != nil {
-			return err
-		}
 	}
 
 	tempfile, err := os.CreateTemp(scriptsDir, "exec-*.ps1")
