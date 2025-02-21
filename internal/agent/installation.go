@@ -3,8 +3,10 @@ package agent
 import (
 	"context"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/RewstApp/agent-smith-go/internal/utils"
 )
@@ -149,4 +151,15 @@ func (paths *PathsData) Load(ctx context.Context, orgId string) error {
 	paths.ServiceManagerPath = serviceManagerPath
 
 	return paths.Tags.Load(ctx, orgId)
+}
+
+func GetOrgIdFromExceutable() (string, error) {
+	exec, err := os.Executable()
+	if err != nil {
+		log.Println("Executable name not found:", err)
+		return "", err
+	}
+
+	filename := filepath.Base(exec)
+	return strings.Split(strings.Split(filename, ".")[0], "_")[3], nil
 }

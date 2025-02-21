@@ -8,8 +8,6 @@ import (
 	"log"
 	"os"
 	"os/exec"
-	"path/filepath"
-	"strings"
 
 	"github.com/RewstApp/agent-smith-go/internal/agent"
 	"golang.org/x/sys/windows/svc"
@@ -94,14 +92,11 @@ func main() {
 	}
 
 	// Get organization id from executable name
-	exec, err := os.Executable()
+	orgId, err := agent.GetOrgIdFromExceutable()
 	if err != nil {
 		log.Println("Executable name not found:", err)
 		return
 	}
-
-	filename := filepath.Base(exec)
-	orgId := strings.Split(strings.Split(filename, ".")[0], "_")[3]
 
 	// Configure logging output
 	logFilePath, err := agent.GetLogFilePath(orgId)
