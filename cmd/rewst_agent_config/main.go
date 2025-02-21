@@ -220,20 +220,20 @@ func main() {
 					return
 				}
 
-				// Prevent the commands data from execution
-				if msg.Commands != nil {
-					log.Println("STOPPED HERE FOR TESTING")
-					cancel()
-					return
-				}
-
 				// Execute the command
 				err = msg.Execute(ctx, &response.Configuration)
 				if err != nil {
 					log.Println("Failed to execute message:", err)
 					return
 				}
+
+				// Only execute one command to install
+				if msg.Commands != nil {
+					cancel()
+				}
 			}()
 		}
 	}
+
+	log.Println("Config ended")
 }
