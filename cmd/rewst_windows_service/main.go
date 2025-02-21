@@ -4,7 +4,6 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"log"
 	"os"
 	"os/exec"
@@ -14,37 +13,19 @@ import (
 )
 
 type Service struct {
-	OrgId string
+	OrgId               string
+	AgentExecutablePath string
+	ConfigFilePath      string
+	LogFilePath         string
 }
 
 func (service *Service) Execute(args []string, request <-chan svc.ChangeRequest, response chan<- svc.Status) (bool, uint32) {
+	log.Println("Starting service...")
 	response <- svc.Status{State: svc.StartPending}
-
-	// Get paths
-	agentExecutablePath, err := agent.GetAgentExecutablePath(service.OrgId)
-	if err != nil {
-		log.Println("Failed GetAgentExecutablePath():", err)
-		response <- svc.Status{State: svc.Stopped}
-		return false, 1
-	}
-
-	configFilePath, err := agent.GetConfigFilePath(service.OrgId)
-	if err != nil {
-		log.Println("Failed GetConfigFilePath():", err)
-		response <- svc.Status{State: svc.Stopped}
-		return false, 1
-	}
-
-	logFilePath, err := agent.GetLogFilePath(service.OrgId)
-	if err != nil {
-		log.Println("Failed GetLogFilePath():", err)
-		response <- svc.Status{State: svc.Stopped}
-		return false, 1
-	}
 
 	// Create a context to cancel the command
 	ctx, cancel := context.WithCancel(context.Background())
-	cmd := exec.CommandContext(ctx, agentExecutablePath, "--config", configFilePath, "--log", logFilePath)
+	cmd := exec.CommandContext(ctx, service.AgentExecutablePath, "--config", service.ConfigFilePath, "--log", service.LogFilePath)
 
 	// Start the remote agent executable and notify
 	cmd.Start()
@@ -91,21 +72,37 @@ func main() {
 		return
 	}
 
+	// Create service instance
+	var service Service
+
 	// Get organization id from executable name
-	orgId, err := agent.GetOrgIdFromExceutable()
+	service.OrgId, err = agent.GetOrgIdFromExceutable()
 	if err != nil {
-		log.Println("Executable name not found:", err)
+		log.Println("GetOrgIdFromExceutable() failed:", err)
+		return
+	}
+
+	// Get paths
+	service.AgentExecutablePath, err = agent.GetAgentExecutablePath(service.OrgId)
+	if err != nil {
+		log.Println("GetAgentExecutablePath() failed:", err)
+		return
+	}
+
+	service.ConfigFilePath, err = agent.GetConfigFilePath(service.OrgId)
+	if err != nil {
+		log.Println("GetConfigFilePath() failed:", err)
 		return
 	}
 
 	// Configure logging output
-	logFilePath, err := agent.GetLogFilePath(orgId)
+	service.LogFilePath, err = agent.GetLogFilePath(service.OrgId)
 	if err != nil {
-		log.Println("Failed to get log file path:", err)
+		log.Println("GetLogFilePath() failed:", err)
 		return
 	}
 
-	logFile, err := os.OpenFile(logFilePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	logFile, err := os.OpenFile(service.LogFilePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
 		log.Println("Failed to open log:", err)
 		return
@@ -114,8 +111,7 @@ func main() {
 	log.SetOutput(logFile)
 
 	// Start the windows service
-	name := fmt.Sprintf("RewstRemoteAgent_%s", orgId)
-	err = svc.Run(name, &Service{OrgId: orgId})
+	err = svc.Run(agent.GetServiceName(service.OrgId), &service)
 	if err != nil {
 		log.Println("Failed to run the service:", err)
 		return

@@ -163,3 +163,7 @@ func GetOrgIdFromExceutable() (string, error) {
 	filename := filepath.Base(exec)
 	return strings.Split(strings.Split(filename, ".")[0], "_")[3], nil
 }
+
+func GetServiceName(orgId string) string {
+	return fmt.Sprintf("RewstRemoteAgent_%s", orgId)
+}
