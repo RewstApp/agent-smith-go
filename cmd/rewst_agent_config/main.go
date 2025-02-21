@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"os"
 
 	"github.com/RewstApp/agent-smith-go/internal/agent"
 	"github.com/RewstApp/agent-smith-go/internal/interpreter"
@@ -107,6 +108,24 @@ func main() {
 	// Got configuration
 	log.Println("Received configuration:")
 	log.Println(string(bodyBytes))
+
+	// Save the configuration file
+	configFilePath, err := agent.GetConfigFilePath(orgId)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	configBytes, err := json.Marshal(response.Configuration)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	err = os.WriteFile(configFilePath, configBytes, 0644)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	log.Println("Configuration saved to", configFilePath)
 
 	// Connect to the receive the device configuration script
 	channel := response.Configuration.Subscribe(ctx)
