@@ -29,7 +29,7 @@ func getOrCreateProgramDirectory(orgId string) (string, error) {
 	return dir, nil
 }
 
-func getOrCreateConfigDirectory(orgId string) (string, error) {
+func getOrCreateDataDirectory(orgId string) (string, error) {
 	// Get program data directory
 	programDataDir := os.Getenv("PROGRAMDATA")
 
@@ -78,13 +78,23 @@ func GetServiceManagerPath(orgId string) (string, error) {
 }
 
 func GetConfigFilePath(orgId string) (string, error) {
-	// Get config directory
-	dir, err := getOrCreateConfigDirectory(orgId)
+	// Get data directory
+	dir, err := getOrCreateDataDirectory(orgId)
 	if err != nil {
 		return "", err
 	}
 
 	return filepath.Join(dir, "config.json"), nil
+}
+
+func GetLogFilePath(orgId string) (string, error) {
+	// Get data directory
+	dir, err := getOrCreateDataDirectory(orgId)
+	if err != nil {
+		return "", err
+	}
+
+	return filepath.Join(dir, "rewst_agent.log"), nil
 }
 
 func GetScriptsDirectory(orgId string) (string, error) {
