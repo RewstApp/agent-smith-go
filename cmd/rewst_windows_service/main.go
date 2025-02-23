@@ -8,9 +8,11 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"runtime"
 
 	"github.com/RewstApp/agent-smith-go/internal/agent"
 	"github.com/RewstApp/agent-smith-go/internal/utils"
+	"github.com/RewstApp/agent-smith-go/internal/version"
 	"golang.org/x/sys/windows/svc"
 )
 
@@ -61,8 +63,10 @@ func (service *Service) Execute(args []string, request <-chan svc.ChangeRequest,
 }
 
 func main() {
-	// Configure logger
+	// Show header
 	utils.ConfigureLogger("[rewst_windows_service]", os.Stdout)
+	log.Println("Version:", version.Version)
+	log.Println("Running on:", runtime.GOOS)
 
 	// Create service instance
 	var service Service

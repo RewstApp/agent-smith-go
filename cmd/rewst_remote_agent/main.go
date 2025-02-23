@@ -17,6 +17,11 @@ import (
 )
 
 func main() {
+	// Show header
+	utils.ConfigureLogger("[rewst_remote_agent]", os.Stdout)
+	log.Println("Version:", version.Version)
+	log.Println("Running on:", runtime.GOOS)
+
 	// Create a channel to monitor incoming signals to closes
 	signalChan := utils.MonitorSignal()
 
@@ -30,7 +35,8 @@ func main() {
 
 	// Validate command-line arguments
 	if len(configFilePath) == 0 {
-		log.Fatalln("Error: Missing config parameter")
+		log.Println("Missing config parameter")
+		return
 	}
 
 	// Configure logger
@@ -60,10 +66,6 @@ func main() {
 		return
 	}
 	log.Println("Configuration file loaded")
-
-	// Show info
-	log.Println("Version:", version.Version)
-	log.Println("Running on:", runtime.GOOS)
 
 	// Output the code
 	log.Println("Loaded Configuration: ")

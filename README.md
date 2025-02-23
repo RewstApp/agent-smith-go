@@ -2,8 +2,19 @@
 This is a POC for agent smith using Golang.
 
 ## Build
-Required packages:
-- [go-winres](https://github.com/tc-hib/go-winres) - To embed icons and file versions to windows executables.
+Required tools and packages:
+
+- [go-winres](https://github.com/tc-hib/go-winres): To embed icons and file versions to windows executables.
+  ```
+  go install github.com/tc-hib/go-winres@latest
+  ```
+
+- [commitizen](https://commitizen-tools.github.io/commitizen/): To use a standardized description of commits.
+  ```
+  pipx ensurepath
+  pipx install commitizen
+  pipx upgrade commitizen
+  ```
 
 ## Directory Structure
 ```
