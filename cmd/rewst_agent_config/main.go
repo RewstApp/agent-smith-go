@@ -10,11 +10,13 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"runtime"
 
 	"github.com/RewstApp/agent-smith-go/internal/agent"
 	"github.com/RewstApp/agent-smith-go/internal/interpreter"
 	"github.com/RewstApp/agent-smith-go/internal/mqtt"
 	"github.com/RewstApp/agent-smith-go/internal/utils"
+	"github.com/RewstApp/agent-smith-go/internal/version"
 )
 
 type FetchConfigurationResponse struct {
@@ -62,6 +64,11 @@ func moveFileToOld(filePath string) error {
 }
 
 func main() {
+	// Show header
+	utils.ConfigureLogger("[rewst_agent_config]", os.Stdout)
+	log.Println("Version:", version.Version)
+	log.Println("Running on:", runtime.GOOS)
+
 	signalChan := utils.MonitorSignal()
 
 	// Parse command-line arguments
@@ -80,15 +87,15 @@ func main() {
 
 	// Validate command-line arguments
 	if len(configSecret) == 0 {
-		log.Fatalln("Error: Missing config-secret parameter")
+		log.Fatalln("Missing config-secret parameter")
 	}
 
 	if len(configUrl) == 0 {
-		log.Fatalln("Error: Missing config-url parameter")
+		log.Fatalln("Missing config-url parameter")
 	}
 
 	if len(orgId) == 0 {
-		log.Fatalln("Error: Missing org-id parameter")
+		log.Fatalln("Missing org-id parameter")
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())

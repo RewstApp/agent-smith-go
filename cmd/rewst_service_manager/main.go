@@ -5,10 +5,12 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"runtime"
 	"time"
 
 	"github.com/RewstApp/agent-smith-go/internal/agent"
 	"github.com/RewstApp/agent-smith-go/internal/utils"
+	"github.com/RewstApp/agent-smith-go/internal/version"
 	"golang.org/x/sys/windows/svc"
 	"golang.org/x/sys/windows/svc/mgr"
 )
@@ -76,6 +78,11 @@ func stopService(svcMgr *mgr.Mgr, name string) error {
 }
 
 func main() {
+	// Show header
+	utils.ConfigureLogger("[rewst_service_manager]", os.Stdout)
+	log.Println("Version:", version.Version)
+	log.Println("Running on:", runtime.GOOS)
+
 	// Parse command-line arguments
 	var orgId string
 	var install bool
