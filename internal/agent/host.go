@@ -10,10 +10,10 @@ import (
 	"strings"
 
 	"github.com/RewstApp/agent-smith-go/internal/version"
-	"github.com/shirou/gopsutil/cpu"
-	"github.com/shirou/gopsutil/host"
-	"github.com/shirou/gopsutil/mem"
-	"github.com/shirou/gopsutil/winservices"
+	"github.com/shirou/gopsutil/v4/cpu"
+	"github.com/shirou/gopsutil/v4/host"
+	"github.com/shirou/gopsutil/v4/mem"
+	"github.com/shirou/gopsutil/v4/winservices"
 )
 
 type HostInfo struct {
