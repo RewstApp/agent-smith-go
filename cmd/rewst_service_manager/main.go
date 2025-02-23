@@ -79,7 +79,7 @@ func stopService(svcMgr *mgr.Mgr, name string) error {
 
 func main() {
 	// Show header
-	utils.ConfigureLogger("[rewst_service_manager]", os.Stdout)
+	utils.ConfigureLogger("rewst_service_manager", os.Stdout)
 	log.Println("Version:", version.Version)
 	log.Println("Running on:", runtime.GOOS)
 
@@ -102,7 +102,7 @@ func main() {
 	flag.Parse()
 
 	// Configure logger
-	utils.ConfigureLogger("[rewst_service_manager]", os.Stdout)
+	utils.ConfigureLogger("rewst_service_manager", os.Stdout)
 
 	// Validate arguments
 	if len(orgId) == 0 {

@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"time"
 
 	"github.com/RewstApp/agent-smith-go/internal/agent"
 	"github.com/RewstApp/agent-smith-go/internal/utils"
@@ -29,42 +30,48 @@ func (service *Service) Execute(args []string, request <-chan svc.ChangeRequest,
 
 	// Create a context to cancel the command
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	cmd := exec.CommandContext(ctx, service.AgentExecutablePath, "--config-file", service.ConfigFilePath, "--log-file", service.LogFilePath)
+	cmd.WaitDelay = time.Second
 
 	// Start the remote agent executable and notify
 	cmd.Start()
 	response <- svc.Status{State: svc.Running, Accepts: svc.AcceptStop | svc.AcceptShutdown}
 
-	// Monitor when the executable stops on its own
+	// Monitor when the executable stopped on its own
 	stopped := make(chan struct{})
-	go func() {
-		// Wait for the executable to finish
-		cmd.Wait()
 
-		// Trigger the stopped channel
-		stopped <- struct{}{}
+	// Create a goroutine to monitor the interaction of service host to the software
+	go func() {
+		for {
+			select {
+			case change := <-request:
+				switch change.Cmd {
+				case svc.Stop, svc.Shutdown:
+					// Cancel the executable and update the status
+					cancel()
+					response <- svc.Status{State: svc.StopPending}
+				}
+			case <-stopped:
+				return
+			}
+		}
 	}()
 
-	for {
-		select {
-		case change := <-request:
-			switch change.Cmd {
-			case svc.Stop, svc.Shutdown:
-				// Cancel the executable and update the status
-				cancel()
-				response <- svc.Status{State: svc.StopPending}
-			}
-		case <-stopped:
-			response <- svc.Status{State: svc.Stopped}
-			cancel()
-			return true, 0
-		}
-	}
+	// Wait for the executable to finish
+	cmd.Wait()
+
+	// Trigger the stopped channel
+	stopped <- struct{}{}
+
+	// Notify the service host
+	response <- svc.Status{State: svc.Stopped}
+	return true, 0
 }
 
 func main() {
 	// Show header
-	utils.ConfigureLogger("[rewst_windows_service]", os.Stdout)
+	utils.ConfigureLogger("rewst_windows_service", os.Stdout)
 	log.Println("Version:", version.Version)
 	log.Println("Running on:", runtime.GOOS)
 
@@ -139,7 +146,7 @@ func main() {
 	defer logFile.Close()
 
 	// Configure logger with the new log file
-	utils.ConfigureLogger("[rewst_windows_service]", logFile)
+	utils.ConfigureLogger("rewst_windows_service", logFile)
 
 	// Start the windows service
 	err = svc.Run(agent.GetServiceName(service.OrgId), &service)
@@ -148,5 +155,5 @@ func main() {
 		return
 	}
 
-	log.Println("Service closed successfully")
+	log.Println("Service closed")
 }

@@ -45,7 +45,7 @@ func main() {
 	} else {
 		loggerWriter = os.Stdout
 	}
-	utils.ConfigureLogger("[rewst_remote_agent]", loggerWriter)
+	utils.ConfigureLogger("rewst_remote_agent", loggerWriter)
 
 	// Show header
 	log.Println("Version:", version.Version)
@@ -152,5 +152,5 @@ func main() {
 		}
 	}
 
-	log.Println("Closed")
+	log.Println("Agent closed")
 }
