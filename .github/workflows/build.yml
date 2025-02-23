@@ -68,7 +68,7 @@ jobs:
 
       - name: Sign binaries
         if: (github.ref == 'refs/heads/staging' || github.ref == 'refs/heads/main')
-        run: ./scripts/ssl_com_sign_binaries.ps1 -username '${{ secrets.SSL_COM_USERNAME }}' -password '${{ secrets.SSL_COM_PASSWORD }}' -credentialId '${{ secrets.SSL_COM_CREDENTIAL_ID }}' -totpSecret '${{ secrets.SSL_COM_OTP }}' -appDistPath $((Get-Item .).FullName)
+        run: ./scripts/ssl_com_sign_binaries.ps1 -username '${{ secrets.SSL_COM_USERNAME }}' -password '${{ secrets.SSL_COM_PASSWORD }}' -credentialId '${{ secrets.SSL_COM_CREDENTIAL_ID }}' -totpSecret '${{ secrets.SSL_COM_OTP }}' -appDistPath "$((Get-Item .).FullName)\dist"
 
       - name: Generate checksums
         if: (github.ref == 'refs/heads/staging' || github.ref == 'refs/heads/main')
