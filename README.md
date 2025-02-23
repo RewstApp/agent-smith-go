@@ -1,6 +1,10 @@
 # Agent Smith
 This is a POC for agent smith using Golang.
 
+## Build
+Required packages:
+- [go-winres](https://github.com/tc-hib/go-winres) - To embed icons and file versions to windows executables.
+
 ## Directory Structure
 ```
 agent-smith-go/
