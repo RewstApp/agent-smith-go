@@ -1,10 +1,12 @@
 name: Build
 
 on:
-  pull_request:
+  push:
     branches:
       - qa
       - staging
+  pull_request:
+    branches:
       - main
     types:
       - closed
@@ -59,10 +61,10 @@ jobs:
         with:
           name: windows-compiled-assets
           path: |
-            ./dist/rewst_windows_service.exe
-            ./dist/rewst_service_manager.exe
-            ./dist/rewst_remote_agent.exe
-            ./dist/rewst_agent_config.exe
+            ./dist/rewst_windows_service.win.exe
+            ./dist/rewst_service_manager.win.exe
+            ./dist/rewst_remote_agent.win.exe
+            ./dist/rewst_agent_config.win.exe
 
       - name: Sign binaries
         if: (github.ref == 'refs/heads/staging' || github.ref == 'refs/heads/main')
@@ -71,10 +73,10 @@ jobs:
       - name: Generate checksums
         if: (github.ref == 'refs/heads/staging' || github.ref == 'refs/heads/main')
         run: |
-          Get-FileHash -Path ./dist/signed/rewst_remote_agent.exe    -Algorithm SHA256 | Format-List | Out-File -FilePath ./dist/signed/rewst_remote_agent.exe.sha256
-          Get-FileHash -Path ./dist/signed/rewst_service_manager.exe -Algorithm SHA256 | Format-List | Out-File -FilePath ./dist/signed/rewst_service_manager.exe.sha256
-          Get-FileHash -Path ./dist/signed/rewst_agent_config.exe    -Algorithm SHA256 | Format-List | Out-File -FilePath ./dist/signed/rewst_agent_config.exe.sha256
-          Get-FileHash -Path ./dist/signed/rewst_windows_service.exe -Algorithm SHA256 | Format-List | Out-File -FilePath ./dist/signed/rewst_windows_service.exe.sha256
+          Get-FileHash -Path ./dist/signed/rewst_remote_agent.win.exe    -Algorithm SHA256 | Format-List | Out-File -FilePath ./dist/signed/rewst_remote_agent.win.exe.sha256
+          Get-FileHash -Path ./dist/signed/rewst_service_manager.win.exe -Algorithm SHA256 | Format-List | Out-File -FilePath ./dist/signed/rewst_service_manager.win.exe.sha256
+          Get-FileHash -Path ./dist/signed/rewst_agent_config.win.exe    -Algorithm SHA256 | Format-List | Out-File -FilePath ./dist/signed/rewst_agent_config.win.exe.sha256
+          Get-FileHash -Path ./dist/signed/rewst_windows_service.win.exe -Algorithm SHA256 | Format-List | Out-File -FilePath ./dist/signed/rewst_windows_service.win.exe.sha256
 
       - name: Upload assets
         if: (github.ref == 'refs/heads/staging' || github.ref == 'refs/heads/main')
@@ -82,26 +84,24 @@ jobs:
         with:
           name: windows-signed-assets
           path: |
-            ./dist/signed/rewst_windows_service.exe
-            ./dist/signed/rewst_service_manager.exe
-            ./dist/signed/rewst_remote_agent.exe
-            ./dist/signed/rewst_agent_config.exe
-            ./dist/signed/rewst_windows_service.exe.sha256
-            ./dist/signed/rewst_service_manager.exe.sha256
-            ./dist/signed/rewst_remote_agent.exe.sha256
-            ./dist/signed/rewst_agent_config.exe.sha256
+            ./dist/signed/rewst_windows_service.win.exe
+            ./dist/signed/rewst_service_manager.win.exe
+            ./dist/signed/rewst_remote_agent.win.exe
+            ./dist/signed/rewst_agent_config.win.exe
+            ./dist/signed/rewst_windows_service.win.exe.sha256
+            ./dist/signed/rewst_service_manager.win.exe.sha256
+            ./dist/signed/rewst_remote_agent.win.exe.sha256
+            ./dist/signed/rewst_agent_config.win.exe.sha256
 
       - name: Extract version
         if: github.ref == 'refs/heads/main'
         shell: bash
         id: extract_version
-        run: echo "version=v$(poetry version --short)" >> $GITHUB_OUTPUT
+        run: echo "version=v$(cz version -p)" >> $GITHUB_OUTPUT
 
       - name: Create release and upload files
         if: github.ref == 'refs/heads/main'
         run: |
-          Get-Item ./dist/signed/*.exe | Rename-Item -NewName { $_.Name -replace '.exe','.win.exe' }
-          Get-Item ./dist/signed/*.exe.sha256 | Rename-Item -NewName { $_.Name -replace '.exe.sha256','.win.exe.sha256' }
           gh release create ${{ env.VERSION }} --generate-notes (Get-Item ./dist/signed/*)
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
