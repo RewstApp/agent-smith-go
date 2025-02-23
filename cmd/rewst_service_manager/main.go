@@ -4,9 +4,11 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"os"
 	"time"
 
 	"github.com/RewstApp/agent-smith-go/internal/agent"
+	"github.com/RewstApp/agent-smith-go/internal/utils"
 	"golang.org/x/sys/windows/svc"
 	"golang.org/x/sys/windows/svc/mgr"
 )
@@ -92,8 +94,8 @@ func main() {
 	flag.BoolVar(&restart, "restart", false, "Restart the service")
 	flag.Parse()
 
-	// Configure log
-	log.SetPrefix("[rewst_service_manager] ")
+	// Configure logger
+	utils.ConfigureLogger("[rewst_service_manager]", os.Stdout)
 
 	// Validate arguments
 	if len(orgId) == 0 {

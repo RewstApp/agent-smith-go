@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"flag"
+	"io"
 	"log"
 	"os"
 	"runtime"
@@ -32,7 +33,8 @@ func main() {
 		log.Fatalln("Error: Missing config parameter")
 	}
 
-	log.SetPrefix("[rewst_remote_agent] ")
+	// Configure logger
+	var loggerWriter io.Writer
 
 	// Setup the log file if present
 	if len(logFilePath) > 0 {
@@ -42,8 +44,13 @@ func main() {
 			return
 		}
 		defer logFile.Close()
-		log.SetOutput(logFile)
+
+		// Use the log file as logger writer
+		loggerWriter = logFile
+	} else {
+		loggerWriter = os.Stdout
 	}
+	utils.ConfigureLogger("[rewst_remote_agent]", loggerWriter)
 
 	// Load the configuration file
 	device := agent.Device{}
