@@ -3,7 +3,6 @@ package agent
 import (
 	"context"
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -155,8 +154,7 @@ func (paths *PathsData) Load(ctx context.Context, orgId string) error {
 
 func GetOrgIdFromExecutable() (string, error) {
 	exec, err := os.Executable()
-	if err != nil {
-		log.Println("Executable name not found:", err)
+	if err != nil {	
 		return "", err
 	}
 
