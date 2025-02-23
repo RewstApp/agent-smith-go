@@ -57,16 +57,6 @@ func main() {
 		return
 	}
 
-	// Show header
-	log.Println("Version:", version.Version)
-	log.Println("Running on:", runtime.GOOS)
-
-	// Validate command-line arguments
-	if len(configFilePath) == 0 {
-		log.Println("Missing config-file parameter")
-		return
-	}
-
 	// Load the configuration file
 	device := agent.Device{}
 	err := device.Load(configFilePath)
