@@ -82,7 +82,7 @@ func main() {
 	// Get organization id from executable name
 	service.OrgId, err = agent.GetOrgIdFromExecutable()
 	if err != nil {
-		log.Println("GetOrgIdFromExceutable() failed:", err)
+		log.Println("GetOrgIdFromExecutable() failed:", err)
 		return
 	}
 
