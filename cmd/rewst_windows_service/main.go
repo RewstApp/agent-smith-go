@@ -29,7 +29,7 @@ func (service *Service) Execute(args []string, request <-chan svc.ChangeRequest,
 
 	// Create a context to cancel the command
 	ctx, cancel := context.WithCancel(context.Background())
-	cmd := exec.CommandContext(ctx, service.AgentExecutablePath, "--config", service.ConfigFilePath, "--log", service.LogFilePath)
+	cmd := exec.CommandContext(ctx, service.AgentExecutablePath, "--config-file", service.ConfigFilePath, "--log-file", service.LogFilePath)
 
 	// Start the remote agent executable and notify
 	cmd.Start()

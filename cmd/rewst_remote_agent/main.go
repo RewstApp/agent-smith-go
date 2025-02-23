@@ -17,11 +17,6 @@ import (
 )
 
 func main() {
-	// Show header
-	utils.ConfigureLogger("[rewst_remote_agent]", os.Stdout)
-	log.Println("Version:", version.Version)
-	log.Println("Running on:", runtime.GOOS)
-
 	// Create a channel to monitor incoming signals to closes
 	signalChan := utils.MonitorSignal()
 
@@ -29,15 +24,9 @@ func main() {
 	var configFilePath string
 	var logFilePath string
 
-	flag.StringVar(&configFilePath, "config", "", "Config file path")
-	flag.StringVar(&logFilePath, "log", "", "Log file path")
+	flag.StringVar(&configFilePath, "config-file", "", "Config file path")
+	flag.StringVar(&logFilePath, "log-file", "", "Log file path")
 	flag.Parse()
-
-	// Validate command-line arguments
-	if len(configFilePath) == 0 {
-		log.Println("Missing config parameter")
-		return
-	}
 
 	// Configure logger
 	var loggerWriter io.Writer
@@ -57,6 +46,16 @@ func main() {
 		loggerWriter = os.Stdout
 	}
 	utils.ConfigureLogger("[rewst_remote_agent]", loggerWriter)
+
+	// Show header
+	log.Println("Version:", version.Version)
+	log.Println("Running on:", runtime.GOOS)
+
+	// Validate command-line arguments
+	if len(configFilePath) == 0 {
+		log.Println("Missing config-file parameter")
+		return
+	}
 
 	// Load the configuration file
 	device := agent.Device{}
