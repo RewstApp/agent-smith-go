@@ -2,7 +2,8 @@ param(
     [string]$username,
     [string]$password,
     [string]$credentialId,
-    [string]$totpSecret
+    [string]$totpSecret,
+    [string]$appDistPath
 )
 
 # Used for staging purposes only
@@ -13,7 +14,6 @@ if ($fake) {
 }
 
 $downloadUrl = 'https://www.ssl.com/download/codesigntool-for-windows/'
-$appDistPath =  'dist'
 
 $inputFiles = @(
     "rewst_agent_config.win.exe",
