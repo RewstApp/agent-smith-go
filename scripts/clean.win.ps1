@@ -1,1 +1,1 @@
-Remove-Item "./bin/*.exe" -ErrorAction SilentlyContinue
+Remove-Item "./dist/*.*" -ErrorAction SilentlyContinue
