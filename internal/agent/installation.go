@@ -153,7 +153,7 @@ func (paths *PathsData) Load(ctx context.Context, orgId string) error {
 	return paths.Tags.Load(ctx, orgId)
 }
 
-func GetOrgIdFromExceutable() (string, error) {
+func GetOrgIdFromExecutable() (string, error) {
 	exec, err := os.Executable()
 	if err != nil {
 		log.Println("Executable name not found:", err)
@@ -161,7 +161,13 @@ func GetOrgIdFromExceutable() (string, error) {
 	}
 
 	filename := filepath.Base(exec)
-	return strings.Split(strings.Split(filename, ".")[0], "_")[3], nil
+	fragments := strings.Split(strings.Split(filename, ".")[0], "_")
+
+	if len(fragments) != 4 {
+		return "", fmt.Errorf("missing org id from executable: %s", filename)
+	}
+
+	return fragments[3], nil
 }
 
 func GetServiceName(orgId string) string {

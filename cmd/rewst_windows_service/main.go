@@ -4,11 +4,13 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"os"
 	"os/exec"
 
 	"github.com/RewstApp/agent-smith-go/internal/agent"
+	"github.com/RewstApp/agent-smith-go/internal/utils"
 	"golang.org/x/sys/windows/svc"
 )
 
@@ -59,14 +61,15 @@ func (service *Service) Execute(args []string, request <-chan svc.ChangeRequest,
 }
 
 func main() {
-	log.SetPrefix("[rewst_windows_service] ")
+	// Configure logger
+	utils.ConfigureLogger("[rewst_windows_service]", os.Stdout)
 
 	// Create service instance
 	var service Service
 	var err error
 
 	// Get organization id from executable name
-	service.OrgId, err = agent.GetOrgIdFromExceutable()
+	service.OrgId, err = agent.GetOrgIdFromExecutable()
 	if err != nil {
 		log.Println("GetOrgIdFromExceutable() failed:", err)
 		return
@@ -101,38 +104,38 @@ func main() {
 		if len(os.Args) == 2 {
 			// Check if we start the service
 			// This is used to align with the installation script
-			if os.Args[1] == "start" {
-				cmd := exec.Command(serviceManagerPath, "--org-id", service.OrgId, "--start")
-				cmd.Stdout = os.Stdout
-				cmd.Stdin = os.Stdin
-				err = cmd.Run()
-				if err != nil {
-					log.Println("Failed to start service:", err)
-					return
-				}
-
+			cmd := exec.Command(serviceManagerPath, "--org-id", service.OrgId, fmt.Sprintf("--%s", os.Args[1]))
+			cmd.Stdout = os.Stdout
+			cmd.Stdin = os.Stdin
+			err = cmd.Run()
+			if err != nil {
+				log.Println("Failed to start service:", err)
 				return
 			}
+
+			return
 		}
 
 		log.Println("Executable should be run as a service")
 		return
 	}
 
-	// Configure logging output
 	service.LogFilePath, err = agent.GetLogFilePath(service.OrgId)
 	if err != nil {
 		log.Println("GetLogFilePath() failed:", err)
 		return
 	}
 
+	// Configure logger
 	logFile, err := os.OpenFile(service.LogFilePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
 		log.Println("Failed to open log:", err)
 		return
 	}
 	defer logFile.Close()
-	log.SetOutput(logFile)
+
+	// Configure logger with the new log file
+	utils.ConfigureLogger("[rewst_windows_service]", logFile)
 
 	// Start the windows service
 	err = svc.Run(agent.GetServiceName(service.OrgId), &service)

@@ -69,12 +69,14 @@ func main() {
 	var configUrl string
 	var orgId string
 
+	// Arguments are based on the python version
 	flag.StringVar(&configSecret, "config-secret", "", "Secret key for configuration access")
 	flag.StringVar(&configUrl, "config-url", "", "URL to fetch the configuration from")
 	flag.StringVar(&orgId, "org-id", "", "Organization ID to register agent within")
 	flag.Parse()
 
-	log.SetPrefix("[rewst_agent_config] ")
+	// Configure logger
+	utils.ConfigureLogger("[rewst_agent_config]", os.Stdout)
 
 	// Validate command-line arguments
 	if len(configSecret) == 0 {
