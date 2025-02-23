@@ -65,7 +65,7 @@ func moveFileToOld(filePath string) error {
 
 func main() {
 	// Show header
-	utils.ConfigureLogger("[rewst_agent_config]", os.Stdout)
+	utils.ConfigureLogger("rewst_agent_config", os.Stdout)
 	log.Println("Version:", version.Version)
 	log.Println("Running on:", runtime.GOOS)
 
@@ -83,7 +83,7 @@ func main() {
 	flag.Parse()
 
 	// Configure logger
-	utils.ConfigureLogger("[rewst_agent_config]", os.Stdout)
+	utils.ConfigureLogger("rewst_agent_config", os.Stdout)
 
 	// Validate command-line arguments
 	if len(configSecret) == 0 {
@@ -244,5 +244,5 @@ func main() {
 		}
 	}
 
-	log.Println("Config ended")
+	log.Println("Config closed")
 }
