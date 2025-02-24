@@ -19,6 +19,7 @@ import (
 type HostInfo struct {
 	AgentVersion          string  `json:"agent_version"`
 	AgentExecutablePath   string  `json:"agent_executable_path"`
+	AgentApp              string  `json:"agent_app"`
 	ServiceExecutablePath string  `json:"service_executable_path"`
 	HostName              string  `json:"hostname"`
 	MacAddress            *string `json:"mac_address"`
@@ -225,6 +226,7 @@ func (hostInfo *HostInfo) Load(ctx context.Context, orgId string) error {
 	hostInfo.IsEntraConnectServer = isEntraConnectServer
 	hostInfo.EntraDomain = entraDomain
 	hostInfo.OrgId = orgId
+	hostInfo.AgentApp = "agent-smith-go"
 
 	return nil
 }
