@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"flag"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -121,6 +122,9 @@ func main() {
 		log.Println(err)
 		return
 	}
+
+	// Modify config url to add the param
+	configUrl = fmt.Sprintf("%s?agent_app=agent-smith-go", configUrl)
 
 	// Prepare http request and send
 	log.Println("Sending", string(hostInfoBytes), "to", configUrl)

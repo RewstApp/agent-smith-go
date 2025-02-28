@@ -1,7 +1,6 @@
 package mqtt
 
 import (
-	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"crypto/tls"
@@ -9,11 +8,10 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/RewstApp/agent-smith-go/internal/utils"
 	mqtt "github.com/eclipse/paho.mqtt.golang"
 )
 
-type AzureIotHubDevice struct {
+type azureIotHubDevice struct {
 	DeviceId        string
 	Host            string
 	SharedAccessKey string
@@ -43,114 +41,24 @@ func generateSASToken(resourceURI, key string, duration time.Duration) (string, 
 	return token, nil
 }
 
-func SubscribeToAzureIotHub(ctx context.Context, device *AzureIotHubDevice) <-chan Event {
-	// Create the channels for the subscription
-	channel := make(chan Event)
+func newAzureIotHubClientOptions(device azureIotHubDevice) (*mqtt.ClientOptions, error) {
+	// Generate SAS token
+	resourceURI := fmt.Sprintf("%s/devices/%s", device.Host, device.DeviceId)
+	sasToken, err := generateSASToken(resourceURI, device.SharedAccessKey, time.Hour)
+	if err != nil {
+		return nil, err
+	}
 
-	go func() {
-		defer close(channel)
+	// Initialize MQTT options
+	opts := mqtt.NewClientOptions()
+	opts.AddBroker(fmt.Sprintf("tls://%s:8883", device.Host)) // Use port 8883 for MQTT over TLS
+	opts.AddBroker(fmt.Sprintf("wss://%s", device.Host))      // Add websocket as a backup for Azure Iot Hub
+	opts.SetClientID(device.DeviceId)
+	opts.SetUsername(fmt.Sprintf("%s/%s/?api-version=2021-04-12", device.Host, device.DeviceId))
+	opts.SetPassword(sasToken)
+	opts.SetTLSConfig(&tls.Config{
+		Renegotiation: tls.RenegotiateOnceAsClient,
+	})
 
-		childCtx, cancel := context.WithCancel(ctx)
-
-		// Create a tls connection to broker
-		rootCAs, err := utils.RootCAs()
-		if err != nil {
-			channel <- Event{OnError, nil, err}
-			cancel()
-			return
-		}
-
-		// Generate SAS token
-		resourceURI := fmt.Sprintf("%s/devices/%s", device.Host, device.DeviceId)
-		sasToken, err := generateSASToken(resourceURI, device.SharedAccessKey, time.Hour)
-		if err != nil {
-			channel <- Event{OnError, nil, err}
-			cancel()
-			return
-		}
-
-		// Initialize MQTT options
-		opts := mqtt.NewClientOptions()
-		opts.AddBroker(fmt.Sprintf("tls://%s:8883", device.Host)) // Use port 8883 for MQTT over TLS
-		opts.AddBroker(fmt.Sprintf("wss://%s", device.Host))      // Add websocket as a backup for Azure Iot Hub
-		opts.SetClientID(device.DeviceId)
-		opts.SetUsername(fmt.Sprintf("%s/%s/?api-version=2021-04-12", device.Host, device.DeviceId))
-		opts.SetPassword(sasToken)
-		opts.SetTLSConfig(&tls.Config{
-			RootCAs:       rootCAs,
-			MinVersion:    tls.VersionTLS12,
-			Renegotiation: tls.RenegotiateOnceAsClient,
-		}) // Use proper TLS validation in production
-		opts.SetAutoReconnect(false)
-
-		// Handle the case when the connection was lost
-		opts.OnConnectionLost = func(client mqtt.Client, err error) {
-			go func() {
-				channel <- Event{OnConnectionLost, nil, err}
-				cancel()
-			}()
-		}
-
-		// Define message handlers
-		opts.OnConnect = func(client mqtt.Client) {
-			go func() {
-				// Trigger on connect events
-				channel <- Event{OnConnect, nil, nil}
-
-				// Subscribe to the cloud-to-device (C2D) message topic
-				topic := fmt.Sprintf("devices/%s/messages/devicebound/#", device.DeviceId)
-				token := client.Subscribe(topic, 1, func(client mqtt.Client, msg mqtt.Message) {
-					go func() {
-						channel <- Event{OnMessageReceived, msg.Payload(), err}
-					}()
-				})
-
-				cancelled, err := waitToken(token, ctx)
-
-				if cancelled {
-					channel <- Event{OnCancelled, nil, err}
-					cancel()
-					return
-				}
-
-				if err != nil {
-					// Failed to subscribe to message topic
-					channel <- Event{OnError, nil, err}
-					cancel()
-					return
-				}
-
-				// Trigger on subscribed event
-				channel <- Event{OnSubscribed, nil, nil}
-			}()
-		}
-
-		// Create and connect the MQTT client
-		client := mqtt.NewClient(opts)
-
-		channel <- Event{OnConnecting, nil, nil}
-
-		token := client.Connect()
-		defer client.Disconnect(250)
-
-		cancelled, err := waitToken(token, ctx)
-
-		if cancelled {
-			channel <- Event{OnCancelled, nil, err}
-			cancel()
-			return
-		}
-
-		if err != nil {
-			// Failed to connect
-			channel <- Event{OnError, nil, err}
-			cancel()
-			return
-		}
-
-		// Wait for the context to be cancelled
-		<-childCtx.Done()
-	}()
-
-	return channel
+	return opts, nil
 }
