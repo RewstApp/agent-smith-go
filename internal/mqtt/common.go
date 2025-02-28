@@ -1,8 +1,7 @@
 package mqtt
 
 import (
-	"context"
-
+	"github.com/RewstApp/agent-smith-go/internal/agent"
 	mqtt "github.com/eclipse/paho.mqtt.golang"
 )
 
@@ -24,13 +23,18 @@ type Event struct {
 	Error   error
 }
 
-func waitToken(token mqtt.Token, ctx context.Context) (bool, error) {
-	select {
-	case <-token.Done():
-		// Token completed before cancelling
-		return false, token.Error()
-	case <-ctx.Done():
-		// Cancelled before the token is done
-		return true, ctx.Err()
+type Client = mqtt.Client
+type Message = mqtt.Message
+
+var NewClient = mqtt.NewClient
+
+func NewClientOptions(device agent.Device) (*mqtt.ClientOptions, error) {
+	switch device.Broker {
+	default:
+		return newAzureIotHubClientOptions(azureIotHubDevice{
+			DeviceId:        device.DeviceId,
+			Host:            device.AzureIotHubHost,
+			SharedAccessKey: device.SharedAccessKey,
+		})
 	}
 }

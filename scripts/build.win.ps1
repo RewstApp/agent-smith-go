@@ -1,9 +1,8 @@
 # Build the executables for windows
+$env:GOARCH = "amd64" # Use 64-bit as default architecture
+$env:GOOS = "windows"
 $versionFlag = "-X github.com/RewstApp/agent-smith-go/internal/version.Version=v$(cz version -p)"
-go build -ldflags="-w -s $versionFlag" -o "./dist/rewst_remote_agent.win.exe" "./cmd/rewst_remote_agent"
-go build -ldflags="-w -s $versionFlag" -o "./dist/rewst_windows_service.win.exe" "./cmd/rewst_windows_service"
-go build -ldflags="-w -s $versionFlag" -o "./dist/rewst_agent_config.win.exe" "./cmd/rewst_agent_config"
-go build -ldflags="-w -s $versionFlag" -o "./dist/rewst_service_manager.win.exe" "./cmd/rewst_service_manager"
+go build -ldflags="-w -s $versionFlag" -o "./dist/agent_smith.win.exe" "./cmd/agent_smith"
 
 # Create a build winres.json for patch
 $winVersion = "$(cz version -p).0"
@@ -17,7 +16,4 @@ $winresObj | ConvertTo-Json -Depth 16 -Compress | Out-File -FilePath "./dist/win
 Copy-Item "./winres/logo-rewsty.ico" "./dist/logo-rewsty.ico"
 
 # Use the go-winres to patch the executables
-go-winres patch --no-backup --in "./dist/winres.json" "./dist/rewst_remote_agent.win.exe"
-go-winres patch --no-backup --in "./dist/winres.json" "./dist/rewst_windows_service.win.exe"
-go-winres patch --no-backup --in "./dist/winres.json" "./dist/rewst_agent_config.win.exe"
-go-winres patch --no-backup --in "./dist/winres.json" "./dist/rewst_service_manager.win.exe"
+go-winres patch --no-backup --in "./dist/winres.json" "./dist/agent_smith.win.exe"
