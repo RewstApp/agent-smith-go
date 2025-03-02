@@ -307,6 +307,7 @@ func main() {
 		}
 
 		log.Println("Configuration saved to", configFilePath)
+		log.Println("Logs will be saved to", agent.GetLogFilePath(orgId))
 
 		// Create the program directory
 		programDir := agent.GetProgramDirectory(orgId)
@@ -337,6 +338,7 @@ func main() {
 		}
 
 		log.Println("Agent installed to", agentExecutablePath)
+		log.Println("Commands will be temporarily saved to", agent.GetScriptsDirectory(orgId))
 
 		// Create the service
 		svcMgr, err := mgr.Connect()
@@ -347,7 +349,7 @@ func main() {
 		defer svcMgr.Disconnect()
 
 		name := agent.GetServiceName(orgId)
-		log.Println("Creating service", name)
+		log.Println("Creating service", name, "...")
 
 		svc, err := svcMgr.CreateService(name, agentExecutablePath, mgr.Config{
 			StartType:        mgr.StartAutomatic,
@@ -359,15 +361,17 @@ func main() {
 			return
 		}
 		defer svc.Close()
+		log.Println("Service created")
 
 		// Start the service
+		log.Println("Starting service", name, "...")
 		err = svc.Start()
 		if err != nil {
 			log.Println("Failed to start service:", err)
 			return
 		}
 
-		log.Println("Service", name, "started")
+		log.Println("Service started")
 		return
 	}
 
