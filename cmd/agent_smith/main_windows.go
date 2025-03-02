@@ -183,7 +183,8 @@ func (service *service) Execute(args []string, request <-chan svc.ChangeRequest,
 				}
 
 				// Send the postback
-				log.Println("Sending Postback", message.PostId, "...")
+
+				log.Println("Sending Postback", message.PostId, "to", postbackReq.URL, "...")
 				client := &http.Client{}
 				res, err := client.Do(postbackReq)
 				if err != nil {
