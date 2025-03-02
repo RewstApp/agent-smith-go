@@ -187,7 +187,8 @@ func main() {
 
 	// Make sure that org id is specified
 	if orgId == "" {
-		log.Fatal("Missing org-id parameter")
+		log.Println("Missing org-id parameter")
+		return
 	}
 
 	// Run in config mode
