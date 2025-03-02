@@ -1,16 +1,32 @@
 package interpreter
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"strings"
 
 	"github.com/RewstApp/agent-smith-go/internal/agent"
 )
+
+type errorResult struct {
+	Error string `json:"error"`
+}
+
+func errorResultBytes(err error) []byte {
+	result := errorResult{err.Error()}
+
+	bytes, err := json.MarshalIndent(&result, "", "  ")
+	if err != nil {
+		// Fallback
+		return []byte(err.Error())
+	}
+
+	return bytes
+}
 
 type Message struct {
 	PostId              string  `json:"post_id"`
@@ -41,7 +57,7 @@ func (msg *Message) Parse(data []byte) error {
 	return json.Unmarshal(data, msg)
 }
 
-func (msg *Message) Execute(ctx context.Context, device *agent.Device) error {
+func (msg *Message) Execute(ctx context.Context, device agent.Device) []byte {
 	// Execute commands if given
 	if msg.Commands != nil {
 		log.Println("Executing commands...")
@@ -58,46 +74,37 @@ func (msg *Message) Execute(ctx context.Context, device *agent.Device) error {
 	if msg.GetInstallation != nil && *msg.GetInstallation {
 		log.Println("Executing get_installation...")
 
-		// Create a postback url
-		postBackUrl := fmt.Sprintf("https://%s/webhooks/custom/action/%s", device.RewstEngineHost, strings.ReplaceAll(msg.PostId, ":", "/"))
-
 		// Load the paths data
 		var paths agent.PathsData
 		err := paths.Load(ctx, device.RewstOrgId)
 		if err != nil {
-			return err
+			return errorResultBytes(err)
 		}
 
 		// Convert to bytes in json
 		pathsBytes, err := json.MarshalIndent(&paths, "", "  ")
 		if err != nil {
-			return err
+			return errorResultBytes(err)
 		}
 
-		// Create an http request
-		req, err := http.NewRequestWithContext(ctx, "POST", postBackUrl, bytes.NewReader(pathsBytes))
-		if err != nil {
-			return err
-		}
-		req.Header.Set("Content-Type", "application/json")
-
-		// Send the postback
-		log.Println("Sending", string(pathsBytes), "to", postBackUrl)
-		client := &http.Client{}
-		res, err := client.Do(req)
-		if err != nil {
-			return err
-		}
-		defer res.Body.Close()
-
-		if res.StatusCode != http.StatusOK {
-			return fmt.Errorf("postback failed with status code: %d", res.StatusCode)
-		}
-
-		// Return the result
-		return nil
+		return pathsBytes
 	}
 
 	// No command
-	return fmt.Errorf("noop")
+	return errorResultBytes(fmt.Errorf("noop"))
+}
+
+func (msg *Message) CreatePostbackRequest(ctx context.Context, device agent.Device, body io.Reader) (*http.Request, error) {
+	// Create a postback url
+	postBackUrl := fmt.Sprintf("https://%s/webhooks/custom/action/%s", device.RewstEngineHost, strings.ReplaceAll(msg.PostId, ":", "/"))
+
+	// Create an http request
+	req, err := http.NewRequestWithContext(ctx, "POST", postBackUrl, body)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	// Return the request
+	return req, nil
 }
