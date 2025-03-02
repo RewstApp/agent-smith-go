@@ -29,7 +29,7 @@ func GetScriptsDirectory(orgId string) string {
 	systemDrive := os.Getenv("SYSTEMDRIVE")
 
 	// Build the program directory based on organization id
-	return filepath.Join(systemDrive, fmt.Sprintf("RewstRemoteAgent/scripts/%s", orgId))
+	return filepath.Join(fmt.Sprintf("%s\\", systemDrive), fmt.Sprintf("RewstRemoteAgent/scripts/%s", orgId))
 }
 
 func GetAgentExecutablePath(orgId string) string {

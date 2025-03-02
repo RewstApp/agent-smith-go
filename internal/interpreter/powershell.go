@@ -51,12 +51,12 @@ func executeUsingPowershell(ctx context.Context, message *Message, device *agent
 		return err
 	}
 
-	log.Println("Commands saved to", tempfile.Name())
+	log.Println("Command", message.PostId, "saved to", tempfile.Name())
 
 	// Close the temporary file
 	tempfile.Close()
-	cmd := exec.CommandContext(ctx, shell, "-File", tempfile.Name())
 
+	cmd := exec.CommandContext(ctx, shell, "-File", tempfile.Name())
 	err = cmd.Run()
 	if err != nil {
 		return err
@@ -65,7 +65,7 @@ func executeUsingPowershell(ctx context.Context, message *Message, device *agent
 	// Remove successfully executed temporary filename
 	defer os.Remove(tempfile.Name())
 
-	log.Println("Command", message.PostId, "completed with exit code", cmd.ProcessState.ExitCode())
+	log.Println("Command", message.PostId, "completed with exit code:", cmd.ProcessState.ExitCode())
 
 	return nil
 }

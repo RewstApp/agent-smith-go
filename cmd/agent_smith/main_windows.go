@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"runtime"
+	"time"
 
 	"github.com/RewstApp/agent-smith-go/internal/agent"
 	"github.com/RewstApp/agent-smith-go/internal/interpreter"
@@ -74,20 +75,15 @@ func (service *service) Execute(args []string, request <-chan svc.ChangeRequest,
 	log.Println("Agent Smith Version:", version.Version)
 	log.Println("Running on:", runtime.GOOS)
 
-	// Load the config file
-	configFile, err := os.OpenFile(service.ConfigFile, os.O_RDONLY, 0644)
-	if err != nil {
-		log.Println("Failed to open config:", err)
+	defer func() {
+		log.Println("Service stopped")
 		response <- svc.Status{State: svc.Stopped}
-		return false, 1
-	}
-	defer configFile.Close()
+	}()
 
 	// Read and parse the config file
-	configFileBytes, err := io.ReadAll(configFile)
+	configFileBytes, err := os.ReadFile(service.ConfigFile)
 	if err != nil {
 		log.Println("Failed to read config:", err)
-		response <- svc.Status{State: svc.Stopped}
 		return false, 1
 	}
 
@@ -96,80 +92,114 @@ func (service *service) Execute(args []string, request <-chan svc.ChangeRequest,
 	err = json.Unmarshal(configFileBytes, &device)
 	if err != nil {
 		log.Println("Failed to parse config:", err)
-		response <- svc.Status{State: svc.Stopped}
 		return false, 1
 	}
 
-	// Create MQTT options
-	opts, err := mqtt.NewClientOptions(device)
-	if err != nil {
-		log.Println("Failed to create client options:", err)
-		response <- svc.Status{State: svc.Stopped}
-		return false, 1
-	}
+	// Create a channel for stopped signal
+	stopped := make(chan struct{})
 
-	// Manually handle auto reconnection
-	opts.SetAutoReconnect(false)
-
-	// Add event handlers
-	opts.OnConnectionLost = func(client mqtt.Client, err error) {
-		log.Println("Connection lost:", err)
-	}
-
-	// Connect to the broker
-	client := mqtt.NewClient(opts)
-	token := client.Connect()
-
-	if token.Wait() && token.Error() != nil {
-		log.Println("Failed to connect:", token.Error())
-		response <- svc.Status{State: svc.Stopped}
-		return false, 1
-	}
-	defer client.Disconnect(250)
-
-	// Subscribe to the topic
-	topic := fmt.Sprintf("devices/%s/messages/devicebound/#", device.DeviceId)
-	token = client.Subscribe(topic, 1, func(client mqtt.Client, msg mqtt.Message) {
-		// Execute the payload on a goroutine so it won't block the receiver
-		go func() {
-			var message interpreter.Message
-			err := message.Parse(msg.Payload())
-			if err != nil {
-				log.Println("Parse failed:", err)
+	// Monitor the request for the stopped signal
+	go func() {
+		for {
+			select {
+			case change := <-request:
+				switch change.Cmd {
+				case svc.Stop, svc.Shutdown:
+					stopped <- struct{}{}
+				}
+			case <-ctx.Done():
 				return
 			}
+		}
+	}()
 
-			err = message.Execute(ctx, &device)
-			if err != nil {
-				log.Println("Failed to execute message:", err)
-				return
-			}
-		}()
-	})
-
-	if token.Wait() && token.Error() != nil {
-		log.Println("Failed to subscribe:", err)
-		response <- svc.Status{State: svc.Stopped}
-		return false, 1
-	}
-
-	// Complete initialization
-	log.Println("Subscribed to messages")
 	response <- svc.Status{State: svc.Running, Accepts: svc.AcceptStop | svc.AcceptShutdown}
+	rg := utils.ReconnectTimeoutGenerator{}
 
-	// Wait for the stop or shutdown command
-	for change := range request {
-		switch change.Cmd {
-		case svc.Stop, svc.Shutdown:
-			response <- svc.Status{State: svc.Stopped}
+	for {
+		// Wait for the timeout
+		if rg.Timeout() > 0 {
+			log.Println("Reconnecting in", rg.Timeout())
+			select {
+			case <-stopped:
+				return true, 0
+			case <-time.After(rg.Timeout()):
+				log.Println("Reconnecting...")
+			}
+		}
+
+		// Move to the next timeout
+		rg.Next()
+
+		// Create a channel to wait for lost connection
+		lost := make(chan struct{})
+
+		// Create MQTT options
+		opts, err := mqtt.NewClientOptions(device)
+		if err != nil {
+			log.Println("Failed to create client options:", err)
+			return false, 1
+		}
+
+		// Manually handle auto reconnection
+		opts.SetAutoReconnect(false)
+
+		// Add event handlers
+		opts.OnConnectionLost = func(client mqtt.Client, err error) {
+			log.Println("Connection lost:", err)
+			lost <- struct{}{}
+		}
+
+		// Connect to the broker
+		client := mqtt.NewClient(opts)
+		token := client.Connect()
+
+		if token.Wait() && token.Error() != nil {
+			log.Println("Failed to connect:", token.Error())
+			continue
+		}
+		defer client.Disconnect(250)
+
+		// Subscribe to the topic
+		topic := fmt.Sprintf("devices/%s/messages/devicebound/#", device.DeviceId)
+		token = client.Subscribe(topic, 1, func(client mqtt.Client, msg mqtt.Message) {
+			// Execute the payload on a goroutine so it won't block the receiver
+			go func() {
+				var message interpreter.Message
+				err := message.Parse(msg.Payload())
+				if err != nil {
+					log.Println("Parse failed:", err)
+					return
+				}
+
+				err = message.Execute(ctx, &device)
+				if err != nil {
+					log.Println("Failed to execute message:", err)
+					return
+				}
+			}()
+		})
+
+		if token.Wait() && token.Error() != nil {
+			log.Println("Failed to subscribe:", err)
+			continue
+		}
+
+		// Complete initialization
+		log.Println("Subscribed to messages")
+
+		// Reset the timeout
+		rg.Clear()
+		rg.Next()
+
+		// Wait for the stop/shutdown command or lost connection
+		select {
+		case <-stopped:
 			return true, 0
+		case <-lost:
+			continue
 		}
 	}
-
-	// Request channel has been closed
-	log.Println("Request channel closed")
-	response <- svc.Status{State: svc.Stopped}
-	return false, 1
 }
 
 func main() {
@@ -199,22 +229,9 @@ func main() {
 
 	// Run in config mode
 	if configUrl != "" && configSecret != "" {
-		signalChan := utils.MonitorSignal()
-
-		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
-
-		// Wait for the signal to cancel
-		go func() {
-			<-signalChan
-			log.Println("Signal received")
-
-			cancel()
-		}()
-
 		// Get installation paths data
 		var pathsData agent.PathsData
-		err := pathsData.Load(ctx, orgId)
+		err := pathsData.Load(context.Background(), orgId)
 		if err != nil {
 			log.Println("Failed to read paths:", err)
 			return
@@ -229,7 +246,7 @@ func main() {
 
 		// Prepare http request and send
 		log.Println("Sending", string(hostInfoBytes), "to", configUrl)
-		req, err := http.NewRequestWithContext(ctx, "POST", configUrl, bytes.NewReader(hostInfoBytes))
+		req, err := http.NewRequestWithContext(context.Background(), "POST", configUrl, bytes.NewReader(hostInfoBytes))
 		if err != nil {
 			log.Println("Failed to create request:", err)
 			return
@@ -306,28 +323,20 @@ func main() {
 			return
 		}
 
-		execFile, err := os.OpenFile(execFilePath, os.O_RDONLY, utils.DefaultFileMod)
+		execFileBytes, err := os.ReadFile(execFilePath)
 		if err != nil {
 			log.Println("Failed to read executable file:", err)
 			return
 		}
-		defer execFile.Close()
 
 		agentExecutablePath := agent.GetAgentExecutablePath(orgId)
-		agentExecutableFile, err := os.Create(agentExecutablePath)
+		err = os.WriteFile(agentExecutablePath, execFileBytes, utils.DefaultFileMod)
 		if err != nil {
 			log.Println("Failed to create agent executable:", err)
 			return
 		}
-		defer agentExecutableFile.Close()
 
-		_, err = io.Copy(agentExecutableFile, execFile)
-		if err != nil {
-			log.Println("Failed to copy contents to agent executable:", err)
-			return
-		}
-
-		log.Println("Copied executable to", agentExecutablePath)
+		log.Println("Agent installed to", agentExecutablePath)
 
 		// Create the service
 		svcMgr, err := mgr.Connect()
@@ -338,8 +347,12 @@ func main() {
 		defer svcMgr.Disconnect()
 
 		name := agent.GetServiceName(orgId)
+		log.Println("Creating service", name)
+
 		svc, err := svcMgr.CreateService(name, agentExecutablePath, mgr.Config{
-			StartType: mgr.StartAutomatic,
+			StartType:        mgr.StartAutomatic,
+			Description:      fmt.Sprintf("Rewst Remote Agent for Org %s", orgId),
+			DelayedAutoStart: true,
 		}, "--org-id", orgId, "--config-file", configFilePath, "--log-file", agent.GetLogFilePath(orgId))
 		if err != nil {
 			log.Println("Failed to create service:", err)
@@ -348,7 +361,12 @@ func main() {
 		defer svc.Close()
 
 		// Start the service
-		svc.Start()
+		err = svc.Start()
+		if err != nil {
+			log.Println("Failed to start service:", err)
+			return
+		}
+
 		log.Println("Service", name, "started")
 		return
 	}
@@ -375,9 +393,9 @@ func main() {
 		})
 		if err != nil {
 			log.Println("Failed to run the service:", err)
+			return
 		}
 
-		log.Println("Service closed")
 		return
 	}
 
