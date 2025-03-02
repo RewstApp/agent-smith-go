@@ -56,8 +56,6 @@ func executeUsingPowershell(ctx context.Context, message *Message, device *agent
 	// Close the temporary file
 	tempfile.Close()
 	cmd := exec.CommandContext(ctx, shell, "-File", tempfile.Name())
-	cmd.Stdout = log.Writer()
-	cmd.Stderr = log.Writer()
 
 	err = cmd.Run()
 	if err != nil {
