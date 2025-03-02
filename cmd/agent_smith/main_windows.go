@@ -286,10 +286,12 @@ func main() {
 
 		_, err = service.Control(svc.Stop)
 		if err != nil {
-			log.Println("Failed to start service:", name)
+			log.Println("Failed to stop service:", name)
 			return
 		}
-		log.Println("Started")
+		log.Println("Stopped")
 		return
 	}
+
+	log.Println("Unrecognized command:", command)
 }
