@@ -5,24 +5,6 @@ import (
 	mqtt "github.com/eclipse/paho.mqtt.golang"
 )
 
-type EventType int
-
-const (
-	OnError = iota
-	OnMessageReceived
-	OnConnecting
-	OnConnect
-	OnConnectionLost
-	OnSubscribed
-	OnCancelled
-)
-
-type Event struct {
-	Type    EventType
-	Message []byte
-	Error   error
-}
-
 type Client = mqtt.Client
 type Message = mqtt.Message
 
