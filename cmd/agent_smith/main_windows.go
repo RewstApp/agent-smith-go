@@ -172,10 +172,43 @@ func (service *service) Execute(args []string, request <-chan svc.ChangeRequest,
 					return
 				}
 
-				err = message.Execute(ctx, &device)
+				// Execute the message
+				resultBytes := message.Execute(ctx, device)
+
+				// Postback the response
+				postbackReq, err := message.CreatePostbackRequest(ctx, device, bytes.NewReader(resultBytes))
 				if err != nil {
-					log.Println("Failed to execute message:", err)
+					log.Println("Failed to create postback request:", err)
 					return
+				}
+
+				// Send the postback
+				log.Println("Sending Postback", message.PostId, "...")
+				client := &http.Client{}
+				res, err := client.Do(postbackReq)
+				if err != nil {
+					log.Println("Failed to send postback:", err)
+					return
+				}
+				defer res.Body.Close()
+
+				if res.StatusCode != http.StatusOK && res.StatusCode != http.StatusBadRequest {
+					log.Println("Postback", message.PostId, "failed with status code:", res.StatusCode)
+				} else {
+					log.Println("Postback", message.PostId, "sent")
+				}
+
+				// Show postback response body if not empty
+				bodyBytes, err := io.ReadAll(res.Body)
+				if err != nil {
+					log.Println("Failed to read postback response body:", err)
+					return
+				}
+
+				if res.StatusCode != http.StatusBadRequest {
+					if len(bodyBytes) > 0 {
+						log.Println(string(bodyBytes))
+					}
 				}
 			}()
 		})
