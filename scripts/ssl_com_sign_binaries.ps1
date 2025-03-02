@@ -16,10 +16,7 @@ if ($fake) {
 $downloadUrl = 'https://www.ssl.com/download/codesigntool-for-windows/'
 
 $inputFiles = @(
-    "rewst_agent_config.win.exe",
-    "rewst_service_manager.win.exe",
-    "rewst_windows_service.win.exe",
-    "rewst_remote_agent.win.exe"
+    "rewst_agent_config.win.exe"
 )
 $outputDirPath = "$appDistPath\signed"
 

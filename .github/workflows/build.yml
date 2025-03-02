@@ -61,9 +61,6 @@ jobs:
         with:
           name: windows-compiled-assets
           path: |
-            ./dist/rewst_windows_service.win.exe
-            ./dist/rewst_service_manager.win.exe
-            ./dist/rewst_remote_agent.win.exe
             ./dist/rewst_agent_config.win.exe
 
       - name: Sign binaries
@@ -73,10 +70,7 @@ jobs:
       - name: Generate checksums
         if: (github.ref == 'refs/heads/staging' || github.ref == 'refs/heads/main')
         run: |
-          Get-FileHash -Path ./dist/signed/rewst_remote_agent.win.exe    -Algorithm SHA256 | Format-List | Out-File -FilePath ./dist/signed/rewst_remote_agent.win.exe.sha256
-          Get-FileHash -Path ./dist/signed/rewst_service_manager.win.exe -Algorithm SHA256 | Format-List | Out-File -FilePath ./dist/signed/rewst_service_manager.win.exe.sha256
           Get-FileHash -Path ./dist/signed/rewst_agent_config.win.exe    -Algorithm SHA256 | Format-List | Out-File -FilePath ./dist/signed/rewst_agent_config.win.exe.sha256
-          Get-FileHash -Path ./dist/signed/rewst_windows_service.win.exe -Algorithm SHA256 | Format-List | Out-File -FilePath ./dist/signed/rewst_windows_service.win.exe.sha256
 
       - name: Upload assets
         if: (github.ref == 'refs/heads/staging' || github.ref == 'refs/heads/main')
@@ -84,13 +78,7 @@ jobs:
         with:
           name: windows-signed-assets
           path: |
-            ./dist/signed/rewst_windows_service.win.exe
-            ./dist/signed/rewst_service_manager.win.exe
-            ./dist/signed/rewst_remote_agent.win.exe
             ./dist/signed/rewst_agent_config.win.exe
-            ./dist/signed/rewst_windows_service.win.exe.sha256
-            ./dist/signed/rewst_service_manager.win.exe.sha256
-            ./dist/signed/rewst_remote_agent.win.exe.sha256
             ./dist/signed/rewst_agent_config.win.exe.sha256
 
       - name: Extract version
