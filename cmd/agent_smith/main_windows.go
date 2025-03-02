@@ -3,12 +3,14 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
 	"log"
+	"net/http"
 	"os"
 	"runtime"
 
@@ -40,6 +42,10 @@ func stateToString(state svc.State) string {
 	default:
 		return ""
 	}
+}
+
+type fetchConfigurationResponse struct {
+	Configuration agent.Device `json:"configuration"`
 }
 
 type service struct {
@@ -193,7 +199,157 @@ func main() {
 
 	// Run in config mode
 	if configUrl != "" && configSecret != "" {
-		// TODO: DO CONFIG URL
+		signalChan := utils.MonitorSignal()
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		// Wait for the signal to cancel
+		go func() {
+			<-signalChan
+			log.Println("Signal received")
+
+			cancel()
+		}()
+
+		// Get installation paths data
+		var pathsData agent.PathsData
+		err := pathsData.Load(ctx, orgId)
+		if err != nil {
+			log.Println("Failed to read paths:", err)
+			return
+		}
+
+		// Fetch configuration
+		hostInfoBytes, err := json.MarshalIndent(pathsData.Tags, "", "  ")
+		if err != nil {
+			log.Println("Failed to read host info:", err)
+			return
+		}
+
+		// Prepare http request and send
+		log.Println("Sending", string(hostInfoBytes), "to", configUrl)
+		req, err := http.NewRequestWithContext(ctx, "POST", configUrl, bytes.NewReader(hostInfoBytes))
+		if err != nil {
+			log.Println("Failed to create request:", err)
+			return
+		}
+		req.Header.Set("x-rewst-secret", configSecret)
+		req.Header.Set("Content-Type", "application/json")
+
+		client := &http.Client{}
+		res, err := client.Do(req)
+		if err != nil {
+			log.Println(err)
+			return
+		}
+		defer res.Body.Close()
+
+		if res.StatusCode != http.StatusOK {
+			log.Println("Failed to fetch configuration with status code:", res.StatusCode)
+			return
+		}
+
+		bodyBytes, err := io.ReadAll(res.Body)
+		if err != nil {
+			log.Println("Failed to read response:", err)
+			return
+		}
+
+		// Parse the fetch configuration response
+		var response fetchConfigurationResponse
+		err = json.Unmarshal(bodyBytes, &response)
+		if err != nil {
+			log.Println("Failed to parse response:", err)
+			return
+		}
+
+		// Create the data directory
+		dataDir := agent.GetDataDirectory(orgId)
+		err = utils.CreateFolderIfMissing(dataDir)
+		if err != nil {
+			log.Println("Failed to create data directory:", err)
+			return
+		}
+
+		// Save the configuration file
+		configFilePath := agent.GetConfigFilePath(orgId)
+		configBytes, err := json.MarshalIndent(response.Configuration, "", "  ")
+		if err != nil {
+			log.Println("Failed to print config file:", err)
+			return
+		}
+
+		// Got configuration
+		log.Println("Received configuration:", string(configBytes))
+
+		err = os.WriteFile(configFilePath, configBytes, utils.DefaultFileMod)
+		if err != nil {
+			log.Println("Failed to save config:", err)
+			return
+		}
+
+		log.Println("Configuration saved to", configFilePath)
+
+		// Create the program directory
+		programDir := agent.GetProgramDirectory(orgId)
+		err = utils.CreateFolderIfMissing(programDir)
+		if err != nil {
+			log.Println("Failed to create program directory:", err)
+			return
+		}
+
+		// Copy the agent executable
+		execFilePath, err := os.Executable()
+		if err != nil {
+			log.Println("Failed to get executable:", err)
+			return
+		}
+
+		execFile, err := os.OpenFile(execFilePath, os.O_RDONLY, utils.DefaultFileMod)
+		if err != nil {
+			log.Println("Failed to read executable file:", err)
+			return
+		}
+		defer execFile.Close()
+
+		agentExecutablePath := agent.GetAgentExecutablePath(orgId)
+		agentExecutableFile, err := os.Create(agentExecutablePath)
+		if err != nil {
+			log.Println("Failed to create agent executable:", err)
+			return
+		}
+		defer agentExecutableFile.Close()
+
+		_, err = io.Copy(agentExecutableFile, execFile)
+		if err != nil {
+			log.Println("Failed to copy contents to agent executable:", err)
+			return
+		}
+
+		log.Println("Copied executable to", agentExecutablePath)
+
+		// Create the service
+		svcMgr, err := mgr.Connect()
+		if err != nil {
+			log.Println("Failed to connect service manager:", err)
+			return
+		}
+		defer svcMgr.Disconnect()
+
+		name := agent.GetServiceName(orgId)
+		svc, err := svcMgr.CreateService(name, agentExecutablePath, mgr.Config{
+			StartType: mgr.StartAutomatic,
+		}, "--org-id", orgId, "--config-file", configFilePath, "--log-file", agent.GetLogFilePath(orgId))
+		if err != nil {
+			log.Println("Failed to create service:", err)
+			return
+		}
+		defer svc.Close()
+
+		// Start the service
+		svc.Start()
+		log.Println("Service", name, "started")
 		return
 	}
 

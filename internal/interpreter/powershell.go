@@ -9,6 +9,7 @@ import (
 	"runtime"
 
 	"github.com/RewstApp/agent-smith-go/internal/agent"
+	"github.com/RewstApp/agent-smith-go/internal/utils"
 	"golang.org/x/text/encoding/unicode"
 	"golang.org/x/text/transform"
 )
@@ -34,7 +35,8 @@ func executeUsingPowershell(ctx context.Context, message *Message, device *agent
 	}
 
 	// Save commands to temporary file
-	scriptsDir, err := agent.GetScriptsDirectory(device.RewstOrgId)
+	scriptsDir := agent.GetScriptsDirectory(device.RewstOrgId)
+	err = utils.CreateFolderIfMissing(scriptsDir)
 	if err != nil {
 		return err
 	}
