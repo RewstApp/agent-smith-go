@@ -243,6 +243,7 @@ func main() {
 	var configSecret string
 	var configFile string
 	var logFile string
+	var uninstall bool
 
 	flag.StringVar(&orgId, "org-id", "", "Organization ID")
 
@@ -253,11 +254,21 @@ func main() {
 	// Service mode arguments
 	flag.StringVar(&configFile, "config-file", "", "Config file")
 	flag.StringVar(&logFile, "log-file", "", "Log file")
+
+	// Service management arguments
+	flag.BoolVar(&uninstall, "uninstall", false, "Uninstall the agent")
+
 	flag.Parse()
 
 	// Make sure that org id is specified
 	if orgId == "" {
 		log.Println("Missing org-id parameter")
+		return
+	}
+
+	// Run uninstall script
+	if uninstall {
+		runUninstall(orgId)
 		return
 	}
 
