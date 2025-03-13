@@ -1,0 +1,45 @@
+name: Build QA
+
+on: workflow_dispatch
+
+jobs:
+  build:
+    permissions:
+      contents: write
+    runs-on: windows-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
+          fetch-depth: 0
+
+      - name: Setup go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.24.0"
+
+      - name: Setup go packages
+        run: go install github.com/tc-hib/go-winres@latest
+
+      - name: Setup python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.12"
+
+      - name: Setup python packages
+        run: |
+          pip install pipx
+          pipx ensurepath
+          pipx install commitizen
+          pipx upgrade commitizen
+
+      - name: Build binaries
+        run: ./scripts/build.win.ps1
+
+      - name: Upload assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-compiled-assets
+          path: |
+            ./dist/rewst_agent_config.win.exe
