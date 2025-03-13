@@ -1,11 +1,10 @@
-name: Build QA
+name: QA
 
 on: workflow_dispatch
 
 jobs:
   build:
-    permissions:
-      contents: write
+    if: github.ref == 'refs/heads/main'
     runs-on: windows-latest
     steps:
       - name: Checkout code
