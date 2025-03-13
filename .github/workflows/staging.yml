@@ -1,12 +1,10 @@
-name: Release
+name: Staging
 
 on: workflow_dispatch
 
 jobs:
   build:
     if: github.ref == 'refs/heads/main'
-    permissions:
-      contents: write
     runs-on: windows-latest
     steps:
       - name: Checkout code
@@ -68,14 +66,3 @@ jobs:
             ./dist/signed/rewst_agent_config.win.exe
             ./dist/signed/rewst_agent_config.win.exe.sha256
 
-      - name: Extract version
-        shell: bash
-        id: extract_version
-        run: echo "version=v$(cz version -p)" >> $GITHUB_OUTPUT
-
-      - name: Create release and upload files
-        run: |
-          gh release create ${{ env.VERSION }} --generate-notes (Get-Item ./dist/signed/*)
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          VERSION: ${{ steps.extract_version.outputs.version }}
