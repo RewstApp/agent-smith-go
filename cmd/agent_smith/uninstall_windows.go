@@ -4,6 +4,7 @@ package main
 
 import (
 	"log"
+	"os"
 	"time"
 
 	"github.com/RewstApp/agent-smith-go/internal/agent"
@@ -12,7 +13,6 @@ import (
 )
 
 func runUninstall(orgId string) {
-	// Connect to service manager
 	svcMgr, err := mgr.Connect()
 	if err != nil {
 		log.Println("Failed to connect to service manager:", err)
@@ -69,5 +69,37 @@ func runUninstall(orgId string) {
 	}
 
 	// Delete the service
+	err = service.Delete()
+	if err != nil {
+		log.Println("Failed to delete service:", err)
+		return
+	}
+	log.Println(name, "deleted")
 
+	// Delete data directory
+	dataDir := agent.GetDataDirectory(orgId)
+	err = os.RemoveAll(dataDir)
+	if err != nil {
+		log.Println("Failed to delete directory:", dataDir)
+		return
+	}
+	log.Println(dataDir, "deleted")
+
+	// Delete program directory
+	programDir := agent.GetProgramDirectory(orgId)
+	err = os.RemoveAll(programDir)
+	if err != nil {
+		log.Println("Failed to delete directory:", programDir)
+		return
+	}
+	log.Println(programDir, "deleted")
+
+	// Delete scripts directory
+	scriptsDir := agent.GetScriptsDirectory(orgId)
+	err = os.RemoveAll(scriptsDir)
+	if err != nil {
+		log.Println("Failed to delete directory:", scriptsDir)
+		return
+	}
+	log.Println(scriptsDir, "deleted")
 }
