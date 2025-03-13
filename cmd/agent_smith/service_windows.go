@@ -131,7 +131,7 @@ func (service *service) Execute(args []string, request <-chan svc.ChangeRequest,
 			log.Println("Failed to connect:", token.Error())
 			continue
 		}
-		defer client.Disconnect(250)
+		defer client.Disconnect((uint)(mqtt.DefaultDisconnectQuiesce / time.Millisecond))
 
 		// Subscribe to the topic
 		topic := fmt.Sprintf("devices/%s/messages/devicebound/#", device.DeviceId)
