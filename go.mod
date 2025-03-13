@@ -2,12 +2,12 @@ module github.com/RewstApp/agent-smith-go
 
 go 1.24.0
 
-require golang.org/x/text v0.22.0
+require golang.org/x/text v0.23.0
 
 require (
 	github.com/eclipse/paho.mqtt.golang v1.5.0
 	github.com/shirou/gopsutil/v4 v4.25.1
-	golang.org/x/sys v0.30.0
+	golang.org/x/sys v0.31.0
 )
 
 require (
@@ -19,6 +19,6 @@ require (
 	github.com/tklauser/go-sysconf v0.3.14 // indirect
 	github.com/tklauser/numcpus v0.9.0 // indirect
 	github.com/yusufpapurcu/wmi v1.2.4 // indirect
-	golang.org/x/net v0.35.0 // indirect
-	golang.org/x/sync v0.11.0 // indirect
+	golang.org/x/net v0.37.0 // indirect
+	golang.org/x/sync v0.12.0 // indirect
 )
