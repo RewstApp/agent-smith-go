@@ -65,6 +65,7 @@ func runConfig(orgId string, configUrl string, configSecret string) {
 		log.Println("Failed to fetch configuration with status code:", res.StatusCode)
 		return
 	}
+	log.Println("Sent with response status code", res.StatusCode)
 
 	bodyBytes, err := io.ReadAll(res.Body)
 	if err != nil {
