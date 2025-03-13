@@ -33,14 +33,6 @@ jobs:
           pipx install commitizen
           pipx upgrade commitizen
 
-      - name: Bump version and push
-        run: |
-          git config --local user.email "automated_builds@rewst.io"
-          git config --local user.name "Rewst GitHub Actions"
-          cz bump --yes
-          git push
-          git push --tags
-
       - name: Build binaries
         run: ./scripts/build.win.ps1
 
