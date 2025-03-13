@@ -266,7 +266,7 @@ func main() {
 		return
 	}
 
-	// Run uninstall script
+	// Run uninstall routine
 	if uninstall {
 		runUninstall(orgId)
 		return
