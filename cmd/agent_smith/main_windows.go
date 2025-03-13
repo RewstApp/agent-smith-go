@@ -24,27 +24,6 @@ import (
 	"golang.org/x/sys/windows/svc/mgr"
 )
 
-func stateToString(state svc.State) string {
-	switch state {
-	case svc.Stopped:
-		return "STOPPED"
-	case svc.StartPending:
-		return "PENDING"
-	case svc.StopPending:
-		return "STOP PENDING"
-	case svc.Running:
-		return "RUNNING"
-	case svc.ContinuePending:
-		return "CONTINUE PENDING"
-	case svc.PausePending:
-		return "PAUSE PENDING"
-	case svc.Paused:
-		return "PAUSED"
-	default:
-		return ""
-	}
-}
-
 type fetchConfigurationResponse struct {
 	Configuration agent.Device `json:"configuration"`
 }
@@ -448,74 +427,5 @@ func main() {
 		return
 	}
 
-	// Run in service management mode
-	tail := flag.Args()
-	if len(tail) == 0 {
-		log.Println("Missing command")
-		return
-	}
-
-	// Connect to service manager
-	svcMgr, err := mgr.Connect()
-	if err != nil {
-		log.Println("Failed to connect to service manager:", err)
-		return
-	}
-
-	command := tail[0]
-	name := agent.GetServiceName(orgId)
-
-	if command == "status" {
-		service, err := svcMgr.OpenService(name)
-		if err != nil {
-			log.Println("Failed to open service:", name)
-			return
-		}
-		defer service.Close()
-
-		status, err := service.Query()
-		if err != nil {
-			log.Println("Failed to query service status:", err)
-			return
-		}
-
-		log.Println(stateToString(status.State))
-		return
-	}
-
-	if command == "start" {
-		service, err := svcMgr.OpenService(name)
-		if err != nil {
-			log.Println("Failed to open service:", name)
-			return
-		}
-		defer service.Close()
-
-		err = service.Start()
-		if err != nil {
-			log.Println("Failed to start service:", name)
-			return
-		}
-		log.Println("Started")
-		return
-	}
-
-	if command == "stop" {
-		service, err := svcMgr.OpenService(name)
-		if err != nil {
-			log.Println("Failed to open service:", name)
-			return
-		}
-		defer service.Close()
-
-		_, err = service.Control(svc.Stop)
-		if err != nil {
-			log.Println("Failed to stop service:", name)
-			return
-		}
-		log.Println("Stopped")
-		return
-	}
-
-	log.Println("Unrecognized command:", command)
+	log.Println("Missing flag")
 }
