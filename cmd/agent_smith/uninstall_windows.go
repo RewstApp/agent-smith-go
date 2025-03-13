@@ -5,14 +5,20 @@ package main
 import (
 	"log"
 	"os"
+	"runtime"
 	"time"
 
 	"github.com/RewstApp/agent-smith-go/internal/agent"
+	"github.com/RewstApp/agent-smith-go/internal/version"
 	"golang.org/x/sys/windows/svc"
 	"golang.org/x/sys/windows/svc/mgr"
 )
 
 func runUninstall(orgId string) {
+	// Show header
+	log.Println("Agent Smith Version:", version.Version)
+	log.Println("Running on:", runtime.GOOS)
+
 	svcMgr, err := mgr.Connect()
 	if err != nil {
 		log.Println("Failed to connect to service manager:", err)
