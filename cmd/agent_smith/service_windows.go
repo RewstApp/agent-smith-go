@@ -22,13 +22,7 @@ import (
 	"golang.org/x/sys/windows/svc"
 )
 
-type service struct {
-	OrgId      string
-	ConfigFile string
-	LogFile    string
-}
-
-func (service *service) Execute(args []string, request <-chan svc.ChangeRequest, response chan<- svc.Status) (bool, uint32) {
+func (service *serviceParams) Execute(args []string, request <-chan svc.ChangeRequest, response chan<- svc.Status) (bool, uint32) {
 	response <- svc.Status{State: svc.StartPending}
 
 	// Create context to cancel running commands
@@ -206,7 +200,7 @@ func (service *service) Execute(args []string, request <-chan svc.ChangeRequest,
 	}
 }
 
-func runService(orgId string, configFile string, logFile string) {
+func runService(params *serviceParams) {
 	// Check if this is running as a service
 	isWinSvc, err := svc.IsWindowsService()
 	if err != nil {
@@ -220,11 +214,7 @@ func runService(orgId string, configFile string, logFile string) {
 	}
 
 	// Start the windows service
-	err = svc.Run(agent.GetServiceName(orgId), &service{
-		OrgId:      orgId,
-		ConfigFile: configFile,
-		LogFile:    logFile,
-	})
+	err = svc.Run(agent.GetServiceName(params.OrgId), params)
 	if err != nil {
 		log.Println("Failed to run the service:", err)
 		return

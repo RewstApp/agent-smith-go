@@ -16,7 +16,7 @@ import (
 
 const pollingInterval = time.Second
 
-func runUninstall(orgId string) {
+func runUninstall(params *uninstallParams) {
 	// Show header
 	log.Println("Agent Smith Version:", version.Version)
 	log.Println("Running on:", runtime.GOOS)
@@ -28,7 +28,7 @@ func runUninstall(orgId string) {
 	}
 	defer svcMgr.Disconnect()
 
-	name := agent.GetServiceName(orgId)
+	name := agent.GetServiceName(params.OrgId)
 
 	service, err := svcMgr.OpenService(name)
 	if err != nil {
@@ -81,7 +81,7 @@ func runUninstall(orgId string) {
 	log.Println(name, "deleted")
 
 	// Delete data directory
-	dataDir := agent.GetDataDirectory(orgId)
+	dataDir := agent.GetDataDirectory(params.OrgId)
 	err = os.RemoveAll(dataDir)
 	if err != nil {
 		log.Println("Failed to delete directory:", dataDir)
@@ -90,7 +90,7 @@ func runUninstall(orgId string) {
 	log.Println(dataDir, "deleted")
 
 	// Delete program directory
-	programDir := agent.GetProgramDirectory(orgId)
+	programDir := agent.GetProgramDirectory(params.OrgId)
 	err = os.RemoveAll(programDir)
 	if err != nil {
 		log.Println("Failed to delete directory:", programDir)
@@ -99,7 +99,7 @@ func runUninstall(orgId string) {
 	log.Println(programDir, "deleted")
 
 	// Delete scripts directory
-	scriptsDir := agent.GetScriptsDirectory(orgId)
+	scriptsDir := agent.GetScriptsDirectory(params.OrgId)
 	err = os.RemoveAll(scriptsDir)
 	if err != nil {
 		log.Println("Failed to delete directory:", scriptsDir)
