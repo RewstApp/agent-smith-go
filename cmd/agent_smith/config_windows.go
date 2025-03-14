@@ -23,14 +23,14 @@ type fetchConfigurationResponse struct {
 	Configuration agent.Device `json:"configuration"`
 }
 
-func runConfig(orgId string, configUrl string, configSecret string) {
+func runConfig(params *configParams) {
 	// Show header
 	log.Println("Agent Smith Version:", version.Version)
 	log.Println("Running on:", runtime.GOOS)
 
 	// Get installation paths data
 	var pathsData agent.PathsData
-	err := pathsData.Load(context.Background(), orgId)
+	err := pathsData.Load(context.Background(), params.OrgId)
 	if err != nil {
 		log.Println("Failed to read paths:", err)
 		return
@@ -44,13 +44,13 @@ func runConfig(orgId string, configUrl string, configSecret string) {
 	}
 
 	// Prepare http request and send
-	log.Println("Sending", string(hostInfoBytes), "to", configUrl)
-	req, err := http.NewRequestWithContext(context.Background(), "POST", configUrl, bytes.NewReader(hostInfoBytes))
+	log.Println("Sending", string(hostInfoBytes), "to", params.ConfigUrl)
+	req, err := http.NewRequestWithContext(context.Background(), "POST", params.ConfigUrl, bytes.NewReader(hostInfoBytes))
 	if err != nil {
 		log.Println("Failed to create request:", err)
 		return
 	}
-	req.Header.Set("x-rewst-secret", configSecret)
+	req.Header.Set("x-rewst-secret", params.ConfigSecret)
 	req.Header.Set("Content-Type", "application/json")
 
 	client := &http.Client{}
@@ -82,7 +82,7 @@ func runConfig(orgId string, configUrl string, configSecret string) {
 	}
 
 	// Create the data directory
-	dataDir := agent.GetDataDirectory(orgId)
+	dataDir := agent.GetDataDirectory(params.OrgId)
 	err = utils.CreateFolderIfMissing(dataDir)
 	if err != nil {
 		log.Println("Failed to create data directory:", err)
@@ -90,7 +90,7 @@ func runConfig(orgId string, configUrl string, configSecret string) {
 	}
 
 	// Save the configuration file
-	configFilePath := agent.GetConfigFilePath(orgId)
+	configFilePath := agent.GetConfigFilePath(params.OrgId)
 	configBytes, err := json.MarshalIndent(response.Configuration, "", "  ")
 	if err != nil {
 		log.Println("Failed to print config file:", err)
@@ -107,10 +107,10 @@ func runConfig(orgId string, configUrl string, configSecret string) {
 	}
 
 	log.Println("Configuration saved to", configFilePath)
-	log.Println("Logs will be saved to", agent.GetLogFilePath(orgId))
+	log.Println("Logs will be saved to", agent.GetLogFilePath(params.OrgId))
 
 	// Create the program directory
-	programDir := agent.GetProgramDirectory(orgId)
+	programDir := agent.GetProgramDirectory(params.OrgId)
 	err = utils.CreateFolderIfMissing(programDir)
 	if err != nil {
 		log.Println("Failed to create program directory:", err)
@@ -130,7 +130,7 @@ func runConfig(orgId string, configUrl string, configSecret string) {
 		return
 	}
 
-	agentExecutablePath := agent.GetAgentExecutablePath(orgId)
+	agentExecutablePath := agent.GetAgentExecutablePath(params.OrgId)
 	err = os.WriteFile(agentExecutablePath, execFileBytes, utils.DefaultFileMod)
 	if err != nil {
 		log.Println("Failed to create agent executable:", err)
@@ -138,7 +138,7 @@ func runConfig(orgId string, configUrl string, configSecret string) {
 	}
 
 	log.Println("Agent installed to", agentExecutablePath)
-	log.Println("Commands will be temporarily saved to", agent.GetScriptsDirectory(orgId))
+	log.Println("Commands will be temporarily saved to", agent.GetScriptsDirectory(params.OrgId))
 
 	// Create the service
 	svcMgr, err := mgr.Connect()
@@ -148,14 +148,14 @@ func runConfig(orgId string, configUrl string, configSecret string) {
 	}
 	defer svcMgr.Disconnect()
 
-	name := agent.GetServiceName(orgId)
+	name := agent.GetServiceName(params.OrgId)
 	log.Println("Creating service", name, "...")
 
 	svc, err := svcMgr.CreateService(name, agentExecutablePath, mgr.Config{
 		StartType:        mgr.StartAutomatic,
-		Description:      fmt.Sprintf("Rewst Remote Agent for Org %s", orgId),
+		Description:      fmt.Sprintf("Rewst Remote Agent for Org %s", params.OrgId),
 		DelayedAutoStart: true,
-	}, "--org-id", orgId, "--config-file", configFilePath, "--log-file", agent.GetLogFilePath(orgId))
+	}, "--org-id", params.OrgId, "--config-file", configFilePath, "--log-file", agent.GetLogFilePath(params.OrgId))
 	if err != nil {
 		log.Println("Failed to create service:", err)
 		return
