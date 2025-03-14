@@ -14,6 +14,8 @@ import (
 	"golang.org/x/sys/windows/svc/mgr"
 )
 
+const pollingInterval = time.Second
+
 func runUninstall(orgId string) {
 	// Show header
 	log.Println("Agent Smith Version:", version.Version)
@@ -43,32 +45,28 @@ func runUninstall(orgId string) {
 
 	if status.State == svc.Running {
 		// Stop the service is running
-		service.Control(svc.Stop)
-		log.Println(name, "is stopping")
-
-		// Wait a bit to see if it stopped
-		stopped := false
-		for range 10 {
-			// Wait for a second
-			time.Sleep(time.Second)
-
-			// Get the status
-			status, err := service.Query()
-			if err != nil {
-				log.Println("Failed to query service status:", status)
-				return
-			}
-
-			// Check if stopped
-			if status.State == svc.Stopped {
-				stopped = true
-				break
-			}
+		status, err = service.Control(svc.Stop)
+		if err != nil {
+			log.Println("Failed to send stop command:", err)
+			return
 		}
 
-		if !stopped {
-			log.Println(name, "didn't stop within the time")
-			return
+		log.Println("Sent stop command to", name)
+
+		for {
+			// Check if the service stopped
+			if status.State == svc.Stopped {
+				break
+			}
+
+			log.Println("Waiting for", name, "to stop...")
+			time.Sleep(pollingInterval)
+
+			status, err = service.Query()
+			if err != nil {
+				log.Println("Failed to query service status:", err)
+				return
+			}
 		}
 
 		log.Println(name, "stopped")
