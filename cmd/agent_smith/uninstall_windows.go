@@ -15,6 +15,7 @@ import (
 )
 
 const pollingInterval = time.Second
+const serviceExecutableTimeout = time.Second
 
 func runUninstall(params *uninstallParams) {
 	// Show header
@@ -32,14 +33,14 @@ func runUninstall(params *uninstallParams) {
 
 	service, err := svcMgr.OpenService(name)
 	if err != nil {
-		log.Println("Failed to open service:", name)
+		log.Println("Failed to open service", name, ":", err)
 		return
 	}
 	defer service.Close()
 
 	status, err := service.Query()
 	if err != nil {
-		log.Println("Failed to query service status:", status)
+		log.Println("Failed to query service status:", err)
 		return
 	}
 
@@ -80,11 +81,15 @@ func runUninstall(params *uninstallParams) {
 	}
 	log.Println(name, "deleted")
 
+	// Wait for some time for the service executable to clean up
+	log.Println("Waiting for service executable to stop...")
+	time.Sleep(serviceExecutableTimeout)
+
 	// Delete data directory
 	dataDir := agent.GetDataDirectory(params.OrgId)
 	err = os.RemoveAll(dataDir)
 	if err != nil {
-		log.Println("Failed to delete directory:", dataDir)
+		log.Println("Failed to delete directory", dataDir, ":", err)
 		return
 	}
 	log.Println(dataDir, "deleted")
@@ -93,7 +98,7 @@ func runUninstall(params *uninstallParams) {
 	programDir := agent.GetProgramDirectory(params.OrgId)
 	err = os.RemoveAll(programDir)
 	if err != nil {
-		log.Println("Failed to delete directory:", programDir)
+		log.Println("Failed to delete directory", programDir, ":", err)
 		return
 	}
 	log.Println(programDir, "deleted")
@@ -102,7 +107,7 @@ func runUninstall(params *uninstallParams) {
 	scriptsDir := agent.GetScriptsDirectory(params.OrgId)
 	err = os.RemoveAll(scriptsDir)
 	if err != nil {
-		log.Println("Failed to delete directory:", scriptsDir)
+		log.Println("Failed to delete directory", scriptsDir, ":", err)
 		return
 	}
 	log.Println(scriptsDir, "deleted")
