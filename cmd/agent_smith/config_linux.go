@@ -1,4 +1,4 @@
-//go:build windows
+//go:build linux
 
 package main
 
@@ -11,12 +11,14 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"runtime"
+	"strings"
 
 	"github.com/RewstApp/agent-smith-go/internal/agent"
 	"github.com/RewstApp/agent-smith-go/internal/utils"
 	"github.com/RewstApp/agent-smith-go/internal/version"
-	"golang.org/x/sys/windows/svc/mgr"
 )
 
 func runConfig(params *configParams) {
@@ -127,7 +129,7 @@ func runConfig(params *configParams) {
 	}
 
 	agentExecutablePath := agent.GetAgentExecutablePath(params.OrgId)
-	err = os.WriteFile(agentExecutablePath, execFileBytes, utils.DefaultFileMod)
+	err = os.WriteFile(agentExecutablePath, execFileBytes, utils.DefaultExecutableFileMod)
 	if err != nil {
 		log.Println("Failed to create agent executable:", err)
 		return
@@ -137,31 +139,51 @@ func runConfig(params *configParams) {
 	log.Println("Commands will be temporarily saved to", agent.GetScriptsDirectory(params.OrgId))
 
 	// Create the service
-	svcMgr, err := mgr.Connect()
-	if err != nil {
-		log.Println("Failed to connect service manager:", err)
-		return
-	}
-	defer svcMgr.Disconnect()
-
 	name := agent.GetServiceName(params.OrgId)
 	log.Println("Creating service", name, "...")
 
-	svc, err := svcMgr.CreateService(name, agentExecutablePath, mgr.Config{
-		StartType:        mgr.StartAutomatic,
-		Description:      fmt.Sprintf("Rewst Remote Agent for Org %s", params.OrgId),
-		DelayedAutoStart: true,
-	}, "--org-id", params.OrgId, "--config-file", configFilePath, "--log-file", agent.GetLogFilePath(params.OrgId))
+	serviceConfig := strings.Builder{}
+
+	serviceConfig.WriteString("[Unit]\n")
+	serviceConfig.WriteString(fmt.Sprintf("Description=%s\n", name))
+	serviceConfig.WriteString("\n")
+
+	serviceConfig.WriteString("[Service]\n")
+	serviceConfig.WriteString(fmt.Sprintf("ExecStart=%s --org-id %s --config-file %s --log-file %s\n",
+		agentExecutablePath, params.OrgId, configFilePath, agent.GetLogFilePath(params.OrgId)))
+	serviceConfig.WriteString("Restart=always\n")
+	serviceConfig.WriteString("\n")
+
+	serviceConfig.WriteString("[Install]\n")
+	serviceConfig.WriteString("WantedBy=multi-user.target\n")
+
+	serviceConfigFilePath := filepath.Join("/etc/systemd/system", fmt.Sprintf("%s.service", name))
+	err = os.WriteFile(serviceConfigFilePath, []byte(serviceConfig.String()), utils.DefaultFileMod)
 	if err != nil {
 		log.Println("Failed to create service:", err)
 		return
 	}
-	defer svc.Close()
+
+	cmd := exec.Command("systemctl", "daemon-reload")
+	err = cmd.Run()
+	if err != nil {
+		log.Println("Failed to reload system daemon:", err)
+		return
+	}
+
+	cmd = exec.Command("systemctl", "enable", name)
+	err = cmd.Run()
+	if err != nil {
+		log.Println("Failed to enable service:", err)
+		return
+	}
 	log.Println("Service created")
 
 	// Start the service
 	log.Println("Starting service", name, "...")
-	err = svc.Start()
+
+	cmd = exec.Command("systemctl", "start", name)
+	err = cmd.Run()
 	if err != nil {
 		log.Println("Failed to start service:", err)
 		return
