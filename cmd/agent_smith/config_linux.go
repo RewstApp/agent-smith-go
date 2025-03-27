@@ -167,21 +167,21 @@ func runConfig(params *configParams) {
 	cmd := exec.Command("systemctl", "daemon-reload")
 	err = cmd.Run()
 	if err != nil {
-		log.Println("Failed to reload system daemon:", err)
+		log.Println("Failed to create service:", err)
 		return
 	}
 
 	cmd = exec.Command("systemctl", "enable", name)
 	err = cmd.Run()
 	if err != nil {
-		log.Println("Failed to enable service:", err)
+		log.Println("Failed to create service:", err)
 		return
 	}
+
 	log.Println("Service created")
 
 	// Start the service
 	log.Println("Starting service", name, "...")
-
 	cmd = exec.Command("systemctl", "start", name)
 	err = cmd.Run()
 	if err != nil {
