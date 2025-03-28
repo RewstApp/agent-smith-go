@@ -5,7 +5,10 @@ on: workflow_dispatch
 jobs:
   build:
     if: github.ref == 'refs/heads/main'
-    runs-on: windows-latest
+    strategy:
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -19,6 +22,7 @@ jobs:
           go-version: "1.24.0"
 
       - name: Setup go packages
+        if: matrix.os == 'windows-latest'
         run: go install github.com/tc-hib/go-winres@latest
 
       - name: Setup python
@@ -33,12 +37,26 @@ jobs:
           pipx install commitizen
           pipx upgrade commitizen
 
-      - name: Build binaries
+      - name: Build windows binaries
+        if: matrix.os == 'windows-latest'
         run: ./scripts/build.win.ps1
 
-      - name: Upload assets
+      - name: Build linux binaries
+        if: matrix.os == 'ubuntu-latest'
+        run: ./scripts/build.linux.ps1
+
+      - name: Upload windows assets
+        if: matrix.os == 'windows-latest'
         uses: actions/upload-artifact@v4
         with:
           name: windows-compiled-assets
           path: |
             ./dist/rewst_agent_config.win.exe
+
+      - name: Upload linux assets
+        if: matrix.os == 'ubuntu-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-compiled-assets
+          path: |
+            ./dist/rewst_agent_config.linux.bin
