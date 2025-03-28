@@ -43,6 +43,7 @@ jobs:
 
       - name: Build linux binaries
         if: matrix.os == 'ubuntu-latest'
+        shell: pwsh
         run: ./scripts/build.linux.ps1
 
       - name: Upload windows assets
