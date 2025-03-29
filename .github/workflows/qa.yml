@@ -21,10 +21,6 @@ jobs:
         with:
           go-version: "1.24.0"
 
-      - name: Setup go packages
-        if: matrix.os == 'windows-latest'
-        run: go install github.com/tc-hib/go-winres@latest
-
       - name: Setup python
         uses: actions/setup-python@v4
         with:
@@ -37,14 +33,8 @@ jobs:
           pipx install commitizen
           pipx upgrade commitizen
 
-      - name: Build windows binaries
-        if: matrix.os == 'windows-latest'
-        run: ./scripts/build.win.ps1
-
-      - name: Build linux binaries
-        if: matrix.os == 'ubuntu-latest'
-        shell: pwsh
-        run: ./scripts/build.linux.ps1
+      - name: Build binary
+        run: ./scripts/build.ps1
 
       - name: Upload windows assets
         if: matrix.os == 'windows-latest'
