@@ -30,5 +30,5 @@ if ($IsWindows) {
 if ($IsLinux) {
     # Build the executables for linux
     $env:GOOS = "linux"
-    go build -ldflags="-w -s $versionFlag" -o "./dist/rewst_agent_config.linux.bin" "./cmd/agent_smith"s
+    go build -ldflags="-w -s $versionFlag" -o "./dist/rewst_agent_config.linux.bin" "./cmd/agent_smith"
 }
