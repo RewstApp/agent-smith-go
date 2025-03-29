@@ -34,7 +34,7 @@ jobs:
           pipx upgrade commitizen
 
       - name: Build binary
-        shell: powershell
+        shell: pwsh
         run: ./scripts/build.ps1
 
       - name: Upload windows assets
