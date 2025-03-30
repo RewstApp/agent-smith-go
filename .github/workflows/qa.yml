@@ -7,4 +7,23 @@ jobs:
     if: github.ref == 'refs/heads/main'
     uses: ./.github/workflows/build.yml
 
+  upload:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download windows-latest
+        uses: actions/download-artifact@v4
+        with: 
+          name: compiled-assets-windows-latest
+          path: ./dist
 
+      - name: Download ubuntu-latest
+        uses: actions/download-artifact@v4
+        with: 
+          name: compiled-assets-ubuntu-latest
+          path: ./dist
+
+      - name: Upload assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: compiled-assets
+          path: ./dist
