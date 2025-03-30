@@ -1,10 +1,6 @@
 name: Build
 
-on:
-  workflow_call:
-    outputs:
-      binaries:
-        value: ${{ jobs.build.outputs.binaries }}
+on: workflow_call
 
 jobs:
   build:
@@ -40,3 +36,9 @@ jobs:
         shell: pwsh
         id: build
         run: ./scripts/build.ps1 | % { "output=$_" } >> $env:GITHUB_OUTPUT
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: compiled-assets-${{ matrix.os }}
+          path: ${{ steps.build.outputs.output }}
