@@ -1,0 +1,30 @@
+name: Build
+
+on:
+  workflow_call:
+    outputs:
+      binaries:
+        value: ${{ jobs.build.outputs.binaries }}
+
+jobs:
+  build:
+    if: github.ref == 'refs/heads/main'
+    strategy:
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    outputs:
+      binaries: ${{ steps.build.outputs.output }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.24.0"
+
+      - name: Build binary
+        shell: pwsh
+        id: build
+        run: ./scripts/build.ps1 | % { "output=$_" } >> $env:GITHUB_OUTPUT

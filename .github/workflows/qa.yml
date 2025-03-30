@@ -5,40 +5,14 @@ on: workflow_dispatch
 jobs:
   build:
     if: github.ref == 'refs/heads/main'
-    strategy:
-      matrix:
-        os: [windows-latest, ubuntu-latest]
-    runs-on: ${{ matrix.os }}
+    uses: ./.github/workflows/build.yml
+
+  upload-assets:
+    runs-on: ubuntu-latest
+    needs: build
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ github.ref }}
-          fetch-depth: 0
-
-      - name: Setup go
-        uses: actions/setup-go@v5
-        with:
-          go-version: "1.24.0"
-
-      - name: Setup python
-        uses: actions/setup-python@v4
-        with:
-          python-version: "3.12"
-
-      - name: Setup python packages
-        run: |
-          pip install pipx
-          pipx ensurepath
-          pipx install commitizen
-          pipx upgrade commitizen
-
-      - name: Build binary
-        shell: pwsh
-        run: ./scripts/build.ps1
-
-      - name: Upload compiled assets
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: compiled-assets
-          path: ${{ env.BUILD_OUTPUT }}
+          path: ${{ needs.build.outputs.binaries }}
+
