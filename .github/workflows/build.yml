@@ -24,6 +24,18 @@ jobs:
         with:
           go-version: "1.24.0"
 
+      - name: Setup python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.12"
+
+      - name: Setup python packages
+        run: |
+          pip install pipx
+          pipx ensurepath
+          pipx install commitizen
+          pipx upgrade commitizen
+
       - name: Build binary
         shell: pwsh
         id: build
