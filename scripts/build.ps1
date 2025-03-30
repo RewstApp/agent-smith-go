@@ -8,9 +8,12 @@ if ($IsWindows) {
     # Install go package 
     go install github.com/tc-hib/go-winres@latest
 
+    # Set build output 
+    $buildOutput = "./dist/rewst_agent_config.win.exe"
+
     # Build the executables for windows
     $env:GOOS = "windows"
-    go build -ldflags="-w -s $versionFlag" -o "./dist/rewst_agent_config.win.exe" "./cmd/agent_smith"
+    go build -ldflags="-w -s $versionFlag" -o $buildOutput "./cmd/agent_smith"
 
     # Create a build winres.json for patch
     $winVersion = "$(cz version -p).0"
@@ -24,11 +27,20 @@ if ($IsWindows) {
     Copy-Item "./winres/logo-rewsty.ico" "./dist/logo-rewsty.ico"
 
     # Use the go-winres to patch the executables
-    go-winres patch --no-backup --in "./dist/winres.json" "./dist/rewst_agent_config.win.exe"
+    go-winres patch --no-backup --in "./dist/winres.json" $buildOutput
+
+    # Print the binary path value
+    Write-Host "BUILD_OUTPUT=$buildOutput"
 }
 
 if ($IsLinux) {
+    # Set build output 
+    $buildOutput = "./dist/rewst_agent_config.linux.bin"
+    
     # Build the executables for linux
     $env:GOOS = "linux"
-    go build -ldflags="-w -s $versionFlag" -o "./dist/rewst_agent_config.linux.bin" "./cmd/agent_smith"
+    go build -ldflags="-w -s $versionFlag" -o $buildOutput "./cmd/agent_smith"
+
+    # Print the binary path value
+    Write-Host "BUILD_OUTPUT=$buildOutput"
 }
