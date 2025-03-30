@@ -30,7 +30,7 @@ if ($IsWindows) {
     go-winres patch --no-backup --in "./dist/winres.json" $buildOutput
 
     # Print the binary path value
-    Write-Host "BUILD_OUTPUT=$buildOutput" | Out-File $env:GITHUB_ENV -Append
+    "BUILD_OUTPUT=$buildOutput" | Out-File $env:GITHUB_ENV -Append
 }
 
 if ($IsLinux) {
@@ -42,5 +42,5 @@ if ($IsLinux) {
     go build -ldflags="-w -s $versionFlag" -o $buildOutput "./cmd/agent_smith"
 
     # Print the binary path value
-    Write-Host "BUILD_OUTPUT=$buildOutput" | Out-File $env:GITHUB_ENV -Append
+   "BUILD_OUTPUT=$buildOutput" | Out-File -FilePath $env:GITHUB_ENV -Append
 }
