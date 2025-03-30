@@ -37,18 +37,8 @@ jobs:
         shell: pwsh
         run: ./scripts/build.ps1
 
-      - name: Upload windows assets
-        if: matrix.os == 'windows-latest'
+      - name: Upload compiled assets
         uses: actions/upload-artifact@v4
         with:
-          name: windows-compiled-assets
-          path: |
-            ./dist/rewst_agent_config.win.exe
-
-      - name: Upload linux assets
-        if: matrix.os == 'ubuntu-latest'
-        uses: actions/upload-artifact@v4
-        with:
-          name: linux-compiled-assets
-          path: |
-            ./dist/rewst_agent_config.linux.bin
+          name: compiled-assets
+          path: $BUILD_OUTPUT
