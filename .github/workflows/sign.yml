@@ -21,10 +21,11 @@ jobs:
         uses: sslcom/esigner-codesign@v1.3.1
         with:
           command: batch_sign 
-          username: "${{ secrets.SSL_COM_USERNAME }}"
-          password: "${{ secrets.SSL_COM_PASSWORD }}"
-          credential_id: "${{ secrets.SSL_COM_CREDENTIAL_ID }}"
-          totp_secret: "${{ secrets.SSL_COM_OTP }}"
+          username: ${{ secrets.SSL_COM_USERNAME }}
+          password: ${{ secrets.SSL_COM_PASSWORD }}
+          credential_id: ${{ secrets.SSL_COM_CREDENTIAL_ID }}
+          totp_secret: ${{ secrets.SSL_COM_OTP }}
+          malware_block: true
           dir_path: ./dist
           output_path: ./signed
 
