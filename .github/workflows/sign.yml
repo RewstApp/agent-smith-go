@@ -26,7 +26,7 @@ jobs:
 
       - name: Batch sign code
         run: |
-          ${{ matrix.os == 'windows-latest' && 'CodeSignTool.bat' || 'CodeSignTool.sh'}} -username="${{ secrets.SSL_COM_USERNAME }}" -password="${{ secrets.SSL_COM_PASSWORD }}"
+          ${{ matrix.os == 'windows-latest' && './CodeSignTool.bat' || './CodeSignTool.sh'}} -username="${{ secrets.SSL_COM_USERNAME }}" -password="${{ secrets.SSL_COM_PASSWORD }}"
 
       - name: Upload signed assets
         uses: actions/upload-artifact@v4
