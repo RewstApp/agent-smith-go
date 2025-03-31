@@ -24,6 +24,11 @@ jobs:
           Invoke-WebRequest -Uri $downloadUrl -OutFile codesigntool.zip
           Expand-Archive -Path codesigntool.zip -DestinationPath .
 
+      - name: Add execute permission on codesign
+        shell: bash 
+        if: matrix.os != 'windows-latest'
+        run: chmod +x ./CodeSignTool.sh
+
       - name: Batch sign code
         run: |
           ${{ matrix.os == 'windows-latest' && './CodeSignTool.bat' || './CodeSignTool.sh'}} batch_sign -username="${{ secrets.SSL_COM_USERNAME }}" -password="${{ secrets.SSL_COM_PASSWORD }}"
