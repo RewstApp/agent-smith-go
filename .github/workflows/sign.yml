@@ -32,6 +32,7 @@ jobs:
 
       - name: Batch sign code
         uses: sslcom/esigner-codesign@develop
+        if: matrix.os == 'windows-latest'
         with:
           command: batch_sign
           username: ${{ secrets.ssl_com_username }}
@@ -46,4 +47,4 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.os }}-signed
-          path: ./signed
+          path: ${{ matrix.os == 'windows-latest' && './signed' || './dist' }}
