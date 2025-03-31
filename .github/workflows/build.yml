@@ -40,5 +40,5 @@ jobs:
       - name: Upload binary
         uses: actions/upload-artifact@v4
         with:
-          name: compiled-assets-${{ matrix.os }}
+          name: ${{ matrix.os }}
           path: ${{ steps.build.outputs.output }}

@@ -15,9 +15,7 @@ if ($fake) {
 
 $downloadUrl = 'https://www.ssl.com/download/codesigntool-for-windows/'
 
-$inputFiles = @(
-    "rewst_agent_config.win.exe"
-)
+$inputFiles = Get-ChildItem $appDistPath | ForEach-Object { $_.name }
 $outputDirPath = "$appDistPath\signed"
 
 Write-Host "Signing App as Username: $username"

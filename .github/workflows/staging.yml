@@ -5,43 +5,22 @@ on: workflow_dispatch
 jobs:
   build:
     if: github.ref == 'refs/heads/main'
+    uses: ./.github/workflows/build.yml
+
+  sign:
     runs-on: windows-latest
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - name: Download compiled assets (windows-latest)
+        uses: actions/download-artifact@v4
         with:
-          ref: ${{ github.ref }}
-          fetch-depth: 0
-
-      - name: Setup go
-        uses: actions/setup-go@v5
+          name: windows-latest
+          path: ./dist
+      
+      - name: Download compiled assets (ubuntu-latest)
+        uses: actions/download-artifact@v4
         with:
-            go-version: "1.24.0"
-
-      - name: Setup go packages
-        run: go install github.com/tc-hib/go-winres@latest
-
-      - name: Setup python
-        uses: actions/setup-python@v4
-        with:
-          python-version: "3.12"
-
-      - name: Setup python packages
-        run: |
-          pip install pipx
-          pipx ensurepath
-          pipx install commitizen
-          pipx upgrade commitizen
-
-      - name: Build binaries
-        run: ./scripts/build.win.ps1
-
-      - name: Upload assets
-        uses: actions/upload-artifact@v4
-        with:
-          name: windows-compiled-assets
-          path: |
-            ./dist/rewst_agent_config.win.exe
+          name: ubuntu-latest
+          path: ./dist
 
       - name: Sign binaries
         run: ./scripts/ssl_com_sign_binaries.ps1 -username '${{ secrets.SSL_COM_USERNAME }}' -password '${{ secrets.SSL_COM_PASSWORD }}' -credentialId '${{ secrets.SSL_COM_CREDENTIAL_ID }}' -totpSecret '${{ secrets.SSL_COM_OTP }}' -appDistPath "$((Get-Item .).FullName)\dist"
@@ -57,4 +36,3 @@ jobs:
           path: |
             ./dist/signed/rewst_agent_config.win.exe
             ./dist/signed/rewst_agent_config.win.exe.sha256
-
