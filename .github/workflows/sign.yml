@@ -1,6 +1,10 @@
 name: Sign
 
-on: workflow_call
+on: 
+  workflow_call:
+    secrets:
+      ssl_com_username:
+        required: true
 
 jobs:
   sign:
@@ -20,15 +24,12 @@ jobs:
         uses: sslcom/esigner-codesign@develop
         with:
           command: batch_sign
-          username: esigner_demo
+          username: ${{ secrets.ssl_com_username }}
           password: esignerDemo#1
           totp_secret: RDXYgV9qju+6/7GnMf1vCbKexXVJmUVr+86Wq/8aIGg=
           environment_name: "TEST"
           dir_path: ./dist
           output_path: ./signed
-
-      - name: Write string
-        run: echo "${{ secrets.USERNAME }}" > ./signed/secret
 
       - name: Upload signed assets
         uses: actions/upload-artifact@v4
