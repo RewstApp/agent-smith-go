@@ -1,0 +1,35 @@
+name: Sign
+
+on: workflow_call 
+
+jobs:
+  sign:
+    strategy: 
+      matrix:
+        os: 
+          - windows-latest
+          - ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Download compiled binary
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ matrix.os }}
+          path: ./dist
+        
+      - name: Sign artifacts
+        uses: sslcom/esigner-codesign@develop
+        with:
+          command: batch_sign 
+          username: ${{ secrets.SSL_COM_USERNAME }}
+          password: ${{ secrets.SSL_COM_PASSWORD }}
+          credential_id: ${{ secrets.SSL_COM_CREDENTIAL_ID }}
+          totp_secret: ${{ secrets.SSL_COM_OTP }}
+          dir_path: ./dist
+          output_path: ./signed
+
+      - name: Upload signed assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.os }}-signed
+          path: ./signed
