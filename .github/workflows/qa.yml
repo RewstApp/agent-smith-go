@@ -4,5 +4,4 @@ on: workflow_dispatch
 
 jobs:
   build:
-    if: github.ref == 'refs/heads/main'
     uses: ./.github/workflows/build.yml
