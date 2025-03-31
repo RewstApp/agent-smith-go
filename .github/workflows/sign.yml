@@ -32,12 +32,14 @@ jobs:
       - name: Extract first asset
         id: first_asset
         shell: pwsh
-        run: (Get-ChildItem ./dist -File -Name)[0] | % { "file=$_" } >> $env:GITHUB_OUTPUT
+        run: |
+          (Get-ChildItem ./dist -File -Name)[0]
+          (Get-ChildItem ./dist -File -Name)[0] | % { "file=$_" } >> $env:GITHUB_OUTPUT
       
       - name: Create signed directory
         shell: pwsh
         run: New-Item -Type Directory ./signed
-        
+
       - name: Batch sign code
         run: |
           ${{ matrix.os == 'windows-latest' && './CodeSignTool.bat' || './CodeSignTool.sh'}} sign -username="${{ secrets.SSL_COM_USERNAME }}" -password="${{ secrets.SSL_COM_PASSWORD }}" -credential_id="${{ secrets.SSL_COM_CREDENTIAL_ID }}" -totp_secret="${{ secrets.SSL_COM_OTP }}" -input_file_path="${{ steps.first_asset.outputs.file }}" -output_dir_path="./signed"
