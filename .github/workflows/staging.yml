@@ -8,6 +8,7 @@ jobs:
     uses: ./.github/workflows/build.yml
 
   sign:
+    needs: build
     runs-on: windows-latest
     steps:
       - name: Download compiled assets (windows-latest)
