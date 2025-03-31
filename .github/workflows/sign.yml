@@ -8,7 +8,6 @@ jobs:
       matrix:
         os:
           - windows-latest
-          - ubuntu-latest
     runs-on: ${{ matrix.os }}
     steps:
       - name: Download compiled binary
@@ -17,31 +16,11 @@ jobs:
           name: ${{ matrix.os }}
           path: ./dist
 
-      - name: Download codesign tool
-        shell: pwsh
-        run: |
-          $downloadUrl = "${{ matrix.os == 'windows-latest' && 'https://www.ssl.com/download/codesigntool-for-windows/' || 'https://www.ssl.com/download/codesigntool-for-linux-and-macos/' }}"
-          Invoke-WebRequest -Uri $downloadUrl -OutFile codesigntool.zip
-          Expand-Archive -Path codesigntool.zip -DestinationPath .
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-      - name: Add execute permission on codesign
-        shell: bash
-        if: matrix.os != 'windows-latest'
-        run: chmod +x ./CodeSignTool.sh
-
-      - name: Extract first asset
-        id: first_asset
-        shell: pwsh
-        run: |
-          (Get-ChildItem ./dist -File)[0].Name | % { "file=$_" } >> $env:GITHUB_OUTPUT
-      
-      - name: Create signed directory
-        shell: pwsh
-        run: New-Item -Type Directory ./signed
-
-      - name: Batch sign code
-        run: |
-          ${{ matrix.os == 'windows-latest' && './CodeSignTool.bat' || './CodeSignTool.sh'}} sign -username="${{ secrets.SSL_COM_USERNAME }}" -password="${{ secrets.SSL_COM_PASSWORD }}" -credential_id="${{ secrets.SSL_COM_CREDENTIAL_ID }}" -totp_secret="${{ secrets.SSL_COM_OTP }}" -input_file_path="./dist/${{ steps.first_asset.outputs.file }}" -output_dir_path="./signed"
+      - name: Sign binaries
+        run: ./scripts/ssl_com_sign_binaries.ps1 -username '${{ secrets.SSL_COM_USERNAME }}' -password '${{ secrets.SSL_COM_PASSWORD }}' -credentialId '${{ secrets.SSL_COM_CREDENTIAL_ID }}' -totpSecret '${{ secrets.SSL_COM_OTP }}' -appDistPath "$((Get-Item .).FullName)\dist"
 
       - name: Upload signed assets
         uses: actions/upload-artifact@v4
