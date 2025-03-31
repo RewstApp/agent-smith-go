@@ -21,7 +21,7 @@ jobs:
         uses: sslcom/esigner-codesign@develop
         with:
           command: batch_sign
-          username: ${{secrets.SSL_COM_USERNAME}}
+          username: esigner_demo
           password: esignerDemo#1
           totp_secret: RDXYgV9qju+6/7GnMf1vCbKexXVJmUVr+86Wq/8aIGg=
           environment_name: "TEST"
