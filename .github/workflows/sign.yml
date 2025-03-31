@@ -33,8 +33,7 @@ jobs:
         id: first_asset
         shell: pwsh
         run: |
-          (Get-ChildItem ./dist -File)[0].Name
-          (Get-ChildItem ./dist -File -Name)[0] | % { "file=$_" } >> $env:GITHUB_OUTPUT
+          (Get-ChildItem ./dist -File)[0].Name | % { "file=$_" } >> $env:GITHUB_OUTPUT
       
       - name: Create signed directory
         shell: pwsh
