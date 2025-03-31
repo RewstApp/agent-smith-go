@@ -16,6 +16,10 @@ jobs:
         with:
           name: ${{ matrix.os }}
           path: ./dist
+
+      - name: Check creds
+        shell: pwsh
+        run: echo "${{ secrets.SSL_COM_USERNAME }}"
         
       - name: Sign artifacts
         uses: sslcom/esigner-codesign@develop
