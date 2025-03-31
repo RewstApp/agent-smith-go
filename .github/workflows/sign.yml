@@ -17,6 +17,7 @@ on:
 jobs:
   sign:
     strategy:
+      fail-fast: false
       matrix:
         os:
           - windows-latest
