@@ -20,10 +20,10 @@ jobs:
       - name: Batch sign code
         uses: sslcom/esigner-codesign@develop
         with:
-          command: sign
-          username: "esigner_demo"
-          password: "esignerDemo#1"
-          totp_secret: "RDXYgV9qju+6/7GnMf1vCbKexXVJmUVr+86Wq/8aIGg="
+          command: batch_sign
+          username: esigner_demo
+          password: esignerDemo#1
+          totp_secret: RDXYgV9qju+6/7GnMf1vCbKexXVJmUVr+86Wq/8aIGg=
           environment_name: "TEST"
           dir_path: ./dist
           output_path: ./signed
