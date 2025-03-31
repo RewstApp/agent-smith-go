@@ -10,14 +10,14 @@ jobs:
           - windows-latest
     runs-on: ${{ matrix.os }}
     steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        
       - name: Download compiled binary
         uses: actions/download-artifact@v4
         with:
           name: ${{ matrix.os }}
           path: ./dist
-
-      - name: Checkout code
-        uses: actions/checkout@v4
 
       - name: Sign binaries
         run: |
