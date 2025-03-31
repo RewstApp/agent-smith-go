@@ -5,6 +5,14 @@ on:
     secrets:
       ssl_com_username:
         required: true
+      ssl_com_password:
+        required: true
+      ssl_com_credential_id:
+        required: true
+      ssl_com_totp_secret:
+        required: true
+      ssl_com_environment_name:
+        required: true
 
 jobs:
   sign:
@@ -25,9 +33,10 @@ jobs:
         with:
           command: batch_sign
           username: ${{ secrets.ssl_com_username }}
-          password: esignerDemo#1
-          totp_secret: RDXYgV9qju+6/7GnMf1vCbKexXVJmUVr+86Wq/8aIGg=
-          environment_name: "TEST"
+          password: ${{ secrets.ssl_com_password }}
+          credential_id: ${{ secrets.ssl_com_credential_id }}
+          totp_secret: ${{ secrets.ssl_com_totp_secret }}
+          environment_name: ${{ secrets.ssl_com_environment_name }}
           dir_path: ./dist
           output_path: ./signed
 

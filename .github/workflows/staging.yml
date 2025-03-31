@@ -11,4 +11,7 @@ jobs:
     uses: ./.github/workflows/sign.yml
     secrets:
       ssl_com_username: ${{ secrets.SSL_COM_USERNAME }}
-    
+      ssl_com_password: ${{ secrets.SSL_COM_PASSWORD }}
+      ssl_com_credential_id: ${{ secrets.SSL_COM_CREDENTIAL_ID }}
+      ssl_com_totp_secret: ${{ secrets.SSL_COM_OTP }}
+      ssl_com_environment_name: ${{ secrets.SSL_COM_ENVIRONMENT_NAME }}
