@@ -4,13 +4,12 @@ on: workflow_call
 
 jobs:
   build:
-    if: github.ref == 'refs/heads/main'
     strategy:
       matrix:
-        os: [windows-latest, ubuntu-latest]
+        os:
+          - windows-latest
+          - ubuntu-latest
     runs-on: ${{ matrix.os }}
-    outputs:
-      binaries: ${{ steps.build.outputs.output }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -35,10 +34,10 @@ jobs:
       - name: Build binary
         shell: pwsh
         id: build
-        run: ./scripts/build.ps1 | % { "output=$_" } >> $env:GITHUB_OUTPUT
+        run: ./scripts/build.ps1 | % { "binary_path=$_" } >> $env:GITHUB_OUTPUT
 
       - name: Upload binary
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.os }}
-          path: ${{ steps.build.outputs.output }}
+          path: ${{ steps.build.outputs.binary_path }}

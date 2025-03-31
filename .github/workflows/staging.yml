@@ -9,34 +9,5 @@ jobs:
 
   sign:
     needs: build
-    runs-on: windows-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-        
-      - name: Download compiled assets (windows-latest)
-        uses: actions/download-artifact@v4
-        with:
-          name: windows-latest
-          path: ./dist
-      
-      - name: Download compiled assets (ubuntu-latest)
-        uses: actions/download-artifact@v4
-        with:
-          name: ubuntu-latest
-          path: ./dist
-
-      - name: Sign binaries
-        run: ./scripts/ssl_com_sign_binaries.ps1 -username '${{ secrets.SSL_COM_USERNAME }}' -password '${{ secrets.SSL_COM_PASSWORD }}' -credentialId '${{ secrets.SSL_COM_CREDENTIAL_ID }}' -totpSecret '${{ secrets.SSL_COM_OTP }}' -appDistPath "$((Get-Item .).FullName)\dist"
-
-      - name: Generate checksums
-        run: |
-          Get-FileHash -Path ./dist/signed/rewst_agent_config.win.exe    -Algorithm SHA256 | Format-List | Out-File -FilePath ./dist/signed/rewst_agent_config.win.exe.sha256
-
-      - name: Upload assets
-        uses: actions/upload-artifact@v4
-        with:
-          name: windows-signed-assets
-          path: |
-            ./dist/signed/rewst_agent_config.win.exe
-            ./dist/signed/rewst_agent_config.win.exe.sha256
+    uses: ./.github/workflows/sign.yml
+    
