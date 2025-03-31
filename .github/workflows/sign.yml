@@ -21,13 +21,11 @@ jobs:
         uses: sslcom/esigner-codesign@develop
         with:
           command: sign
-          username: ${{ secrets.SSL_COM_USERNAME }}
-          password: ${{ secrets.SSL_COM_PASSWORD }}
-          credential_id: ${{ secrets.SSL_COM_CREDENTIAL_ID }}
-          totp_secret: ${{ secrets.SSL_COM_OTP }}
-          environment_name: ${{ secrets.SSL_COM_ENVIRONMENT_NAME }}
-          #dir_path: ${GITHUB_WORKSPACE}/dist
-          file_path: ./dist/rewst_agent_config.win.exe
+          username: "esigner_demo"
+          password: "esignerDemo#1"
+          totp_secret: "RDXYgV9qju+6/7GnMf1vCbKexXVJmUVr+86Wq/8aIGg="
+          environment_name: "TEST"
+          dir_path: ./dist
           output_path: ./signed
 
       - name: Upload signed assets
