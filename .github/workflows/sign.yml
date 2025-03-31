@@ -20,7 +20,9 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Sign binaries
-        run: ./scripts/ssl_com_sign_binaries.ps1 -username '${{ secrets.SSL_COM_USERNAME }}' -password '${{ secrets.SSL_COM_PASSWORD }}' -credentialId '${{ secrets.SSL_COM_CREDENTIAL_ID }}' -totpSecret '${{ secrets.SSL_COM_OTP }}' -appDistPath "$((Get-Item .).FullName)\dist"
+        run: |
+          echo "$((Get-Item .).FullName)\dist"
+          ./scripts/ssl_com_sign_binaries.ps1 -username '${{ secrets.SSL_COM_USERNAME }}' -password '${{ secrets.SSL_COM_PASSWORD }}' -credentialId '${{ secrets.SSL_COM_CREDENTIAL_ID }}' -totpSecret '${{ secrets.SSL_COM_OTP }}' -appDistPath "$((Get-Item .).FullName)\dist"
 
       - name: Upload signed assets
         uses: actions/upload-artifact@v4
