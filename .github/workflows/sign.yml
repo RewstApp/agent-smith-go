@@ -20,13 +20,13 @@ jobs:
       - name: Download codesign tool
         shell: pwsh 
         run: |
-          $downloadUrl = ${{ matrix.os == 'windows-latest' && 'https://www.ssl.com/download/codesigntool-for-windows/' || 'https://www.ssl.com/download/codesigntool-for-windows/' }}
-          Invoke-WebRequest -uri $downloadUrl -OutFile codesigntool.zip
+          $downloadUrl = "${{ matrix.os == 'windows-latest' && 'https://www.ssl.com/download/codesigntool-for-windows/' || 'https://www.ssl.com/download/codesigntool-for-windows/' }}"
+          Invoke-WebRequest -Uri $downloadUrl -OutFile codesigntool.zip
           Expand-Archive -Path codesigntool.zip -DestinationPath .
 
       - name: Batch sign code
         run: |
-          ${{ matrix.os == 'windows-latest' && 'CodeSignTool.bat' || 'CodeSignTool.sh'}} -username='${{ secrets.SSL_COM_USERNAME }}' -password='${{ secrets.SSL_COM_PASSWORD }}'
+          ${{ matrix.os == 'windows-latest' && 'CodeSignTool.bat' || 'CodeSignTool.sh'}} -username="${{ secrets.SSL_COM_USERNAME }}" -password="${{ secrets.SSL_COM_PASSWORD }}"
 
       - name: Upload signed assets
         uses: actions/upload-artifact@v4
