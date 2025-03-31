@@ -9,4 +9,6 @@ jobs:
   sign:
     needs: build
     uses: ./.github/workflows/sign.yml
+    secrets:
+      ssl_com_username: ${{ secrets.SSL_COM_USERNAME }}
     
