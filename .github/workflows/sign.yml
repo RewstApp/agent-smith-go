@@ -8,7 +8,7 @@ jobs:
       matrix:
         os:
           - windows-latest
-          # - ubuntu-latest
+          - ubuntu-latest
     runs-on: ${{ matrix.os }}
     steps:
       - name: Download compiled binary
@@ -21,7 +21,7 @@ jobs:
         uses: sslcom/esigner-codesign@develop
         with:
           command: batch_sign
-          username: esigner_demo
+          username: ${{secrets.SSL_COM_USERNAME}}
           password: esignerDemo#1
           totp_secret: RDXYgV9qju+6/7GnMf1vCbKexXVJmUVr+86Wq/8aIGg=
           environment_name: "TEST"
