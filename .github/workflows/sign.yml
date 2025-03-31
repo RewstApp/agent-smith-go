@@ -1,12 +1,12 @@
 name: Sign
 
-on: workflow_call 
+on: workflow_call
 
 jobs:
   sign:
-    strategy: 
+    strategy:
       matrix:
-        os: 
+        os:
           - windows-latest
           - ubuntu-latest
     runs-on: ${{ matrix.os }}
@@ -18,20 +18,25 @@ jobs:
           path: ./dist
 
       - name: Download codesign tool
-        shell: pwsh 
+        shell: pwsh
         run: |
           $downloadUrl = "${{ matrix.os == 'windows-latest' && 'https://www.ssl.com/download/codesigntool-for-windows/' || 'https://www.ssl.com/download/codesigntool-for-linux-and-macos/' }}"
           Invoke-WebRequest -Uri $downloadUrl -OutFile codesigntool.zip
           Expand-Archive -Path codesigntool.zip -DestinationPath .
 
       - name: Add execute permission on codesign
-        shell: bash 
+        shell: bash
         if: matrix.os != 'windows-latest'
         run: chmod +x ./CodeSignTool.sh
 
+      - name: Extract first asset
+        id: first_asset
+        shell: pwsh
+        run: (Get-ChildItem ./dist -File -Name)[0] | % { "file=$_" } >> $env:GITHUB_OUTPUT
+
       - name: Batch sign code
         run: |
-          ${{ matrix.os == 'windows-latest' && './CodeSignTool.bat' || './CodeSignTool.sh'}} batch_sign -username="${{ secrets.SSL_COM_USERNAME }}" -password="${{ secrets.SSL_COM_PASSWORD }}" -credential_id="${{ secrets.SSL_COM_CREDENTIAL_ID }}" -totp_secret="${{ secrets.SSL_COM_OTP }}" -input_dir_path="./dist" -output_dir_path="./signed"
+          ${{ matrix.os == 'windows-latest' && './CodeSignTool.bat' || './CodeSignTool.sh'}} sign -username="${{ secrets.SSL_COM_USERNAME }}" -password="${{ secrets.SSL_COM_PASSWORD }}" -credential_id="${{ secrets.SSL_COM_CREDENTIAL_ID }}" -totp_secret="${{ secrets.SSL_COM_OTP }}" -input_file_path="${{ steps.first_asset.outputs.file }}" -output_dir_path="./signed"
 
       - name: Upload signed assets
         uses: actions/upload-artifact@v4
