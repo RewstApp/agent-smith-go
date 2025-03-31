@@ -8,7 +8,7 @@ jobs:
       matrix:
         os:
           - windows-latest
-          - ubuntu-latest
+          # - ubuntu-latest
     runs-on: ${{ matrix.os }}
     steps:
       - name: Download compiled binary
@@ -20,14 +20,15 @@ jobs:
       - name: Batch sign code
         uses: sslcom/esigner-codesign@develop
         with:
-          command: batch_sign
+          command: sign
           username: ${{ secrets.SSL_COM_USERNAME }}
           password: ${{ secrets.SSL_COM_PASSWORD }}
           credential_id: ${{ secrets.SSL_COM_CREDENTIAL_ID }}
           totp_secret: ${{ secrets.SSL_COM_OTP }}
           environment_name: ${{ secrets.SSL_COM_ENVIRONMENT_NAME }}
-          dir_path: ${GITHUB_WORKSPACE}/dist
-          output_path: ${GITHUB_WORKSPACE}/signed
+          #dir_path: ${GITHUB_WORKSPACE}/dist
+          file_path: ./dist/rewst_agent_config.win.exe
+          output_path: ./signed
 
       - name: Upload signed assets
         uses: actions/upload-artifact@v4
