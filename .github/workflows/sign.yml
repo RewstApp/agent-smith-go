@@ -41,7 +41,7 @@ jobs:
 
       - name: Batch sign code
         run: |
-          ${{ matrix.os == 'windows-latest' && './CodeSignTool.bat' || './CodeSignTool.sh'}} sign -username="${{ secrets.SSL_COM_USERNAME }}" -password="${{ secrets.SSL_COM_PASSWORD }}" -credential_id="${{ secrets.SSL_COM_CREDENTIAL_ID }}" -totp_secret="${{ secrets.SSL_COM_OTP }}" -input_file_path="${{ steps.first_asset.outputs.file }}" -output_dir_path="./signed"
+          ${{ matrix.os == 'windows-latest' && './CodeSignTool.bat' || './CodeSignTool.sh'}} sign -username="${{ secrets.SSL_COM_USERNAME }}" -password="${{ secrets.SSL_COM_PASSWORD }}" -credential_id="${{ secrets.SSL_COM_CREDENTIAL_ID }}" -totp_secret="${{ secrets.SSL_COM_OTP }}" -input_file_path="./dist/${{ steps.first_asset.outputs.file }}" -output_dir_path="./signed"
 
       - name: Upload signed assets
         uses: actions/upload-artifact@v4
