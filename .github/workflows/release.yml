@@ -3,25 +3,18 @@ name: Release
 on: workflow_dispatch
 
 jobs:
-  build:
+  bump:
     if: github.ref == 'refs/heads/main'
     permissions:
       contents: write
-    runs-on: windows-latest
+    runs-on: ubuntu-latest
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
           ref: ${{ github.ref }}
           fetch-depth: 0
-
-      - name: Setup go
-        uses: actions/setup-go@v5
-        with:
-            go-version: "1.24.0"
-
-      - name: Setup go packages
-        run: go install github.com/tc-hib/go-winres@latest
 
       - name: Setup python
         uses: actions/setup-python@v4
@@ -43,39 +36,58 @@ jobs:
           git push
           git push --tags
 
-      - name: Build binaries
-        run: ./scripts/build.win.ps1
+  build:
+    needs: bump
+    uses: ./.github/workflows/build.yml
 
-      - name: Upload assets
-        uses: actions/upload-artifact@v4
+  sign:
+    needs: build
+    uses: ./.github/workflows/sign.yml
+    secrets:
+      ssl_com_username: ${{ secrets.SSL_COM_USERNAME }}
+      ssl_com_password: ${{ secrets.SSL_COM_PASSWORD }}
+      ssl_com_credential_id: ${{ secrets.SSL_COM_CREDENTIAL_ID }}
+      ssl_com_totp_secret: ${{ secrets.SSL_COM_OTP }}
+      ssl_com_environment_name: ${{ secrets.SSL_COM_ENVIRONMENT_NAME }}
+
+  release:
+    needs: sign
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup python
+        uses: actions/setup-python@v4
         with:
-          name: windows-compiled-assets
-          path: |
-            ./dist/rewst_agent_config.win.exe
+          python-version: "3.12"
 
-      - name: Sign binaries
-        run: ./scripts/ssl_com_sign_binaries.ps1 -username '${{ secrets.SSL_COM_USERNAME }}' -password '${{ secrets.SSL_COM_PASSWORD }}' -credentialId '${{ secrets.SSL_COM_CREDENTIAL_ID }}' -totpSecret '${{ secrets.SSL_COM_OTP }}' -appDistPath "$((Get-Item .).FullName)\dist"
-
-      - name: Generate checksums
+      - name: Setup python packages
         run: |
-          Get-FileHash -Path ./dist/signed/rewst_agent_config.win.exe    -Algorithm SHA256 | Format-List | Out-File -FilePath ./dist/signed/rewst_agent_config.win.exe.sha256
-
-      - name: Upload assets
-        uses: actions/upload-artifact@v4
-        with:
-          name: windows-signed-assets
-          path: |
-            ./dist/signed/rewst_agent_config.win.exe
-            ./dist/signed/rewst_agent_config.win.exe.sha256
+          pip install pipx
+          pipx ensurepath
+          pipx install commitizen
+          pipx upgrade commitizen
 
       - name: Extract version
-        shell: bash
         id: extract_version
         run: echo "version=v$(cz version -p)" >> $GITHUB_OUTPUT
 
+      - name: Download windows signed assets
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-latest-signed
+          path: ./signed
+
+      - name: Download linux signed assets
+        uses: actions/download-artifact@v4
+        with:
+          name: ubuntu-latest-signed
+          path: ./signed
+
       - name: Create release and upload files
         run: |
-          gh release create ${{ env.VERSION }} --generate-notes (Get-Item ./dist/signed/*)
+          gh release create ${{ env.VERSION }} --generate-notes (Get-Item ./signed/*)
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VERSION: ${{ steps.extract_version.outputs.version }}
