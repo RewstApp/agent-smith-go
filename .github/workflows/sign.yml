@@ -1,6 +1,6 @@
 name: Sign
 
-on: 
+on:
   workflow_call:
     secrets:
       ssl_com_username:
@@ -43,8 +43,22 @@ jobs:
           dir_path: ./dist
           output_path: ./signed
 
+      - name: Skip sign code
+        if: matrix.os != 'windows-latest'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path ./signed
+          Copy-Item -Path ./dist/* -Destination ./signed
+
+      - name: Compute file hash
+        shell: pwsh
+        run: |
+          Get-ChildItem -Path ./signed -File -Name | ForEach-Object { 
+            Get-FileHash -Path ./signed/$_ -Algorithm SHA256 | Format-List | Out-File -Path ./signed/$_.sha256 
+          }
+
       - name: Upload signed assets
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.os }}-signed
-          path: ${{ matrix.os == 'windows-latest' && './signed' || './dist' }}
+          path: ./signed
