@@ -86,8 +86,8 @@ jobs:
           path: ./signed
 
       - name: Create release and upload files
+        shell: pwsh
         run: |
-          gh release create ${{ env.VERSION }} --generate-notes (Get-Item ./signed/*)
+          gh release create ${{ steps.extract_version.outputs.version }} --generate-notes (Get-Item ./signed/*)
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          VERSION: ${{ steps.extract_version.outputs.version }}
