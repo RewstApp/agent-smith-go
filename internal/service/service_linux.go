@@ -38,6 +38,21 @@ func (linuxSvc *linuxService) Stop() error {
 	return runSystemCtl("stop", linuxSvc.name)
 }
 
+func (linuxSvc *linuxService) Delete() error {
+	err := runSystemCtl("disable", linuxSvc.name)
+	if err != nil {
+		return err
+	}
+
+	// Delete the service configuration file
+	serviceConfigFilePath := filepath.Join("/etc/systemd/system", fmt.Sprintf("%s.service", linuxSvc.name))
+	return os.Remove(serviceConfigFilePath)
+}
+
+func (linuxSvc *linuxService) IsActive() bool {
+	return runSystemCtl("is-active", linuxSvc.name) == nil
+}
+
 func Create(params AgentParams) (Service, error) {
 	serviceConfig := strings.Builder{}
 
@@ -72,5 +87,11 @@ func Create(params AgentParams) (Service, error) {
 
 	return &linuxService{
 		name: params.Name,
+	}, nil
+}
+
+func Open(name string) (Service, error) {
+	return &linuxService{
+		name: name,
 	}, nil
 }

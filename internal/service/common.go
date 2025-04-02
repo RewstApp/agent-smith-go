@@ -12,4 +12,6 @@ type Service interface {
 	Start() error
 	Stop() error
 	Close() error
+	Delete() error
+	IsActive() bool
 }

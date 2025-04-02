@@ -1,5 +1,3 @@
-//go:build windows
-
 package main
 
 import (
@@ -9,12 +7,10 @@ import (
 	"time"
 
 	"github.com/RewstApp/agent-smith-go/internal/agent"
+	"github.com/RewstApp/agent-smith-go/internal/service"
 	"github.com/RewstApp/agent-smith-go/internal/version"
-	"golang.org/x/sys/windows/svc"
-	"golang.org/x/sys/windows/svc/mgr"
 )
 
-const pollingInterval = time.Second
 const serviceExecutableTimeout = time.Second
 
 func runUninstall(params *uninstallParams) {
@@ -22,52 +18,21 @@ func runUninstall(params *uninstallParams) {
 	log.Println("Agent Smith Version:", version.Version)
 	log.Println("Running on:", runtime.GOOS)
 
-	svcMgr, err := mgr.Connect()
-	if err != nil {
-		log.Println("Failed to connect to service manager:", err)
-		return
-	}
-	defer svcMgr.Disconnect()
-
 	name := agent.GetServiceName(params.OrgId)
 
-	service, err := svcMgr.OpenService(name)
+	service, err := service.Open(name)
 	if err != nil {
 		log.Println("Failed to open service", name, ":", err)
 		return
 	}
 	defer service.Close()
 
-	status, err := service.Query()
-	if err != nil {
-		log.Println("Failed to query service status:", err)
-		return
-	}
-
-	if status.State == svc.Running {
-		// Stop the service is running
-		status, err = service.Control(svc.Stop)
+	if service.IsActive() {
+		log.Println("Stopping service", name, "...")
+		err = service.Stop()
 		if err != nil {
-			log.Println("Failed to send stop command:", err)
+			log.Println("Failed to stop service:", err)
 			return
-		}
-
-		log.Println("Sent stop command to", name)
-
-		for {
-			// Check if the service stopped
-			if status.State == svc.Stopped {
-				break
-			}
-
-			log.Println("Waiting for", name, "to stop...")
-			time.Sleep(pollingInterval)
-
-			status, err = service.Query()
-			if err != nil {
-				log.Println("Failed to query service status:", err)
-				return
-			}
 		}
 
 		log.Println(name, "stopped")
