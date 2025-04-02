@@ -3,6 +3,7 @@
 package service
 
 import (
+	"context"
 	"fmt"
 	"time"
 
@@ -94,4 +95,78 @@ func Open(name string) (Service, error) {
 	return &windowsService{
 		handle: svc,
 	}, nil
+}
+
+type windowsRunner struct {
+	runner   Runner
+	exitCode int
+}
+
+func (host *windowsRunner) Execute(args []string, request <-chan svc.ChangeRequest, response chan<- svc.Status) (bool, uint32) {
+	response <- svc.Status{State: svc.StartPending}
+
+	// Make the channels
+	stop := make(chan struct{})
+	running := make(chan struct{})
+
+	// Make go routines for the channels
+	ctxStop, cancelStop := context.WithCancel(context.Background())
+	defer cancelStop()
+	go func() {
+		for {
+			select {
+			case change := <-request:
+				switch change.Cmd {
+				case svc.Stop, svc.Shutdown:
+					stop <- struct{}{}
+					return
+				}
+			case <-ctxStop.Done():
+				// Stop this routine
+				return
+			}
+		}
+	}()
+
+	ctxRunning, cancelRunning := context.WithCancel(context.Background())
+	defer cancelRunning()
+	go func() {
+		select {
+		case <-running:
+			response <- svc.Status{State: svc.Running, Accepts: svc.AcceptStop | svc.AcceptShutdown}
+		case <-ctxRunning.Done():
+			// Stop this routine
+			return
+		}
+	}()
+
+	// Execute the runner
+	host.exitCode = host.runner.Execute(stop, running)
+	response <- svc.Status{State: svc.Stopped}
+
+	// Return the proper response
+	return host.exitCode == 0, uint32(host.exitCode)
+}
+
+func Run(runner Runner) (int, error) {
+	// Check if this is running as a service
+	isWinSvc, err := svc.IsWindowsService()
+	if err != nil {
+		return 1, err
+	}
+
+	if !isWinSvc {
+		return 1, fmt.Errorf("executable should be run as a service")
+	}
+
+	// Start the windows service
+	host := &windowsRunner{
+		runner: runner,
+	}
+	err = svc.Run(runner.Name(), host)
+	if err != nil {
+		return host.exitCode, err
+	}
+
+	return host.exitCode, nil
 }
