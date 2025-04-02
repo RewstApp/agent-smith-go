@@ -15,3 +15,8 @@ type Service interface {
 	Delete() error
 	IsActive() bool
 }
+
+type Runner interface {
+	Name() string
+	Execute(stop <-chan struct{}, running chan<- struct{}) int
+}

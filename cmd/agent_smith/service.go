@@ -1,5 +1,3 @@
-//go:build windows
-
 package main
 
 import (
@@ -17,14 +15,16 @@ import (
 	"github.com/RewstApp/agent-smith-go/internal/agent"
 	"github.com/RewstApp/agent-smith-go/internal/interpreter"
 	"github.com/RewstApp/agent-smith-go/internal/mqtt"
+	"github.com/RewstApp/agent-smith-go/internal/service"
 	"github.com/RewstApp/agent-smith-go/internal/utils"
 	"github.com/RewstApp/agent-smith-go/internal/version"
-	"golang.org/x/sys/windows/svc"
 )
 
-func (service *serviceParams) Execute(args []string, request <-chan svc.ChangeRequest, response chan<- svc.Status) (bool, uint32) {
-	response <- svc.Status{State: svc.StartPending}
+func (service *serviceParams) Name() string {
+	return agent.GetServiceName(service.OrgId)
+}
 
+func (service *serviceParams) Execute(stop <-chan struct{}, running chan<- struct{}) int {
 	// Create context to cancel running commands
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -32,8 +32,7 @@ func (service *serviceParams) Execute(args []string, request <-chan svc.ChangeRe
 	// Configure the logger
 	logFile, err := os.OpenFile(service.LogFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
-		response <- svc.Status{State: svc.Stopped}
-		return false, 1
+		return 1
 	}
 	defer logFile.Close()
 	utils.ConfigureLogger("agent_smith", logFile)
@@ -44,14 +43,13 @@ func (service *serviceParams) Execute(args []string, request <-chan svc.ChangeRe
 
 	defer func() {
 		log.Println("Service stopped")
-		response <- svc.Status{State: svc.Stopped}
 	}()
 
 	// Read and parse the config file
 	configFileBytes, err := os.ReadFile(service.ConfigFile)
 	if err != nil {
 		log.Println("Failed to read config:", err)
-		return false, 1
+		return 1
 	}
 
 	var device agent.Device
@@ -59,7 +57,7 @@ func (service *serviceParams) Execute(args []string, request <-chan svc.ChangeRe
 	err = json.Unmarshal(configFileBytes, &device)
 	if err != nil {
 		log.Println("Failed to parse config:", err)
-		return false, 1
+		return 1
 	}
 
 	// Create a channel for stopped signal
@@ -69,18 +67,15 @@ func (service *serviceParams) Execute(args []string, request <-chan svc.ChangeRe
 	go func() {
 		for {
 			select {
-			case change := <-request:
-				switch change.Cmd {
-				case svc.Stop, svc.Shutdown:
-					stopped <- struct{}{}
-				}
+			case <-stop:
+				stopped <- struct{}{}
 			case <-ctx.Done():
 				return
 			}
 		}
 	}()
 
-	response <- svc.Status{State: svc.Running, Accepts: svc.AcceptStop | svc.AcceptShutdown}
+	running <- struct{}{}
 	rg := utils.ReconnectTimeoutGenerator{}
 
 	for {
@@ -89,7 +84,7 @@ func (service *serviceParams) Execute(args []string, request <-chan svc.ChangeRe
 			log.Println("Reconnecting in", rg.Timeout())
 			select {
 			case <-stopped:
-				return true, 0
+				return 0
 			case <-time.After(rg.Timeout()):
 				log.Println("Reconnecting...")
 			}
@@ -105,7 +100,7 @@ func (service *serviceParams) Execute(args []string, request <-chan svc.ChangeRe
 		opts, err := mqtt.NewClientOptions(device)
 		if err != nil {
 			log.Println("Failed to create client options:", err)
-			return false, 1
+			return 1
 		}
 
 		// Manually handle auto reconnection
@@ -193,7 +188,7 @@ func (service *serviceParams) Execute(args []string, request <-chan svc.ChangeRe
 		// Wait for the stop/shutdown command or lost connection
 		select {
 		case <-stopped:
-			return true, 0
+			return 0
 		case <-lost:
 			continue
 		}
@@ -201,22 +196,10 @@ func (service *serviceParams) Execute(args []string, request <-chan svc.ChangeRe
 }
 
 func runService(params *serviceParams) {
-	// Check if this is running as a service
-	isWinSvc, err := svc.IsWindowsService()
+	exitCode, err := service.Run(params)
 	if err != nil {
-		log.Println("Failed to query execution status:", err)
-		return
+		log.Println("Failed to run service:", err)
 	}
 
-	if !isWinSvc {
-		log.Println("Executable should be run as a service")
-		return
-	}
-
-	// Start the windows service
-	err = svc.Run(agent.GetServiceName(params.OrgId), params)
-	if err != nil {
-		log.Println("Failed to run the service:", err)
-		return
-	}
+	os.Exit(exitCode)
 }
