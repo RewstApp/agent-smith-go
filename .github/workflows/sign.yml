@@ -39,7 +39,7 @@ jobs:
           password: ${{ secrets.ssl_com_password }}
           credential_id: ${{ secrets.ssl_com_credential_id }}
           totp_secret: ${{ secrets.ssl_com_totp_secret }}
-          environment_name: ${{ secrets.ssl_com_environment_name }}
+          environment_name: ${{ secrets.ssl_com_environment_name != 'TEST' && 'PROD' || 'TEST' }}
           dir_path: ./dist
           output_path: ./signed
 
