@@ -4,9 +4,9 @@ import (
 	"os"
 )
 
-var DefaultFileMod os.FileMode = 0644
-var DefaultExecutableFileMod os.FileMode = 0755
-var DefaultDirMod os.FileMode = 0755
+const DefaultFileMod os.FileMode = 0644
+const DefaultExecutableFileMod os.FileMode = 0755
+const DefaultDirMod os.FileMode = 0755
 
 func DirExists(path string) bool {
 	info, err := os.Stat(path)
