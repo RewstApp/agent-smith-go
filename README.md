@@ -1,5 +1,16 @@
 # Agent Smith
-This is a POC for agent smith using Golang.
+This is a POC for Agent Smith using Golang. Uses go version `1.24`. Check this [link](https://go.dev/doc/install) to install the latest version.
+
+## Testing
+Run the tests of all packages using this command:
+```
+go test ./...
+```
+
+Run the tests of all package with coverage report using this command:
+```
+go test -cover ./...
+```
 
 ## Build
 Required tools and packages:
@@ -15,6 +26,11 @@ Required tools and packages:
   ```
   go install github.com/tc-hib/go-winres@latest
   ```
+
+Run the following command using `powershell` or `pwsh` to build the binary:
+```
+./scripts/build.ps1
+```
 
 ## Directory Structure
 ```
