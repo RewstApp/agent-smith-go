@@ -4,6 +4,8 @@ import (
 	"time"
 )
 
+const maxTimeout time.Duration = 64 * time.Second
+
 type ReconnectTimeoutGenerator struct {
 	timeout time.Duration
 }
@@ -19,9 +21,8 @@ func (g *ReconnectTimeoutGenerator) Next() {
 
 	g.timeout *= 2
 
-	max := 64 * time.Second
-	if g.timeout > max {
-		g.timeout = max
+	if g.timeout > maxTimeout {
+		g.timeout = maxTimeout
 	}
 }
 
