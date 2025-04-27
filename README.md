@@ -2,14 +2,10 @@
 This is a POC for Agent Smith using Golang. Uses go version `1.24`. Check this [link](https://go.dev/doc/install) to install the latest version.
 
 ## Testing
-Run the tests of all packages using this command:
-```
-go test ./...
-```
-
 Run the tests of all package with coverage report using this command:
 ```
-go test -cover ./...
+go test ./... -coverprofile=coverage.out
+go tool cover -func coverage.out
 ```
 
 ## Build
