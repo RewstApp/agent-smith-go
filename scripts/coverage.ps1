@@ -4,7 +4,10 @@ param(
 )
 
 # Generate the coverage profile
-go test -coverprofile ./dist/coverage.out ./... > $null
+go test -coverprofile ./dist/coverage.out ./...
+if ($LASTEXITCODE -ne 0) {
+    exit 1
+}
 
 # Extract the total coverage
 $coverageOutput = go tool cover -func ./dist/coverage.out
