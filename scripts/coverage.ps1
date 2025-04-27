@@ -6,7 +6,7 @@ param(
 # Generate the coverage profile
 go test -coverprofile ./dist/coverage.out ./...
 if ($LASTEXITCODE -ne 0) {
-    exit 1
+    exit $LASTEXITCODE
 }
 
 # Extract the total coverage
