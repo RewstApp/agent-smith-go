@@ -2,10 +2,9 @@
 This is a POC for Agent Smith using Golang. Uses go version `1.24`. Check this [link](https://go.dev/doc/install) to install the latest version.
 
 ## Testing
-Run the tests of all package with coverage report using this command:
+Run the tests of all package with coverage report using this script. The `MinCoverage` parameter is optional with default value of `80.0`.
 ```
-go test ./... -coverprofile=coverage.out
-go tool cover -func coverage.out
+./scripts/coverage.ps1 -MinCoverage 80.0
 ```
 
 ## Build
