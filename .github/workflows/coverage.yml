@@ -26,6 +26,7 @@ jobs:
 
       - name: Run test coverage
         shell: pwsh
+        working-directory: ./
         run: ./scripts/coverage.ps1
 
     
