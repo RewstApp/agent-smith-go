@@ -24,9 +24,11 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Create output directory
+        shell: pwsh
+        run: New-Item -ItemType Directory -Path dist
+
       - name: Run test coverage
         shell: pwsh
-        working-directory: ./
         run: ./scripts/coverage.ps1
-
     
