@@ -9,6 +9,7 @@ import (
 
 func TestGetAdDomain(t *testing.T) {
 	ctx := context.Background()
+
 	result, err := getAdDomain(ctx)
 
 	if result != nil {
@@ -22,14 +23,15 @@ func TestGetAdDomain(t *testing.T) {
 
 func TestGetIsAdDomainController(t *testing.T) {
 	ctx := context.Background()
+
 	result, err := getIsAdDomainController(ctx)
 
 	if result != false {
-		t.Errorf("expected false, got true")
+		t.Error("expected false, got true")
 	}
 
 	if err != nil {
-		t.Errorf("expected no error, got %v", err.Error())
+		t.Errorf("expected no error, got %v", err)
 	}
 }
 
@@ -37,11 +39,11 @@ func TestGetIsEntraConnectServer(t *testing.T) {
 	result, err := getIsEntraConnectServer()
 
 	if result != false {
-		t.Errorf("expected false, got true")
+		t.Error("expected false, got true")
 	}
 
 	if err != nil {
-		t.Errorf("expected no error, got %v", err.Error())
+		t.Errorf("expected no error, got %v", err)
 	}
 }
 
@@ -57,12 +59,13 @@ func TestGetMacAddress(t *testing.T) {
 	}
 
 	if len(*mac) != 12 {
-		t.Errorf("expected 12-character MAC, got: %s", *mac)
+		t.Errorf("expected 12-character mac, got %s", *mac)
 	}
 }
 
 func TestGetEntraDomain(t *testing.T) {
 	ctx := context.Background()
+
 	result, err := getEntraDomain(ctx)
 
 	if result != nil {
@@ -70,6 +73,6 @@ func TestGetEntraDomain(t *testing.T) {
 	}
 
 	if err != nil {
-		t.Fatalf("expected no error, got %v", err.Error())
+		t.Fatalf("expected no error, got %v", err)
 	}
 }

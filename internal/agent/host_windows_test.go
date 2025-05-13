@@ -8,13 +8,16 @@ import (
 
 func TestGetMacAddress(t *testing.T) {
 	mac, err := getMacAddress()
+
 	if err != nil {
-		t.Fatalf("Expected no error, got: %v", err)
+		t.Fatalf("expected no error, got %v", err)
 	}
+
 	if mac == nil || len(*mac) == 0 {
-		t.Fatal("Expected a valid MAC address, got nil or empty")
+		t.Fatal("expected a valid mac address, got nil or empty")
 	}
-	if len(*mac) != 12 { // Without colons, MAC address is 12 hex chars
-		t.Errorf("Expected 12-character MAC, got: %s", *mac)
+
+	if len(*mac) != 12 {
+		t.Errorf("expected 12-character mac, got %s", *mac)
 	}
 }
