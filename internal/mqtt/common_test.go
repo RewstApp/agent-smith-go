@@ -15,24 +15,26 @@ func TestNewClientOptions_DefaultAzureIotHub(t *testing.T) {
 	}
 
 	opts, err := NewClientOptions(device)
+
 	if err != nil {
-		t.Fatalf("NewClientOptions returned error: %v", err)
+		t.Fatalf("expected no error, got %v", err)
 	}
 
 	if opts.ClientID != device.DeviceId {
-		t.Errorf("Expected ClientID %s, got %s", device.DeviceId, opts.ClientID)
+		t.Errorf("expected ClientID to be %s, got %s", device.DeviceId, opts.ClientID)
 	}
 
 	expectedUsername := device.AzureIotHubHost + "/" + device.DeviceId + "/?api-version=2021-04-12"
+
 	if opts.Username != expectedUsername {
-		t.Errorf("Expected Username %s, got %s", expectedUsername, opts.Username)
+		t.Errorf("expected Username to be %s, got %s", expectedUsername, opts.Username)
 	}
 
 	if opts.Password == "" {
-		t.Error("Expected non-empty Password (SAS token)")
+		t.Error("expected non-empty Password (SAS token)")
 	}
 
 	if len(opts.Servers) == 0 {
-		t.Error("Expected at least one MQTT broker to be configured")
+		t.Error("expected at least one mqtt broker to be configured")
 	}
 }
