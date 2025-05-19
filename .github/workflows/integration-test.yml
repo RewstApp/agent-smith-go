@@ -1,0 +1,26 @@
+name: Integration Test
+
+on: workflow_call
+
+jobs:
+  build:
+    uses: ./.github/workflows/build.yml
+ 
+  test:
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Download compiled binary
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ matrix.os }}
+          path: ./dist
+
+      - name: Install agent
+        run: |
+          sudo ./dist/rewst_agent_config.linux.bin --config-url ${{ vars.IT_CONFIG_URL }}  --config-secret ${{ secrets.IT_CONFIG_SECRET }}= --org-id ${{ vars.IT_ORG_ID }}
