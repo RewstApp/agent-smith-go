@@ -18,7 +18,7 @@ jobs:
       - name: Parse OS list and set matrix
         id: set-matrix
         run: |
-          os_list="${{ github.event.inputs.os_list }}"
+          os_list="${{ inputs.os_list }}"
           os_json=$(echo "$os_list" | jq -R 'split(",")')
           echo "Parsed OS list to JSON array: $os_json"
           echo "matrix={\"os\":$os_json}" >> $GITHUB_OUTPUT
