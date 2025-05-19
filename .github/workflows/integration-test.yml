@@ -25,5 +25,5 @@ jobs:
 
       - name: Install agent
         run: |
-          which sudo
-          sudo ./dist/rewst_agent_config.linux.bin --config-url ${{ vars.IT_CONFIG_URL }} --config-secret ${{ secrets.IT_CONFIG_SECRET }}= --org-id ${{ vars.IT_ORG_ID }}
+          realpath ./dist/rewst_agent_config.linux.bin
+          sudo $(realpath ./dist/rewst_agent_config.linux.bin) --config-url ${{ vars.IT_CONFIG_URL }} --config-secret ${{ secrets.IT_CONFIG_SECRET }}= --org-id ${{ vars.IT_ORG_ID }}
