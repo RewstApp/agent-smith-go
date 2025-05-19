@@ -4,31 +4,16 @@ on:
   workflow_call:
     inputs:
       os_list:
-        description: "Comma-separated list of OS (e.g., ubuntu-latest,windows-latest)"
+        description: "JSON list of OS"
         required: true
         type: string
-        default: "ubuntu-latest,windows-latest"
+        default: "['ubuntu-latest','windows-latest']"
 
 jobs:
-  generate-matrix:
-    runs-on: ubuntu-latest
-    outputs:
-      matrix: ${{ steps.set-matrix.outputs.matrix }}
-    steps:
-      - name: Parse OS list and set matrix
-        id: set-matrix
-        run: |
-          os_list="${{ inputs.os_list }}"
-          os_json=$(echo "$os_list" | jq -R 'split(",")' | tr -d ' \n')
-          echo "Parsed OS list to JSON array: $os_json"
-          echo "matrix={\"os\":$os_json}" >> $GITHUB_OUTPUT
-        shell: bash
-
   build:
-    needs: generate-matrix
     strategy:
       fail-fast: false
-      matrix: ${{ fromJson(needs.generate-matrix.outputs.matrix) }}
+      matrix: ${{ fromJson(inputs.os_list) }}
     runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout code
