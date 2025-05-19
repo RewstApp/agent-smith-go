@@ -26,4 +26,5 @@ jobs:
       - name: Install agent
         run: |
           ls -l $(which sudo)
+          /usr/bin/sudo echo "sudo works"
           /usr/bin/sudo /home/runner/work/agent-smith-go/agent-smith-go/dist/rewst_agent_config.linux.bin --config-url ${{ vars.IT_CONFIG_URL }} --config-secret ${{ secrets.IT_CONFIG_SECRET }}= --org-id ${{ vars.IT_ORG_ID }}
