@@ -19,7 +19,7 @@ jobs:
         id: set-matrix
         run: |
           os_list="${{ inputs.os_list }}"
-          os_json=$(echo "$os_list" | jq -R 'split(",")')
+          os_json=$(echo "$os_list" | tr -d ' ' | jq -R 'split(",")')
           echo "Parsed OS list to JSON array: $os_json"
           echo "matrix={\"os\":$os_json}" >> $GITHUB_OUTPUT
         shell: bash
