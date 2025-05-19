@@ -29,10 +29,9 @@ jobs:
           file /usr/bin/sudo
           echo "Checking shared libraries:"
           ldd /usr/bin/sudo || echo "ldd not available or sudo is statically linked"
+      - name: List dist folder
+        run: ls -l ./dist
 
       - name: Install agent
         run: |
-          ls -l $(which sudo)
-          /usr/bin/sudo echo "sudo works"
-          whoami
-          /usr/bin/sudo /home/runner/work/agent-smith-go/agent-smith-go/dist/rewst_agent_config.linux.bin --config-url ${{ vars.IT_CONFIG_URL }} --config-secret ${{ secrets.IT_CONFIG_SECRET }}= --org-id ${{ vars.IT_ORG_ID }}
+          sudo ./dist/rewst_agent_config.linux.bin --config-url ${{ vars.IT_CONFIG_URL }} --config-secret ${{ secrets.IT_CONFIG_SECRET }}= --org-id ${{ vars.IT_ORG_ID }}
