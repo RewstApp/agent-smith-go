@@ -6,7 +6,7 @@ jobs:
   build:
     uses: ./.github/workflows/build.yml
     with:
-      os_list: "ubuntu-latest"
+      os_list: "['ubuntu-latest']"
 
   test:
     needs: build
