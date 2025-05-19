@@ -23,14 +23,8 @@ jobs:
           name: ${{ matrix.os }}
           path: ./dist
 
-      - name: Check if sudo is executable
-        run: |
-          echo "Checking sudo binary:"
-          file /usr/bin/sudo
-          echo "Checking shared libraries:"
-          ldd /usr/bin/sudo || echo "ldd not available or sudo is statically linked"
-      - name: List dist folder
-        run: ls -l ./dist
+      - name: Make binary executable
+        run: chmod +x ./dist/rewst_agent_config.linux.bin
 
       - name: Install agent
         run: |
