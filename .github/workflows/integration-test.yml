@@ -5,6 +5,8 @@ on: workflow_dispatch
 jobs:
   build:
     uses: ./.github/workflows/build.yml
+    with:
+      os_list: ubuntu-latest
  
   test:
     needs: build
