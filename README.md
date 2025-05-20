@@ -1,5 +1,5 @@
 # Agent Smith
-This is a POC for agent smith using Golang.
+This is an implementation of agent smith using Golang.
 
 ## Build
 Required tools and packages:
