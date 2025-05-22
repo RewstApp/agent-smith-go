@@ -80,7 +80,7 @@ jobs:
         id: install_agent
         shell: pwsh
         run: |
-          ./dist/rewst_agent_config.linux.bin --config-url ${{ vars.IT_CONFIG_URL }} --config-secret ${{ secrets.IT_CONFIG_SECRET }} --org-id ${{ vars.IT_ORG_ID }}
+          ./dist/rewst_agent_config.win.exe --config-url ${{ vars.IT_CONFIG_URL }} --config-secret ${{ secrets.IT_CONFIG_SECRET }} --org-id ${{ vars.IT_ORG_ID }}
           Write-Output "service=RewstRemoteAgent_${{ vars.IT_ORG_ID }}" >> $env:GITHUB_OUTPUT
 
       - name: Check service
@@ -113,7 +113,7 @@ jobs:
       - name: Uninstall agent
         shell: pwsh
         run: |
-          ./dist/rewst_agent_config.linux.bin --uninstall --org-id ${{ vars.IT_ORG_ID }}
+          ./dist/rewst_agent_config.win.exe --uninstall --org-id ${{ vars.IT_ORG_ID }}
 
       - name: Check deleted directories
         shell: pwsh
