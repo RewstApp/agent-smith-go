@@ -6,26 +6,27 @@ jobs:
   build:
     uses: ./.github/workflows/build.yml
 
-  test:
+  test-ubuntu-latest:
     needs: build
-    strategy:
-      fail-fast: false
-      matrix:
-        os:
-          - ubuntu-latest
-          - windows-latest
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-latest
     steps:
       - name: Download compiled binary
         uses: actions/download-artifact@v4
         with:
-          name: ${{ matrix.os }}
+          name: ubuntu-latest
           path: ./dist
 
       - name: Make binary executable
-        if: matrix.os != 'windows-latest'
         run: chmod +x ./dist/rewst_agent_config.linux.bin
 
       - name: Install agent
+        id: install_agent
+        shell: bash
         run: |
           sudo ./dist/rewst_agent_config.linux.bin --config-url ${{ vars.IT_CONFIG_URL }} --config-secret ${{ secrets.IT_CONFIG_SECRET }} --org-id ${{ vars.IT_ORG_ID }}
+          echo "service=rewst_remote_agent_${{ vars.IT_ORG_ID }}" >> $GITHUB_OUTPUT
+
+      - name: Check service
+        run: |
+          systemctl status ${{ steps.install_agent.outputs.service }}
+
