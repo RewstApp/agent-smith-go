@@ -5,6 +5,8 @@ on: workflow_dispatch
 jobs:
   build:
     uses: ./.github/workflows/build.yml
+    with:
+      os_list: "['ubuntu-latest']"
 
   test-ubuntu-latest:
     needs: build
@@ -27,6 +29,7 @@ jobs:
           echo "service=rewst_remote_agent_${{ vars.IT_ORG_ID }}" >> $GITHUB_OUTPUT
 
       - name: Check service
+        shell: bash
         run: |
-          systemctl status ${{ steps.install_agent.outputs.service }}
+          systemctl status ${{ steps.install_agent.outputs.service }}-non-existent
 
