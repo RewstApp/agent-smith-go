@@ -39,10 +39,21 @@ jobs:
         run: |
           echo "value=$(cat /etc/rewst_remote_agent/${{ vars.IT_ORG_ID }}/config.json | jq -r '.device_id')" >> "$GITHUB_OUTPUT"
 
-      - name: Send command 1
+      - name: Send test command
         shell: bash
         run: |
-          echo ${{ steps.get_device_id.outputs.value }}
+          curl --location '${{ vars.IT_SEND_COMMAND_TRIGGER_URL }}' \
+          --form 'device_id="${{ steps.get_device_id.outputs.value }}"' \
+          --form 'commands="[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
+          \$PS_Results = New-Object -TypeName psobject
+
+          \# Start of typed powershell
+          \$PS_Results | Add-Member -MemberType NoteProperty -Name \"Hello\" -Value \"World\"
+
+          \# Post results back to Rewst
+          \$postData = \$PS_Results | ConvertTo-Json
+          Invoke-RestMethod -Method '\''Post'\'' -Uri \$post_url -Body \$postData -ContentType '\''application/json'\''"'
 
       - name: Uninstall agent
         shell: bash
