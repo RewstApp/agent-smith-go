@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"runtime"
+	"time"
 
 	"github.com/RewstApp/agent-smith-go/internal/agent"
 	"github.com/RewstApp/agent-smith-go/internal/service"
@@ -103,6 +104,35 @@ func runConfig(params *configParams) {
 		return
 	}
 
+	name := agent.GetServiceName(params.OrgId)
+
+	// Stop and delete the service if it already exists
+	existingService, err := service.Open(name)
+	if err == nil {
+		if existingService.IsActive() {
+			log.Println("Stopping service", name, "...")
+			err = existingService.Stop()
+			if err != nil {
+				log.Println("Failed to stop service:", err)
+				existingService.Close()
+				return
+			}
+		}
+
+		// Delete the service
+		err = existingService.Delete()
+		if err != nil {
+			log.Println("Failed to delete service:", err)
+			return
+		}
+		log.Println(name, "deleted")
+
+		// Wait for some time for the service executable to clean up
+		existingService.Close()
+		log.Println("Waiting for service executable to stop...")
+		time.Sleep(serviceExecutableTimeout)
+	}
+
 	log.Println("Configuration saved to", configFilePath)
 	log.Println("Logs will be saved to", agent.GetLogFilePath(params.OrgId))
 
@@ -138,7 +168,6 @@ func runConfig(params *configParams) {
 	log.Println("Commands will be temporarily saved to", agent.GetScriptsDirectory(params.OrgId))
 
 	// Create the service
-	name := agent.GetServiceName(params.OrgId)
 	log.Println("Creating service", name, "...")
 
 	svc, err := service.Create(service.AgentParams{
