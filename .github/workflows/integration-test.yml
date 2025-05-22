@@ -52,7 +52,7 @@ jobs:
       - name: Check deleted directories
         shell: pwsh
         run: |
-          if (!(Test-Path -Path "/etc/rewst_remote_agent/${{ vars.IT_ORG_ID }}")) { exit 1 }
-          if (!(Test-Path -Path "/usr/local/bin/rewst_remote_agent/${{ vars.IT_ORG_ID }}")) { exit 1 }
-          if (!(Test-Path -Path "/tmp/rewst_remote_agent/scripts/${{ vars.IT_ORG_ID }}")) { exit 1 }
+          if (Test-Path -Path "/etc/rewst_remote_agent/${{ vars.IT_ORG_ID }}") { exit 1 }
+          if (Test-Path -Path "/usr/local/bin/rewst_remote_agent/${{ vars.IT_ORG_ID }}") { exit 1 }
+          if (Test-Path -Path "/tmp/rewst_remote_agent/scripts/${{ vars.IT_ORG_ID }}") { exit 1 }
           echo "All directories have been deleted"
