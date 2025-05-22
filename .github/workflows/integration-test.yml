@@ -33,3 +33,15 @@ jobs:
         run: |
           systemctl status ${{ steps.install_agent.outputs.service }}-non-existent
 
+      - name: Get device id
+        id: get_device_id
+        shell: bash
+        run: |
+          echo "value=$(cat /etc/rewst_remote_agent/${{ vars.IT_ORG_ID }}/config.json | jq -r '.device_id')" >> "$GITHUB_OUTPUT"
+
+      - name: Send command 1
+        shell: bash 
+        run: |
+          echo ${{ steps.get_device_id.outputs.value }}
+        
+
