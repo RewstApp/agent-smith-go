@@ -49,11 +49,11 @@ jobs:
           $PS_Results = New-Object -TypeName psobject
 
           # Start of typed powershell
-          $PS_Results | Add-Member -MemberType NoteProperty -Name "Hello" -Value "World"
+          $PS_Results | Add-Member -MemberType NoteProperty -Name \"Hello\" -Value \"World\"
 
           # Post results back to Rewst
           $postData = $PS_Results | ConvertTo-Json
-          Invoke-RestMethod -Method \'Post\' -Uri $post_url -Body $postData -ContentType \'application/json\'"'
+          Invoke-RestMethod -Method \"Post\" -Uri $post_url -Body $postData -ContentType \"application/json\""'
 
       - name: Uninstall agent
         shell: bash
