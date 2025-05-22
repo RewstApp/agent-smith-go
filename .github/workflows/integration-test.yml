@@ -5,8 +5,6 @@ on: workflow_dispatch
 jobs:
   build:
     uses: ./.github/workflows/build.yml
-    with:
-      os_list: "['ubuntu-latest']"
 
   test-ubuntu-latest:
     needs: build
@@ -66,4 +64,61 @@ jobs:
           if (Test-Path -Path "/etc/rewst_remote_agent/${{ vars.IT_ORG_ID }}") { exit 1 }
           if (Test-Path -Path "/usr/local/bin/rewst_remote_agent/${{ vars.IT_ORG_ID }}") { exit 1 }
           if (Test-Path -Path "/tmp/rewst_remote_agent/scripts/${{ vars.IT_ORG_ID }}") { exit 1 }
+          echo "All directories have been deleted"
+
+  test-windows-latest:
+    needs: build
+    runs-on: windows-latest
+    steps:
+      - name: Download compiled binary
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-latest
+          path: ./dist
+
+      - name: Install agent
+        id: install_agent
+        shell: pwsh
+        run: |
+          ./dist/rewst_agent_config.linux.bin --config-url ${{ vars.IT_CONFIG_URL }} --config-secret ${{ secrets.IT_CONFIG_SECRET }} --org-id ${{ vars.IT_ORG_ID }}
+          Write-Output "service=RewstRemoteAgent_${{ vars.IT_ORG_ID }}" >> $env:GITHUB_OUTPUT
+
+      - name: Check service
+        shell: pwsh
+        run: |
+          sc.exe query ${{ steps.install_agent.outputs.service }}
+
+      - name: Get device id
+        id: get_device_id
+        shell: pwsh
+        run: |
+          (Get-Content C:\ProgramData\RewstRemoteAgent\${{ vars.IT_ORG_ID }}\config.json | ConvertFrom-Json).device_id | % { "value=$_" } >> $env:GITHUB_OUTPUT
+
+      - name: Send test command
+        shell: pwsh
+        run: |
+          curl --location '${{ vars.IT_SEND_COMMAND_TRIGGER_URL }}' \
+          --form 'device_id="${{ steps.get_device_id.outputs.value }}"' \
+          --form 'commands="[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
+          $PS_Results = New-Object -TypeName psobject
+
+          # Start of typed powershell
+          $PS_Results | Add-Member -MemberType NoteProperty -Name \"Hello\" -Value \"World\"
+
+          # Post results back to Rewst
+          $postData = $PS_Results | ConvertTo-Json
+          Invoke-RestMethod -Method \"Post\" -Uri $post_url -Body $postData -ContentType \"application/json\""'
+
+      - name: Uninstall agent
+        shell: pwsh
+        run: |
+          ./dist/rewst_agent_config.linux.bin --uninstall --org-id ${{ vars.IT_ORG_ID }}
+
+      - name: Check deleted directories
+        shell: pwsh
+        run: |
+          if (Test-Path -Path "C:\ProgramData\RewstRemoteAgent\${{ vars.IT_ORG_ID }}") { exit 1 }
+          if (Test-Path -Path "C:\Program Files\RewstRemoteAgent\${{ vars.IT_ORG_ID }}") { exit 1 }
+          if (Test-Path -Path "C:\RewstRemoteAgent\scripts\${{ vars.IT_ORG_ID }}") { exit 1 }
           echo "All directories have been deleted"
