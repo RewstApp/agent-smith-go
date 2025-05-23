@@ -1,15 +1,20 @@
 name: Build
 
-on: workflow_call
+on:
+  workflow_call:
+    inputs:
+      os_list:
+        description: "JSON list of OS"
+        required: false
+        type: string
+        default: "['ubuntu-latest','windows-latest']"
 
 jobs:
   build:
     strategy:
       fail-fast: false
-      matrix:
-        os:
-          - windows-latest
-          - ubuntu-latest
+      matrix: 
+        os: ${{ fromJson(inputs.os_list) }}
     runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout code

@@ -11,7 +11,7 @@ import (
 	"github.com/RewstApp/agent-smith-go/internal/version"
 )
 
-const serviceExecutableTimeout = time.Second
+const serviceExecutableTimeout = time.Second * 5
 
 func runUninstall(params *uninstallParams) {
 	// Show header

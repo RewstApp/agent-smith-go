@@ -94,6 +94,11 @@ func Create(params AgentParams) (Service, error) {
 }
 
 func Open(name string) (Service, error) {
+	err := runSystemCtl("status", name)
+	if err != nil {
+		return nil, err
+	}
+
 	return &linuxService{
 		name: name,
 	}, nil

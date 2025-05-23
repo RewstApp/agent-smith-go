@@ -16,6 +16,11 @@ Required tools and packages:
   go install github.com/tc-hib/go-winres@latest
   ```
 
+Run the following command using `powershell` or `pwsh` to build the binary:
+```
+./scripts/build.ps1
+```
+
 ## Directory Structure
 ```
 agent-smith-go/

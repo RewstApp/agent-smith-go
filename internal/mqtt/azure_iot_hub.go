@@ -28,7 +28,7 @@ func generateSASToken(resourceURI, key string, duration time.Duration) (string, 
 	// Decode the base64 key
 	keyBytes, err := base64.StdEncoding.DecodeString(key)
 	if err != nil {
-		return "", fmt.Errorf("Failed to decode key: %w", err)
+		return "", fmt.Errorf("failed to decode key: %w", err)
 	}
 
 	// Create the HMAC-SHA256 signature
