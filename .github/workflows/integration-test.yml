@@ -7,6 +7,8 @@ jobs:
     uses: ./.github/workflows/build.yml
 
   test-ubuntu-latest:
+    permissions:
+      contents: read
     needs: build
     runs-on: ubuntu-latest
     steps:
@@ -67,6 +69,8 @@ jobs:
           echo "All directories have been deleted"
 
   test-windows-latest:
+    permissions:
+      contents: read
     needs: build
     runs-on: windows-latest
     steps:

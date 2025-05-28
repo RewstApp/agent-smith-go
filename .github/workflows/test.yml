@@ -4,6 +4,8 @@ on: push
 
 jobs:
   test:
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:
