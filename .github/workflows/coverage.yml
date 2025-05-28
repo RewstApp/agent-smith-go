@@ -4,6 +4,8 @@ on: workflow_dispatch
 
 jobs:
   coverage:
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:
