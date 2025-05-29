@@ -8,7 +8,6 @@ jobs:
     permissions:
       contents: write
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -38,10 +37,14 @@ jobs:
 
   build:
     needs: bump
+    permissions:
+      contents: read
     uses: ./.github/workflows/build.yml
 
   sign:
     needs: build
+    permissions:
+      contents: read
     uses: ./.github/workflows/sign.yml
     secrets:
       ssl_com_username: ${{ secrets.SSL_COM_USERNAME }}

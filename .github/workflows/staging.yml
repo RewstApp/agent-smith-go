@@ -4,10 +4,14 @@ on: workflow_dispatch
 
 jobs:
   build:
+    permissions:
+      contents: read
     uses: ./.github/workflows/build.yml
 
   sign:
     needs: build
+    permissions:
+      contents: read
     uses: ./.github/workflows/sign.yml
     secrets:
       ssl_com_username: ${{ secrets.SSL_COM_USERNAME }}
