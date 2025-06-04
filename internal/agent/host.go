@@ -39,6 +39,7 @@ func (hostInfo *HostInfo) Load(ctx context.Context, orgId string) error {
 	if err != nil {
 		return err
 	}
+	hostname = strings.ToLower(hostname)
 
 	macAddress, err := getMacAddress()
 	if err != nil {
