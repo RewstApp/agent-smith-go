@@ -60,6 +60,9 @@ func (service *serviceParams) Execute(stop <-chan struct{}, running chan<- struc
 		return 1
 	}
 
+	// Show the device id
+	log.Println("Device ID:", device.DeviceId)
+
 	// Create a channel for stopped signal
 	stopped := make(chan struct{})
 
