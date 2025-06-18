@@ -45,6 +45,15 @@ func (service *serviceParams) Execute(stop <-chan struct{}, running chan<- struc
 		log.Println("Service stopped")
 	}()
 
+	// Setup the server
+	http.HandleFunc("/echo", echoHandler)
+	log.Println("Server listening on http://localhost:6060")
+	go func() {
+		if err := http.ListenAndServe("localhost:6060", nil); err != nil {
+			log.Println("Server failed", err)
+		}
+	}()
+
 	// Read and parse the config file
 	configFileBytes, err := os.ReadFile(service.ConfigFile)
 	if err != nil {
@@ -193,6 +202,26 @@ func (service *serviceParams) Execute(stop <-chan struct{}, running chan<- struc
 			continue
 		}
 	}
+}
+
+func echoHandler(w http.ResponseWriter, r *http.Request) {
+	// Ensure GET request
+	if r.Method != http.MethodPost {
+		http.Error(w, "Only POST allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Read data from request body
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, "Cannot read body", http.StatusBadRequest)
+		return
+	}
+	defer r.Body.Close()
+
+	// Reply the same data
+	w.Header().Set("Content-Type", r.Header["Content-Type"][0])
+	w.Write(body)
 }
 
 func runService(params *serviceParams) {
