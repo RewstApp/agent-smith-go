@@ -56,7 +56,7 @@ func (svc *serviceParams) Name() string {
 	return agent.GetServiceName(svc.OrgId)
 }
 
-func (svc *serviceParams) Execute(stop <-chan struct{}, running chan<- struct{}) service.ServiceExitCode {
+func (service *serviceParams) Execute(stop <-chan struct{}, running chan<- struct{}) int {
 	// Create context to cancel running commands
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -243,8 +243,10 @@ func (svc *serviceParams) Execute(stop <-chan struct{}, running chan<- struct{})
 		// Wait for the stop/shutdown command or lost connection
 		select {
 		case <-stopped:
+			status.IsOnline = false
 			return 0
 		case <-lost:
+			status.IsOnline = false
 			continue
 		}
 	}
