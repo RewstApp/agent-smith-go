@@ -13,15 +13,12 @@ import (
 	"time"
 
 	"github.com/RewstApp/agent-smith-go/internal/agent"
+	"github.com/RewstApp/agent-smith-go/internal/hub"
 	"github.com/RewstApp/agent-smith-go/internal/interpreter"
 	"github.com/RewstApp/agent-smith-go/internal/mqtt"
 	"github.com/RewstApp/agent-smith-go/internal/service"
 	"github.com/RewstApp/agent-smith-go/internal/utils"
 	"github.com/RewstApp/agent-smith-go/internal/version"
-	"github.com/shirou/gopsutil/v4/cpu"
-	"github.com/shirou/gopsutil/v4/disk"
-	"github.com/shirou/gopsutil/v4/mem"
-	"github.com/shirou/gopsutil/v4/net"
 )
 
 type Status struct {
@@ -30,48 +27,6 @@ type Status struct {
 	Disk     int  `json:"disk"`
 	Network  int  `json:"network"`
 	IsOnline bool `json:"is_online"`
-}
-
-const maxBandwidthMbps = 100 // change based on your NIC or plan
-
-func (status *Status) GetDeviceStatus() {
-	// Get the CPU usage percent
-	percent, err := cpu.Percent(time.Second, false)
-	if err != nil {
-		log.Println("Failed to get cpu percent:", err)
-		return
-	}
-	status.Cpu = int(percent[0])
-
-	// Get total memory usage
-	vmStat, err := mem.VirtualMemory()
-	if err != nil {
-		log.Println("Failed to get memory usage:", err)
-	}
-	status.Memory = int(vmStat.UsedPercent)
-
-	// Get disk usage
-	usage, err := disk.Usage("C:\\") // "/" for Linux/macOS, "C:\\" for Windows
-	if err != nil {
-		log.Println("Failed to get disk usage:", err)
-	}
-	status.Disk = int(usage.UsedPercent)
-
-	// Get network usage
-	initial, _ := net.IOCounters(false)
-	time.Sleep(1 * time.Second)
-	current, _ := net.IOCounters(false)
-
-	bytesSent := current[0].BytesSent - initial[0].BytesSent
-	bytesRecv := current[0].BytesRecv - initial[0].BytesRecv
-
-	// Total used bandwidth in Mbps (Megabits per second)
-	totalBits := float64((bytesSent + bytesRecv) * 8)
-	mbps := totalBits / (1024 * 1024)
-
-	// Compute usage percentage
-	usagePercent := (mbps / maxBandwidthMbps) * 100
-	status.Network = int(usagePercent)
 }
 
 func (service *serviceParams) Name() string {
@@ -108,27 +63,7 @@ func (service *serviceParams) Execute(stop <-chan struct{}, running chan<- struc
 	}
 
 	// Setup the server
-	http.HandleFunc("/echo", echoHandler)
-	http.HandleFunc("/status", func(w http.ResponseWriter, r *http.Request) {
-		// Ensure GET request
-		if r.Method != http.MethodGet {
-			http.Error(w, "Only GET allowed", http.StatusMethodNotAllowed)
-			return
-		}
-
-		// Get device details
-		status.GetDeviceStatus()
-
-		// Return the data
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(status)
-	})
-	log.Println("Server listening on http://localhost:6060")
-	go func() {
-		if err := http.ListenAndServe("localhost:6060", nil); err != nil {
-			log.Println("Server failed", err)
-		}
-	}()
+	go hub.Run(6060)
 
 	// Read and parse the config file
 	configFileBytes, err := os.ReadFile(service.ConfigFile)
