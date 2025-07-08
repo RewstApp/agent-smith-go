@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/RewstApp/agent-smith-go/internal/agent"
+	"github.com/RewstApp/agent-smith-go/internal/hub"
 	"github.com/RewstApp/agent-smith-go/internal/interpreter"
 	"github.com/RewstApp/agent-smith-go/internal/mqtt"
 	"github.com/RewstApp/agent-smith-go/internal/service"
