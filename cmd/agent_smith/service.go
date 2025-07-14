@@ -6,20 +6,25 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
 
 	"github.com/RewstApp/agent-smith-go/internal/agent"
-	"github.com/RewstApp/agent-smith-go/internal/hub"
 	"github.com/RewstApp/agent-smith-go/internal/interpreter"
 	"github.com/RewstApp/agent-smith-go/internal/mqtt"
 	"github.com/RewstApp/agent-smith-go/internal/service"
 	"github.com/RewstApp/agent-smith-go/internal/syslog"
 	"github.com/RewstApp/agent-smith-go/internal/utils"
 	"github.com/RewstApp/agent-smith-go/internal/version"
+	"github.com/RewstApp/agent-smith-go/shared"
+
+	"github.com/hashicorp/go-plugin"
 )
 
 type errorResponse struct {
@@ -51,6 +56,21 @@ func (svc *serviceParams) loadLog() (*os.File, error) {
 	}
 
 	return logFile, nil
+}
+
+// handshakeConfigs are used to just do a basic handshake between
+// a plugin and host. If the handshake fails, a user friendly error is shown.
+// This prevents users from executing bad plugins or executing a plugin
+// directory. It is a UX feature, not a security feature.
+var handshakeConfig = plugin.HandshakeConfig{
+	ProtocolVersion:  1,
+	MagicCookieKey:   "BASIC_PLUGIN",
+	MagicCookieValue: "hello",
+}
+
+// pluginMap is the map of plugins we can dispense.
+var pluginMap = map[string]plugin.Plugin{
+	"notifier": &shared.NotifierPlugin{},
 }
 
 func (svc *serviceParams) Name() string {
@@ -95,6 +115,58 @@ func (service *serviceParams) Execute(stop <-chan struct{}, running chan<- struc
 		logger.Info("Service stopped")
 	}()
 
+	// START PLUGIN INIT
+	execPath, err := os.Executable()
+	if err != nil {
+		logger.Error("Failed to get os executable", "error", err)
+		return service.GenericError
+	}
+
+	pluginPath := filepath.Join(filepath.Dir(execPath), "plugins/agent-smith-httpd.exe")
+
+	// We're a host! Start by launching the plugin process.
+	client := plugin.NewClient(&plugin.ClientConfig{
+		HandshakeConfig: handshakeConfig,
+		Plugins:         pluginMap,
+		Cmd:             exec.Command(pluginPath),
+		Stderr:          log.Writer(),
+	})
+	defer client.Kill()
+
+	// Connect via RPC
+	rpcClient, err := client.Client()
+	if err != nil {
+		logger.Error("Failed to connect to plugin RPC", "error", err)
+		return service.GenericError
+	}
+
+	// Request the plugin
+	raw, err := rpcClient.Dispense("notifier")
+	if err != nil {
+		logger.Error("Failed to fetch plugin", "error", err)
+		return service.GenericError
+	}
+
+	// We should have a Greeter now! This feels like a normal interface
+	// implementation but is in fact over an RPC connection.
+	notifier := raw.(shared.Notifier)
+	// END USE THE PLUGIN
+
+	// Read and parse the config file
+	configFileBytes, err := os.ReadFile(service.ConfigFile)
+	if err != nil {
+		log.Println("Failed to read config:", err)
+		return 1
+	}
+
+	var device agent.Device
+
+	err = json.Unmarshal(configFileBytes, &device)
+	if err != nil {
+		log.Println("Failed to parse config:", err)
+		return 1
+	}
+
 	// Create a channel for stopped signal
 	stopped := make(chan struct{})
 
@@ -111,6 +183,7 @@ func (service *serviceParams) Execute(stop <-chan struct{}, running chan<- struc
 	}()
 
 	running <- struct{}{}
+	notifier.Notify("AgentStarted")
 	rg := utils.ReconnectTimeoutGenerator{}
 
 	for {
@@ -122,6 +195,7 @@ func (service *serviceParams) Execute(stop <-chan struct{}, running chan<- struc
 				return 0
 			case <-time.After(rg.Timeout()):
 				logger.Info("Reconnecting...")
+				notifier.Notify("AgentReconnecting")
 			}
 		}
 
@@ -168,6 +242,8 @@ func (service *serviceParams) Execute(stop <-chan struct{}, running chan<- struc
 					logger.Error("Parse failed", "error", err)
 					return
 				}
+
+				notifier.Notify("AgentReceivedMesage")
 
 				// Execute the message
 				resultBytes := message.Execute(ctx, device, logger)
@@ -236,6 +312,7 @@ func (service *serviceParams) Execute(stop <-chan struct{}, running chan<- struc
 
 		// Complete initialization
 		logger.Info("Subscribed to messages")
+		notifier.Notify("AgentOnline")
 
 		// Reset the timeout
 		rg.Clear()
@@ -244,10 +321,10 @@ func (service *serviceParams) Execute(stop <-chan struct{}, running chan<- struc
 		// Wait for the stop/shutdown command or lost connection
 		select {
 		case <-stopped:
-			status.IsOnline = false
+			notifier.Notify("AgentStopped")
 			return 0
 		case <-lost:
-			status.IsOnline = false
+			notifier.Notify("AgentOffline")
 			continue
 		}
 	}
