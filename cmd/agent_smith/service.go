@@ -9,16 +9,20 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"runtime"
 	"time"
 
 	"github.com/RewstApp/agent-smith-go/internal/agent"
-	"github.com/RewstApp/agent-smith-go/internal/hub"
 	"github.com/RewstApp/agent-smith-go/internal/interpreter"
 	"github.com/RewstApp/agent-smith-go/internal/mqtt"
 	"github.com/RewstApp/agent-smith-go/internal/service"
 	"github.com/RewstApp/agent-smith-go/internal/utils"
 	"github.com/RewstApp/agent-smith-go/internal/version"
+	"github.com/RewstApp/agent-smith-go/shared"
+
+	"github.com/hashicorp/go-plugin"
 )
 
 type Status struct {
@@ -27,6 +31,21 @@ type Status struct {
 	Disk     int  `json:"disk"`
 	Network  int  `json:"network"`
 	IsOnline bool `json:"is_online"`
+}
+
+// handshakeConfigs are used to just do a basic handshake between
+// a plugin and host. If the handshake fails, a user friendly error is shown.
+// This prevents users from executing bad plugins or executing a plugin
+// directory. It is a UX feature, not a security feature.
+var handshakeConfig = plugin.HandshakeConfig{
+	ProtocolVersion:  1,
+	MagicCookieKey:   "BASIC_PLUGIN",
+	MagicCookieValue: "hello",
+}
+
+// pluginMap is the map of plugins we can dispense.
+var pluginMap = map[string]plugin.Plugin{
+	"notifier": &shared.NotifierPlugin{},
 }
 
 func (service *serviceParams) Name() string {
@@ -54,16 +73,42 @@ func (service *serviceParams) Execute(stop <-chan struct{}, running chan<- struc
 		log.Println("Service stopped")
 	}()
 
-	status := Status{
-		Cpu:      12,
-		Memory:   66,
-		Disk:     11,
-		Network:  2,
-		IsOnline: false,
+	// START PLUGIN INIT
+	execPath, err := os.Executable()
+	if err != nil {
+		log.Println("Failed to get os executable")
+		return 1
 	}
 
-	// Setup the server
-	go hub.Run(6060)
+	pluginPath := filepath.Join(filepath.Dir(execPath), "plugins/agent-smith-httpd.exe")
+
+	// We're a host! Start by launching the plugin process.
+	client := plugin.NewClient(&plugin.ClientConfig{
+		HandshakeConfig: handshakeConfig,
+		Plugins:         pluginMap,
+		Cmd:             exec.Command(pluginPath),
+		Stderr:          log.Writer(),
+	})
+	defer client.Kill()
+
+	// Connect via RPC
+	rpcClient, err := client.Client()
+	if err != nil {
+		log.Println(err)
+		return 1
+	}
+
+	// Request the plugin
+	raw, err := rpcClient.Dispense("notifier")
+	if err != nil {
+		log.Println(err)
+		return 1
+	}
+
+	// We should have a Greeter now! This feels like a normal interface
+	// implementation but is in fact over an RPC connection.
+	notifier := raw.(shared.Notifier)
+	// END USE THE PLUGIN
 
 	// Read and parse the config file
 	configFileBytes, err := os.ReadFile(service.ConfigFile)
@@ -96,6 +141,7 @@ func (service *serviceParams) Execute(stop <-chan struct{}, running chan<- struc
 	}()
 
 	running <- struct{}{}
+	notifier.Notify("AgentStarted")
 	rg := utils.ReconnectTimeoutGenerator{}
 
 	for {
@@ -107,6 +153,7 @@ func (service *serviceParams) Execute(stop <-chan struct{}, running chan<- struc
 				return 0
 			case <-time.After(rg.Timeout()):
 				log.Println("Reconnecting...")
+				notifier.Notify("AgentReconnecting")
 			}
 		}
 
@@ -154,6 +201,8 @@ func (service *serviceParams) Execute(stop <-chan struct{}, running chan<- struc
 					return
 				}
 
+				notifier.Notify("AgentReceivedMesage")
+
 				// Execute the message
 				resultBytes := message.Execute(ctx, device)
 
@@ -200,7 +249,7 @@ func (service *serviceParams) Execute(stop <-chan struct{}, running chan<- struc
 
 		// Complete initialization
 		log.Println("Subscribed to messages")
-		status.IsOnline = true
+		notifier.Notify("AgentOnline")
 
 		// Reset the timeout
 		rg.Clear()
@@ -209,33 +258,13 @@ func (service *serviceParams) Execute(stop <-chan struct{}, running chan<- struc
 		// Wait for the stop/shutdown command or lost connection
 		select {
 		case <-stopped:
-			status.IsOnline = false
+			notifier.Notify("AgentStopped")
 			return 0
 		case <-lost:
-			status.IsOnline = false
+			notifier.Notify("AgentOffline")
 			continue
 		}
 	}
-}
-
-func echoHandler(w http.ResponseWriter, r *http.Request) {
-	// Ensure GET request
-	if r.Method != http.MethodPost {
-		http.Error(w, "Only POST allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	// Read data from request body
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		http.Error(w, "Cannot read body", http.StatusBadRequest)
-		return
-	}
-	defer r.Body.Close()
-
-	// Reply the same data
-	w.Header().Set("Content-Type", r.Header["Content-Type"][0])
-	w.Write(body)
 }
 
 func runService(params *serviceParams) {
