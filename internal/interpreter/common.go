@@ -28,11 +28,37 @@ func errorResultBytes(err error) []byte {
 	return bytes
 }
 
+type StringFalse struct {
+	Value string
+}
+
+func (sf *StringFalse) UnmarshalJSON(data []byte) error {
+	// Try to parse bool
+	var b bool
+	if err := json.Unmarshal(data, &b); err == nil {
+		if b {
+			sf.Value = "true"
+		} else {
+			sf.Value = ""
+		}
+		return nil
+	}
+
+	// Try to parse string
+	var s string
+	if err := json.Unmarshal(data, &s); err == nil {
+		sf.Value = s
+		return nil
+	}
+
+	return fmt.Errorf("unsupported type: %s", string(data))
+}
+
 type Message struct {
-	PostId              string  `json:"post_id"`
-	Commands            *string `json:"commands"`
-	InterpreterOverride *string `json:"interpreter_override"`
-	GetInstallation     *bool   `json:"get_installation"`
+	PostId              string      `json:"post_id"`
+	Commands            *string     `json:"commands"`
+	InterpreterOverride StringFalse `json:"interpreter_override"`
+	GetInstallation     *bool       `json:"get_installation"`
 }
 
 type CommandsResult struct {
@@ -63,7 +89,7 @@ func (msg *Message) Execute(ctx context.Context, device agent.Device) []byte {
 		log.Println("Executing commands...")
 
 		// Select the correct interpreter
-		switch msg.InterpreterOverride {
+		switch msg.InterpreterOverride.Value {
 		// TODO: Support other interpreter
 		default:
 			return executeUsingPowershell(ctx, msg, device)

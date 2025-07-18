@@ -45,3 +45,48 @@ func TestErrorResultBytes(t *testing.T) {
 		t.Errorf("expected 'test error', got %s", out.Error)
 	}
 }
+
+func TestMessageCustomUnmarshal(t *testing.T) {
+	var msg Message
+	var err error
+
+	err = json.Unmarshal([]byte("{}"), &msg)
+	if err != nil {
+		t.Errorf("expected no error, got %v", err)
+	}
+	if msg.InterpreterOverride.Value != "" {
+		t.Errorf("expected '', got '%v'", msg.InterpreterOverride.Value)
+	}
+
+	err = json.Unmarshal([]byte("{\"interpreter_override\":false}"), &msg)
+	if err != nil {
+		t.Errorf("expected no error, got %v", err)
+	}
+	if msg.InterpreterOverride.Value != "" {
+		t.Errorf("expected '', got '%v'", msg.InterpreterOverride.Value)
+	}
+
+	err = json.Unmarshal([]byte("{\"interpreter_override\":true}"), &msg)
+	if err != nil {
+		t.Errorf("expected no error, got %v", err)
+	}
+	if msg.InterpreterOverride.Value != "true" {
+		t.Errorf("expected 'true', got '%v'", msg.InterpreterOverride.Value)
+	}
+
+	err = json.Unmarshal([]byte("{\"interpreter_override\":\"test\"}"), &msg)
+	if err != nil {
+		t.Errorf("expected no error, got %v", err)
+	}
+	if msg.InterpreterOverride.Value != "test" {
+		t.Errorf("expected 'test', got '%v'", msg.InterpreterOverride.Value)
+	}
+
+	err = json.Unmarshal([]byte("{\"interpreter_override\":\"\"}"), &msg)
+	if err != nil {
+		t.Errorf("expected no error, got %v", err)
+	}
+	if msg.InterpreterOverride.Value != "" {
+		t.Errorf("expected '', got '%v'", msg.InterpreterOverride.Value)
+	}
+}
