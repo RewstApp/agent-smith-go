@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"runtime"
+	"strings"
 	"time"
 
 	"github.com/RewstApp/agent-smith-go/internal/agent"
@@ -19,6 +20,10 @@ import (
 	"github.com/RewstApp/agent-smith-go/internal/utils"
 	"github.com/RewstApp/agent-smith-go/internal/version"
 )
+
+type errorResponse struct {
+	Error string `json:"error"`
+}
 
 func (service *serviceParams) Name() string {
 	return agent.GetServiceName(service.OrgId)
@@ -156,12 +161,6 @@ func (service *serviceParams) Execute(stop <-chan struct{}, running chan<- struc
 				}
 				defer res.Body.Close()
 
-				if res.StatusCode != http.StatusOK && res.StatusCode != http.StatusBadRequest {
-					log.Println("Postback", message.PostId, "failed with status code:", res.StatusCode)
-				} else {
-					log.Println("Postback", message.PostId, "sent")
-				}
-
 				// Show postback response body if not empty
 				bodyBytes, err := io.ReadAll(res.Body)
 				if err != nil {
@@ -169,9 +168,36 @@ func (service *serviceParams) Execute(stop <-chan struct{}, running chan<- struc
 					return
 				}
 
-				if len(bodyBytes) > 0 && res.StatusCode != http.StatusBadRequest {
-					log.Println(string(bodyBytes))
+				// Show success response
+				if res.StatusCode == http.StatusOK {
+					log.Println("Postback", message.PostId, "sent")
+					if len(bodyBytes) > 0 {
+						log.Println("Received response:", string(bodyBytes))
+					}
+					return
 				}
+
+				// Process error
+				var response errorResponse
+				err = json.Unmarshal(bodyBytes, &response)
+
+				// Error with different format
+				if err != nil {
+					log.Println("Postback", message.PostId, "failed with status code:", res.StatusCode)
+					if len(bodyBytes) > 0 {
+						log.Println("Received error response:", string(bodyBytes))
+					}
+					return
+				}
+
+				// Special error for webhook already fulfilled
+				if res.StatusCode == http.StatusBadRequest && strings.Contains(strings.ToLower(response.Error), "fulfilled") {
+					log.Println("Postback", message.PostId, "already sent")
+					return
+				}
+
+				// Standard error format
+				log.Println("Postback", message.PostId, "failed with status code:", res.StatusCode, "message:", response.Error)
 			}()
 		})
 
