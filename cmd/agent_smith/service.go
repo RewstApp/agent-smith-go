@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"os"
 	"runtime"
@@ -25,47 +24,62 @@ type errorResponse struct {
 	Error string `json:"error"`
 }
 
-func (service *serviceParams) Name() string {
-	return agent.GetServiceName(service.OrgId)
+func (svc *serviceParams) loadConfig() (agent.Device, error) {
+	var device agent.Device
+
+	// Read and parse the config file
+	configFileBytes, err := os.ReadFile(svc.ConfigFile)
+	if err != nil {
+		return device, err
+	}
+
+	// Decode the config file
+	err = json.Unmarshal(configFileBytes, &device)
+	if err != nil {
+		return device, err
+	}
+
+	return device, nil
 }
 
-func (service *serviceParams) Execute(stop <-chan struct{}, running chan<- struct{}) int {
+func (svc *serviceParams) loadLog() (*os.File, error) {
+	logFile, err := os.OpenFile(svc.LogFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, utils.DefaultFileMod)
+	if err != nil {
+		return nil, err
+	}
+
+	return logFile, nil
+}
+
+func (svc *serviceParams) Name() string {
+	return agent.GetServiceName(svc.OrgId)
+}
+
+func (svc *serviceParams) Execute(stop <-chan struct{}, running chan<- struct{}) service.ServiceExitCode {
 	// Create context to cancel running commands
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// Configure the logger
-	logFile, err := os.OpenFile(service.LogFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	// Load config
+	device, err := svc.loadConfig()
 	if err != nil {
-		return 1
+		return service.ConfigError
+	}
+
+	// Configure the logger
+	logFile, err := svc.loadLog()
+	if err != nil {
+		return service.LogFileError
 	}
 	defer logFile.Close()
-	utils.ConfigureLogger("agent_smith", logFile)
+	logger := utils.ConfigureLogger("agent_smith", logFile, device.LoggingLevel)
 
 	// Show header
-	log.Println("Agent Smith Version:", version.Version)
-	log.Println("Running on:", runtime.GOOS)
+	logger.Info("Agent Smith started", "version", version.Version, "os", runtime.GOOS, "device_id", device.DeviceId)
 
 	defer func() {
-		log.Println("Service stopped")
+		logger.Info("Service stopped")
 	}()
-
-	// Read and parse the config file
-	configFileBytes, err := os.ReadFile(service.ConfigFile)
-	if err != nil {
-		log.Println("Failed to read config:", err)
-		return 1
-	}
-
-	var device agent.Device
-
-	err = json.Unmarshal(configFileBytes, &device)
-	if err != nil {
-		log.Println("Failed to parse config:", err)
-		return 1
-	}
-
-	log.Println("Device ID:", device.DeviceId)
 
 	// Create a channel for stopped signal
 	stopped := make(chan struct{})
@@ -88,12 +102,12 @@ func (service *serviceParams) Execute(stop <-chan struct{}, running chan<- struc
 	for {
 		// Wait for the timeout
 		if rg.Timeout() > 0 {
-			log.Println("Reconnecting in", rg.Timeout())
+			logger.Info("Reconnecting in", "timeout", rg.Timeout())
 			select {
 			case <-stopped:
 				return 0
 			case <-time.After(rg.Timeout()):
-				log.Println("Reconnecting...")
+				logger.Info("Reconnecting...")
 			}
 		}
 
@@ -106,8 +120,8 @@ func (service *serviceParams) Execute(stop <-chan struct{}, running chan<- struc
 		// Create MQTT options
 		opts, err := mqtt.NewClientOptions(device)
 		if err != nil {
-			log.Println("Failed to create client options:", err)
-			return 1
+			logger.Error("Failed to create client options", "error", err)
+			return service.GenericError
 		}
 
 		// Manually handle auto reconnection
@@ -115,7 +129,7 @@ func (service *serviceParams) Execute(stop <-chan struct{}, running chan<- struc
 
 		// Add event handlers
 		opts.OnConnectionLost = func(client mqtt.Client, err error) {
-			log.Println("Connection lost:", err)
+			logger.Error("Connection lost", "error", err)
 			lost <- struct{}{}
 		}
 
@@ -124,7 +138,7 @@ func (service *serviceParams) Execute(stop <-chan struct{}, running chan<- struc
 		token := client.Connect()
 
 		if token.Wait() && token.Error() != nil {
-			log.Println("Failed to connect:", token.Error())
+			logger.Error("Failed to connect", "error", token.Error())
 			continue
 		}
 		defer client.Disconnect((uint)(mqtt.DefaultDisconnectQuiesce / time.Millisecond))
@@ -137,7 +151,7 @@ func (service *serviceParams) Execute(stop <-chan struct{}, running chan<- struc
 				var message interpreter.Message
 				err := message.Parse(msg.Payload())
 				if err != nil {
-					log.Println("Parse failed:", err)
+					logger.Error("Parse failed", "error", err)
 					return
 				}
 
@@ -147,16 +161,16 @@ func (service *serviceParams) Execute(stop <-chan struct{}, running chan<- struc
 				// Postback the response
 				postbackReq, err := message.CreatePostbackRequest(ctx, device, bytes.NewReader(resultBytes))
 				if err != nil {
-					log.Println("Failed to create postback request:", err)
+					logger.Error("Failed to create postback request", "error", err)
 					return
 				}
 
 				// Send the postback
-				log.Println("Sending Postback", message.PostId, "to", postbackReq.URL, "...")
+				logger.Info("Sending postback", "post_id", message.PostId, "url", postbackReq.URL)
 				client := &http.Client{}
 				res, err := client.Do(postbackReq)
 				if err != nil {
-					log.Println("Failed to send postback:", err)
+					logger.Error("Failed to send postback", "error", err)
 					return
 				}
 				defer res.Body.Close()
@@ -164,15 +178,15 @@ func (service *serviceParams) Execute(stop <-chan struct{}, running chan<- struc
 				// Show postback response body if not empty
 				bodyBytes, err := io.ReadAll(res.Body)
 				if err != nil {
-					log.Println("Failed to read postback response body:", err)
+					logger.Error("Failed to read postback response body", "error", err)
 					return
 				}
 
 				// Show success response
 				if res.StatusCode == http.StatusOK {
-					log.Println("Postback", message.PostId, "sent")
+					logger.Info("Postback sent", "post_id", message.PostId)
 					if len(bodyBytes) > 0 {
-						log.Println("Received response:", string(bodyBytes))
+						logger.Info("Received response", "data", string(bodyBytes))
 					}
 					return
 				}
@@ -183,31 +197,31 @@ func (service *serviceParams) Execute(stop <-chan struct{}, running chan<- struc
 
 				// Error with different format
 				if err != nil {
-					log.Println("Postback", message.PostId, "failed with status code:", res.StatusCode)
+					logger.Error("Postback failed", "post_id", message.PostId, "status_code", res.StatusCode)
 					if len(bodyBytes) > 0 {
-						log.Println("Received error response:", string(bodyBytes))
+						logger.Error("Received error response", "data", string(bodyBytes))
 					}
 					return
 				}
 
 				// Special error for webhook already fulfilled
 				if res.StatusCode == http.StatusBadRequest && strings.Contains(strings.ToLower(response.Error), "fulfilled") {
-					log.Println("Postback", message.PostId, "already sent")
+					logger.Info("Postback already sent", "post_id", message.PostId)
 					return
 				}
 
 				// Standard error format
-				log.Println("Postback", message.PostId, "failed with status code:", res.StatusCode, "message:", response.Error)
+				logger.Error("Postback failed", "post_id", message.PostId, "status_code", res.StatusCode, "message", response.Error)
 			}()
 		})
 
 		if token.Wait() && token.Error() != nil {
-			log.Println("Failed to subscribe:", err)
+			logger.Error("Failed to subscribe", "error", err)
 			continue
 		}
 
 		// Complete initialization
-		log.Println("Subscribed to messages")
+		logger.Info("Subscribed to messages")
 
 		// Reset the timeout
 		rg.Clear()
@@ -224,10 +238,6 @@ func (service *serviceParams) Execute(stop <-chan struct{}, running chan<- struc
 }
 
 func runService(params *serviceParams) {
-	exitCode, err := service.Run(params)
-	if err != nil {
-		log.Println("Failed to run service:", err)
-	}
-
+	exitCode, _ := service.Run(params)
 	os.Exit(exitCode)
 }

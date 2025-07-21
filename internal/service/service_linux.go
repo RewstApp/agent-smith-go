@@ -137,5 +137,5 @@ func Run(runner Runner) (int, error) {
 	// Execute the runner
 	exitCode := runner.Execute(stop, running)
 
-	return exitCode, nil
+	return int(exitCode), nil
 }
