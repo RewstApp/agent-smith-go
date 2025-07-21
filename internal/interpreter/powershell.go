@@ -1,6 +1,7 @@
 package interpreter
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -16,7 +17,8 @@ import (
 )
 
 type result struct {
-	ExitCode int `json:"exitCode"`
+	Error  string `json:"error"`
+	Output string `json:"output"`
 }
 
 func executeUsingPowershell(ctx context.Context, message *Message, device agent.Device) []byte {
@@ -61,7 +63,11 @@ func executeUsingPowershell(ctx context.Context, message *Message, device agent.
 	// Close the temporary file
 	tempfile.Close()
 
+	var stdoutBuf, stderrBuf bytes.Buffer
 	cmd := exec.CommandContext(ctx, shell, "-File", tempfile.Name())
+	cmd.Stdout = &stdoutBuf
+	cmd.Stderr = &stderrBuf
+
 	err = cmd.Run()
 	if err != nil {
 		return errorResultBytes(err)
@@ -72,7 +78,7 @@ func executeUsingPowershell(ctx context.Context, message *Message, device agent.
 
 	log.Println("Command", message.PostId, "completed with exit code:", cmd.ProcessState.ExitCode())
 
-	result := result{ExitCode: cmd.ProcessState.ExitCode()}
+	result := result{Error: stderrBuf.String(), Output: stdoutBuf.String()}
 	resultBytes, err := json.MarshalIndent(&result, "", "  ")
 	if err != nil {
 		return errorResultBytes(err)
