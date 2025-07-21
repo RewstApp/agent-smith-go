@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"fmt"
+	"log"
 	"os"
 	"strings"
 
@@ -57,22 +58,22 @@ func (hostInfo *HostInfo) Load(ctx context.Context, orgId string) error {
 
 	adDomain, err := getAdDomain(ctx)
 	if err != nil {
-		return err
+		log.Println("[WARN] Could not retrieve AD Domain:", err)
 	}
 
 	isAdDomainController, err := getIsAdDomainController(ctx)
 	if err != nil {
-		return err
+		log.Println("[WARN] Could not retrieve AD Domain Controller:", err)
 	}
 
 	isEntraConnectServer, err := getIsEntraConnectServer()
 	if err != nil {
-		return err
+		log.Println("[WARN] Could not retrieve Entra Connect Server:", err)
 	}
 
 	entraDomain, err := getEntraDomain(ctx)
 	if err != nil {
-		return err
+		log.Println("[WARN] Could not retrieve Entra Domain:", err)
 	}
 
 	agentExecutablePath := GetAgentExecutablePath(orgId)
