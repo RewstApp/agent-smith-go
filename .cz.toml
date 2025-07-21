@@ -2,4 +2,4 @@
 name = "cz_conventional_commits"
 tag_format = "v$version"
 version_scheme = "semver"
-version = "0.4.3"
+version = "0.4.4"
