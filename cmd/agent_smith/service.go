@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"os"
 	"os/exec"
@@ -77,7 +76,7 @@ func (svc *serviceParams) Name() string {
 	return agent.GetServiceName(svc.OrgId)
 }
 
-func (service *serviceParams) Execute(stop <-chan struct{}, running chan<- struct{}) int {
+func (svc *serviceParams) Execute(stop <-chan struct{}, running chan<- struct{}) service.ServiceExitCode {
 	// Create context to cancel running commands
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -129,7 +128,7 @@ func (service *serviceParams) Execute(stop <-chan struct{}, running chan<- struc
 		HandshakeConfig: handshakeConfig,
 		Plugins:         pluginMap,
 		Cmd:             exec.Command(pluginPath),
-		Stderr:          log.Writer(),
+		Stderr:          logFile,
 	})
 	defer client.Kill()
 
@@ -151,21 +150,6 @@ func (service *serviceParams) Execute(stop <-chan struct{}, running chan<- struc
 	// implementation but is in fact over an RPC connection.
 	notifier := raw.(shared.Notifier)
 	// END USE THE PLUGIN
-
-	// Read and parse the config file
-	configFileBytes, err := os.ReadFile(service.ConfigFile)
-	if err != nil {
-		log.Println("Failed to read config:", err)
-		return 1
-	}
-
-	var device agent.Device
-
-	err = json.Unmarshal(configFileBytes, &device)
-	if err != nil {
-		log.Println("Failed to parse config:", err)
-		return 1
-	}
 
 	// Create a channel for stopped signal
 	stopped := make(chan struct{})
