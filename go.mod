@@ -6,6 +6,7 @@ require golang.org/x/text v0.23.0
 
 require (
 	github.com/eclipse/paho.mqtt.golang v1.5.0
+	github.com/hashicorp/go-hclog v1.6.3
 	github.com/shirou/gopsutil/v4 v4.25.1
 	golang.org/x/sys v0.31.0
 )
@@ -15,7 +16,6 @@ require (
 	github.com/fatih/color v1.13.0 // indirect
 	github.com/go-ole/go-ole v1.3.0 // indirect
 	github.com/gorilla/websocket v1.5.3 // indirect
-	github.com/hashicorp/go-hclog v1.6.3 // indirect
 	github.com/lufia/plan9stats v0.0.0-20211012122336-39d0f177ccd0 // indirect
 	github.com/mattn/go-colorable v0.1.12 // indirect
 	github.com/mattn/go-isatty v0.0.14 // indirect
