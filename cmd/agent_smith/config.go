@@ -21,7 +21,7 @@ type fetchConfigurationResponse struct {
 }
 
 func runConfig(params *configParams) {
-	logger := utils.ConfigureLogger("agent_smith", os.Stdout, utils.Info)
+	logger := utils.ConfigureLogger("agent_smith", os.Stdout, utils.Default)
 
 	// Show header
 	logger.Info("Agent Smith started", "version", version.Version, "os", runtime.GOOS)
@@ -78,6 +78,7 @@ func runConfig(params *configParams) {
 		logger.Error("Failed to parse response", "error", err)
 		return
 	}
+	response.Configuration.LoggingLevel = utils.LoggingLevel(params.LoggingLevel)
 
 	// Create the data directory
 	dataDir := agent.GetDataDirectory(params.OrgId)

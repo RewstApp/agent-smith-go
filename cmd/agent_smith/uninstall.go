@@ -14,7 +14,7 @@ import (
 const serviceExecutableTimeout = time.Second * 5
 
 func runUninstall(params *uninstallParams) {
-	logger := utils.ConfigureLogger("agent_smith", os.Stdout, utils.Info)
+	logger := utils.ConfigureLogger("agent_smith", os.Stdout, utils.Default)
 
 	// Show header
 	logger.Info("Agent Smith started", "version", version.Version, "os", runtime.GOOS)
