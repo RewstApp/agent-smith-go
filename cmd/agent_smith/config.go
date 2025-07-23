@@ -28,7 +28,7 @@ func runConfig(params *configParams) {
 
 	// Get installation paths data
 	var pathsData agent.PathsData
-	err := pathsData.Load(context.Background(), params.OrgId)
+	err := pathsData.Load(context.Background(), params.OrgId, logger)
 	if err != nil {
 		logger.Error("Failed to read paths", "error", err)
 		return

@@ -5,13 +5,13 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
-	"log"
 	"os"
 	"os/exec"
 	"runtime"
 
 	"github.com/RewstApp/agent-smith-go/internal/agent"
 	"github.com/RewstApp/agent-smith-go/internal/utils"
+	"github.com/hashicorp/go-hclog"
 	"golang.org/x/text/encoding/unicode"
 	"golang.org/x/text/transform"
 )
@@ -21,7 +21,7 @@ type result struct {
 	Output string `json:"output"`
 }
 
-func executeUsingPowershell(ctx context.Context, message *Message, device agent.Device) []byte {
+func executeUsingPowershell(ctx context.Context, message *Message, device agent.Device, logger hclog.Logger) []byte {
 	// Parse the commands
 	commandBytes, err := base64.StdEncoding.DecodeString(*message.Commands)
 	if err != nil {
@@ -58,7 +58,7 @@ func executeUsingPowershell(ctx context.Context, message *Message, device agent.
 		return errorResultBytes(err)
 	}
 
-	log.Println("Command", message.PostId, "saved to", tempfile.Name())
+	logger.Info("Command saved to", "message_id", message.PostId, "path", tempfile.Name())
 
 	// Close the temporary file
 	tempfile.Close()
@@ -76,7 +76,7 @@ func executeUsingPowershell(ctx context.Context, message *Message, device agent.
 	// Remove successfully executed temporary filename
 	defer os.Remove(tempfile.Name())
 
-	log.Println("Command", message.PostId, "completed with exit code:", cmd.ProcessState.ExitCode())
+	logger.Info("Command completed", "message_id", message.PostId, "exit_code", cmd.ProcessState.ExitCode())
 
 	result := result{Error: stderrBuf.String(), Output: stdoutBuf.String()}
 	resultBytes, err := json.MarshalIndent(&result, "", "  ")

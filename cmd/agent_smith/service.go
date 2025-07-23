@@ -156,7 +156,7 @@ func (svc *serviceParams) Execute(stop <-chan struct{}, running chan<- struct{})
 				}
 
 				// Execute the message
-				resultBytes := message.Execute(ctx, device)
+				resultBytes := message.Execute(ctx, device, logger)
 
 				// Postback the response
 				postbackReq, err := message.CreatePostbackRequest(ctx, device, bytes.NewReader(resultBytes))

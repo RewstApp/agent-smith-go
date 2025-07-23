@@ -1,6 +1,10 @@
 package agent
 
-import "context"
+import (
+	"context"
+
+	"github.com/hashicorp/go-hclog"
+)
 
 type PathsData struct {
 	ServiceExecutablePath string   `json:"service_executable_path"`
@@ -10,11 +14,11 @@ type PathsData struct {
 	Tags                  HostInfo `json:"tags"`
 }
 
-func (paths *PathsData) Load(ctx context.Context, orgId string) error {
+func (paths *PathsData) Load(ctx context.Context, orgId string, logger hclog.Logger) error {
 	paths.ServiceExecutablePath = GetServiceExecutablePath(orgId)
 	paths.AgentExecutablePath = GetAgentExecutablePath(orgId)
 	paths.ConfigFilePath = GetConfigFilePath(orgId)
 	paths.ServiceManagerPath = GetServiceManagerPath(orgId)
 
-	return paths.Tags.Load(ctx, orgId)
+	return paths.Tags.Load(ctx, orgId, logger)
 }

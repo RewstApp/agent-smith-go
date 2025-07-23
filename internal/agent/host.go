@@ -3,11 +3,11 @@ package agent
 import (
 	"context"
 	"fmt"
-	"log"
 	"os"
 	"strings"
 
 	"github.com/RewstApp/agent-smith-go/internal/version"
+	"github.com/hashicorp/go-hclog"
 	"github.com/shirou/gopsutil/v4/cpu"
 	"github.com/shirou/gopsutil/v4/host"
 	"github.com/shirou/gopsutil/v4/mem"
@@ -29,7 +29,7 @@ type HostInfo struct {
 	OrgId                 string  `json:"org_id"`
 }
 
-func (hostInfo *HostInfo) Load(ctx context.Context, orgId string) error {
+func (hostInfo *HostInfo) Load(ctx context.Context, orgId string, logger hclog.Logger) error {
 	// Get stat objects
 	hostStat, err := host.Info()
 	if err != nil {
@@ -58,22 +58,22 @@ func (hostInfo *HostInfo) Load(ctx context.Context, orgId string) error {
 
 	adDomain, err := getAdDomain(ctx)
 	if err != nil {
-		log.Println("[WARN] Could not retrieve AD Domain:", err)
+		logger.Warn("Could not retrieve AD Domain", "error", err)
 	}
 
 	isAdDomainController, err := getIsAdDomainController(ctx)
 	if err != nil {
-		log.Println("[WARN] Could not retrieve AD Domain Controller:", err)
+		logger.Warn("Could not retrieve AD Domain Controller", "error", err)
 	}
 
 	isEntraConnectServer, err := getIsEntraConnectServer()
 	if err != nil {
-		log.Println("[WARN] Could not retrieve Entra Connect Server:", err)
+		logger.Warn("Could not retrieve Entra Connect Server", "error", err)
 	}
 
 	entraDomain, err := getEntraDomain(ctx)
 	if err != nil {
-		log.Println("[WARN] Could not retrieve Entra Domain:", err)
+		logger.Warn("Could not retrieve Entra Domain", "error", err)
 	}
 
 	agentExecutablePath := GetAgentExecutablePath(orgId)
