@@ -1,79 +1,80 @@
 package main
 
 import (
-	"log"
 	"os"
 	"runtime"
 	"time"
 
 	"github.com/RewstApp/agent-smith-go/internal/agent"
 	"github.com/RewstApp/agent-smith-go/internal/service"
+	"github.com/RewstApp/agent-smith-go/internal/utils"
 	"github.com/RewstApp/agent-smith-go/internal/version"
 )
 
 const serviceExecutableTimeout = time.Second * 5
 
 func runUninstall(params *uninstallParams) {
+	logger := utils.ConfigureLogger("agent_smith", os.Stdout, utils.Default)
+
 	// Show header
-	log.Println("Agent Smith Version:", version.Version)
-	log.Println("Running on:", runtime.GOOS)
+	logger.Info("Agent Smith started", "version", version.Version, "os", runtime.GOOS)
 
 	name := agent.GetServiceName(params.OrgId)
 
 	service, err := service.Open(name)
 	if err != nil {
-		log.Println("Failed to open service", name, ":", err)
+		logger.Error("Failed to open service", "service", name, "error", err)
 		return
 	}
 	defer service.Close()
 
 	if service.IsActive() {
-		log.Println("Stopping service", name, "...")
+		logger.Info("Stopping service", "service", name)
 		err = service.Stop()
 		if err != nil {
-			log.Println("Failed to stop service:", err)
+			logger.Error("Failed to stop service", "error", err)
 			return
 		}
 
-		log.Println(name, "stopped")
+		logger.Info("Service stopped", "service", name)
 	}
 
 	// Delete the service
 	err = service.Delete()
 	if err != nil {
-		log.Println("Failed to delete service:", err)
+		logger.Error("Failed to delete service", "error", err)
 		return
 	}
-	log.Println(name, "deleted")
+	logger.Info("Service deleted", "service", name)
 
 	// Wait for some time for the service executable to clean up
-	log.Println("Waiting for service executable to stop...")
+	logger.Info("Waiting for service executable to stop")
 	time.Sleep(serviceExecutableTimeout)
 
 	// Delete data directory
 	dataDir := agent.GetDataDirectory(params.OrgId)
 	err = os.RemoveAll(dataDir)
 	if err != nil {
-		log.Println("Failed to delete directory", dataDir, ":", err)
+		logger.Error("Failed to delete directory", "directory", dataDir, "error", err)
 		return
 	}
-	log.Println(dataDir, "deleted")
+	logger.Info("Directory deleted", "directory", dataDir)
 
 	// Delete program directory
 	programDir := agent.GetProgramDirectory(params.OrgId)
 	err = os.RemoveAll(programDir)
 	if err != nil {
-		log.Println("Failed to delete directory", programDir, ":", err)
+		logger.Error("Failed to delete directory", "directory", programDir, "error", err)
 		return
 	}
-	log.Println(programDir, "deleted")
+	logger.Info("Directory deleted", "directory", programDir)
 
 	// Delete scripts directory
 	scriptsDir := agent.GetScriptsDirectory(params.OrgId)
 	err = os.RemoveAll(scriptsDir)
 	if err != nil {
-		log.Println("Failed to delete directory", scriptsDir, ":", err)
+		logger.Error("Failed to delete directory", "directory", scriptsDir, "error", err)
 		return
 	}
-	log.Println(scriptsDir, "deleted")
+	logger.Info("Directory deleted", "directory", scriptsDir)
 }

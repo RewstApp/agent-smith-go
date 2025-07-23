@@ -5,11 +5,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"strings"
 
 	"github.com/RewstApp/agent-smith-go/internal/agent"
+	"github.com/hashicorp/go-hclog"
 )
 
 type errorResult struct {
@@ -83,26 +83,26 @@ func (msg *Message) Parse(data []byte) error {
 	return json.Unmarshal(data, msg)
 }
 
-func (msg *Message) Execute(ctx context.Context, device agent.Device) []byte {
+func (msg *Message) Execute(ctx context.Context, device agent.Device, logger hclog.Logger) []byte {
 	// Execute commands if given
 	if msg.Commands != nil {
-		log.Println("Executing commands...")
+		logger.Info("Executing commands...")
 
 		// Select the correct interpreter
 		switch msg.InterpreterOverride.Value {
 		// TODO: Support other interpreter
 		default:
-			return executeUsingPowershell(ctx, msg, device)
+			return executeUsingPowershell(ctx, msg, device, logger)
 		}
 	}
 
 	// Get installation data if given
 	if msg.GetInstallation != nil && *msg.GetInstallation {
-		log.Println("Executing get_installation...")
+		logger.Info("Executing get_installation...")
 
 		// Load the paths data
 		var paths agent.PathsData
-		err := paths.Load(ctx, device.RewstOrgId)
+		err := paths.Load(ctx, device.RewstOrgId, logger)
 		if err != nil {
 			return errorResultBytes(err)
 		}

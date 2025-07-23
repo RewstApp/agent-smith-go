@@ -16,7 +16,15 @@ type Service interface {
 	IsActive() bool
 }
 
+type ServiceExitCode int
+
+const (
+	GenericError ServiceExitCode = 1
+	ConfigError  ServiceExitCode = 2
+	LogFileError ServiceExitCode = 3
+)
+
 type Runner interface {
 	Name() string
-	Execute(stop <-chan struct{}, running chan<- struct{}) int
+	Execute(stop <-chan struct{}, running chan<- struct{}) ServiceExitCode
 }

@@ -1,5 +1,9 @@
 # Agent Smith
-This is an implementation of agent smith using Golang.
+[![Test](https://github.com/RewstApp/agent-smith-go/actions/workflows/test.yml/badge.svg)](https://github.com/RewstApp/agent-smith-go/actions/workflows/test.yml)
+[![CodeQL](https://github.com/RewstApp/agent-smith-go/actions/workflows/github-code-scanning/codeql/badge.svg)](https://github.com/RewstApp/agent-smith-go/actions/workflows/github-code-scanning/codeql)
+[![Release](https://github.com/RewstApp/agent-smith-go/actions/workflows/release.yml/badge.svg)](https://github.com/RewstApp/agent-smith-go/actions/workflows/release.yml)
+
+Rewst's lean, open-source command executor that fits right into your Rewst workflows. See [community corner](https://docs.rewst.help/documentation/agent-smith) for more details.
 
 ## Build
 Required tools and packages:
@@ -21,50 +25,15 @@ Run the following command using `powershell` or `pwsh` to build the binary:
 ./scripts/build.ps1
 ```
 
-## Directory Structure
+## Contributing
+Contributions are always welcome. Please submit a PR!
+
+Please use commitizen to format the commit messages. After staging your changes, you can commit the changes with this command.
+
 ```
-agent-smith-go/
-├── cmd/                  # Main applications of the project
-│   ├── app1/
-│   │   └── main.go       # Entry point for application 1
-│   └── app2/
-│       └── main.go       # Entry point for application 2
-├── pkg/                  # Public libraries and reusable code
-│   ├── module1/
-│   │   ├── module1.go
-│   │   └── module1_test.go
-│   └── module2/
-│       ├── module2.go
-│       └── module2_test.go
-├── internal/             # Private application and library code
-│   ├── service1/
-│   │   ├── service1.go
-│   │   └── service1_test.go
-│   └── service2/
-│       ├── service2.go
-│       └── service2_test.go
-├── configs/              # Configuration files (e.g., JSON, YAML, etc.)
-│   ├── app1-config.yaml
-│   └── app2-config.yaml
-├── scripts/              # Scripts for automation and build
-│   ├── build.sh
-│   ├── deploy.sh
-│   └── test.sh
-├── api/                  # API definition files (e.g., OpenAPI/Swagger, gRPC)
-│   ├── proto/
-│   │   ├── service1.proto
-│   │   └── service2.proto
-│   └── swagger.yaml
-├── docs/                 # Documentation
-│   ├── README.md
-│   ├── DESIGN.md
-│   └── API.md
-├── tests/                # Integration or end-to-end tests
-│   ├── test1.go
-│   └── test2.go
-├── vendor/               # Dependency management (used with `go mod vendor`)
-├── .gitignore            # Git ignore file
-├── go.mod                # Go module file
-├── go.sum                # Go checksum file
-└── README.md             # Project overview and instructions
+cz commit
 ```
+
+## License
+
+Agent Smith is licensed under `GNU GENERAL PUBLIC LICENSE`. See license file for details.

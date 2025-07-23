@@ -141,7 +141,7 @@ func (host *windowsRunner) Execute(args []string, request <-chan svc.ChangeReque
 	}()
 
 	// Execute the runner
-	host.exitCode = host.runner.Execute(stop, running)
+	host.exitCode = int(host.runner.Execute(stop, running))
 	response <- svc.Status{State: svc.Stopped}
 
 	// Return the proper response
