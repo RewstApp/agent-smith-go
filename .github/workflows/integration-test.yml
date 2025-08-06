@@ -160,7 +160,7 @@ jobs:
         id: get_device_id
         shell: bash
         run: |
-          echo "value=$(cat /Library/Application Support/rewst_remote_agent/${{ vars.IT_ORG_ID }}/config.json | jq -r '.device_id')" >> "$GITHUB_OUTPUT"
+          echo "value=$(cat "/Library/Application Support/rewst_remote_agent/${{ vars.IT_ORG_ID }}/config.json" | jq -r '.device_id')" >> "$GITHUB_OUTPUT"
 
       - name: Send test command
         shell: bash
