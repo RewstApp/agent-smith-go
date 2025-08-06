@@ -146,24 +146,24 @@ jobs:
 
       - name: Install agent
         id: install_agent
-        shell: zsh
+        shell: bash
         run: |
           sudo ./dist/rewst_agent_config.mac-os.bin --config-url ${{ vars.IT_CONFIG_URL }} --config-secret ${{ secrets.IT_CONFIG_SECRET }} --org-id ${{ vars.IT_ORG_ID }}
           echo "service=io.rewst.remote_agent_${{ vars.IT_ORG_ID }}" >> $GITHUB_OUTPUT
 
       - name: Check service
-        shell: zsh
+        shell: bash
         run: |
           sudo launchctl print system/${{ steps.install_agent.outputs.service }}
 
       - name: Get device id
         id: get_device_id
-        shell: zsh
+        shell: bash
         run: |
           echo "value=$(cat /Library/Application Support/rewst_remote_agent/${{ vars.IT_ORG_ID }}/config.json | jq -r '.device_id')" >> "$GITHUB_OUTPUT"
 
       - name: Send test command
-        shell: zsh
+        shell: bash
         run: |
           curl --location '${{ vars.IT_SEND_COMMAND_TRIGGER_URL }}' \
           --form 'device_id="${{ steps.get_device_id.outputs.value }}"' \
@@ -179,7 +179,7 @@ jobs:
           Invoke-RestMethod -Method \"Post\" -Uri $post_url -Body $postData -ContentType \"application/json\""'
 
       - name: Uninstall agent
-        shell: zsh
+        shell: bash
         run: |
           sudo ./dist/rewst_agent_config.mac-os.bin --uninstall --org-id ${{ vars.IT_ORG_ID }}
 
