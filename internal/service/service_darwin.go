@@ -123,6 +123,12 @@ func Create(params AgentParams) (Service, error) {
 	serviceConfig.WriteString("<key>KeepAlive</key>\n")
 	serviceConfig.WriteString("<true/>\n")
 
+	serviceConfig.WriteString("<key>EnvironmentVariables</key>\n")
+	serviceConfig.WriteString("<dict>\n")
+	serviceConfig.WriteString("<key>PATH</key>\n")
+	serviceConfig.WriteString("<string>/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>\n")
+	serviceConfig.WriteString("</dict>\n")
+
 	serviceConfig.WriteString("</dict>\n")
 	serviceConfig.WriteString("</plist>\n")
 
