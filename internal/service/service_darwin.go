@@ -109,7 +109,7 @@ func Create(params AgentParams) (Service, error) {
 	serviceConfig.WriteString("</string>\n")
 	serviceConfig.WriteString("<string>--config-file</string>\n")
 	serviceConfig.WriteString("<string>")
-	serviceConfig.WriteString(params.OrgId)
+	serviceConfig.WriteString(params.ConfigFilePath)
 	serviceConfig.WriteString("</string>\n")
 	serviceConfig.WriteString("<string>--log-file</string>\n")
 	serviceConfig.WriteString("<string>")
