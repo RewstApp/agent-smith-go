@@ -73,7 +73,7 @@ func (svc *darwinService) IsActive() bool {
 	}
 
 	// Find the line that contains the service name
-	for _, line := range strings.Split(string(out), "\n") {
+	for line := range strings.SplitSeq(string(out), "\n") {
 		if strings.Contains(line, svc.name) {
 			return true
 		}
@@ -139,6 +139,11 @@ func Create(params AgentParams) (Service, error) {
 }
 
 func Open(name string) (Service, error) {
+	_, err := runLaunchCtl("print", fmt.Sprintf("system/%s", name))
+	if err != nil {
+		return nil, err
+	}
+
 	return &darwinService{
 		name: name,
 	}, nil
