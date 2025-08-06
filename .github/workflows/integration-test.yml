@@ -1,17 +1,30 @@
 name: Integration Test
 
-on: workflow_dispatch
+on:
+  workflow_dispatch:
+    inputs:
+      os:
+        description: "Platform to test"
+        required: true
+        type: choice
+        options:
+          - windows-latest
+          - ubuntu-latest
+          - macos-latest
 
 jobs:
   build:
     permissions:
       contents: read
     uses: ./.github/workflows/build.yml
+    with:
+      os_list: "['${{ inputs.os }}']"
 
   test-ubuntu-latest:
     permissions:
       contents: read
     needs: build
+    if: inputs.os == 'ubuntu-latest'
     runs-on: ubuntu-latest
     steps:
       - name: Download compiled binary
@@ -74,6 +87,7 @@ jobs:
     permissions:
       contents: read
     needs: build
+    if: inputs.os == 'windows-latest'
     runs-on: windows-latest
     steps:
       - name: Download compiled binary
@@ -133,6 +147,7 @@ jobs:
     permissions:
       contents: read
     needs: build
+    if: inputs.os == 'macos-latest'
     runs-on: macos-latest
     steps:
       - name: Download compiled binary
