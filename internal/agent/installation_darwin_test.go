@@ -56,7 +56,7 @@ func TestGetAgentExecutablePath(t *testing.T) {
 	setEnvVars(t)
 
 	orgId := "org123"
-	expected := filepath.Join("/usr/local/bin", "rewst_remote_agent", orgId, "agent_smith.linux.bin")
+	expected := filepath.Join("/usr/local/bin", "rewst_remote_agent", orgId, "agent_smith.mac-os.bin")
 
 	result := GetAgentExecutablePath(orgId)
 
