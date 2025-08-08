@@ -116,7 +116,7 @@ jobs:
 
           # Start of typed powershell
           $PS_Results | Add-Member -MemberType NoteProperty -Name \"error\" -Value \"\"
-          $PS_Results | Add-Member -MemberType NoteProperty -Name \"output\" -Value \"hello world\\n\"
+          $PS_Results | Add-Member -MemberType NoteProperty -Name \"output\" -Value \"hello world\n\"
 
           # Post results back to Rewst
           $postData = $PS_Results | ConvertTo-Json
