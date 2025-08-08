@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"runtime"
 	"strings"
 
 	"github.com/RewstApp/agent-smith-go/internal/agent"
@@ -26,6 +27,20 @@ func errorResultBytes(err error) []byte {
 	}
 
 	return bytes
+}
+
+type result struct {
+	Error  string `json:"error"`
+	Output string `json:"output"`
+}
+
+func resultBytes(result *result) []byte {
+	resultBytes, err := json.MarshalIndent(result, "", "  ")
+	if err != nil {
+		return errorResultBytes(err)
+	}
+
+	return resultBytes
 }
 
 type StringFalse struct {
@@ -90,9 +105,17 @@ func (msg *Message) Execute(ctx context.Context, device agent.Device, logger hcl
 
 		// Select the correct interpreter
 		switch msg.InterpreterOverride.Value {
-		// TODO: Support other interpreter
-		default:
+		case "pwsh":
+		case "powershell":
 			return executeUsingPowershell(ctx, msg, device, logger)
+		case "bash":
+			return executeUsingBash(ctx, msg, device, logger)
+		default:
+			if runtime.GOOS == "windows" {
+				return executeUsingPowershell(ctx, msg, device, logger)
+			} else {
+				return executeUsingBash(ctx, msg, device, logger)
+			}
 		}
 	}
 
