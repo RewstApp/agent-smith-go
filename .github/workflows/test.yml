@@ -12,6 +12,7 @@ jobs:
         os:
           - windows-latest
           - ubuntu-latest
+          - macos-latest
     runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout code
@@ -22,5 +23,5 @@ jobs:
         with:
           go-version: "1.24.0"
 
-      - name: Rum all tests
+      - name: Run all tests
         run: go test ./...

@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
-	"encoding/json"
 	"os"
 	"os/exec"
 	"runtime"
@@ -15,11 +14,6 @@ import (
 	"golang.org/x/text/encoding/unicode"
 	"golang.org/x/text/transform"
 )
-
-type result struct {
-	Error  string `json:"error"`
-	Output string `json:"output"`
-}
 
 func executeUsingPowershell(ctx context.Context, message *Message, device agent.Device, logger hclog.Logger) []byte {
 	// Parse the commands
@@ -70,7 +64,7 @@ func executeUsingPowershell(ctx context.Context, message *Message, device agent.
 
 	err = cmd.Run()
 	if err != nil {
-		return errorResultBytes(err)
+		return resultBytes(&result{Error: stderrBuf.String(), Output: stdoutBuf.String()})
 	}
 
 	// Remove successfully executed temporary filename
@@ -78,11 +72,5 @@ func executeUsingPowershell(ctx context.Context, message *Message, device agent.
 
 	logger.Info("Command completed", "message_id", message.PostId, "exit_code", cmd.ProcessState.ExitCode())
 
-	result := result{Error: stderrBuf.String(), Output: stdoutBuf.String()}
-	resultBytes, err := json.MarshalIndent(&result, "", "  ")
-	if err != nil {
-		return errorResultBytes(err)
-	}
-
-	return resultBytes
+	return resultBytes(&result{Error: stderrBuf.String(), Output: stdoutBuf.String()})
 }

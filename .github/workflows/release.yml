@@ -93,6 +93,12 @@ jobs:
           name: ubuntu-latest-signed
           path: ./signed
 
+      - name: Download macos signed assets
+        uses: actions/download-artifact@v4
+        with:
+          name: macos-latest-signed
+          path: ./signed
+
       - name: Create release and upload files
         shell: pwsh
         run: |

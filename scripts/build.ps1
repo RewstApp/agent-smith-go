@@ -42,3 +42,14 @@ if ($IsLinux) {
 
     Write-Output $buildOutput
 }
+
+if ($IsMacOS) {
+    # Set build output
+    $buildOutput = "./dist/rewst_agent_config.mac-os.bin"
+
+    # Build the executables for Mac OS
+    $env:GOOS = "darwin"
+    go build -ldflags="-w -s $versionFlag" -o $buildOutput "./cmd/agent_smith"
+
+    Write-Output $buildOutput
+}
