@@ -10,4 +10,5 @@ type Device struct {
 	AzureIotHubHost string             `json:"azure_iot_hub_host"`
 	Broker          string             `json:"broker"`
 	LoggingLevel    utils.LoggingLevel `json:"logging_level"`
+	UseSyslog       bool               `json:"syslog"`
 }
