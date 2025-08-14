@@ -44,7 +44,7 @@ type configParams struct {
 	ConfigUrl    string
 	ConfigSecret string
 	LoggingLevel string
-	Syslog       bool
+	UseSyslog    bool
 }
 
 var allowedLoggingLevels = map[string]bool{
@@ -63,7 +63,7 @@ func parseConfigParams(args []string) (*configParams, error) {
 	fs.StringVar(&params.ConfigUrl, "config-url", "", "Configuration URL")
 	fs.StringVar(&params.ConfigSecret, "config-secret", "", "Configuration Secret")
 	fs.StringVar(&params.LoggingLevel, "logging-level", string(utils.Default), "Logging level: info, warn, error")
-	fs.BoolVar(&params.Syslog, "syslog", false, "Write to system log")
+	fs.BoolVar(&params.UseSyslog, "syslog", false, "Write log messages to system log")
 	fs.SetOutput(bytes.NewBuffer([]byte{}))
 
 	err := fs.Parse(args)
