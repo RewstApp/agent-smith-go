@@ -78,7 +78,7 @@ func (svc *serviceParams) Execute(stop <-chan struct{}, running chan<- struct{})
 
 	// Configure syslogger if needed
 	if device.UseSyslog {
-		sysLogger, err := syslog.New("agent_smith", logFile)
+		sysLogger, err := syslog.New(svc.Name(), logFile)
 		if err != nil {
 			return service.LogFileError
 		}
