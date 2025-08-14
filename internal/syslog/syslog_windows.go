@@ -24,8 +24,7 @@ func (s *windowsSyslog) Write(data []byte) (int, error) {
 	line := string(data)
 
 	// Extract the message
-	start := strings.Index(line, "]") + 2
-	message := line[start:]
+	message := extractMessage(line)
 
 	// Use different levels
 	if strings.Contains(line, "[ERROR]") {
