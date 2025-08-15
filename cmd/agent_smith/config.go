@@ -79,6 +79,7 @@ func runConfig(params *configParams) {
 		return
 	}
 	response.Configuration.LoggingLevel = utils.LoggingLevel(params.LoggingLevel)
+	response.Configuration.UseSyslog = params.UseSyslog
 
 	// Create the data directory
 	dataDir := agent.GetDataDirectory(params.OrgId)

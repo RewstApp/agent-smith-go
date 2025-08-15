@@ -44,6 +44,7 @@ type configParams struct {
 	ConfigUrl    string
 	ConfigSecret string
 	LoggingLevel string
+	UseSyslog    bool
 }
 
 var allowedLoggingLevels = map[string]bool{
@@ -62,6 +63,7 @@ func parseConfigParams(args []string) (*configParams, error) {
 	fs.StringVar(&params.ConfigUrl, "config-url", "", "Configuration URL")
 	fs.StringVar(&params.ConfigSecret, "config-secret", "", "Configuration Secret")
 	fs.StringVar(&params.LoggingLevel, "logging-level", string(utils.Default), "Logging level: info, warn, error")
+	fs.BoolVar(&params.UseSyslog, "syslog", false, "Write log messages to system log")
 	fs.SetOutput(bytes.NewBuffer([]byte{}))
 
 	err := fs.Parse(args)
@@ -160,6 +162,6 @@ func main() {
 	}
 
 	// Show usage
-	fmt.Printf("Usage: --org-id <ORG_ID> {--uninstall | --config-url <CONFIG URL> --config-secret <CONFIG SECRET> [--logging-level [%s]] | --config-file <CONFIG FILE> --log-file <LOG FILE>}\n", getAllowedConfigLevelsString())
+	fmt.Printf("Usage: --org-id <ORG_ID> {--uninstall | --config-url <CONFIG URL> --config-secret <CONFIG SECRET> [--logging-level %s] [--syslog] | --config-file <CONFIG FILE> --log-file <LOG FILE>}\n", getAllowedConfigLevelsString())
 	os.Exit(1)
 }

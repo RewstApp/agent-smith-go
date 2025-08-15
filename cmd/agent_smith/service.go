@@ -16,6 +16,7 @@ import (
 	"github.com/RewstApp/agent-smith-go/internal/interpreter"
 	"github.com/RewstApp/agent-smith-go/internal/mqtt"
 	"github.com/RewstApp/agent-smith-go/internal/service"
+	"github.com/RewstApp/agent-smith-go/internal/syslog"
 	"github.com/RewstApp/agent-smith-go/internal/utils"
 	"github.com/RewstApp/agent-smith-go/internal/version"
 )
@@ -72,7 +73,19 @@ func (svc *serviceParams) Execute(stop <-chan struct{}, running chan<- struct{})
 		return service.LogFileError
 	}
 	defer logFile.Close()
+
 	logger := utils.ConfigureLogger("agent_smith", logFile, device.LoggingLevel)
+
+	// Configure syslogger if needed
+	if device.UseSyslog {
+		sysLogger, err := syslog.New(svc.Name(), logFile)
+		if err != nil {
+			return service.LogFileError
+		}
+		defer sysLogger.Close()
+
+		logger = utils.ConfigureLogger("agent_smith", sysLogger, device.LoggingLevel)
+	}
 
 	// Show header
 	logger.Info("Agent Smith started", "version", version.Version, "os", runtime.GOOS, "device_id", device.DeviceId)
