@@ -118,10 +118,13 @@ func Create(params AgentParams) (Service, error) {
 	serviceConfig.WriteString("</array>\n")
 
 	serviceConfig.WriteString("<key>RunAtLoad</key>\n")
-	serviceConfig.WriteString("<true/>\n")
+	serviceConfig.WriteString("<false/>\n")
 
 	serviceConfig.WriteString("<key>KeepAlive</key>\n")
-	serviceConfig.WriteString("<true/>\n")
+	serviceConfig.WriteString("<dict>\n")
+	serviceConfig.WriteString("<key>SuccessfulExit</key>\n")
+	serviceConfig.WriteString("<false/>\n")
+	serviceConfig.WriteString("</dict>\n")
 
 	serviceConfig.WriteString("<key>EnvironmentVariables</key>\n")
 	serviceConfig.WriteString("<dict>\n")
