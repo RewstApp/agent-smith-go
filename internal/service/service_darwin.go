@@ -67,19 +67,30 @@ func (svc *darwinService) Delete() error {
 }
 
 func (svc *darwinService) IsActive() bool {
-	out, err := runLaunchCtl("list")
+	out, err := runLaunchCtl("print", fmt.Sprintf("system/%s", svc.name))
 	if err != nil {
 		return false
 	}
 
-	// Find the line that contains the service name
+	// Find the line that contains state name
 	for line := range strings.SplitSeq(string(out), "\n") {
-		if strings.Contains(line, svc.name) {
+		pair := strings.Split(strings.TrimSpace(line), "=")
+		if len(pair) != 2 {
+			continue
+		}
+
+		name := strings.TrimSpace(pair[0])
+		if name != "state" {
+			continue
+		}
+
+		value := strings.TrimSpace(pair[1])
+		if value == "running" {
 			return true
 		}
 	}
 
-	// Service name was not found
+	// State parameter is not found, assume service is not active
 	return false
 }
 
