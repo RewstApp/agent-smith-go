@@ -227,7 +227,7 @@ func (svc *serviceParams) Execute(stop <-chan struct{}, running chan<- struct{})
 					return
 				}
 
-				notifier.Notify("AgentReceivedMesage:" + string(msg.Payload()))
+				notifier.Notify("AgentReceivedMessage:" + string(msg.Payload()))
 
 				// Execute the message
 				resultBytes := message.Execute(ctx, device, logger)
