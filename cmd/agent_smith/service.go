@@ -227,10 +227,15 @@ func (svc *serviceParams) Execute(stop <-chan struct{}, running chan<- struct{})
 					return
 				}
 
-				notifier.Notify("AgentReceivedMesage")
+				notifier.Notify("AgentReceivedMesage:" + string(msg.Payload()))
 
 				// Execute the message
 				resultBytes := message.Execute(ctx, device, logger)
+
+				// Skip if there is no post_id specified
+				if message.PostId == "" {
+					return
+				}
 
 				// Postback the response
 				postbackReq, err := message.CreatePostbackRequest(ctx, device, bytes.NewReader(resultBytes))
