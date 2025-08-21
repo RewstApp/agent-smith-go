@@ -179,7 +179,7 @@ func (svc *serviceParams) Execute(stop <-chan struct{}, running chan<- struct{})
 				return 0
 			case <-time.After(rg.Timeout()):
 				logger.Info("Reconnecting...")
-				notifier.Notify("AgentReconnecting")
+				notifier.Notify("AgentStatus:Reconnecting")
 			}
 		}
 
@@ -301,7 +301,7 @@ func (svc *serviceParams) Execute(stop <-chan struct{}, running chan<- struct{})
 
 		// Complete initialization
 		logger.Info("Subscribed to messages")
-		notifier.Notify("AgentOnline")
+		notifier.Notify("AgentStatus:Online")
 
 		// Reset the timeout
 		rg.Clear()
@@ -310,10 +310,10 @@ func (svc *serviceParams) Execute(stop <-chan struct{}, running chan<- struct{})
 		// Wait for the stop/shutdown command or lost connection
 		select {
 		case <-stopped:
-			notifier.Notify("AgentStopped")
+			notifier.Notify("AgentStatus:Stopped")
 			return 0
 		case <-lost:
-			notifier.Notify("AgentOffline")
+			notifier.Notify("AgentStatus:Offline")
 			continue
 		}
 	}
