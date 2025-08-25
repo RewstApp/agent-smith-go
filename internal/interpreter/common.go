@@ -71,9 +71,11 @@ func (sf *StringFalse) UnmarshalJSON(data []byte) error {
 
 type Message struct {
 	PostId              string      `json:"post_id"`
-	Commands            *string     `json:"commands"`
+	Commands            string      `json:"commands"`
 	InterpreterOverride StringFalse `json:"interpreter_override"`
-	GetInstallation     *bool       `json:"get_installation"`
+	GetInstallation     bool        `json:"get_installation"`
+	Type                string      `json:"type"`
+	Content             string      `json:"content"`
 }
 
 type CommandsResult struct {
@@ -100,7 +102,7 @@ func (msg *Message) Parse(data []byte) error {
 
 func (msg *Message) Execute(ctx context.Context, device agent.Device, logger hclog.Logger) []byte {
 	// Execute commands if given
-	if msg.Commands != nil {
+	if msg.Commands != "" {
 		logger.Info("Executing commands...")
 
 		// Select the correct interpreter
@@ -120,7 +122,7 @@ func (msg *Message) Execute(ctx context.Context, device agent.Device, logger hcl
 	}
 
 	// Get installation data if given
-	if msg.GetInstallation != nil && *msg.GetInstallation {
+	if msg.GetInstallation {
 		logger.Info("Executing get_installation...")
 
 		// Load the paths data

@@ -8,6 +8,8 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
@@ -19,6 +21,9 @@ import (
 	"github.com/RewstApp/agent-smith-go/internal/syslog"
 	"github.com/RewstApp/agent-smith-go/internal/utils"
 	"github.com/RewstApp/agent-smith-go/internal/version"
+	"github.com/RewstApp/agent-smith-go/shared"
+
+	"github.com/hashicorp/go-plugin"
 )
 
 type errorResponse struct {
@@ -50,6 +55,21 @@ func (svc *serviceParams) loadLog() (*os.File, error) {
 	}
 
 	return logFile, nil
+}
+
+// handshakeConfigs are used to just do a basic handshake between
+// a plugin and host. If the handshake fails, a user friendly error is shown.
+// This prevents users from executing bad plugins or executing a plugin
+// directory. It is a UX feature, not a security feature.
+var handshakeConfig = plugin.HandshakeConfig{
+	ProtocolVersion:  1,
+	MagicCookieKey:   "BASIC_PLUGIN",
+	MagicCookieValue: "hello",
+}
+
+// pluginMap is the map of plugins we can dispense.
+var pluginMap = map[string]plugin.Plugin{
+	"notifier": &shared.NotifierPlugin{},
 }
 
 func (svc *serviceParams) Name() string {
@@ -94,6 +114,43 @@ func (svc *serviceParams) Execute(stop <-chan struct{}, running chan<- struct{})
 		logger.Info("Service stopped")
 	}()
 
+	// START PLUGIN INIT
+	execPath, err := os.Executable()
+	if err != nil {
+		logger.Error("Failed to get os executable", "error", err)
+		return service.GenericError
+	}
+
+	pluginPath := filepath.Join(filepath.Dir(execPath), "plugins/agent-smith-httpd.exe")
+
+	// We're a host! Start by launching the plugin process.
+	client := plugin.NewClient(&plugin.ClientConfig{
+		HandshakeConfig: handshakeConfig,
+		Plugins:         pluginMap,
+		Cmd:             exec.Command(pluginPath),
+		Stderr:          logFile,
+	})
+	defer client.Kill()
+
+	// Connect via RPC
+	rpcClient, err := client.Client()
+	if err != nil {
+		logger.Error("Failed to connect to plugin RPC", "error", err)
+		return service.GenericError
+	}
+
+	// Request the plugin
+	raw, err := rpcClient.Dispense("notifier")
+	if err != nil {
+		logger.Error("Failed to fetch plugin", "error", err)
+		return service.GenericError
+	}
+
+	// We should have a Greeter now! This feels like a normal interface
+	// implementation but is in fact over an RPC connection.
+	notifier := raw.(shared.Notifier)
+	// END USE THE PLUGIN
+
 	// Create a channel for stopped signal
 	stopped := make(chan struct{})
 
@@ -110,6 +167,7 @@ func (svc *serviceParams) Execute(stop <-chan struct{}, running chan<- struct{})
 	}()
 
 	running <- struct{}{}
+	notifier.Notify("AgentStarted")
 	rg := utils.ReconnectTimeoutGenerator{}
 
 	for {
@@ -121,6 +179,7 @@ func (svc *serviceParams) Execute(stop <-chan struct{}, running chan<- struct{})
 				return 0
 			case <-time.After(rg.Timeout()):
 				logger.Info("Reconnecting...")
+				notifier.Notify("AgentStatus:Reconnecting")
 			}
 		}
 
@@ -168,8 +227,15 @@ func (svc *serviceParams) Execute(stop <-chan struct{}, running chan<- struct{})
 					return
 				}
 
+				notifier.Notify("AgentReceivedMessage:" + string(msg.Payload()))
+
 				// Execute the message
 				resultBytes := message.Execute(ctx, device, logger)
+
+				// Skip if there is no post_id specified
+				if message.PostId == "" {
+					return
+				}
 
 				// Postback the response
 				postbackReq, err := message.CreatePostbackRequest(ctx, device, bytes.NewReader(resultBytes))
@@ -235,6 +301,7 @@ func (svc *serviceParams) Execute(stop <-chan struct{}, running chan<- struct{})
 
 		// Complete initialization
 		logger.Info("Subscribed to messages")
+		notifier.Notify("AgentStatus:Online")
 
 		// Reset the timeout
 		rg.Clear()
@@ -243,8 +310,10 @@ func (svc *serviceParams) Execute(stop <-chan struct{}, running chan<- struct{})
 		// Wait for the stop/shutdown command or lost connection
 		select {
 		case <-stopped:
+			notifier.Notify("AgentStatus:Stopped")
 			return 0
 		case <-lost:
+			notifier.Notify("AgentStatus:Offline")
 			continue
 		}
 	}

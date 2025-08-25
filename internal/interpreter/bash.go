@@ -16,7 +16,7 @@ import (
 
 func executeUsingBash(ctx context.Context, message *Message, device agent.Device, logger hclog.Logger) []byte {
 	// Parse the commands
-	commandBytes, err := base64.StdEncoding.DecodeString(*message.Commands)
+	commandBytes, err := base64.StdEncoding.DecodeString(message.Commands)
 	if err != nil {
 		return errorResultBytes(err)
 	}
