@@ -5,14 +5,9 @@ import (
 	"os/exec"
 
 	"github.com/RewstApp/agent-smith-go/shared"
+	"github.com/google/uuid"
 	"github.com/hashicorp/go-plugin"
 )
-
-var handshakeConfig = plugin.HandshakeConfig{
-	ProtocolVersion:  1,
-	MagicCookieKey:   "BASIC_PLUGIN",
-	MagicCookieValue: "hello",
-}
 
 var pluginMap = map[string]plugin.Plugin{
 	"notifier": &shared.NotifierPlugin{},
@@ -40,10 +35,18 @@ func (p *optionalNotifierWrapper) Notify(message string) error {
 }
 
 func LoadNotifer(path string, logWriter io.Writer) (shared.Notifier, error) {
+	magicCookieValueUuid := uuid.New()
+
+	handshakeConfig := plugin.HandshakeConfig{
+		ProtocolVersion:  1,
+		MagicCookieKey:   "AGENT_SMITH",
+		MagicCookieValue: magicCookieValueUuid.String(),
+	}
+
 	client := plugin.NewClient(&plugin.ClientConfig{
 		HandshakeConfig: handshakeConfig,
 		Plugins:         pluginMap,
-		Cmd:             exec.Command(path),
+		Cmd:             exec.Command(path, "--magic-cookie-key", handshakeConfig.MagicCookieKey, "--magic-cookie-value", handshakeConfig.MagicCookieValue),
 		Stderr:          logWriter,
 	})
 
