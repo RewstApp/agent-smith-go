@@ -8,7 +8,6 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -21,9 +20,7 @@ import (
 	"github.com/RewstApp/agent-smith-go/internal/syslog"
 	"github.com/RewstApp/agent-smith-go/internal/utils"
 	"github.com/RewstApp/agent-smith-go/internal/version"
-	"github.com/RewstApp/agent-smith-go/shared"
-
-	"github.com/hashicorp/go-plugin"
+	"github.com/RewstApp/agent-smith-go/plugins"
 )
 
 type errorResponse struct {
@@ -55,21 +52,6 @@ func (svc *serviceParams) loadLog() (*os.File, error) {
 	}
 
 	return logFile, nil
-}
-
-// handshakeConfigs are used to just do a basic handshake between
-// a plugin and host. If the handshake fails, a user friendly error is shown.
-// This prevents users from executing bad plugins or executing a plugin
-// directory. It is a UX feature, not a security feature.
-var handshakeConfig = plugin.HandshakeConfig{
-	ProtocolVersion:  1,
-	MagicCookieKey:   "BASIC_PLUGIN",
-	MagicCookieValue: "hello",
-}
-
-// pluginMap is the map of plugins we can dispense.
-var pluginMap = map[string]plugin.Plugin{
-	"notifier": &shared.NotifierPlugin{},
 }
 
 func (svc *serviceParams) Name() string {
@@ -121,35 +103,13 @@ func (svc *serviceParams) Execute(stop <-chan struct{}, running chan<- struct{})
 		return service.GenericError
 	}
 
-	pluginPath := filepath.Join(filepath.Dir(execPath), "plugins/agent-smith-httpd.exe")
+	pluginPath := filepath.Join(filepath.Dir(execPath), "plugins/agent-smith-httpd.win.exe")
 
-	// We're a host! Start by launching the plugin process.
-	client := plugin.NewClient(&plugin.ClientConfig{
-		HandshakeConfig: handshakeConfig,
-		Plugins:         pluginMap,
-		Cmd:             exec.Command(pluginPath),
-		Stderr:          logFile,
-	})
-	defer client.Kill()
+	notifier, err := plugins.LoadNotifer(pluginPath, logFile)
 
-	// Connect via RPC
-	rpcClient, err := client.Client()
 	if err != nil {
-		logger.Error("Failed to connect to plugin RPC", "error", err)
-		return service.GenericError
+		logger.Warn("Failed to load plugin", "error", err)
 	}
-
-	// Request the plugin
-	raw, err := rpcClient.Dispense("notifier")
-	if err != nil {
-		logger.Error("Failed to fetch plugin", "error", err)
-		return service.GenericError
-	}
-
-	// We should have a Greeter now! This feels like a normal interface
-	// implementation but is in fact over an RPC connection.
-	notifier := raw.(shared.Notifier)
-	// END USE THE PLUGIN
 
 	// Create a channel for stopped signal
 	stopped := make(chan struct{})
