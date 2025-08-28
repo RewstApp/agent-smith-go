@@ -18,9 +18,16 @@ var pluginMap = map[string]plugin.Plugin{
 	"notifier": &shared.NotifierPlugin{},
 }
 
+type NotifierWrapper interface {
+	Kill()
+	Plugins() []string
+	Notify(message string) error
+}
+
 type optionalNotifierWrapper struct {
 	client *plugin.Client
 	plugin shared.Notifier
+	name   string
 }
 
 func (p *optionalNotifierWrapper) Kill() {
@@ -29,6 +36,10 @@ func (p *optionalNotifierWrapper) Kill() {
 	}
 
 	p.client.Kill()
+}
+
+func (p *optionalNotifierWrapper) Plugins() []string {
+	return []string{p.name}
 }
 
 func (p *optionalNotifierWrapper) Notify(message string) error {
@@ -49,6 +60,16 @@ func (s *notifierSetWrapper) Kill() {
 	}
 }
 
+func (s *notifierSetWrapper) Plugins() []string {
+	names := make([]string, len(s.notifiers))
+
+	for i, notifier := range s.notifiers {
+		names[i] = notifier.name
+	}
+
+	return names
+}
+
 func (s *notifierSetWrapper) Notify(message string) error {
 	var combinedErrors error
 
@@ -63,7 +84,7 @@ func (s *notifierSetWrapper) Notify(message string) error {
 	return combinedErrors
 }
 
-func LoadNotifer(plugins []agent.Plugin, logWriter io.Writer) (shared.Notifier, error) {
+func LoadNotifer(plugins []agent.Plugin, logWriter io.Writer) (NotifierWrapper, error) {
 	set := &notifierSetWrapper{}
 	var combinedErrors error
 
@@ -98,6 +119,7 @@ func LoadNotifer(plugins []agent.Plugin, logWriter io.Writer) (shared.Notifier, 
 		set.notifiers = append(set.notifiers, &optionalNotifierWrapper{
 			client: client,
 			plugin: raw.(shared.Notifier),
+			name:   pluginInfo.Name,
 		})
 	}
 

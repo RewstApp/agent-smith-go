@@ -96,8 +96,17 @@ func (svc *serviceParams) Execute(stop <-chan struct{}, running chan<- struct{})
 	}()
 
 	notifier, err := plugins.LoadNotifer(device.Plugins, logFile)
+	defer notifier.Kill()
+
 	if err != nil {
 		logger.Warn("Failed to load plugin", "error", err)
+	}
+
+	plugins := notifier.Plugins()
+	if len(plugins) == 1 {
+		logger.Info("Plugin loaded", "plugin", plugins[0])
+	} else if len(plugins) > 1 {
+		logger.Info("Plugins loaded", "plugins", plugins)
 	}
 
 	// Create a channel for stopped signal
