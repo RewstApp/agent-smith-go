@@ -19,6 +19,7 @@ import (
 	"github.com/RewstApp/agent-smith-go/internal/syslog"
 	"github.com/RewstApp/agent-smith-go/internal/utils"
 	"github.com/RewstApp/agent-smith-go/internal/version"
+	"github.com/RewstApp/agent-smith-go/plugins"
 )
 
 type errorResponse struct {
@@ -94,6 +95,20 @@ func (svc *serviceParams) Execute(stop <-chan struct{}, running chan<- struct{})
 		logger.Info("Service stopped")
 	}()
 
+	notifier, err := plugins.LoadNotifer(device.Plugins, logFile)
+	defer notifier.Kill()
+
+	if err != nil {
+		logger.Warn("Failed to load plugin", "error", err)
+	}
+
+	plugins := notifier.Plugins()
+	if len(plugins) == 1 {
+		logger.Info("Plugin loaded", "plugin", plugins[0])
+	} else if len(plugins) > 1 {
+		logger.Info("Plugins loaded", "plugins", plugins)
+	}
+
 	// Create a channel for stopped signal
 	stopped := make(chan struct{})
 
@@ -110,6 +125,7 @@ func (svc *serviceParams) Execute(stop <-chan struct{}, running chan<- struct{})
 	}()
 
 	running <- struct{}{}
+	notifier.Notify("AgentStarted")
 	rg := utils.ReconnectTimeoutGenerator{}
 
 	for {
@@ -121,6 +137,7 @@ func (svc *serviceParams) Execute(stop <-chan struct{}, running chan<- struct{})
 				return 0
 			case <-time.After(rg.Timeout()):
 				logger.Info("Reconnecting...")
+				notifier.Notify("AgentStatus:Reconnecting")
 			}
 		}
 
@@ -168,8 +185,15 @@ func (svc *serviceParams) Execute(stop <-chan struct{}, running chan<- struct{})
 					return
 				}
 
+				notifier.Notify("AgentReceivedMessage:" + string(msg.Payload()))
+
 				// Execute the message
 				resultBytes := message.Execute(ctx, device, logger)
+
+				// Skip if there is no post_id specified
+				if message.PostId == "" {
+					return
+				}
 
 				// Postback the response
 				postbackReq, err := message.CreatePostbackRequest(ctx, device, bytes.NewReader(resultBytes))
@@ -235,6 +259,7 @@ func (svc *serviceParams) Execute(stop <-chan struct{}, running chan<- struct{})
 
 		// Complete initialization
 		logger.Info("Subscribed to messages")
+		notifier.Notify("AgentStatus:Online")
 
 		// Reset the timeout
 		rg.Clear()
@@ -243,8 +268,10 @@ func (svc *serviceParams) Execute(stop <-chan struct{}, running chan<- struct{})
 		// Wait for the stop/shutdown command or lost connection
 		select {
 		case <-stopped:
+			notifier.Notify("AgentStatus:Stopped")
 			return 0
 		case <-lost:
+			notifier.Notify("AgentStatus:Offline")
 			continue
 		}
 	}
