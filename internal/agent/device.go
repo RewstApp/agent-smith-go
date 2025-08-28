@@ -11,4 +11,10 @@ type Device struct {
 	Broker          string             `json:"broker"`
 	LoggingLevel    utils.LoggingLevel `json:"logging_level"`
 	UseSyslog       bool               `json:"syslog"`
+	Plugins         []Plugin           `json:"plugins"`
+}
+
+type Plugin struct {
+	Name           string `json:"name"`
+	ExecutablePath string `json:"executable_path"`
 }

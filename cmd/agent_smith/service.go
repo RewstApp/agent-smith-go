@@ -8,7 +8,6 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
@@ -96,17 +95,7 @@ func (svc *serviceParams) Execute(stop <-chan struct{}, running chan<- struct{})
 		logger.Info("Service stopped")
 	}()
 
-	// START PLUGIN INIT
-	execPath, err := os.Executable()
-	if err != nil {
-		logger.Error("Failed to get os executable", "error", err)
-		return service.GenericError
-	}
-
-	pluginPath := filepath.Join(filepath.Dir(execPath), "plugins/agent-smith-httpd.win.exe")
-
-	notifier, err := plugins.LoadNotifer(pluginPath, logFile)
-
+	notifier, err := plugins.LoadNotifer(device.Plugins, logFile)
 	if err != nil {
 		logger.Warn("Failed to load plugin", "error", err)
 	}
