@@ -6,7 +6,7 @@ require golang.org/x/text v0.23.0
 
 require (
 	github.com/eclipse/paho.mqtt.golang v1.5.0
-	github.com/gorilla/websocket v1.5.3
+	github.com/google/uuid v1.6.0
 	github.com/hashicorp/go-hclog v1.6.3
 	github.com/hashicorp/go-plugin v1.6.3
 	github.com/shirou/gopsutil/v4 v4.25.1
@@ -18,7 +18,7 @@ require (
 	github.com/fatih/color v1.13.0 // indirect
 	github.com/go-ole/go-ole v1.3.0 // indirect
 	github.com/golang/protobuf v1.5.3 // indirect
-	github.com/google/uuid v1.6.0 // indirect
+	github.com/gorilla/websocket v1.5.3 // indirect
 	github.com/hashicorp/yamux v0.1.1 // indirect
 	github.com/lufia/plan9stats v0.0.0-20211012122336-39d0f177ccd0 // indirect
 	github.com/mattn/go-colorable v0.1.12 // indirect
