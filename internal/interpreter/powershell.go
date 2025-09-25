@@ -64,6 +64,8 @@ func executeUsingPowershell(ctx context.Context, message *Message, device agent.
 
 	err = cmd.Run()
 	if err != nil {
+		logger.Error("Command failed", "error", err)
+		logger.Debug("Command completed with outputs", "error", stderrBuf.String(), "info", stdoutBuf.String())
 		return resultBytes(&result{Error: stderrBuf.String(), Output: stdoutBuf.String()})
 	}
 
@@ -71,6 +73,7 @@ func executeUsingPowershell(ctx context.Context, message *Message, device agent.
 	defer os.Remove(tempfile.Name())
 
 	logger.Info("Command completed", "message_id", message.PostId, "exit_code", cmd.ProcessState.ExitCode())
+	logger.Debug("Command completed with outputs", "error", stderrBuf.String(), "info", stdoutBuf.String())
 
 	return resultBytes(&result{Error: stderrBuf.String(), Output: stdoutBuf.String()})
 }
