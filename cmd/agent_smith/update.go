@@ -68,6 +68,7 @@ func runUpdate(params *updateParams) {
 
 	device.LoggingLevel = utils.LoggingLevel(params.LoggingLevel)
 	device.UseSyslog = params.UseSyslog
+	device.DisableAgentPostback = params.DisableAgentPostback
 
 	// Save the updated configuration file
 	configBytes, err := json.MarshalIndent(device, "", "  ")
@@ -82,7 +83,7 @@ func runUpdate(params *updateParams) {
 		return
 	}
 
-	logger.Info("Configuration saved to", "path", configFilePath)
+	logger.Info("Configuration successfully updated", "path", configFilePath)
 
 	// Copy the agent executable
 	execFilePath, err := os.Executable()
@@ -107,9 +108,6 @@ func runUpdate(params *updateParams) {
 	logger.Info("Agent installed to", "path", agentExecutablePath)
 
 	// Starting the service
-	logger.Info("Starting service", "service", name)
-
-	// Start the service
 	logger.Info("Starting service", "service", name)
 	err = svc.Start()
 	if err != nil {
