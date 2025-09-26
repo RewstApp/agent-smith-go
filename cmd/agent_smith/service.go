@@ -195,13 +195,17 @@ func (svc *serviceParams) Execute(stop <-chan struct{}, running chan<- struct{})
 					return
 				}
 
+				// Skip postback if disabled in config
+				if device.DisableAgentPostback {
+					return
+				}
+
 				// Postback the response
 				postbackReq, err := message.CreatePostbackRequest(ctx, device, bytes.NewReader(resultBytes))
 				if err != nil {
 					logger.Error("Failed to create postback request", "error", err)
 					return
 				}
-
 				// Send the postback
 				logger.Info("Sending postback", "post_id", message.PostId, "url", postbackReq.URL)
 				client := &http.Client{}

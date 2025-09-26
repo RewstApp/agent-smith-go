@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"os"
 	"os/exec"
+	"strings"
 
 	"github.com/RewstApp/agent-smith-go/internal/agent"
 	"github.com/RewstApp/agent-smith-go/internal/utils"
@@ -28,8 +29,22 @@ func executeUsingBash(ctx context.Context, message *Message, device agent.Device
 		return errorResultBytes(err)
 	}
 
-	// Run the command in the system using powershell
+	// Run the command in the system using bash
 	shell := "bash"
+
+	if logger.IsDebug() {
+		cmd := exec.CommandContext(ctx, shell, "-c", "echo \"$BASH_VERSION\"")
+		outBytes, err := cmd.Output()
+		if err != nil {
+			logger.Error("Shell version check failed", "error", err)
+			return errorResultBytes(err)
+		}
+
+		version := strings.TrimSpace(string(outBytes))
+
+		logger.Debug("Shell version", "shell", shell, "version", version)
+		logger.Debug("Commands to execute", "commands", commands)
+	}
 
 	// Save commands to temporary file
 	scriptsDir := agent.GetScriptsDirectory(device.RewstOrgId)
@@ -60,6 +75,8 @@ func executeUsingBash(ctx context.Context, message *Message, device agent.Device
 
 	err = cmd.Run()
 	if err != nil {
+		logger.Error("Command failed", "error", err)
+		logger.Debug("Command completed with outputs", "error", stderrBuf.String(), "info", stdoutBuf.String())
 		return resultBytes(&result{Error: stderrBuf.String(), Output: stdoutBuf.String()})
 	}
 
@@ -67,6 +84,7 @@ func executeUsingBash(ctx context.Context, message *Message, device agent.Device
 	defer os.Remove(tempfile.Name())
 
 	logger.Info("Command completed", "message_id", message.PostId, "exit_code", cmd.ProcessState.ExitCode())
+	logger.Debug("Command completed with outputs", "error", stderrBuf.String(), "info", stdoutBuf.String())
 
 	return resultBytes(&result{Error: stderrBuf.String(), Output: stdoutBuf.String()})
 }

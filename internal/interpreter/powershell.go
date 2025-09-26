@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"strings"
 
 	"github.com/RewstApp/agent-smith-go/internal/agent"
 	"github.com/RewstApp/agent-smith-go/internal/utils"
@@ -33,6 +34,20 @@ func executeUsingPowershell(ctx context.Context, message *Message, device agent.
 	shell := "powershell"
 	if runtime.GOOS != "windows" {
 		shell = "pwsh"
+	}
+
+	if logger.IsDebug() {
+		cmd := exec.CommandContext(ctx, shell, "-Command", "\"$($PSVersionTable.PSVersion.Major).$($PSVersionTable.PSVersion.Minor).$($PSVersionTable.PSVersion.Build).$($PSVersionTable.PSVersion.Revision)\"")
+		outBytes, err := cmd.Output()
+		if err != nil {
+			logger.Error("Shell version check failed", "error", err)
+			return errorResultBytes(err)
+		}
+
+		version := strings.TrimSpace(string(outBytes))
+
+		logger.Debug("Shell version", "shell", shell, "version", version)
+		logger.Debug("Commands to execute", "commands", commands)
 	}
 
 	// Save commands to temporary file
@@ -64,6 +79,8 @@ func executeUsingPowershell(ctx context.Context, message *Message, device agent.
 
 	err = cmd.Run()
 	if err != nil {
+		logger.Error("Command failed", "error", err)
+		logger.Debug("Command completed with outputs", "error", stderrBuf.String(), "info", stdoutBuf.String())
 		return resultBytes(&result{Error: stderrBuf.String(), Output: stdoutBuf.String()})
 	}
 
@@ -71,6 +88,7 @@ func executeUsingPowershell(ctx context.Context, message *Message, device agent.
 	defer os.Remove(tempfile.Name())
 
 	logger.Info("Command completed", "message_id", message.PostId, "exit_code", cmd.ProcessState.ExitCode())
+	logger.Debug("Command completed with outputs", "error", stderrBuf.String(), "info", stdoutBuf.String())
 
 	return resultBytes(&result{Error: stderrBuf.String(), Output: stdoutBuf.String()})
 }
