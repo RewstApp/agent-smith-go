@@ -35,6 +35,18 @@ func executeUsingPowershell(ctx context.Context, message *Message, device agent.
 		shell = "pwsh"
 	}
 
+	if logger.IsDebug() {
+		cmd := exec.CommandContext(ctx, shell, "-Command", "$PSVersionTable.PSVersion")
+		outBytes, err := cmd.Output()
+
+		if err != nil {
+			logger.Error("Shell version check failed", "error", err)
+			return errorResultBytes(err)
+		}
+
+		logger.Debug("Shell version", "shell", shell, "version", string(outBytes))
+	}
+
 	// Save commands to temporary file
 	scriptsDir := agent.GetScriptsDirectory(device.RewstOrgId)
 	err = utils.CreateFolderIfMissing(scriptsDir)
