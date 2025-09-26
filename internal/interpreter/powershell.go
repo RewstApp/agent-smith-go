@@ -47,6 +47,7 @@ func executeUsingPowershell(ctx context.Context, message *Message, device agent.
 		version := strings.TrimSpace(string(outBytes))
 
 		logger.Debug("Shell version", "shell", shell, "version", version)
+		logger.Debug("Commands to execute", "commands", commands)
 	}
 
 	// Save commands to temporary file
