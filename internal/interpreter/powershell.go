@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"strings"
 
 	"github.com/RewstApp/agent-smith-go/internal/agent"
 	"github.com/RewstApp/agent-smith-go/internal/utils"
@@ -36,15 +37,16 @@ func executeUsingPowershell(ctx context.Context, message *Message, device agent.
 	}
 
 	if logger.IsDebug() {
-		cmd := exec.CommandContext(ctx, shell, "-Command", "$PSVersionTable.PSVersion")
+		cmd := exec.CommandContext(ctx, shell, "-Command", "\"$($PSVersionTable.PSVersion.Major).$($PSVersionTable.PSVersion.Minor).$($PSVersionTable.PSVersion.Build).$($PSVersionTable.PSVersion.Revision)\"")
 		outBytes, err := cmd.Output()
-
 		if err != nil {
 			logger.Error("Shell version check failed", "error", err)
 			return errorResultBytes(err)
 		}
 
-		logger.Debug("Shell version", "shell", shell, "version", string(outBytes))
+		version := strings.TrimSpace(string(outBytes))
+
+		logger.Debug("Shell version", "shell", shell, "version", version)
 	}
 
 	// Save commands to temporary file
