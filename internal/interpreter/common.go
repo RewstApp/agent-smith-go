@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/RewstApp/agent-smith-go/internal/agent"
+	"github.com/RewstApp/agent-smith-go/internal/utils"
 	"github.com/hashicorp/go-hclog"
 )
 
@@ -150,7 +151,7 @@ func (msg *Message) CreatePostbackRequest(ctx context.Context, device agent.Devi
 	postBackUrl := fmt.Sprintf("https://%s/webhooks/custom/action/%s", device.RewstEngineHost, strings.ReplaceAll(msg.PostId, ":", "/"))
 
 	// Create an http request
-	req, err := http.NewRequestWithContext(ctx, "POST", postBackUrl, body)
+	req, err := utils.NewRequestWithContext(ctx, "POST", postBackUrl, body)
 	if err != nil {
 		return nil, err
 	}

@@ -43,7 +43,7 @@ func runConfig(params *configParams) {
 
 	// Prepare http request and send
 	logger.Info("Sending", "data", string(hostInfoBytes), "to", params.ConfigUrl)
-	req, err := http.NewRequestWithContext(context.Background(), "POST", params.ConfigUrl, bytes.NewReader(hostInfoBytes))
+	req, err := utils.NewRequest("POST", params.ConfigUrl, bytes.NewReader(hostInfoBytes))
 	if err != nil {
 		logger.Error("Failed to create request", "error", err)
 		return
