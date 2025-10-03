@@ -115,7 +115,7 @@ func runConfig(params *configParams) {
 			logger.Info("Stopping service", "service", name)
 			err = existingService.Stop()
 			if err != nil {
-				logger.Error("Failed to stop service", "service", err)
+				logger.Error("Failed to stop service", "service", name, "error", err)
 				existingService.Close()
 				return
 			}
@@ -190,7 +190,7 @@ func runConfig(params *configParams) {
 	logger.Info("Starting service", "service", name)
 	err = svc.Start()
 	if err != nil {
-		logger.Error("Failed to start service", "service", err)
+		logger.Error("Failed to start service", "service", name, "error", err)
 		return
 	}
 
