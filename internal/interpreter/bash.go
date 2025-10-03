@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"fmt"
 	"os"
 	"os/exec"
 	"strings"
 
 	"github.com/RewstApp/agent-smith-go/internal/agent"
 	"github.com/RewstApp/agent-smith-go/internal/utils"
+	"github.com/RewstApp/agent-smith-go/internal/version"
 	"github.com/hashicorp/go-hclog"
 	"golang.org/x/text/encoding/unicode"
 	"golang.org/x/text/transform"
@@ -72,6 +74,8 @@ func executeUsingBash(ctx context.Context, message *Message, device agent.Device
 	cmd := exec.CommandContext(ctx, shell, tempfile.Name())
 	cmd.Stdout = &stdoutBuf
 	cmd.Stderr = &stderrBuf
+	cmd.Env = os.Environ()
+	cmd.Env = append(cmd.Env, fmt.Sprintf("AGENT_SMITH_VERSION=%s", version.Version[1:]))
 
 	err = cmd.Run()
 	if err != nil {
