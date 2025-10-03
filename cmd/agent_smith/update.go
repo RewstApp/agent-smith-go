@@ -23,7 +23,7 @@ func runUpdate(params *updateParams) {
 	name := agent.GetServiceName(params.OrgId)
 	svc, err := service.Open(name)
 	if err != nil {
-		logger.Error("Failed to open service", "name", name)
+		logger.Error("Failed to open service", "name", name, "error", err)
 		return
 	}
 	defer svc.Close()
@@ -33,7 +33,7 @@ func runUpdate(params *updateParams) {
 		logger.Info("Stopping service", "service", name)
 		err = svc.Stop()
 		if err != nil {
-			logger.Error("Failed to stop service", "service", err)
+			logger.Error("Failed to stop service", "service", name, "error", err)
 			return
 		}
 
@@ -111,7 +111,7 @@ func runUpdate(params *updateParams) {
 	logger.Info("Starting service", "service", name)
 	err = svc.Start()
 	if err != nil {
-		logger.Error("Failed to start service", "service", err)
+		logger.Error("Failed to start service", "service", name, "error", err)
 		return
 	}
 
