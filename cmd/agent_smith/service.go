@@ -89,7 +89,7 @@ func (svc *serviceParams) Execute(stop <-chan struct{}, running chan<- struct{})
 	}
 
 	// Show header
-	logger.Info("Agent Smith started", "version", version.Version, "os", runtime.GOOS, "device_id", device.DeviceId)
+	logger.Info("Agent Smith started", "version", version.Version, "os", runtime.GOOS, "device_id", device.DeviceId, "logging_level", device.LoggingLevel)
 
 	defer func() {
 		logger.Info("Service stopped")
