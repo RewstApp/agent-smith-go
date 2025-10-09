@@ -17,6 +17,8 @@ import (
 	"golang.org/x/text/transform"
 )
 
+const bashVersionCheckCommand = "echo \"$BASH_VERSION\""
+
 func executeUsingBash(ctx context.Context, message *Message, device agent.Device, logger hclog.Logger) []byte {
 	// Parse the commands
 	commandBytes, err := base64.StdEncoding.DecodeString(message.Commands)
@@ -35,14 +37,14 @@ func executeUsingBash(ctx context.Context, message *Message, device agent.Device
 	shell := "bash"
 
 	if logger.IsDebug() {
-		cmd := exec.CommandContext(ctx, shell, "-c", "echo \"$BASH_VERSION\"")
-		outBytes, err := cmd.Output()
+		cmd := exec.CommandContext(ctx, shell, "-c", bashVersionCheckCommand)
+		combinedOutputBytes, err := cmd.CombinedOutput()
+		combinedOutput := string(combinedOutputBytes)
 		if err != nil {
-			logger.Error("Shell version check failed", "error", err)
-			return errorResultBytes(err)
+			logger.Error("Shell version check failed", "error", err, "combined_output", combinedOutput)
 		}
 
-		version := strings.TrimSpace(string(outBytes))
+		version := strings.TrimSpace(combinedOutput)
 
 		logger.Debug("Shell version", "shell", shell, "version", version)
 		logger.Debug("Commands to execute", "commands", commands)
