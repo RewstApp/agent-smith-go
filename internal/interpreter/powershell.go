@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"runtime"
 	"strings"
 
 	"github.com/RewstApp/agent-smith-go/internal/agent"
@@ -20,7 +19,7 @@ import (
 
 const powershellVersionCheckCommand = "\"$($PSVersionTable.PSVersion.Major).$($PSVersionTable.PSVersion.Minor)\""
 
-func executeUsingPowershell(ctx context.Context, message *Message, device agent.Device, logger hclog.Logger) []byte {
+func executeUsingPowershell(ctx context.Context, message *Message, device agent.Device, logger hclog.Logger, usePwsh bool) []byte {
 	// Parse the commands
 	commandBytes, err := base64.StdEncoding.DecodeString(message.Commands)
 	if err != nil {
@@ -36,7 +35,7 @@ func executeUsingPowershell(ctx context.Context, message *Message, device agent.
 
 	// Run the command in the system using powershell
 	shell := "powershell"
-	if runtime.GOOS != "windows" {
+	if usePwsh {
 		shell = "pwsh"
 	}
 
