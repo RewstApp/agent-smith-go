@@ -50,6 +50,17 @@ func executeUsingBash(ctx context.Context, message *Message, device agent.Device
 		logger.Debug("Commands to execute", "commands", commands)
 	}
 
+	if logger.IsDebug() {
+		cmd := exec.CommandContext(ctx, "whoami")
+		combinedOutputBytes, err := cmd.CombinedOutput()
+		combinedOutput := string(combinedOutputBytes)
+		if err != nil {
+			logger.Error("Whoami check failed", "error", err, "combined_output", combinedOutput)
+		}
+
+		logger.Debug("Whomai", "user", combinedOutput)
+	}
+
 	// Save commands to temporary file
 	scriptsDir := agent.GetScriptsDirectory(device.RewstOrgId)
 	err = utils.CreateFolderIfMissing(scriptsDir)
