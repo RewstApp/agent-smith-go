@@ -104,18 +104,17 @@ func (msg *Message) Parse(data []byte) error {
 func (msg *Message) Execute(ctx context.Context, device agent.Device, logger hclog.Logger) []byte {
 	// Execute commands if given
 	if msg.Commands != "" {
-		logger.Info("Executing commands...")
+		logger.Info("Executing commands", "interpreter_override", msg.InterpreterOverride.Value)
 
 		// Select the correct interpreter
-		switch msg.InterpreterOverride.Value {
-		case "pwsh":
-		case "powershell":
-			return executeUsingPowershell(ctx, msg, device, logger)
+		switch strings.ToLower(msg.InterpreterOverride.Value) {
+		case "pwsh", "powershell":
+			return executeUsingPowershell(ctx, msg, device, logger, msg.InterpreterOverride.Value == "pwsh")
 		case "bash":
 			return executeUsingBash(ctx, msg, device, logger)
 		default:
 			if runtime.GOOS == "windows" {
-				return executeUsingPowershell(ctx, msg, device, logger)
+				return executeUsingPowershell(ctx, msg, device, logger, false)
 			} else {
 				return executeUsingBash(ctx, msg, device, logger)
 			}
