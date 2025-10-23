@@ -69,6 +69,7 @@ func runUpdate(params *updateParams) {
 	device.LoggingLevel = utils.LoggingLevel(params.LoggingLevel)
 	device.UseSyslog = params.UseSyslog
 	device.DisableAgentPostback = params.DisableAgentPostback
+	device.DisableAutoUpdates = params.NoAutoUpdates
 
 	// Save the updated configuration file
 	configBytes, err := json.MarshalIndent(device, "", "  ")

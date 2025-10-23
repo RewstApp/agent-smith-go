@@ -37,10 +37,11 @@ rewst_agent_config.win.exe --org-id YOUR_ORG_ID --config-url CONFIG_URL --config
 - `--logging-level`: Set logging verbosity (`info`, `warn`, `error`, `debug`)  
 - `--syslog`: Write logs to system log instead of file (Linux/macOS)
 - `--disable-agent-postback`: Disable agent postback
+- `--no-auto-updates`: Disable auto updates
 
 Example with optional parameters:
 ```bash
-./rewst_agent_config --org-id YOUR_ORG_ID --config-url CONFIG_URL --config-secret CONFIG_SECRET --logging-level info --syslog --disable-agent-postback
+./rewst_agent_config --org-id YOUR_ORG_ID --config-url CONFIG_URL --config-secret CONFIG_SECRET --logging-level info --syslog --disable-agent-postback --no-auto-updates
 ```
 
 ## Update
@@ -48,7 +49,7 @@ Example with optional parameters:
 Once installed, the agent can be updated and configured using the config executable. The optional parameters are also available.
 
 ```bash
-./rewst_agent_config --org-id YOUR_ORG_ID --update --logging-level info --syslog --disable-agent-postback
+./rewst_agent_config --org-id YOUR_ORG_ID --update --logging-level info --syslog --disable-agent-postback --no-auto-updates
 ```
 
 ## Service Mode

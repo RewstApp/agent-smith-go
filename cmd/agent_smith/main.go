@@ -46,6 +46,7 @@ type configParams struct {
 	LoggingLevel         string
 	UseSyslog            bool
 	DisableAgentPostback bool
+	NoAutoUpdates        bool
 }
 
 var allowedLoggingLevels = map[string]bool{
@@ -67,6 +68,7 @@ func parseConfigParams(args []string) (*configParams, error) {
 	fs.StringVar(&params.LoggingLevel, "logging-level", string(utils.Default), fmt.Sprintf("Logging level: %s", getAllowedConfigLevelsString(", ")))
 	fs.BoolVar(&params.UseSyslog, "syslog", false, "Write log messages to system log")
 	fs.BoolVar(&params.DisableAgentPostback, "disable-agent-postback", false, "Disable agent postback")
+	fs.BoolVar(&params.NoAutoUpdates, "no-auto-updates", false, "No auto updates")
 	fs.SetOutput(bytes.NewBuffer([]byte{}))
 
 	err := fs.Parse(args)
@@ -148,6 +150,7 @@ type updateParams struct {
 	LoggingLevel         string
 	UseSyslog            bool
 	DisableAgentPostback bool
+	NoAutoUpdates        bool
 }
 
 func parseUpdateParams(args []string) (*updateParams, error) {
@@ -212,7 +215,7 @@ func main() {
 
 	// Show usage
 	loggingLevelsList := getAllowedConfigLevelsString("|")
-	configFlagsList := fmt.Sprintf("[--logging-level %s] [--syslog] [--disable-agent-postback]", loggingLevelsList)
+	configFlagsList := fmt.Sprintf("[--logging-level %s] [--syslog] [--disable-agent-postback] [--no-auto-updates]", loggingLevelsList)
 	usages := []string{
 		"--uninstall",
 		fmt.Sprintf("--config-url <CONFIG URL> --config-secret <CONFIG SECRET> %s", configFlagsList),
