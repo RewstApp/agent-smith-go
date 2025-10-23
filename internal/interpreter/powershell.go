@@ -19,6 +19,8 @@ import (
 
 const powershellVersionCheckCommand = "\"$($PSVersionTable.PSVersion.Major).$($PSVersionTable.PSVersion.Minor)\""
 
+var utf8BOM = []byte{0xEF, 0xBB, 0xBF}
+
 func executeUsingPowershell(ctx context.Context, message *Message, device agent.Device, logger hclog.Logger, usePwsh bool) []byte {
 	// Parse the commands
 	commandBytes, err := base64.StdEncoding.DecodeString(message.Commands)
@@ -76,8 +78,15 @@ func executeUsingPowershell(ctx context.Context, message *Message, device agent.
 		return errorResultBytes(err)
 	}
 
+	_, err = tempfile.Write(utf8BOM)
+	if err != nil {
+		logger.Error("Failed to write BOM", "error", err)
+		return errorResultBytes(err)
+	}
+
 	_, err = tempfile.WriteString(commands)
 	if err != nil {
+		logger.Error("Failed to write command file", "error", err)
 		return errorResultBytes(err)
 	}
 
