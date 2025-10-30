@@ -30,6 +30,8 @@ type release struct {
 }
 
 func autoUpdate(logger hclog.Logger, device Device) {
+	logger.Info("Checking for updates")
+
 	resp, err := http.Get(latestReleaseUrl)
 	if err != nil {
 		logger.Error("Failed to fetch latest release", "url", latestReleaseUrl, "error", err)
