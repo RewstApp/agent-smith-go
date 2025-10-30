@@ -162,6 +162,7 @@ func parseUpdateParams(args []string) (*updateParams, error) {
 	fs.StringVar(&params.LoggingLevel, "logging-level", string(utils.Default), fmt.Sprintf("Logging level: %s", getAllowedConfigLevelsString(", ")))
 	fs.BoolVar(&params.UseSyslog, "syslog", false, "Write log messages to system log")
 	fs.BoolVar(&params.DisableAgentPostback, "disable-agent-postback", false, "Disable agent postback")
+	fs.BoolVar(&params.NoAutoUpdates, "no-auto-updates", false, "No auto updates")
 	fs.SetOutput(bytes.NewBuffer([]byte{}))
 
 	err := fs.Parse(args)

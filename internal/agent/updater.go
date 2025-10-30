@@ -60,7 +60,7 @@ func autoUpdate(logger hclog.Logger, device Device) {
 
 	logger.Info("Updating agent", "version", release.TagName)
 
-	err = update(*applicableAsset, device)
+	err = update(logger, *applicableAsset, device)
 	if err != nil {
 		logger.Error("Failed to update agent", "error", err)
 		return
@@ -113,13 +113,29 @@ func download(asset asset) (string, error) {
 	return file.Name(), nil
 }
 
-func update(asset asset, device Device) error {
+func update(logger hclog.Logger, asset asset, device Device) error {
 	path, err := download(asset)
 	if err != nil {
 		return err
 	}
 
-	cmd := exec.Command(path, "--org-id", device.RewstOrgId, "--update", "--logging-level", string(device.LoggingLevel))
+	args := []string{"--org-id", device.RewstOrgId, "--update", "--logging-level", string(device.LoggingLevel)}
+
+	if device.UseSyslog {
+		args = append(args, "--syslog")
+	}
+
+	if device.DisableAgentPostback {
+		args = append(args, "--disable-agent-postback")
+	}
+
+	if device.DisableAutoUpdates {
+		args = append(args, "--no-auto-updates")
+	}
+
+	logger.Debug("Running update commmand", "path", path, "args", args)
+
+	cmd := exec.Command(path, args...)
 	err = cmd.Run()
 
 	return err
