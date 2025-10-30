@@ -39,6 +39,11 @@ func autoUpdate(logger hclog.Logger, device Device) {
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode != http.StatusOK {
+		logger.Error("Failed to fetch latest release", "url", latestReleaseUrl, "status", resp.StatusCode)
+		return
+	}
+
 	var release release
 	if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
 		logger.Error("Failed to parse release", "error", err)
