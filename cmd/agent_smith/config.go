@@ -80,6 +80,8 @@ func runConfig(params *configParams) {
 	}
 	response.Configuration.LoggingLevel = utils.LoggingLevel(params.LoggingLevel)
 	response.Configuration.UseSyslog = params.UseSyslog
+	response.Configuration.DisableAgentPostback = params.DisableAgentPostback
+	response.Configuration.DisableAutoUpdates = params.NoAutoUpdates
 
 	// Create the data directory
 	dataDir := agent.GetDataDirectory(params.OrgId)

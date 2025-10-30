@@ -13,6 +13,7 @@ type Device struct {
 	UseSyslog            bool               `json:"syslog"`
 	Plugins              []Plugin           `json:"plugins"`
 	DisableAgentPostback bool               `json:"disable_agent_postback"`
+	DisableAutoUpdates   bool               `json:"disable_auto_updates"`
 }
 
 type Plugin struct {
