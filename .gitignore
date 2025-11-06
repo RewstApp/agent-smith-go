@@ -5,3 +5,6 @@
 # Coverage files
 /coverage
 /coverage.out
+
+# Claude files
+.claude
