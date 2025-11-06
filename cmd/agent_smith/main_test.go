@@ -110,3 +110,59 @@ func TestParseServiceParams(t *testing.T) {
 		}
 	}
 }
+
+func TestParseUpdateParams(t *testing.T) {
+	orgId := "test123"
+	result, _ := parseUpdateParams([]string{"--org-id", orgId, "--update"})
+
+	if result.OrgId != orgId {
+		t.Errorf("expected %v, got %v", orgId, result.OrgId)
+	}
+
+	if !result.Update {
+		t.Errorf("expected true, got false")
+	}
+
+	// Test with optional parameters
+	result2, _ := parseUpdateParams([]string{
+		"--org-id", orgId,
+		"--update",
+		"--logging-level", "debug",
+		"--syslog",
+		"--disable-agent-postback",
+		"--no-auto-updates",
+	})
+
+	if result2.LoggingLevel != "debug" {
+		t.Errorf("expected 'debug', got %v", result2.LoggingLevel)
+	}
+
+	if !result2.UseSyslog {
+		t.Errorf("expected UseSyslog true, got false")
+	}
+
+	if !result2.DisableAgentPostback {
+		t.Errorf("expected DisableAgentPostback true, got false")
+	}
+
+	if !result2.NoAutoUpdates {
+		t.Errorf("expected NoAutoUpdates true, got false")
+	}
+
+	errorTests := []struct {
+		args    []string
+		message string
+	}{
+		{[]string{"--org-id", orgId}, "missing update"},
+		{[]string{"--update"}, "missing org-id"},
+		{[]string{"--=update"}, "bad flag syntax"},
+	}
+
+	for _, errorTest := range errorTests {
+		_, err := parseUpdateParams(errorTest.args)
+
+		if err == nil || !strings.Contains(err.Error(), errorTest.message) {
+			t.Errorf("expected error %s, got %v", errorTest.message, err.Error())
+		}
+	}
+}
