@@ -31,8 +31,7 @@ jobs:
         run: |
           git config --local user.email "automated_builds@rewst.io"
           git config --local user.name "Rewst GitHub Actions"
-          cz bump --yes
-          git push
+          git tag "v$(cz bump --yes --get-next)"
           git push --tags
 
   build:
