@@ -101,7 +101,7 @@ func (msg *Message) Parse(data []byte) error {
 	return json.Unmarshal(data, msg)
 }
 
-func (msg *Message) Execute(ctx context.Context, device agent.Device, logger hclog.Logger) []byte {
+func (msg *Message) Execute(ctx context.Context, device agent.Device, logger hclog.Logger, sys agent.SystemInfoProvider, domain agent.DomainInfoProvider) []byte {
 	// Execute commands if given
 	if msg.Commands != "" {
 		logger.Info("Executing commands", "interpreter_override", msg.InterpreterOverride.Value)
@@ -126,8 +126,7 @@ func (msg *Message) Execute(ctx context.Context, device agent.Device, logger hcl
 		logger.Info("Executing get_installation...")
 
 		// Load the paths data
-		var paths agent.PathsData
-		err := paths.Load(ctx, device.RewstOrgId, logger)
+		paths, err := agent.NewPathsData(ctx, device.RewstOrgId, logger, sys, domain)
 		if err != nil {
 			return errorResultBytes(err)
 		}

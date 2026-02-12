@@ -26,7 +26,7 @@ type errorResponse struct {
 	Error string `json:"error"`
 }
 
-func (svc *serviceParams) loadConfig() (agent.Device, error) {
+func (svc *serviceContext) loadConfig() (agent.Device, error) {
 	var device agent.Device
 
 	// Read and parse the config file
@@ -44,7 +44,7 @@ func (svc *serviceParams) loadConfig() (agent.Device, error) {
 	return device, nil
 }
 
-func (svc *serviceParams) loadLog() (*os.File, error) {
+func (svc *serviceContext) loadLog() (*os.File, error) {
 	logFile, err := os.OpenFile(svc.LogFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, utils.DefaultFileMod)
 	if err != nil {
 		return nil, err
@@ -53,11 +53,11 @@ func (svc *serviceParams) loadLog() (*os.File, error) {
 	return logFile, nil
 }
 
-func (svc *serviceParams) Name() string {
+func (svc *serviceContext) Name() string {
 	return agent.GetServiceName(svc.OrgId)
 }
 
-func (svc *serviceParams) Execute(stop <-chan struct{}, running chan<- struct{}) service.ServiceExitCode {
+func (svc *serviceContext) Execute(stop <-chan struct{}, running chan<- struct{}) service.ServiceExitCode {
 	// Create context to cancel running commands
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -192,7 +192,7 @@ func (svc *serviceParams) Execute(stop <-chan struct{}, running chan<- struct{})
 				notifier.Notify("AgentReceivedMessage:" + string(msg.Payload()))
 
 				// Execute the message
-				resultBytes := message.Execute(ctx, device, logger)
+				resultBytes := message.Execute(ctx, device, logger, svc.Sys, svc.Domain)
 
 				// Skip if there is no post_id specified
 				if message.PostId == "" {
@@ -285,7 +285,7 @@ func (svc *serviceParams) Execute(stop <-chan struct{}, running chan<- struct{})
 	}
 }
 
-func runService(params *serviceParams) {
+func runService(params *serviceContext) {
 	exitCode, _ := service.Run(params)
 	os.Exit(exitCode)
 }

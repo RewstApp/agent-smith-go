@@ -20,15 +20,14 @@ type fetchConfigurationResponse struct {
 	Configuration agent.Device `json:"configuration"`
 }
 
-func runConfig(params *configParams) {
+func runConfig(params *configContext) {
 	logger := utils.ConfigureLogger("agent_smith", os.Stdout, utils.Default)
 
 	// Show header
 	logger.Info("Agent Smith started", "version", version.Version, "os", runtime.GOOS)
 
 	// Get installation paths data
-	var pathsData agent.PathsData
-	err := pathsData.Load(context.Background(), params.OrgId, logger)
+	pathsData, err := agent.NewPathsData(context.Background(), params.OrgId, logger, params.Sys, params.Domain)
 	if err != nil {
 		logger.Error("Failed to read paths", "error", err)
 		return

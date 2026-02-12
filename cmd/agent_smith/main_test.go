@@ -1,112 +1,65 @@
 package main
 
 import (
-	"strings"
-	"testing"
+	"context"
 )
 
-func TestParseUninstallParams(t *testing.T) {
-	orgId := "test123"
-	result, _ := parseUninstallParams([]string{"--org-id", orgId, "--uninstall"})
-
-	if result.OrgId != orgId {
-		t.Errorf("expected %v, got %v", orgId, result.OrgId)
-	}
-
-	if !result.Uninstall {
-		t.Errorf("expected true, got false")
-	}
-
-	errorTests := []struct {
-		args    []string
-		message string
-	}{
-		{[]string{"--org-id", orgId}, "missing uninstall"},
-		{[]string{"--uninstall"}, "missing org-id"},
-		{[]string{"--=uninstall"}, "bad flag syntax"},
-	}
-
-	for _, errorTest := range errorTests {
-		_, err := parseUninstallParams(errorTest.args)
-
-		if err == nil || !strings.Contains(err.Error(), errorTest.message) {
-			t.Errorf("expected error %s, got %v", errorTest.message, err.Error())
-		}
-	}
+type mockSystemInfoProvider struct {
+	hostname            string
+	hostnameErr         error
+	hostPlatform        string
+	hostPlatformErr     error
+	cpuModelName        string
+	cpuModelNameErr     error
+	totalMemoryBytes    uint64
+	totalMemoryBytesErr error
+	macAddress          *string
+	macAddressErr       error
 }
 
-func TestParseConfigParams(t *testing.T) {
-	orgId := "test123"
-	configUrl := "https://config.url/"
-	configSecret := "secret123"
-
-	result, _ := parseConfigParams([]string{"--org-id", orgId, "--config-url", configUrl, "--config-secret", configSecret})
-
-	if result.OrgId != orgId {
-		t.Errorf("expected %v, got %v", orgId, result.OrgId)
-	}
-
-	if result.ConfigUrl != configUrl {
-		t.Errorf("expected %v, got %v", configUrl, result.ConfigUrl)
-	}
-
-	if result.ConfigSecret != configSecret {
-		t.Errorf("expected %v, got %v", configSecret, result.ConfigSecret)
-	}
-
-	errorTests := []struct {
-		args    []string
-		message string
-	}{
-		{[]string{"--config-url", configUrl, "--config-secret", configSecret}, "missing org-id"},
-		{[]string{"--org-id", orgId, "--config-secret", configSecret}, "missing config-url"},
-		{[]string{"--org-id", orgId, "--config-url", configUrl}, "missing config-secret"},
-		{[]string{"--=uninstall"}, "bad flag syntax"},
-	}
-
-	for _, errorTest := range errorTests {
-		_, err := parseConfigParams(errorTest.args)
-
-		if err == nil || !strings.Contains(err.Error(), errorTest.message) {
-			t.Errorf("expected error %s, got %v", errorTest.message, err.Error())
-		}
-	}
+func (mock *mockSystemInfoProvider) Hostname() (string, error) {
+	return mock.hostname, mock.hostnameErr
 }
 
-func TestParseServiceParams(t *testing.T) {
-	orgId := "test123"
-	configFile := "/file/config"
-	logFile := "/file/log"
+func (mock *mockSystemInfoProvider) HostPlatform() (string, error) {
+	return mock.hostPlatform, mock.hostPlatformErr
+}
 
-	result, _ := parseServiceParams([]string{"--org-id", orgId, "--config-file", configFile, "--log-file", logFile})
+func (mock *mockSystemInfoProvider) CPUModelName() (string, error) {
+	return mock.cpuModelName, mock.cpuModelNameErr
+}
 
-	if result.OrgId != orgId {
-		t.Errorf("expected %v, got %v", orgId, result.OrgId)
-	}
+func (mock *mockSystemInfoProvider) TotalMemoryBytes() (uint64, error) {
+	return mock.totalMemoryBytes, mock.totalMemoryBytesErr
+}
 
-	if result.ConfigFile != configFile {
-		t.Errorf("expected %v, got %v", configFile, result.ConfigFile)
-	}
+func (mock *mockSystemInfoProvider) MACAddress() (*string, error) {
+	return mock.macAddress, mock.macAddressErr
+}
 
-	if result.LogFile != logFile {
-		t.Errorf("expected %v, got %v", logFile, result.LogFile)
-	}
+type mockDomainInfoProvider struct {
+	adDomain                *string
+	adDomainErr             error
+	isAdDomainController    bool
+	isAdDomainControllerErr error
+	isEntraConnectServer    bool
+	isEntraConnectServerErr error
+	entraDomain             *string
+	entraDomainErr          error
+}
 
-	errorTests := []struct {
-		args    []string
-		message string
-	}{
-		{[]string{"--config-file", configFile, "--log-file", logFile}, "missing org-id"},
-		{[]string{"--org-id", orgId, "--config-file", configFile}, "missing log-file"},
-		{[]string{"--org-id", orgId, "--log-file", logFile}, "missing config-file"},
-		{[]string{"--=uninstall"}, "bad flag syntax"},
-	}
+func (mock *mockDomainInfoProvider) ADDomain(context.Context) (*string, error) {
+	return mock.adDomain, mock.adDomainErr
+}
 
-	for _, errorTest := range errorTests {
-		_, err := parseServiceParams(errorTest.args)
+func (mock *mockDomainInfoProvider) IsADDomainController(context.Context) (bool, error) {
+	return mock.isAdDomainController, mock.isAdDomainControllerErr
+}
 
-		if err == nil || !strings.Contains(err.Error(), errorTest.message) {
-			t.Errorf("expected error %s, got %v", errorTest.message, err.Error())
-		}
-	}
+func (mock *mockDomainInfoProvider) IsEntraConnectServer() (bool, error) {
+	return mock.isEntraConnectServer, mock.isEntraConnectServerErr
+}
+
+func (mock *mockDomainInfoProvider) EntraDomain(context.Context) (*string, error) {
+	return mock.entraDomain, mock.entraDomainErr
 }

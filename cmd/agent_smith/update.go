@@ -13,7 +13,7 @@ import (
 	"github.com/RewstApp/agent-smith-go/internal/version"
 )
 
-func runUpdate(params *updateParams) {
+func runUpdate(params *updateContext) {
 	logger := utils.ConfigureLogger("agent_smith", os.Stdout, utils.Default)
 
 	// Show header
@@ -43,8 +43,7 @@ func runUpdate(params *updateParams) {
 	}
 
 	// Get installation paths data
-	var pathsData agent.PathsData
-	err = pathsData.Load(context.Background(), params.OrgId, logger)
+	pathsData, err := agent.NewPathsData(context.Background(), params.OrgId, logger, params.Sys, params.Domain)
 	if err != nil {
 		logger.Error("Failed to read paths", "error", err)
 		return
