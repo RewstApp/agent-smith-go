@@ -6,22 +6,48 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"os"
 	"strings"
+
+	"github.com/shirou/gopsutil/v4/cpu"
+	"github.com/shirou/gopsutil/v4/host"
+	"github.com/shirou/gopsutil/v4/mem"
 )
 
-func getAdDomain(context.Context) (*string, error) {
-	return nil, nil
+type darwinDefaultSystemInfoProvider struct{}
+
+func (*darwinDefaultSystemInfoProvider) Hostname() (string, error) {
+	return os.Hostname()
 }
 
-func getIsAdDomainController(context.Context) (bool, error) {
-	return false, nil
+func (*darwinDefaultSystemInfoProvider) HostPlatform() (string, error) {
+	hostStat, err := host.Info()
+	if err != nil {
+		return "", err
+	}
+
+	return hostStat.Platform, nil
 }
 
-func getIsEntraConnectServer() (bool, error) {
-	return false, nil
+func (*darwinDefaultSystemInfoProvider) CPUModelName() (string, error) {
+	cpuStat, err := cpu.Info()
+	if err != nil {
+		return "", err
+	}
+
+	return strings.TrimSpace(cpuStat[0].ModelName), nil
 }
 
-func getMacAddress() (*string, error) {
+func (*darwinDefaultSystemInfoProvider) TotalMemoryBytes() (uint64, error) {
+	vmStat, err := mem.VirtualMemory()
+	if err != nil {
+		return 0, nil
+	}
+
+	return vmStat.Total, nil
+}
+
+func (*darwinDefaultSystemInfoProvider) MACAddress() (*string, error) {
 	ifas, err := net.Interfaces()
 	if err != nil {
 		return nil, err
@@ -39,6 +65,28 @@ func getMacAddress() (*string, error) {
 	return nil, fmt.Errorf("%s", "No mac address found")
 }
 
-func getEntraDomain(context.Context) (*string, error) {
+func NewSystemInfoProvider() SystemInfoProvider {
+	return &darwinDefaultSystemInfoProvider{}
+}
+
+type darwinDefaultDomainInfoProvider struct{}
+
+func (*darwinDefaultDomainInfoProvider) ADDomain(context.Context) (*string, error) {
 	return nil, nil
+}
+
+func (*darwinDefaultDomainInfoProvider) IsADDomainController(context.Context) (bool, error) {
+	return false, nil
+}
+
+func (*darwinDefaultDomainInfoProvider) IsEntraConnectServer() (bool, error) {
+	return false, nil
+}
+
+func (*darwinDefaultDomainInfoProvider) EntraDomain(context.Context) (*string, error) {
+	return nil, nil
+}
+
+func NewDomainInfoProvider() DomainInfoProvider {
+	return &darwinDefaultDomainInfoProvider{}
 }
