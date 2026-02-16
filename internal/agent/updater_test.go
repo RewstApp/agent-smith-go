@@ -39,7 +39,7 @@ func TestCheck_Success(t *testing.T) {
 	release := Release{
 		Id:      1,
 		TagName: "v2.0.0",
-		Assets:  []Asset{{Id: 1, Name: "agent.win.exe", Url: "http://example.com"}},
+		Assets:  []Asset{{Id: 1, Name: testAssetFileName, Url: "http://example.com"}},
 	}
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -523,7 +523,7 @@ func TestRun_FullUpdateFlow(t *testing.T) {
 	// Serve the release check endpoint
 	release := Release{
 		TagName: "v99.0.0",
-		Assets:  []Asset{{Id: 1, Name: "agent.win.exe", Url: "PLACEHOLDER"}},
+		Assets:  []Asset{{Id: 1, Name: testAssetFileName, Url: "PLACEHOLDER"}},
 	}
 
 	// Serve the binary download endpoint
@@ -588,7 +588,7 @@ func TestRun_DownloadError(t *testing.T) {
 	// Use an unreachable URL so the HTTP request fails
 	release := Release{
 		TagName: "v99.0.0",
-		Assets:  []Asset{{Id: 1, Name: "agent.win.exe", Url: "http://invalid.invalid.invalid"}},
+		Assets:  []Asset{{Id: 1, Name: testAssetFileName, Url: "http://invalid.invalid.invalid"}},
 	}
 
 	releaseServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -619,7 +619,7 @@ func TestRun_UpdateCommandError(t *testing.T) {
 
 	release := Release{
 		TagName: "v99.0.0",
-		Assets:  []Asset{{Id: 1, Name: "agent.win.exe", Url: downloadServer.URL}},
+		Assets:  []Asset{{Id: 1, Name: testAssetFileName, Url: downloadServer.URL}},
 	}
 
 	releaseServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
