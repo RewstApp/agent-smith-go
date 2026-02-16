@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"runtime"
 	"strings"
 	"time"
@@ -89,7 +90,12 @@ func (svc *serviceContext) Execute(stop <-chan struct{}, running chan<- struct{}
 	}
 
 	if !device.DisableAutoUpdates {
-		go agent.RunAutoUpdater(logger, device)
+		updater := agent.NewUpdater(logger, &device, "https://api.github.com/repos/rewstapp/agent-smith-go/releases/latest", func(path string, args []string) error {
+			return exec.Command(path, args...).Run()
+		})
+		runner := agent.NewAutoUpdateRunner(logger, updater, 48*time.Hour, 5, 5*time.Minute)
+		runner.Start()
+		defer runner.Stop()
 	}
 
 	// Show header
