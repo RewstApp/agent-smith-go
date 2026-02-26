@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/RewstApp/agent-smith-go/internal/agent"
@@ -210,6 +211,38 @@ func TestMessage_Execute_GetInstallation(t *testing.T) {
 
 	if out.Tags.HostName != "test-host" {
 		t.Errorf("expected hostname 'test-host', got %s", out.Tags.HostName)
+	}
+}
+
+func TestMessage_Execute_DebugLogger_WritesEntries(t *testing.T) {
+	var buf bytes.Buffer
+	logger := hclog.New(&hclog.LoggerOptions{
+		Output: &buf,
+		Level:  hclog.Debug,
+	})
+	msg := Message{
+		PostId:   "test:123",
+		Commands: encodeCommand("echo 'hello world'"),
+	}
+	device := agent.Device{RewstOrgId: "test-org"}
+	executor := NewExecutor()
+	sys := &mockSystemInfoProvider{}
+	domain := &mockDomainInfoProvider{}
+
+	msg.Execute(executor, context.Background(), device, logger, sys, domain)
+
+	if buf.Len() == 0 {
+		t.Error("expected log entries to be written, but buffer is empty")
+	}
+
+	logs := buf.String()
+
+	if !strings.Contains(strings.ToLower(logs), "[debug] shell version") {
+		t.Errorf("expected log entries to write shell version, but not found in %s", logs)
+	}
+
+	if !strings.Contains(strings.ToLower(logs), "[debug] whoami") {
+		t.Errorf("expected log entries to write whoami, but not found in %s", logs)
 	}
 }
 

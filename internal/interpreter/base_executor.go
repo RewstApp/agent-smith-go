@@ -64,7 +64,7 @@ func (e *baseExecutor) Execute(ctx context.Context, message *Message, device age
 			logger.Error("Whoami check failed", "error", err, "combined_output", combinedOutput)
 		}
 
-		logger.Debug("Whomai", "user", combinedOutput)
+		logger.Debug("Whoami", "user", combinedOutput)
 	}
 
 	// Save commands to temporary file
