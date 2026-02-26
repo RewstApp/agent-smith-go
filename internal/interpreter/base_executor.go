@@ -109,7 +109,7 @@ func (e *baseExecutor) Execute(ctx context.Context, message *Message, device age
 	if err != nil {
 		logger.Error("Command failed", "error", err)
 		logger.Debug("Command completed with outputs", "error", stderrBuf.String(), "info", stdoutBuf.String())
-		return resultBytes(&result{Error: stderrBuf.String(), Output: stdoutBuf.String()})
+		return resultBytes(stderrBuf.String(), stdoutBuf.String())
 	}
 
 	// Remove successfully executed temporary filename
@@ -118,7 +118,7 @@ func (e *baseExecutor) Execute(ctx context.Context, message *Message, device age
 	logger.Info("Command completed", "message_id", message.PostId, "exit_code", cmd.ProcessState.ExitCode())
 	logger.Debug("Command completed with outputs", "error", stderrBuf.String(), "info", stdoutBuf.String())
 
-	return resultBytes(&result{Error: stderrBuf.String(), Output: stdoutBuf.String()})
+	return resultBytes(stderrBuf.String(), stdoutBuf.String())
 }
 
 func NewBaseExecutor(shell string, shellVersionCheckCommand string, writeUtf8BOM bool, buildExecuteCommandArgs BuildExecuteCommandArgsFunc, buildExecuteFileArgs BuildExecuteFileArgsFunc) Executor {

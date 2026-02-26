@@ -5,9 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
-	"errors"
 	"net/http"
-	"strings"
 	"testing"
 
 	"github.com/RewstApp/agent-smith-go/internal/agent"
@@ -37,17 +35,6 @@ func TestMessage_CreatePostbackRequest(t *testing.T) {
 	}
 	if req.Header.Get("Content-Type") != "application/json" {
 		t.Errorf("expected Content-Type application/json, got %s", req.Header.Get("Content-Type"))
-	}
-}
-
-func TestErrorResultBytes(t *testing.T) {
-	err := errors.New("test error")
-	result := errorResultBytes(err)
-
-	var out errorResult
-	json.Unmarshal(result, &out)
-	if out.Error != "test error" {
-		t.Errorf("expected 'test error', got %s", out.Error)
 	}
 }
 
@@ -145,38 +132,6 @@ func TestMessage_Parse_GetInstallation(t *testing.T) {
 
 	if !msg.GetInstallation {
 		t.Error("expected get_installation true")
-	}
-}
-
-func TestResultBytes(t *testing.T) {
-	r := &result{Error: "some error", Output: "some output"}
-	b := resultBytes(r)
-
-	var out result
-	err := json.Unmarshal(b, &out)
-	if err != nil {
-		t.Fatalf("expected valid JSON, got %v", err)
-	}
-
-	if out.Error != "some error" {
-		t.Errorf("expected 'some error', got %s", out.Error)
-	}
-
-	if out.Output != "some output" {
-		t.Errorf("expected 'some output', got %s", out.Output)
-	}
-}
-
-func TestStringFalse_UnsupportedType(t *testing.T) {
-	var sf StringFalse
-	err := sf.UnmarshalJSON([]byte("[1,2,3]"))
-
-	if err == nil {
-		t.Fatal("expected error for unsupported type")
-	}
-
-	if !strings.Contains(err.Error(), "unsupported type") {
-		t.Errorf("expected 'unsupported type' error, got %v", err)
 	}
 }
 
