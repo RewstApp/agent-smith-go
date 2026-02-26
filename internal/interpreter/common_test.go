@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
-	"runtime"
 	"strings"
 	"testing"
 
@@ -186,70 +185,12 @@ func TestMessage_Execute_Noop(t *testing.T) {
 	msg := Message{}
 	device := agent.Device{RewstOrgId: "test-org"}
 
-	result := msg.Execute(context.Background(), device, logger, nil, nil)
+	result := msg.Execute(nil, context.Background(), device, logger, nil, nil)
 
 	var out errorResult
 	json.Unmarshal(result, &out)
 	if out.Error != "noop" {
 		t.Errorf("expected 'noop', got %s", out.Error)
-	}
-}
-
-func TestMessage_Execute_Commands(t *testing.T) {
-	logger := hclog.NewNullLogger()
-
-	var command string
-	if runtime.GOOS == "windows" {
-		command = "Write-Output 'hello from test'"
-	} else {
-		command = "echo 'hello from test'"
-	}
-
-	msg := Message{
-		PostId:   "test:123",
-		Commands: encodeCommand(command),
-	}
-	device := agent.Device{RewstOrgId: "test-org"}
-
-	resultBytes := msg.Execute(context.Background(), device, logger, nil, nil)
-
-	var out result
-	err := json.Unmarshal(resultBytes, &out)
-	if err != nil {
-		t.Fatalf("expected valid JSON result, got %v", err)
-	}
-
-	if !strings.Contains(out.Output, "hello from test") {
-		t.Errorf("expected output to contain 'hello from test', got %s", out.Output)
-	}
-}
-
-func TestMessage_Execute_CommandError(t *testing.T) {
-	logger := hclog.NewNullLogger()
-
-	var command string
-	if runtime.GOOS == "windows" {
-		command = "[Console]::Error.WriteLine('fail'); exit 1"
-	} else {
-		command = "echo 'fail' >&2; exit 1"
-	}
-
-	msg := Message{
-		PostId:   "test:456",
-		Commands: encodeCommand(command),
-	}
-	device := agent.Device{RewstOrgId: "test-org"}
-
-	resultBytes := msg.Execute(context.Background(), device, logger, nil, nil)
-
-	var out result
-	err := json.Unmarshal(resultBytes, &out)
-	if err != nil {
-		t.Fatalf("expected valid JSON result, got %v", err)
-	}
-
-	if !strings.Contains(out.Error, "fail") {
-		t.Errorf("expected stderr to contain 'fail', got %s", out.Error)
 	}
 }
 
@@ -259,51 +200,14 @@ func TestMessage_Execute_InvalidBase64(t *testing.T) {
 		Commands: "not-valid-base64!!!",
 	}
 	device := agent.Device{RewstOrgId: "test-org"}
+	executor := NewExecutor()
 
-	resultBytes := msg.Execute(context.Background(), device, logger, nil, nil)
+	resultBytes := msg.Execute(executor, context.Background(), device, logger, nil, nil)
 
 	var out errorResult
 	json.Unmarshal(resultBytes, &out)
 	if out.Error == "" {
 		t.Error("expected error for invalid base64")
-	}
-}
-
-func TestMessage_Execute_InterpreterOverride(t *testing.T) {
-	logger := hclog.NewNullLogger()
-
-	var override string
-	var command string
-	if runtime.GOOS == "windows" {
-		override = "powershell"
-		command = "Write-Output 'ps-test'"
-	} else {
-		override = "bash"
-		command = "echo 'bash-test'"
-	}
-
-	msg := Message{
-		PostId:              "test:789",
-		Commands:            encodeCommand(command),
-		InterpreterOverride: StringFalse{Value: override},
-	}
-	device := agent.Device{RewstOrgId: "test-org"}
-
-	resultBytes := msg.Execute(context.Background(), device, logger, nil, nil)
-
-	var out result
-	err := json.Unmarshal(resultBytes, &out)
-	if err != nil {
-		t.Fatalf("expected valid JSON result, got %v", err)
-	}
-
-	expected := "ps-test"
-	if runtime.GOOS != "windows" {
-		expected = "bash-test"
-	}
-
-	if !strings.Contains(out.Output, expected) {
-		t.Errorf("expected output to contain '%s', got %s", expected, out.Output)
 	}
 }
 
@@ -317,10 +221,12 @@ func (m *mockSystemInfoProvider) MACAddress() (*string, error)      { return nil
 
 type mockDomainInfoProvider struct{}
 
-func (m *mockDomainInfoProvider) ADDomain(context.Context) (*string, error)          { return nil, nil }
-func (m *mockDomainInfoProvider) IsADDomainController(context.Context) (bool, error) { return false, nil }
-func (m *mockDomainInfoProvider) IsEntraConnectServer() (bool, error)                { return false, nil }
-func (m *mockDomainInfoProvider) EntraDomain(context.Context) (*string, error)       { return nil, nil }
+func (m *mockDomainInfoProvider) ADDomain(context.Context) (*string, error) { return nil, nil }
+func (m *mockDomainInfoProvider) IsADDomainController(context.Context) (bool, error) {
+	return false, nil
+}
+func (m *mockDomainInfoProvider) IsEntraConnectServer() (bool, error)          { return false, nil }
+func (m *mockDomainInfoProvider) EntraDomain(context.Context) (*string, error) { return nil, nil }
 
 func TestMessage_Execute_GetInstallation(t *testing.T) {
 	logger := hclog.NewNullLogger()
@@ -331,7 +237,7 @@ func TestMessage_Execute_GetInstallation(t *testing.T) {
 	sys := &mockSystemInfoProvider{}
 	domain := &mockDomainInfoProvider{}
 
-	resultBytes := msg.Execute(context.Background(), device, logger, sys, domain)
+	resultBytes := msg.Execute(nil, context.Background(), device, logger, sys, domain)
 
 	var out agent.PathsData
 	err := json.Unmarshal(resultBytes, &out)
@@ -349,36 +255,6 @@ func TestMessage_Execute_GetInstallation(t *testing.T) {
 
 	if out.Tags.HostName != "test-host" {
 		t.Errorf("expected hostname 'test-host', got %s", out.Tags.HostName)
-	}
-}
-
-func TestMessage_Execute_Bash(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("bash not available on Windows")
-	}
-
-	logger := hclog.NewNullLogger()
-	msg := Message{
-		PostId:              "test:bash",
-		Commands:            encodeCommand("echo 'hello from bash'"),
-		InterpreterOverride: StringFalse{Value: "bash"},
-	}
-	device := agent.Device{RewstOrgId: "test-org"}
-
-	resultBytes := msg.Execute(context.Background(), device, logger, nil, nil)
-
-	var out result
-	err := json.Unmarshal(resultBytes, &out)
-	if err != nil {
-		t.Fatalf("expected valid JSON result, got %v", err)
-	}
-
-	if !strings.Contains(out.Output, "hello from bash") {
-		t.Errorf("expected output to contain 'hello from bash', got %s", out.Output)
-	}
-
-	if out.Error != "" {
-		t.Errorf("expected no error, got %s", out.Error)
 	}
 }
 

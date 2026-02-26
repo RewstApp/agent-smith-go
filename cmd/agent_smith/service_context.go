@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/RewstApp/agent-smith-go/internal/agent"
+	"github.com/RewstApp/agent-smith-go/internal/interpreter"
 )
 
 type serviceContext struct {
@@ -15,9 +16,11 @@ type serviceContext struct {
 
 	Sys    agent.SystemInfoProvider
 	Domain agent.DomainInfoProvider
+
+	Executor interpreter.Executor
 }
 
-func newServiceContext(args []string, sys agent.SystemInfoProvider, domain agent.DomainInfoProvider) (*serviceContext, error) {
+func newServiceContext(args []string, sys agent.SystemInfoProvider, domain agent.DomainInfoProvider, executor interpreter.Executor) (*serviceContext, error) {
 	var params serviceContext
 
 	fs := flag.NewFlagSet("config", flag.ContinueOnError)
@@ -45,6 +48,7 @@ func newServiceContext(args []string, sys agent.SystemInfoProvider, domain agent
 
 	params.Sys = sys
 	params.Domain = domain
+	params.Executor = executor
 
 	return &params, nil
 }

@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"runtime"
 	"strings"
 
 	"github.com/RewstApp/agent-smith-go/internal/agent"
@@ -101,24 +100,11 @@ func (msg *Message) Parse(data []byte) error {
 	return json.Unmarshal(data, msg)
 }
 
-func (msg *Message) Execute(ctx context.Context, device agent.Device, logger hclog.Logger, sys agent.SystemInfoProvider, domain agent.DomainInfoProvider) []byte {
+func (msg *Message) Execute(executor Executor, ctx context.Context, device agent.Device, logger hclog.Logger, sys agent.SystemInfoProvider, domain agent.DomainInfoProvider) []byte {
 	// Execute commands if given
 	if msg.Commands != "" {
 		logger.Info("Executing commands", "interpreter_override", msg.InterpreterOverride.Value)
-
-		// Select the correct interpreter
-		switch strings.ToLower(msg.InterpreterOverride.Value) {
-		case "pwsh", "powershell":
-			return executeUsingPowershell(ctx, msg, device, logger, msg.InterpreterOverride.Value == "pwsh")
-		case "bash":
-			return executeUsingBash(ctx, msg, device, logger)
-		default:
-			if runtime.GOOS == "windows" {
-				return executeUsingPowershell(ctx, msg, device, logger, false)
-			} else {
-				return executeUsingBash(ctx, msg, device, logger)
-			}
-		}
+		return executor.Execute(ctx, msg, device, logger, sys, domain)
 	}
 
 	// Get installation data if given

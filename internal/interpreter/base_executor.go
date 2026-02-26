@@ -17,9 +17,17 @@ import (
 	"golang.org/x/text/transform"
 )
 
-const bashVersionCheckCommand = "echo \"$BASH_VERSION\""
+var utf8BOM = []byte{0xEF, 0xBB, 0xBF}
 
-func executeUsingBash(ctx context.Context, message *Message, device agent.Device, logger hclog.Logger) []byte {
+type baseExecutor struct {
+	Shell                    string
+	ShellVersionCheckCommand string
+	WriteUtf8BOM             bool
+	BuildExecuteCommandArgs  BuildExecuteCommandArgsFunc
+	BuildExecuteFileArgs     BuildExecuteFileArgsFunc
+}
+
+func (e *baseExecutor) Execute(ctx context.Context, message *Message, device agent.Device, logger hclog.Logger, sys agent.SystemInfoProvider, domain agent.DomainInfoProvider) []byte {
 	// Parse the commands
 	commandBytes, err := base64.StdEncoding.DecodeString(message.Commands)
 	if err != nil {
@@ -33,11 +41,9 @@ func executeUsingBash(ctx context.Context, message *Message, device agent.Device
 		return errorResultBytes(err)
 	}
 
-	// Run the command in the system using bash
-	shell := "bash"
-
+	// Run the command in the system using powershell
 	if logger.IsDebug() {
-		cmd := exec.CommandContext(ctx, shell, "-c", bashVersionCheckCommand)
+		cmd := exec.CommandContext(ctx, e.Shell, e.BuildExecuteCommandArgs(e.ShellVersionCheckCommand)...)
 		combinedOutputBytes, err := cmd.CombinedOutput()
 		combinedOutput := string(combinedOutputBytes)
 		if err != nil {
@@ -46,12 +52,12 @@ func executeUsingBash(ctx context.Context, message *Message, device agent.Device
 
 		version := strings.TrimSpace(combinedOutput)
 
-		logger.Debug("Shell version", "shell", shell, "version", version)
+		logger.Debug("Shell version", "shell", e.Shell, "version", version)
 		logger.Debug("Commands to execute", "commands", commands)
 	}
 
 	if logger.IsDebug() {
-		cmd := exec.CommandContext(ctx, "whoami")
+		cmd := exec.CommandContext(ctx, e.Shell, e.BuildExecuteCommandArgs("whoami")...)
 		combinedOutputBytes, err := cmd.CombinedOutput()
 		combinedOutput := string(combinedOutputBytes)
 		if err != nil {
@@ -68,13 +74,22 @@ func executeUsingBash(ctx context.Context, message *Message, device agent.Device
 		return errorResultBytes(err)
 	}
 
-	tempfile, err := os.CreateTemp(scriptsDir, "exec-*.sh")
+	tempfile, err := os.CreateTemp(scriptsDir, "exec-*.ps1")
 	if err != nil {
 		return errorResultBytes(err)
 	}
 
+	if e.WriteUtf8BOM {
+		_, err = tempfile.Write(utf8BOM)
+		if err != nil {
+			logger.Error("Failed to write BOM", "error", err)
+			return errorResultBytes(err)
+		}
+	}
+
 	_, err = tempfile.WriteString(commands)
 	if err != nil {
+		logger.Error("Failed to write command file", "error", err)
 		return errorResultBytes(err)
 	}
 
@@ -84,7 +99,7 @@ func executeUsingBash(ctx context.Context, message *Message, device agent.Device
 	tempfile.Close()
 
 	var stdoutBuf, stderrBuf bytes.Buffer
-	cmd := exec.CommandContext(ctx, shell, tempfile.Name())
+	cmd := exec.CommandContext(ctx, e.Shell, e.BuildExecuteFileArgs(tempfile.Name())...)
 	cmd.Stdout = &stdoutBuf
 	cmd.Stderr = &stderrBuf
 	cmd.Env = os.Environ()
@@ -104,4 +119,14 @@ func executeUsingBash(ctx context.Context, message *Message, device agent.Device
 	logger.Debug("Command completed with outputs", "error", stderrBuf.String(), "info", stdoutBuf.String())
 
 	return resultBytes(&result{Error: stderrBuf.String(), Output: stdoutBuf.String()})
+}
+
+func NewBaseExecutor(shell string, shellVersionCheckCommand string, writeUtf8BOM bool, buildExecuteCommandArgs BuildExecuteCommandArgsFunc, buildExecuteFileArgs BuildExecuteFileArgsFunc) Executor {
+	return &baseExecutor{
+		Shell:                    shell,
+		ShellVersionCheckCommand: shellVersionCheckCommand,
+		WriteUtf8BOM:             writeUtf8BOM,
+		BuildExecuteCommandArgs:  buildExecuteCommandArgs,
+		BuildExecuteFileArgs:     buildExecuteFileArgs,
+	}
 }

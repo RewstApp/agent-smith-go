@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/RewstApp/agent-smith-go/internal/agent"
+	"github.com/RewstApp/agent-smith-go/internal/interpreter"
 	"github.com/RewstApp/agent-smith-go/internal/utils"
 )
 
@@ -36,6 +37,7 @@ func main() {
 	// Create providers
 	sys := agent.NewSystemInfoProvider()
 	domain := agent.NewDomainInfoProvider()
+	executor := interpreter.NewExecutor()
 
 	uninstallContext, err := newUninstallContext(os.Args[1:])
 	if err == nil {
@@ -51,7 +53,7 @@ func main() {
 		return
 	}
 
-	serviceContext, err := newServiceContext(os.Args[1:], sys, domain)
+	serviceContext, err := newServiceContext(os.Args[1:], sys, domain, executor)
 	if err == nil {
 		// Run service routine
 		runService(serviceContext)

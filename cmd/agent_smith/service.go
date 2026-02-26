@@ -198,7 +198,7 @@ func (svc *serviceContext) Execute(stop <-chan struct{}, running chan<- struct{}
 				notifier.Notify("AgentReceivedMessage:" + string(msg.Payload()))
 
 				// Execute the message
-				resultBytes := message.Execute(ctx, device, logger, svc.Sys, svc.Domain)
+				resultBytes := message.Execute(svc.Executor, ctx, device, logger, svc.Sys, svc.Domain)
 
 				// Skip if there is no post_id specified
 				if message.PostId == "" {
