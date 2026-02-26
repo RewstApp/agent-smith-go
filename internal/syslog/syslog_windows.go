@@ -10,9 +10,16 @@ import (
 	"golang.org/x/sys/windows/svc/eventlog"
 )
 
+type eventLogger interface {
+	Info(eid uint32, msg string) error
+	Warning(eid uint32, msg string) error
+	Error(eid uint32, msg string) error
+	Close() error
+}
+
 type windowsSyslog struct {
 	out io.Writer
-	log *eventlog.Log
+	log eventLogger
 }
 
 const infoEventId = 100
