@@ -4,8 +4,15 @@ package syslog
 
 import (
 	"bytes"
+	"errors"
+	"io"
+	"syscall"
 	"testing"
+
+	"golang.org/x/sys/windows/registry"
 )
+
+// mockEventLogger
 
 type mockEventLogger struct {
 	infoMessages    []string
@@ -33,6 +40,34 @@ func (m *mockEventLogger) Close() error {
 	m.closed = true
 	return nil
 }
+
+// mockEventLogFactory
+
+type mockEventLogFactory struct {
+	openKeyErr    error
+	installErr    error
+	openErr       error
+	openResult    eventLogger
+	installCalled bool
+}
+
+func (m *mockEventLogFactory) OpenKey(name string) (io.Closer, error) {
+	if m.openKeyErr != nil {
+		return nil, m.openKeyErr
+	}
+	return io.NopCloser(nil), nil
+}
+
+func (m *mockEventLogFactory) Install(name string) error {
+	m.installCalled = true
+	return m.installErr
+}
+
+func (m *mockEventLogFactory) Open(name string) (eventLogger, error) {
+	return m.openResult, m.openErr
+}
+
+// windowsSyslog.Write tests
 
 func TestWindowsSyslog_Write_Info(t *testing.T) {
 	mock := &mockEventLogger{}
@@ -116,38 +151,6 @@ func TestWindowsSyslog_Write_ForwardsToOut(t *testing.T) {
 	}
 }
 
-func TestWindowsSyslog_Write_UsesCorrectEventIds(t *testing.T) {
-	tests := []struct {
-		name       string
-		input      string
-		wantInfoId bool
-		wantWarnId bool
-		wantErrId  bool
-	}{
-		{"info event id", "[INFO] msg", true, false, false},
-		{"warning event id", "[WARNING] msg", false, true, false},
-		{"error event id", "[ERROR] msg", false, false, true},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			mock := &mockEventLogger{}
-			s := &windowsSyslog{out: &bytes.Buffer{}, log: mock}
-			s.Write([]byte(tt.input))
-
-			if tt.wantInfoId && len(mock.infoMessages) == 0 {
-				t.Error("expected info event")
-			}
-			if tt.wantWarnId && len(mock.warningMessages) == 0 {
-				t.Error("expected warning event")
-			}
-			if tt.wantErrId && len(mock.errorMessages) == 0 {
-				t.Error("expected error event")
-			}
-		})
-	}
-}
-
 func TestWindowsSyslog_Close(t *testing.T) {
 	mock := &mockEventLogger{}
 	s := &windowsSyslog{out: &bytes.Buffer{}, log: mock}
@@ -159,5 +162,138 @@ func TestWindowsSyslog_Close(t *testing.T) {
 	}
 	if !mock.closed {
 		t.Error("expected eventLogger.Close to be called")
+	}
+}
+
+// newWithFactory tests
+
+func TestNewWithFactory_OpenKeySuccess_SkipsInstall(t *testing.T) {
+	logger := &mockEventLogger{}
+	factory := &mockEventLogFactory{
+		openResult: logger,
+	}
+
+	syslogger, err := newWithFactory("test", &bytes.Buffer{}, factory)
+
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if syslogger == nil {
+		t.Fatal("expected non-nil Syslog")
+	}
+	if factory.installCalled {
+		t.Error("expected Install not to be called when OpenKey succeeds")
+	}
+}
+
+func TestNewWithFactory_OpenKeyErrNotExist_CallsInstall(t *testing.T) {
+	logger := &mockEventLogger{}
+	factory := &mockEventLogFactory{
+		openKeyErr: registry.ErrNotExist,
+		openResult: logger,
+	}
+
+	syslogger, err := newWithFactory("test", &bytes.Buffer{}, factory)
+
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if syslogger == nil {
+		t.Fatal("expected non-nil Syslog")
+	}
+	if !factory.installCalled {
+		t.Error("expected Install to be called when OpenKey returns ErrNotExist")
+	}
+}
+
+func TestNewWithFactory_OpenKeyErrPathNotFound_CallsInstall(t *testing.T) {
+	logger := &mockEventLogger{}
+	factory := &mockEventLogFactory{
+		openKeyErr: syscall.ERROR_PATH_NOT_FOUND,
+		openResult: logger,
+	}
+
+	syslogger, err := newWithFactory("test", &bytes.Buffer{}, factory)
+
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if syslogger == nil {
+		t.Fatal("expected non-nil Syslog")
+	}
+	if !factory.installCalled {
+		t.Error("expected Install to be called when OpenKey returns ERROR_PATH_NOT_FOUND")
+	}
+}
+
+func TestNewWithFactory_OpenKeyUnknownError_ReturnsError(t *testing.T) {
+	factory := &mockEventLogFactory{
+		openKeyErr: errors.New("unexpected registry error"),
+	}
+
+	_, err := newWithFactory("test", &bytes.Buffer{}, factory)
+
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if err.Error() != "unexpected registry error" {
+		t.Errorf("expected 'unexpected registry error', got %q", err.Error())
+	}
+	if factory.installCalled {
+		t.Error("expected Install not to be called on unknown OpenKey error")
+	}
+}
+
+func TestNewWithFactory_InstallError_ReturnsError(t *testing.T) {
+	factory := &mockEventLogFactory{
+		openKeyErr: registry.ErrNotExist,
+		installErr: errors.New("install failed"),
+	}
+
+	_, err := newWithFactory("test", &bytes.Buffer{}, factory)
+
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if err.Error() != "install failed" {
+		t.Errorf("expected 'install failed', got %q", err.Error())
+	}
+}
+
+func TestNewWithFactory_OpenError_ReturnsError(t *testing.T) {
+	factory := &mockEventLogFactory{
+		openErr: errors.New("open failed"),
+	}
+
+	_, err := newWithFactory("test", &bytes.Buffer{}, factory)
+
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if err.Error() != "open failed" {
+		t.Errorf("expected 'open failed', got %q", err.Error())
+	}
+}
+
+func TestNewWithFactory_ReturnedSyslog_IsUsable(t *testing.T) {
+	logger := &mockEventLogger{}
+	var out bytes.Buffer
+	factory := &mockEventLogFactory{
+		openResult: logger,
+	}
+
+	syslogger, err := newWithFactory("test", &out, factory)
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+
+	data := []byte("[ERROR] test error")
+	syslogger.Write(data)
+
+	if len(logger.errorMessages) != 1 {
+		t.Fatalf("expected 1 error message, got %d", len(logger.errorMessages))
+	}
+	if out.String() != string(data) {
+		t.Errorf("expected out %q, got %q", string(data), out.String())
 	}
 }
