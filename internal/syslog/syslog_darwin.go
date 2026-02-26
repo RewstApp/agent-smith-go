@@ -8,19 +8,26 @@ import (
 	"strings"
 )
 
+type commandRunner interface {
+	Run(priority, source, message string) error
+}
+
+type loggerCommandRunner struct{}
+
+func (r *loggerCommandRunner) Run(priority, source, message string) error {
+	return exec.Command("logger", "-p", priority, "-t", source, message).Run()
+}
+
 type darwinSyslog struct {
 	out    io.Writer
 	source string
+	runner commandRunner
 }
 
 func (s *darwinSyslog) Write(data []byte) (int, error) {
-	// Write to event log
 	line := string(data)
-
-	// Extract the message
 	message := extractMessage(line)
 
-	// Use different levels
 	priority := "daemon.info"
 	if strings.Contains(line, "[ERROR]") {
 		priority = "daemon.err"
@@ -28,9 +35,7 @@ func (s *darwinSyslog) Write(data []byte) (int, error) {
 		priority = "daemon.warning"
 	}
 
-	// Write to system logger
-	cmd := exec.Command("logger", "-p", priority, "-t", s.source, message)
-	cmd.Run()
+	s.runner.Run(priority, s.source, message)
 
 	return s.out.Write(data)
 }
@@ -40,8 +45,9 @@ func (s *darwinSyslog) Close() error {
 }
 
 func New(name string, out io.Writer) (Syslog, error) {
-	return &darwinSyslog{
-		out:    out,
-		source: name,
-	}, nil
+	return newWithRunner(name, out, &loggerCommandRunner{}), nil
+}
+
+func newWithRunner(name string, out io.Writer, runner commandRunner) Syslog {
+	return &darwinSyslog{out: out, source: name, runner: runner}
 }

@@ -7,11 +7,88 @@ import (
 	"testing"
 )
 
-func TestLinuxSyslog_Write_ForwardsToOut(t *testing.T) {
-	var out bytes.Buffer
-	s := &linuxSyslog{out: &out, source: "test"}
+type mockCommandRunner struct {
+	priority string
+	source   string
+	message  string
+	called   bool
+}
 
-	data := []byte("[INFO] hello from linux")
+func (m *mockCommandRunner) Run(priority, source, message string) error {
+	m.called = true
+	m.priority = priority
+	m.source = source
+	m.message = message
+	return nil
+}
+
+func TestLinuxSyslog_Write_InfoPriority(t *testing.T) {
+	runner := &mockCommandRunner{}
+	s := &linuxSyslog{out: &bytes.Buffer{}, source: "test", runner: runner}
+
+	s.Write([]byte("[INFO] info message"))
+
+	if !runner.called {
+		t.Fatal("expected runner to be called")
+	}
+	if runner.priority != "daemon.info" {
+		t.Errorf("expected priority 'daemon.info', got %q", runner.priority)
+	}
+}
+
+func TestLinuxSyslog_Write_WarningPriority(t *testing.T) {
+	runner := &mockCommandRunner{}
+	s := &linuxSyslog{out: &bytes.Buffer{}, source: "test", runner: runner}
+
+	s.Write([]byte("[WARNING] warning message"))
+
+	if runner.priority != "daemon.warning" {
+		t.Errorf("expected priority 'daemon.warning', got %q", runner.priority)
+	}
+}
+
+func TestLinuxSyslog_Write_ErrorPriority(t *testing.T) {
+	runner := &mockCommandRunner{}
+	s := &linuxSyslog{out: &bytes.Buffer{}, source: "test", runner: runner}
+
+	s.Write([]byte("[ERROR] error message"))
+
+	if runner.priority != "daemon.err" {
+		t.Errorf("expected priority 'daemon.err', got %q", runner.priority)
+	}
+}
+
+func TestLinuxSyslog_Write_DefaultsToInfo(t *testing.T) {
+	runner := &mockCommandRunner{}
+	s := &linuxSyslog{out: &bytes.Buffer{}, source: "test", runner: runner}
+
+	s.Write([]byte("[DEBUG] debug message"))
+
+	if runner.priority != "daemon.info" {
+		t.Errorf("expected default priority 'daemon.info', got %q", runner.priority)
+	}
+}
+
+func TestLinuxSyslog_Write_PassesSourceAndMessage(t *testing.T) {
+	runner := &mockCommandRunner{}
+	s := &linuxSyslog{out: &bytes.Buffer{}, source: "my-app", runner: runner}
+
+	s.Write([]byte("[INFO] hello world"))
+
+	if runner.source != "my-app" {
+		t.Errorf("expected source 'my-app', got %q", runner.source)
+	}
+	if runner.message != "hello world" {
+		t.Errorf("expected message 'hello world', got %q", runner.message)
+	}
+}
+
+func TestLinuxSyslog_Write_ForwardsToOut(t *testing.T) {
+	runner := &mockCommandRunner{}
+	var out bytes.Buffer
+	s := &linuxSyslog{out: &out, source: "test", runner: runner}
+
+	data := []byte("[INFO] forwarded")
 	n, err := s.Write(data)
 
 	if err != nil {
@@ -21,53 +98,24 @@ func TestLinuxSyslog_Write_ForwardsToOut(t *testing.T) {
 		t.Errorf("expected %d bytes written, got %d", len(data), n)
 	}
 	if out.String() != string(data) {
-		t.Errorf("expected out to contain %q, got %q", string(data), out.String())
-	}
-}
-
-func TestLinuxSyslog_Write_Levels(t *testing.T) {
-	tests := []struct {
-		name  string
-		input string
-	}{
-		{"info level", "[INFO] info message"},
-		{"warning level", "[WARNING] warning message"},
-		{"error level", "[ERROR] error message"},
-		{"unknown level defaults to info", "[DEBUG] debug message"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			var out bytes.Buffer
-			s := &linuxSyslog{out: &out, source: "test"}
-
-			_, err := s.Write([]byte(tt.input))
-			if err != nil {
-				t.Fatalf("expected no error, got %v", err)
-			}
-			if out.String() != tt.input {
-				t.Errorf("expected out %q, got %q", tt.input, out.String())
-			}
-		})
+		t.Errorf("expected out %q, got %q", string(data), out.String())
 	}
 }
 
 func TestLinuxSyslog_Close(t *testing.T) {
-	s := &linuxSyslog{out: &bytes.Buffer{}, source: "test"}
+	s := &linuxSyslog{out: &bytes.Buffer{}, source: "test", runner: &mockCommandRunner{}}
 
-	err := s.Close()
-	if err != nil {
+	if err := s.Close(); err != nil {
 		t.Errorf("expected nil error, got %v", err)
 	}
 }
 
-func TestNew_Linux(t *testing.T) {
+func TestNewWithRunner_Linux(t *testing.T) {
+	runner := &mockCommandRunner{}
 	var out bytes.Buffer
-	syslogger, err := New("test-source", &out)
 
-	if err != nil {
-		t.Fatalf("expected no error, got %v", err)
-	}
+	syslogger := newWithRunner("test-source", &out, runner)
+
 	if syslogger == nil {
 		t.Fatal("expected non-nil Syslog")
 	}
