@@ -63,6 +63,7 @@ func TestMessage_Execute_InterpreterOverride(t *testing.T) {
 	logger := hclog.NewNullLogger()
 	override := "bash"
 	command := "echo 'bash-test'"
+	executor := NewExecutor()
 
 	msg := Message{
 		PostId:              "test:789",
@@ -71,7 +72,7 @@ func TestMessage_Execute_InterpreterOverride(t *testing.T) {
 	}
 	device := agent.Device{RewstOrgId: "test-org"}
 
-	resultBytes := msg.Execute(nil, context.Background(), device, logger, nil, nil)
+	resultBytes := msg.Execute(executor, context.Background(), device, logger, nil, nil)
 
 	var out result
 	err := json.Unmarshal(resultBytes, &out)
