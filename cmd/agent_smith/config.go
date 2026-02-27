@@ -100,7 +100,7 @@ func runConfig(params *configContext) {
 	// Got configuration
 	logger.Info("Received configuration", "configuration", string(configBytes))
 
-	err = os.WriteFile(configFilePath, configBytes, utils.DefaultFileMod)
+	err = params.FS.WriteFile(configFilePath, configBytes, utils.DefaultFileMod)
 	if err != nil {
 		logger.Error("Failed to save config", "error", err)
 		return
@@ -147,20 +147,20 @@ func runConfig(params *configContext) {
 	}
 
 	// Copy the agent executable
-	execFilePath, err := os.Executable()
+	execFilePath, err := params.FS.Executable()
 	if err != nil {
 		logger.Error("Failed to get executable", "error", err)
 		return
 	}
 
-	execFileBytes, err := os.ReadFile(execFilePath)
+	execFileBytes, err := params.FS.ReadFile(execFilePath)
 	if err != nil {
 		logger.Error("Failed to read executable file", "error", err)
 		return
 	}
 
 	agentExecutablePath := agent.GetAgentExecutablePath(params.OrgId)
-	err = os.WriteFile(agentExecutablePath, execFileBytes, utils.DefaultExecutableFileMod)
+	err = params.FS.WriteFile(agentExecutablePath, execFileBytes, utils.DefaultExecutableFileMod)
 	if err != nil {
 		logger.Error("Failed to create agent executable", "error", err)
 		return

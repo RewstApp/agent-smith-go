@@ -20,9 +20,11 @@ type configContext struct {
 
 	Sys    agent.SystemInfoProvider
 	Domain agent.DomainInfoProvider
+
+	FS utils.FileSystem
 }
 
-func newConfigContext(args []string, sys agent.SystemInfoProvider, domain agent.DomainInfoProvider) (*configContext, error) {
+func newConfigContext(args []string, sys agent.SystemInfoProvider, domain agent.DomainInfoProvider, fsys utils.FileSystem) (*configContext, error) {
 	var params configContext
 
 	fs := flag.NewFlagSet("config", flag.ContinueOnError)
@@ -58,6 +60,7 @@ func newConfigContext(args []string, sys agent.SystemInfoProvider, domain agent.
 
 	params.Sys = sys
 	params.Domain = domain
+	params.FS = fsys
 
 	return &params, nil
 }

@@ -38,6 +38,7 @@ func main() {
 	sys := agent.NewSystemInfoProvider()
 	domain := agent.NewDomainInfoProvider()
 	executor := interpreter.NewExecutor()
+	fs := utils.NewFileSystem()
 
 	uninstallContext, err := newUninstallContext(os.Args[1:])
 	if err == nil {
@@ -46,7 +47,7 @@ func main() {
 		return
 	}
 
-	configContext, err := newConfigContext(os.Args[1:], sys, domain)
+	configContext, err := newConfigContext(os.Args[1:], sys, domain, fs)
 	if err == nil {
 		// Run config routine
 		runConfig(configContext)

@@ -10,7 +10,7 @@ func TestNewConfigContext(t *testing.T) {
 	configUrl := "https://config.url/"
 	configSecret := "secret123"
 
-	result, _ := newConfigContext([]string{"--org-id", orgId, "--config-url", configUrl, "--config-secret", configSecret}, nil, nil)
+	result, _ := newConfigContext([]string{"--org-id", orgId, "--config-url", configUrl, "--config-secret", configSecret}, nil, nil, nil)
 
 	if result.OrgId != orgId {
 		t.Errorf("expected %v, got %v", orgId, result.OrgId)
@@ -44,7 +44,7 @@ func TestNewConfigContext(t *testing.T) {
 	}
 
 	for _, errorTest := range errorTests {
-		_, err := newConfigContext(errorTest.args, nil, nil)
+		_, err := newConfigContext(errorTest.args, nil, nil, nil)
 
 		if err == nil || !strings.Contains(err.Error(), errorTest.message) {
 			t.Errorf("expected error %s, got %v", errorTest.message, err.Error())
