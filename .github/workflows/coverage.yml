@@ -11,6 +11,8 @@ jobs:
       matrix:
         os:
           - windows-latest
+          - ubuntu-latest
+          - macos-latest
     runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout code
@@ -33,4 +35,3 @@ jobs:
       - name: Run test coverage
         shell: pwsh
         run: ./scripts/coverage.ps1
-    
