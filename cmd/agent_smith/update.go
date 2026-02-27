@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/RewstApp/agent-smith-go/internal/agent"
-	"github.com/RewstApp/agent-smith-go/internal/service"
 	"github.com/RewstApp/agent-smith-go/internal/utils"
 	"github.com/RewstApp/agent-smith-go/internal/version"
 )
@@ -21,7 +20,7 @@ func runUpdate(params *updateContext) {
 
 	// Open the service
 	name := agent.GetServiceName(params.OrgId)
-	svc, err := service.Open(name)
+	svc, err := params.ServiceManager.Open(name)
 	if err != nil {
 		logger.Error("Failed to open service", "name", name, "error", err)
 		return

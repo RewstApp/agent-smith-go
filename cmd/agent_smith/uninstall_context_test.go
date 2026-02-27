@@ -7,7 +7,7 @@ import (
 
 func TestNewUninstallContext(t *testing.T) {
 	orgId := "test123"
-	result, _ := newUninstallContext([]string{"--org-id", orgId, "--uninstall"})
+	result, _ := newUninstallContext([]string{"--org-id", orgId, "--uninstall"}, nil)
 
 	if result.OrgId != orgId {
 		t.Errorf("expected %v, got %v", orgId, result.OrgId)
@@ -27,7 +27,7 @@ func TestNewUninstallContext(t *testing.T) {
 	}
 
 	for _, errorTest := range errorTests {
-		_, err := newUninstallContext(errorTest.args)
+		_, err := newUninstallContext(errorTest.args, nil)
 
 		if err == nil || !strings.Contains(err.Error(), errorTest.message) {
 			t.Errorf("expected error %s, got %v", errorTest.message, err.Error())

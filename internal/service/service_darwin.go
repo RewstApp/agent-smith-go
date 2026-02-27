@@ -107,11 +107,11 @@ func (svc *darwinService) IsActive() bool {
 	return false
 }
 
-func Create(params AgentParams) (Service, error) {
-	return createWithLaunchCtl(params, &defaultLaunchCtl{})
+type defaultServiceManager struct {
+	system launchCtl
 }
 
-func createWithLaunchCtl(params AgentParams, system launchCtl) (Service, error) {
+func (s *defaultServiceManager) Create(params AgentParams) (Service, error) {
 	serviceConfig := strings.Builder{}
 
 	fmt.Fprintf(&serviceConfig, "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\"\n\"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n")
@@ -124,7 +124,7 @@ func createWithLaunchCtl(params AgentParams, system launchCtl) (Service, error) 
 	fmt.Fprintf(&serviceConfig, "<key>EnvironmentVariables</key>\n<dict>\n<key>PATH</key>\n<string>/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>\n</dict>\n")
 	fmt.Fprintf(&serviceConfig, "</dict>\n</plist>\n")
 
-	svc := &darwinService{name: params.Name, system: system}
+	svc := &darwinService{name: params.Name, system: s.system}
 	err := os.WriteFile(svc.serviceFilePath(), []byte(serviceConfig.String()), utils.DefaultFileMod)
 	if err != nil {
 		return nil, err
@@ -133,20 +133,22 @@ func createWithLaunchCtl(params AgentParams, system launchCtl) (Service, error) 
 	return svc, nil
 }
 
-func Open(name string) (Service, error) {
-	return openWithLaunchCtl(name, &defaultLaunchCtl{})
-}
-
-func openWithLaunchCtl(name string, system launchCtl) (Service, error) {
-	_, err := system.Run("print", fmt.Sprintf("system/%s", name))
+func (s *defaultServiceManager) Open(name string) (Service, error) {
+	_, err := s.system.Run("print", fmt.Sprintf("system/%s", name))
 	if err != nil {
 		return nil, err
 	}
 
 	return &darwinService{
 		name:   name,
-		system: system,
+		system: s.system,
 	}, nil
+}
+
+func NewServiceManager() ServiceManager {
+	return &defaultServiceManager{
+		system: &defaultLaunchCtl{},
+	}
 }
 
 func Run(runner Runner) (int, error) {

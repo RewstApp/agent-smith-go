@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/RewstApp/agent-smith-go/internal/agent"
+	"github.com/RewstApp/agent-smith-go/internal/service"
 	"github.com/RewstApp/agent-smith-go/internal/utils"
 )
 
@@ -21,10 +22,11 @@ type configContext struct {
 	Sys    agent.SystemInfoProvider
 	Domain agent.DomainInfoProvider
 
-	FS utils.FileSystem
+	FS             utils.FileSystem
+	ServiceManager service.ServiceManager
 }
 
-func newConfigContext(args []string, sys agent.SystemInfoProvider, domain agent.DomainInfoProvider, fsys utils.FileSystem) (*configContext, error) {
+func newConfigContext(args []string, sys agent.SystemInfoProvider, domain agent.DomainInfoProvider, fsys utils.FileSystem, svcMgr service.ServiceManager) (*configContext, error) {
 	var params configContext
 
 	fs := flag.NewFlagSet("config", flag.ContinueOnError)
@@ -61,6 +63,7 @@ func newConfigContext(args []string, sys agent.SystemInfoProvider, domain agent.
 	params.Sys = sys
 	params.Domain = domain
 	params.FS = fsys
+	params.ServiceManager = svcMgr
 
 	return &params, nil
 }

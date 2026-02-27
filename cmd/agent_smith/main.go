@@ -7,6 +7,7 @@ import (
 
 	"github.com/RewstApp/agent-smith-go/internal/agent"
 	"github.com/RewstApp/agent-smith-go/internal/interpreter"
+	"github.com/RewstApp/agent-smith-go/internal/service"
 	"github.com/RewstApp/agent-smith-go/internal/utils"
 )
 
@@ -39,15 +40,16 @@ func main() {
 	domain := agent.NewDomainInfoProvider()
 	executor := interpreter.NewExecutor()
 	fs := utils.NewFileSystem()
+	svcMgr := service.NewServiceManager()
 
-	uninstallContext, err := newUninstallContext(os.Args[1:])
+	uninstallContext, err := newUninstallContext(os.Args[1:], svcMgr)
 	if err == nil {
 		// Run uninstall routine
 		runUninstall(uninstallContext)
 		return
 	}
 
-	configContext, err := newConfigContext(os.Args[1:], sys, domain, fs)
+	configContext, err := newConfigContext(os.Args[1:], sys, domain, fs, svcMgr)
 	if err == nil {
 		// Run config routine
 		runConfig(configContext)
@@ -61,7 +63,7 @@ func main() {
 		return
 	}
 
-	updateContext, err := newUpdateContext(os.Args[1:], sys, domain)
+	updateContext, err := newUpdateContext(os.Args[1:], sys, domain, svcMgr)
 	if err == nil {
 		// Run update routine
 		runUpdate(updateContext)

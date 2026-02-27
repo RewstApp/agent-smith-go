@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/RewstApp/agent-smith-go/internal/agent"
+	"github.com/RewstApp/agent-smith-go/internal/service"
 	"github.com/RewstApp/agent-smith-go/internal/utils"
 )
 
@@ -19,9 +20,11 @@ type updateContext struct {
 
 	Sys    agent.SystemInfoProvider
 	Domain agent.DomainInfoProvider
+
+	ServiceManager service.ServiceManager
 }
 
-func newUpdateContext(args []string, sys agent.SystemInfoProvider, domain agent.DomainInfoProvider) (*updateContext, error) {
+func newUpdateContext(args []string, sys agent.SystemInfoProvider, domain agent.DomainInfoProvider, svcMgr service.ServiceManager) (*updateContext, error) {
 	var params updateContext
 
 	fs := flag.NewFlagSet("config", flag.ContinueOnError)
@@ -52,6 +55,7 @@ func newUpdateContext(args []string, sys agent.SystemInfoProvider, domain agent.
 
 	params.Sys = sys
 	params.Domain = domain
+	params.ServiceManager = svcMgr
 
 	return &params, nil
 }

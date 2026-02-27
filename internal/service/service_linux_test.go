@@ -147,11 +147,21 @@ func TestLinuxService_IsActive_Inactive(t *testing.T) {
 	}
 }
 
-// createWithSystemCtl tests
+// NewServiceManager tests
 
-func TestCreateWithSystemCtl_Success(t *testing.T) {
+func TestNewServiceManager_ReturnsNonNil(t *testing.T) {
+	sm := NewServiceManager()
+	if sm == nil {
+		t.Fatal("expected non-nil ServiceManager")
+	}
+}
+
+// defaultServiceManager.Create tests
+
+func TestDefaultServiceManager_Create_Success(t *testing.T) {
 	tmpFile := newTempConfigPath(t)
 	mock := &mockSystemCtl{configFilePath: tmpFile}
+	sm := &defaultServiceManager{system: mock}
 	params := AgentParams{
 		Name:                "test-svc",
 		AgentExecutablePath: "/usr/bin/agent",
@@ -160,7 +170,7 @@ func TestCreateWithSystemCtl_Success(t *testing.T) {
 		LogFilePath:         "/var/log/agent.log",
 	}
 
-	svc, err := createWithSystemCtl(params, mock)
+	svc, err := sm.Create(params)
 
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
@@ -179,9 +189,10 @@ func TestCreateWithSystemCtl_Success(t *testing.T) {
 	}
 }
 
-func TestCreateWithSystemCtl_ServiceConfigContent(t *testing.T) {
+func TestDefaultServiceManager_Create_ServiceConfigContent(t *testing.T) {
 	tmpFile := newTempConfigPath(t)
 	mock := &mockSystemCtl{configFilePath: tmpFile}
+	sm := &defaultServiceManager{system: mock}
 	params := AgentParams{
 		Name:                "my-service",
 		AgentExecutablePath: "/usr/bin/agent",
@@ -190,7 +201,7 @@ func TestCreateWithSystemCtl_ServiceConfigContent(t *testing.T) {
 		LogFilePath:         "/var/log/agent.log",
 	}
 
-	if _, err := createWithSystemCtl(params, mock); err != nil {
+	if _, err := sm.Create(params); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -216,50 +227,54 @@ func TestCreateWithSystemCtl_ServiceConfigContent(t *testing.T) {
 	}
 }
 
-func TestCreateWithSystemCtl_WriteFileError(t *testing.T) {
+func TestDefaultServiceManager_Create_WriteFileError(t *testing.T) {
 	mock := &mockSystemCtl{configFilePath: "/nonexistent/dir/file.service"}
+	sm := &defaultServiceManager{system: mock}
 
-	_, err := createWithSystemCtl(AgentParams{Name: "test-svc"}, mock)
+	_, err := sm.Create(AgentParams{Name: "test-svc"})
 
 	if err == nil {
 		t.Error("expected error on WriteFile failure, got nil")
 	}
 }
 
-func TestCreateWithSystemCtl_DaemonReloadError(t *testing.T) {
+func TestDefaultServiceManager_Create_DaemonReloadError(t *testing.T) {
 	mock := &mockSystemCtl{
 		configFilePath: newTempConfigPath(t),
 		runErrOnCmd:    "daemon-reload",
 		runErr:         errors.New("daemon-reload failed"),
 	}
+	sm := &defaultServiceManager{system: mock}
 
-	_, err := createWithSystemCtl(AgentParams{Name: "test-svc"}, mock)
+	_, err := sm.Create(AgentParams{Name: "test-svc"})
 
 	if err == nil {
 		t.Error("expected error on daemon-reload failure, got nil")
 	}
 }
 
-func TestCreateWithSystemCtl_EnableError(t *testing.T) {
+func TestDefaultServiceManager_Create_EnableError(t *testing.T) {
 	mock := &mockSystemCtl{
 		configFilePath: newTempConfigPath(t),
 		runErrOnCmd:    "enable",
 		runErr:         errors.New("enable failed"),
 	}
+	sm := &defaultServiceManager{system: mock}
 
-	_, err := createWithSystemCtl(AgentParams{Name: "test-svc"}, mock)
+	_, err := sm.Create(AgentParams{Name: "test-svc"})
 
 	if err == nil {
 		t.Error("expected error on enable failure, got nil")
 	}
 }
 
-// openWithSystemCtl tests
+// defaultServiceManager.Open tests
 
-func TestOpenWithSystemCtl_Success(t *testing.T) {
+func TestDefaultServiceManager_Open_Success(t *testing.T) {
 	mock := &mockSystemCtl{}
+	sm := &defaultServiceManager{system: mock}
 
-	svc, err := openWithSystemCtl("test-svc", mock)
+	svc, err := sm.Open("test-svc")
 
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
@@ -272,10 +287,11 @@ func TestOpenWithSystemCtl_Success(t *testing.T) {
 	}
 }
 
-func TestOpenWithSystemCtl_Error(t *testing.T) {
+func TestDefaultServiceManager_Open_Error(t *testing.T) {
 	mock := &mockSystemCtl{runErr: errors.New("status failed")}
+	sm := &defaultServiceManager{system: mock}
 
-	_, err := openWithSystemCtl("test-svc", mock)
+	_, err := sm.Open("test-svc")
 
 	if err == nil {
 		t.Error("expected error, got nil")

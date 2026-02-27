@@ -259,14 +259,24 @@ func TestWindowsService_IsActive_QueryError(t *testing.T) {
 	}
 }
 
-// createWithFactory tests
+// NewServiceManager tests
 
-func TestCreateWithFactory_ConnectError(t *testing.T) {
+func TestNewServiceManager_ReturnsNonNil(t *testing.T) {
+	sm := NewServiceManager()
+	if sm == nil {
+		t.Fatal("expected non-nil ServiceManager")
+	}
+}
+
+// defaultServiceManager.Create tests
+
+func TestDefaultServiceManager_Create_ConnectError(t *testing.T) {
 	factory := &mockWindowsServiceManagerFactory{
 		connectErr: errors.New("connect failed"),
 	}
+	sm := &defaultServiceManager{factory: factory}
 
-	_, err := createWithFactory(AgentParams{}, factory)
+	_, err := sm.Create(AgentParams{})
 
 	if err == nil {
 		t.Fatal("expected error, got nil")
@@ -276,11 +286,12 @@ func TestCreateWithFactory_ConnectError(t *testing.T) {
 	}
 }
 
-func TestCreateWithFactory_CreateServiceError(t *testing.T) {
+func TestDefaultServiceManager_Create_CreateServiceError(t *testing.T) {
 	manager := &mockWindowsServiceManager{createErr: errors.New("create failed")}
 	factory := &mockWindowsServiceManagerFactory{manager: manager}
+	sm := &defaultServiceManager{factory: factory}
 
-	_, err := createWithFactory(AgentParams{}, factory)
+	_, err := sm.Create(AgentParams{})
 
 	if err == nil {
 		t.Fatal("expected error, got nil")
@@ -293,25 +304,27 @@ func TestCreateWithFactory_CreateServiceError(t *testing.T) {
 	}
 }
 
-func TestCreateWithFactory_DisconnectsOnSuccess(t *testing.T) {
+func TestDefaultServiceManager_Create_DisconnectsOnSuccess(t *testing.T) {
 	manager := &mockWindowsServiceManager{}
 	factory := &mockWindowsServiceManagerFactory{manager: manager}
+	sm := &defaultServiceManager{factory: factory}
 
-	createWithFactory(AgentParams{}, factory)
+	sm.Create(AgentParams{})
 
 	if !manager.disconnected {
 		t.Error("expected Disconnect to be called after success")
 	}
 }
 
-// openWithFactory tests
+// defaultServiceManager.Open tests
 
-func TestOpenWithFactory_ConnectError(t *testing.T) {
+func TestDefaultServiceManager_Open_ConnectError(t *testing.T) {
 	factory := &mockWindowsServiceManagerFactory{
 		connectErr: errors.New("connect failed"),
 	}
+	sm := &defaultServiceManager{factory: factory}
 
-	_, err := openWithFactory("test-svc", factory)
+	_, err := sm.Open("test-svc")
 
 	if err == nil {
 		t.Fatal("expected error, got nil")
@@ -321,11 +334,12 @@ func TestOpenWithFactory_ConnectError(t *testing.T) {
 	}
 }
 
-func TestOpenWithFactory_OpenServiceError(t *testing.T) {
+func TestDefaultServiceManager_Open_OpenServiceError(t *testing.T) {
 	manager := &mockWindowsServiceManager{openErr: errors.New("open failed")}
 	factory := &mockWindowsServiceManagerFactory{manager: manager}
+	sm := &defaultServiceManager{factory: factory}
 
-	_, err := openWithFactory("test-svc", factory)
+	_, err := sm.Open("test-svc")
 
 	if err == nil {
 		t.Fatal("expected error, got nil")
@@ -338,11 +352,12 @@ func TestOpenWithFactory_OpenServiceError(t *testing.T) {
 	}
 }
 
-func TestOpenWithFactory_DisconnectsOnSuccess(t *testing.T) {
+func TestDefaultServiceManager_Open_DisconnectsOnSuccess(t *testing.T) {
 	manager := &mockWindowsServiceManager{}
 	factory := &mockWindowsServiceManagerFactory{manager: manager}
+	sm := &defaultServiceManager{factory: factory}
 
-	openWithFactory("test-svc", factory)
+	sm.Open("test-svc")
 
 	if !manager.disconnected {
 		t.Error("expected Disconnect to be called after success")

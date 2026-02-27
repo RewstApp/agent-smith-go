@@ -109,7 +109,7 @@ func runConfig(params *configContext) {
 	name := agent.GetServiceName(params.OrgId)
 
 	// Stop and delete the service if it already exists
-	existingService, err := service.Open(name)
+	existingService, err := params.ServiceManager.Open(name)
 	if err == nil {
 		if existingService.IsActive() {
 			logger.Info("Stopping service", "service", name)
@@ -172,7 +172,7 @@ func runConfig(params *configContext) {
 	// Create the service
 	logger.Info("Creating service", "service", name)
 
-	svc, err := service.Create(service.AgentParams{
+	svc, err := params.ServiceManager.Create(service.AgentParams{
 		Name:                name,
 		AgentExecutablePath: agentExecutablePath,
 		OrgId:               params.OrgId,

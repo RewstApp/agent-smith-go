@@ -4,14 +4,18 @@ import (
 	"bytes"
 	"flag"
 	"fmt"
+
+	"github.com/RewstApp/agent-smith-go/internal/service"
 )
 
 type uninstallContext struct {
 	OrgId     string
 	Uninstall bool
+
+	ServiceManager service.ServiceManager
 }
 
-func newUninstallContext(args []string) (*uninstallContext, error) {
+func newUninstallContext(args []string, svcMgr service.ServiceManager) (*uninstallContext, error) {
 	var params uninstallContext
 
 	fs := flag.NewFlagSet("uninstall", flag.ContinueOnError)
@@ -31,6 +35,8 @@ func newUninstallContext(args []string) (*uninstallContext, error) {
 	if !params.Uninstall {
 		return nil, fmt.Errorf("missing uninstall")
 	}
+
+	params.ServiceManager = svcMgr
 
 	return &params, nil
 }

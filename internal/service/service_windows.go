@@ -85,8 +85,12 @@ func (f *defaultWindowsServiceManagerFactory) Connect() (windowsServiceManager, 
 	return mgr.Connect()
 }
 
-func createWithFactory(params AgentParams, factory windowsServiceManagerFactory) (Service, error) {
-	svcMgr, err := factory.Connect()
+type defaultServiceManager struct {
+	factory windowsServiceManagerFactory
+}
+
+func (s *defaultServiceManager) Create(params AgentParams) (Service, error) {
+	svcMgr, err := s.factory.Connect()
 	if err != nil {
 		return nil, err
 	}
@@ -106,8 +110,8 @@ func createWithFactory(params AgentParams, factory windowsServiceManagerFactory)
 	}, nil
 }
 
-func openWithFactory(name string, factory windowsServiceManagerFactory) (Service, error) {
-	svcMgr, err := factory.Connect()
+func (s *defaultServiceManager) Open(name string) (Service, error) {
+	svcMgr, err := s.factory.Connect()
 	if err != nil {
 		return nil, err
 	}
@@ -123,12 +127,10 @@ func openWithFactory(name string, factory windowsServiceManagerFactory) (Service
 	}, nil
 }
 
-func Create(params AgentParams) (Service, error) {
-	return createWithFactory(params, &defaultWindowsServiceManagerFactory{})
-}
-
-func Open(name string) (Service, error) {
-	return openWithFactory(name, &defaultWindowsServiceManagerFactory{})
+func NewServiceManager() ServiceManager {
+	return &defaultServiceManager{
+		factory: &defaultWindowsServiceManagerFactory{},
+	}
 }
 
 type windowsRunner struct {

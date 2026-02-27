@@ -28,3 +28,8 @@ type Runner interface {
 	Name() string
 	Execute(stop <-chan struct{}, running chan<- struct{}) ServiceExitCode
 }
+
+type ServiceManager interface {
+	Create(params AgentParams) (Service, error)
+	Open(name string) (Service, error)
+}

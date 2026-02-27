@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/RewstApp/agent-smith-go/internal/agent"
-	"github.com/RewstApp/agent-smith-go/internal/service"
 	"github.com/RewstApp/agent-smith-go/internal/utils"
 	"github.com/RewstApp/agent-smith-go/internal/version"
 )
@@ -21,7 +20,7 @@ func runUninstall(params *uninstallContext) {
 
 	name := agent.GetServiceName(params.OrgId)
 
-	service, err := service.Open(name)
+	service, err := params.ServiceManager.Open(name)
 	if err != nil {
 		logger.Error("Failed to open service", "service", name, "error", err)
 		return

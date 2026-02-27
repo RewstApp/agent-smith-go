@@ -67,11 +67,11 @@ func (linuxSvc *linuxService) IsActive() bool {
 	return linuxSvc.system.Run("is-active", linuxSvc.name) == nil
 }
 
-func Create(params AgentParams) (Service, error) {
-	return createWithSystemCtl(params, &defaultSystemCtl{})
+type defaultServiceManager struct {
+	system systemCtl
 }
 
-func createWithSystemCtl(params AgentParams, system systemCtl) (Service, error) {
+func (s *defaultServiceManager) Create(params AgentParams) (Service, error) {
 	serviceConfig := strings.Builder{}
 
 	fmt.Fprintf(&serviceConfig, "[Unit]\nDescription=%s\n\n", params.Name)
@@ -79,42 +79,44 @@ func createWithSystemCtl(params AgentParams, system systemCtl) (Service, error) 
 		params.AgentExecutablePath, params.OrgId, params.ConfigFilePath, params.LogFilePath)
 	fmt.Fprintf(&serviceConfig, "[Install]\nWantedBy=multi-user.target\n")
 
-	serviceConfigFilePath := system.ServiceConfigFilePath(params.Name)
+	serviceConfigFilePath := s.system.ServiceConfigFilePath(params.Name)
 	err := os.WriteFile(serviceConfigFilePath, []byte(serviceConfig.String()), utils.DefaultFileMod)
 	if err != nil {
 		return nil, err
 	}
 
-	err = system.Run("daemon-reload")
+	err = s.system.Run("daemon-reload")
 	if err != nil {
 		return nil, err
 	}
 
-	err = system.Run("enable", params.Name)
+	err = s.system.Run("enable", params.Name)
 	if err != nil {
 		return nil, err
 	}
 
 	return &linuxService{
 		name:   params.Name,
-		system: system,
+		system: s.system,
 	}, nil
 }
 
-func Open(name string) (Service, error) {
-	return openWithSystemCtl(name, &defaultSystemCtl{})
-}
-
-func openWithSystemCtl(name string, system systemCtl) (Service, error) {
-	err := system.Run("status", name)
+func (s *defaultServiceManager) Open(name string) (Service, error) {
+	err := s.system.Run("status", name)
 	if err != nil {
 		return nil, err
 	}
 
 	return &linuxService{
 		name:   name,
-		system: system,
+		system: s.system,
 	}, nil
+}
+
+func NewServiceManager() ServiceManager {
+	return &defaultServiceManager{
+		system: &defaultSystemCtl{},
+	}
 }
 
 func Run(runner Runner) (int, error) {

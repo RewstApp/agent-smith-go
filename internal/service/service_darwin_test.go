@@ -232,11 +232,21 @@ func TestDarwinService_IsActive_NoStateLine(t *testing.T) {
 	}
 }
 
-// createWithLaunchCtl tests
+// NewServiceManager tests
 
-func TestCreateWithLaunchCtl_Success(t *testing.T) {
+func TestNewServiceManager_ReturnsNonNil(t *testing.T) {
+	sm := NewServiceManager()
+	if sm == nil {
+		t.Fatal("expected non-nil ServiceManager")
+	}
+}
+
+// defaultServiceManager.Create tests
+
+func TestDefaultServiceManager_Create_Success(t *testing.T) {
 	tmpFile := newTempPlistPath(t)
 	mock := &mockLaunchCtl{plistPath: tmpFile}
+	sm := &defaultServiceManager{system: mock}
 	params := AgentParams{
 		Name:                "test-svc",
 		AgentExecutablePath: "/usr/bin/agent",
@@ -245,7 +255,7 @@ func TestCreateWithLaunchCtl_Success(t *testing.T) {
 		LogFilePath:         "/var/log/agent.log",
 	}
 
-	svc, err := createWithLaunchCtl(params, mock)
+	svc, err := sm.Create(params)
 
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
@@ -255,9 +265,10 @@ func TestCreateWithLaunchCtl_Success(t *testing.T) {
 	}
 }
 
-func TestCreateWithLaunchCtl_PlistContent(t *testing.T) {
+func TestDefaultServiceManager_Create_PlistContent(t *testing.T) {
 	tmpFile := newTempPlistPath(t)
 	mock := &mockLaunchCtl{plistPath: tmpFile}
+	sm := &defaultServiceManager{system: mock}
 	params := AgentParams{
 		Name:                "my-service",
 		AgentExecutablePath: "/usr/bin/agent",
@@ -266,7 +277,7 @@ func TestCreateWithLaunchCtl_PlistContent(t *testing.T) {
 		LogFilePath:         "/var/log/agent.log",
 	}
 
-	if _, err := createWithLaunchCtl(params, mock); err != nil {
+	if _, err := sm.Create(params); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -299,22 +310,24 @@ func TestCreateWithLaunchCtl_PlistContent(t *testing.T) {
 	}
 }
 
-func TestCreateWithLaunchCtl_WriteFileError(t *testing.T) {
+func TestDefaultServiceManager_Create_WriteFileError(t *testing.T) {
 	mock := &mockLaunchCtl{plistPath: "/nonexistent/dir/file.plist"}
+	sm := &defaultServiceManager{system: mock}
 
-	_, err := createWithLaunchCtl(AgentParams{Name: "test-svc"}, mock)
+	_, err := sm.Create(AgentParams{Name: "test-svc"})
 
 	if err == nil {
 		t.Error("expected error on WriteFile failure, got nil")
 	}
 }
 
-// openWithLaunchCtl tests
+// defaultServiceManager.Open tests
 
-func TestOpenWithLaunchCtl_Success(t *testing.T) {
+func TestDefaultServiceManager_Open_Success(t *testing.T) {
 	mock := &mockLaunchCtl{}
+	sm := &defaultServiceManager{system: mock}
 
-	svc, err := openWithLaunchCtl("test-svc", mock)
+	svc, err := sm.Open("test-svc")
 
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
@@ -327,10 +340,11 @@ func TestOpenWithLaunchCtl_Success(t *testing.T) {
 	}
 }
 
-func TestOpenWithLaunchCtl_Error(t *testing.T) {
+func TestDefaultServiceManager_Open_Error(t *testing.T) {
 	mock := &mockLaunchCtl{runErr: errors.New("not found")}
+	sm := &defaultServiceManager{system: mock}
 
-	_, err := openWithLaunchCtl("test-svc", mock)
+	_, err := sm.Open("test-svc")
 
 	if err == nil {
 		t.Error("expected error, got nil")
