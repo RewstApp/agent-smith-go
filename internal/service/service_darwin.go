@@ -15,7 +15,14 @@ import (
 	"github.com/RewstApp/agent-smith-go/internal/utils"
 )
 
-func runLaunchCtl(args ...string) ([]byte, error) {
+type launchCtl interface {
+	Run(args ...string) ([]byte, error)
+	PlistFilePath(name string) string
+}
+
+type defaultLaunchCtl struct{}
+
+func (d *defaultLaunchCtl) Run(args ...string) ([]byte, error) {
 	cmd := exec.Command("launchctl", args...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -25,12 +32,17 @@ func runLaunchCtl(args ...string) ([]byte, error) {
 	return out, nil
 }
 
+func (d *defaultLaunchCtl) PlistFilePath(name string) string {
+	return filepath.Join("/Library/LaunchDaemons", fmt.Sprintf("%s.plist", name))
+}
+
 type darwinService struct {
-	name string
+	name   string
+	system launchCtl
 }
 
 func (svc *darwinService) serviceFilePath() string {
-	return filepath.Join("/Library/LaunchDaemons", fmt.Sprintf("%s.plist", svc.name))
+	return svc.system.PlistFilePath(svc.name)
 }
 
 func (svc *darwinService) Close() error {
@@ -38,26 +50,27 @@ func (svc *darwinService) Close() error {
 }
 
 func (svc *darwinService) Start() error {
-	_, err := runLaunchCtl("load", svc.serviceFilePath())
+	_, err := svc.system.Run("load", svc.serviceFilePath())
 	if err != nil {
 		return err
 	}
 
-	_, err = runLaunchCtl("start", svc.name)
+	_, err = svc.system.Run("start", svc.name)
 	return err
 }
 
 func (svc *darwinService) Stop() error {
-	_, err := runLaunchCtl("stop", svc.name)
+	_, err := svc.system.Run("stop", svc.name)
 	if err != nil {
 		return err
 	}
-	_, err = runLaunchCtl("unload", svc.serviceFilePath())
+
+	_, err = svc.system.Run("unload", svc.serviceFilePath())
 	return err
 }
 
 func (svc *darwinService) Delete() error {
-	_, err := runLaunchCtl("unload", svc.name)
+	_, err := svc.system.Run("unload", svc.name)
 	if err != nil {
 		return err
 	}
@@ -67,7 +80,7 @@ func (svc *darwinService) Delete() error {
 }
 
 func (svc *darwinService) IsActive() bool {
-	out, err := runLaunchCtl("print", fmt.Sprintf("system/%s", svc.name))
+	out, err := svc.system.Run("print", fmt.Sprintf("system/%s", svc.name))
 	if err != nil {
 		return false
 	}
@@ -95,61 +108,23 @@ func (svc *darwinService) IsActive() bool {
 }
 
 func Create(params AgentParams) (Service, error) {
+	return createWithLaunchCtl(params, &defaultLaunchCtl{})
+}
+
+func createWithLaunchCtl(params AgentParams, system launchCtl) (Service, error) {
 	serviceConfig := strings.Builder{}
 
-	serviceConfig.WriteString("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n")
-	serviceConfig.WriteString("<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\"\n")
-	serviceConfig.WriteString("\"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n")
+	fmt.Fprintf(&serviceConfig, "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\"\n\"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n")
+	fmt.Fprintf(&serviceConfig, "<plist version=\"1.0\">\n<dict>\n")
+	fmt.Fprintf(&serviceConfig, "<key>Label</key>\n<string>%s</string>\n", params.Name)
+	fmt.Fprintf(&serviceConfig, "<key>ProgramArguments</key>\n<array>\n<string>%s</string>\n<string>--org-id</string>\n<string>%s</string>\n<string>--config-file</string>\n<string>%s</string>\n<string>--log-file</string>\n<string>%s</string>\n</array>\n",
+		params.AgentExecutablePath, params.OrgId, params.ConfigFilePath, params.LogFilePath)
+	fmt.Fprintf(&serviceConfig, "<key>RunAtLoad</key>\n<false/>\n")
+	fmt.Fprintf(&serviceConfig, "<key>KeepAlive</key>\n<dict>\n<key>SuccessfulExit</key>\n<false/>\n</dict>\n")
+	fmt.Fprintf(&serviceConfig, "<key>EnvironmentVariables</key>\n<dict>\n<key>PATH</key>\n<string>/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>\n</dict>\n")
+	fmt.Fprintf(&serviceConfig, "</dict>\n</plist>\n")
 
-	serviceConfig.WriteString("<plist version=\"1.0\">\n")
-	serviceConfig.WriteString("<dict>\n")
-
-	serviceConfig.WriteString("<key>Label</key>\n")
-	serviceConfig.WriteString("<string>")
-	serviceConfig.WriteString(params.Name)
-	serviceConfig.WriteString("</string>\n")
-
-	serviceConfig.WriteString("<key>ProgramArguments</key>\n")
-	serviceConfig.WriteString("<array>\n")
-	serviceConfig.WriteString("<string>")
-	serviceConfig.WriteString(params.AgentExecutablePath)
-	serviceConfig.WriteString("</string>\n")
-	serviceConfig.WriteString("<string>--org-id</string>\n")
-	serviceConfig.WriteString("<string>")
-	serviceConfig.WriteString(params.OrgId)
-	serviceConfig.WriteString("</string>\n")
-	serviceConfig.WriteString("<string>--config-file</string>\n")
-	serviceConfig.WriteString("<string>")
-	serviceConfig.WriteString(params.ConfigFilePath)
-	serviceConfig.WriteString("</string>\n")
-	serviceConfig.WriteString("<string>--log-file</string>\n")
-	serviceConfig.WriteString("<string>")
-	serviceConfig.WriteString(params.LogFilePath)
-	serviceConfig.WriteString("</string>\n")
-	serviceConfig.WriteString("</array>\n")
-
-	serviceConfig.WriteString("<key>RunAtLoad</key>\n")
-	serviceConfig.WriteString("<false/>\n")
-
-	serviceConfig.WriteString("<key>KeepAlive</key>\n")
-	serviceConfig.WriteString("<dict>\n")
-	serviceConfig.WriteString("<key>SuccessfulExit</key>\n")
-	serviceConfig.WriteString("<false/>\n")
-	serviceConfig.WriteString("</dict>\n")
-
-	serviceConfig.WriteString("<key>EnvironmentVariables</key>\n")
-	serviceConfig.WriteString("<dict>\n")
-	serviceConfig.WriteString("<key>PATH</key>\n")
-	serviceConfig.WriteString("<string>/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>\n")
-	serviceConfig.WriteString("</dict>\n")
-
-	serviceConfig.WriteString("</dict>\n")
-	serviceConfig.WriteString("</plist>\n")
-
-	svc := &darwinService{
-		name: params.Name,
-	}
-
+	svc := &darwinService{name: params.Name, system: system}
 	err := os.WriteFile(svc.serviceFilePath(), []byte(serviceConfig.String()), utils.DefaultFileMod)
 	if err != nil {
 		return nil, err
@@ -159,13 +134,18 @@ func Create(params AgentParams) (Service, error) {
 }
 
 func Open(name string) (Service, error) {
-	_, err := runLaunchCtl("print", fmt.Sprintf("system/%s", name))
+	return openWithLaunchCtl(name, &defaultLaunchCtl{})
+}
+
+func openWithLaunchCtl(name string, system launchCtl) (Service, error) {
+	_, err := system.Run("print", fmt.Sprintf("system/%s", name))
 	if err != nil {
 		return nil, err
 	}
 
 	return &darwinService{
-		name: name,
+		name:   name,
+		system: system,
 	}, nil
 }
 
