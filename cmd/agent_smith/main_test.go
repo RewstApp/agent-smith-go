@@ -2,6 +2,9 @@ package main
 
 import (
 	"context"
+	"os"
+
+	"github.com/RewstApp/agent-smith-go/internal/service"
 )
 
 type mockSystemInfoProvider struct {
@@ -62,4 +65,55 @@ func (mock *mockDomainInfoProvider) IsEntraConnectServer() (bool, error) {
 
 func (mock *mockDomainInfoProvider) EntraDomain(context.Context) (*string, error) {
 	return mock.entraDomain, mock.entraDomainErr
+}
+
+type mockFileSystem struct {
+	executableFunc func() (string, error)
+	readFileFunc   func(name string) ([]byte, error)
+	writeFileFunc  func(name string, data []byte, perm os.FileMode) error
+	mkdirAllFunc   func(path string) error
+}
+
+func (m *mockFileSystem) Executable() (string, error) {
+	return m.executableFunc()
+}
+
+func (m *mockFileSystem) ReadFile(name string) ([]byte, error) {
+	return m.readFileFunc(name)
+}
+
+func (m *mockFileSystem) WriteFile(name string, data []byte, perm os.FileMode) error {
+	return m.writeFileFunc(name, data, perm)
+}
+
+func (m *mockFileSystem) MkdirAll(path string) error {
+	return m.mkdirAllFunc(path)
+}
+
+type mockService struct {
+	isActive  bool
+	stopErr   error
+	deleteErr error
+	startErr  error
+}
+
+func (m *mockService) IsActive() bool { return m.isActive }
+func (m *mockService) Stop() error    { return m.stopErr }
+func (m *mockService) Delete() error  { return m.deleteErr }
+func (m *mockService) Start() error   { return m.startErr }
+func (m *mockService) Close() error   { return nil }
+
+type mockServiceManager struct {
+	openErr       error
+	openService   service.Service
+	createErr     error
+	createService service.Service
+}
+
+func (m *mockServiceManager) Open(name string) (service.Service, error) {
+	return m.openService, m.openErr
+}
+
+func (m *mockServiceManager) Create(params service.AgentParams) (service.Service, error) {
+	return m.createService, m.createErr
 }
