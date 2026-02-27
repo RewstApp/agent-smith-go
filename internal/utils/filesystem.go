@@ -26,3 +26,27 @@ func CreateFolderIfMissing(dir string) error {
 
 	return nil
 }
+
+type FileSystem interface {
+	Executable() (string, error)
+	ReadFile(name string) ([]byte, error)
+	WriteFile(name string, data []byte, perm os.FileMode) error
+}
+
+type defaultFileSystem struct{}
+
+func (*defaultFileSystem) Executable() (string, error) {
+	return os.Executable()
+}
+
+func (*defaultFileSystem) ReadFile(name string) ([]byte, error) {
+	return os.ReadFile(name)
+}
+
+func (*defaultFileSystem) WriteFile(name string, data []byte, perm os.FileMode) error {
+	return os.WriteFile(name, data, perm)
+}
+
+func NewFileSystem() FileSystem {
+	return &defaultFileSystem{}
+}
