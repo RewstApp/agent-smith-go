@@ -25,6 +25,7 @@ type baseExecutor struct {
 	WriteUtf8BOM             bool
 	BuildExecuteCommandArgs  BuildExecuteCommandArgsFunc
 	BuildExecuteFileArgs     BuildExecuteFileArgsFunc
+	FS                       utils.FileSystem
 }
 
 func (e *baseExecutor) Execute(ctx context.Context, message *Message, device agent.Device, logger hclog.Logger, sys agent.SystemInfoProvider, domain agent.DomainInfoProvider) []byte {
@@ -69,7 +70,7 @@ func (e *baseExecutor) Execute(ctx context.Context, message *Message, device age
 
 	// Save commands to temporary file
 	scriptsDir := agent.GetScriptsDirectory(device.RewstOrgId)
-	err = utils.CreateFolderIfMissing(scriptsDir)
+	err = e.FS.MkdirAll(scriptsDir)
 	if err != nil {
 		return errorResultBytes(err)
 	}
@@ -121,12 +122,13 @@ func (e *baseExecutor) Execute(ctx context.Context, message *Message, device age
 	return resultBytes(stderrBuf.String(), stdoutBuf.String())
 }
 
-func NewBaseExecutor(shell string, shellVersionCheckCommand string, writeUtf8BOM bool, buildExecuteCommandArgs BuildExecuteCommandArgsFunc, buildExecuteFileArgs BuildExecuteFileArgsFunc) Executor {
+func NewBaseExecutor(shell string, shellVersionCheckCommand string, writeUtf8BOM bool, buildExecuteCommandArgs BuildExecuteCommandArgsFunc, buildExecuteFileArgs BuildExecuteFileArgsFunc, fs utils.FileSystem) Executor {
 	return &baseExecutor{
 		Shell:                    shell,
 		ShellVersionCheckCommand: shellVersionCheckCommand,
 		WriteUtf8BOM:             writeUtf8BOM,
 		BuildExecuteCommandArgs:  buildExecuteCommandArgs,
 		BuildExecuteFileArgs:     buildExecuteFileArgs,
+		FS:                       fs,
 	}
 }

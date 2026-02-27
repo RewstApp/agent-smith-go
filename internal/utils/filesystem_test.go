@@ -6,55 +6,28 @@ import (
 	"testing"
 )
 
-func TestDirExists(t *testing.T) {
-	tmpDir := t.TempDir()
-
-	if !DirExists(tmpDir) {
-		t.Errorf("expected true for existing directory %s", tmpDir)
-	}
-
-	nonExistentPath := filepath.Join(tmpDir, "does_not_exist")
-
-	if DirExists(nonExistentPath) {
-		t.Errorf("expected false for non-existent directory %s", nonExistentPath)
-	}
-}
-
-func TestDirExists_File(t *testing.T) {
-	tmpDir := t.TempDir()
-	filePath := filepath.Join(tmpDir, "file.txt")
-
-	if err := os.WriteFile(filePath, []byte("data"), DefaultFileMod); err != nil {
-		t.Fatal(err)
-	}
-
-	if DirExists(filePath) {
-		t.Errorf("expected false for a file path, got true")
-	}
-}
-
-func TestCreateFolderIfMissing(t *testing.T) {
-	tmpDir := t.TempDir()
-	newDir := filepath.Join(tmpDir, "new_folder")
-
-	err := CreateFolderIfMissing(newDir)
-
-	if err != nil {
-		t.Fatalf("expected no error, got %v", err)
-	}
-
-	if !DirExists(newDir) {
-		t.Errorf("expected the directory %s to be created", newDir)
-	}
-
-	err = CreateFolderIfMissing(newDir)
-
-	if err != nil {
-		t.Fatalf("expected no error, got %v", err)
-	}
-}
-
 // defaultFileSystem tests
+
+func TestDefaultFileSystem_MkdirAll(t *testing.T) {
+	fs := NewFileSystem()
+	newDir := filepath.Join(t.TempDir(), "sub", "dir")
+
+	err := fs.MkdirAll(newDir)
+
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	info, err := os.Stat(newDir)
+	if err != nil || !info.IsDir() {
+		t.Errorf("expected directory %s to exist", newDir)
+	}
+
+	err = fs.MkdirAll(newDir)
+
+	if err != nil {
+		t.Fatalf("expected no error on second call, got %v", err)
+	}
+}
 
 func TestNewFileSystem_ReturnsNonNil(t *testing.T) {
 	fs := NewFileSystem()

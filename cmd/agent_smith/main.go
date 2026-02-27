@@ -52,7 +52,10 @@ func main() {
 	configContext, err := newConfigContext(os.Args[1:], sys, domain, fs, svcMgr)
 	if err == nil {
 		// Run config routine
-		runConfig(configContext)
+		if err := runConfig(configContext); err != nil {
+			fmt.Fprintf(os.Stderr, "config error: %v\n", err)
+			os.Exit(1)
+		}
 		return
 	}
 

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -20,7 +21,7 @@ type fetchConfigurationResponse struct {
 	Configuration agent.Device `json:"configuration"`
 }
 
-func runConfig(params *configContext) {
+func runConfig(params *configContext) error {
 	logger := utils.ConfigureLogger("agent_smith", os.Stdout, utils.Default)
 
 	// Show header
@@ -29,52 +30,45 @@ func runConfig(params *configContext) {
 	// Get installation paths data
 	pathsData, err := agent.NewPathsData(context.Background(), params.OrgId, logger, params.Sys, params.Domain)
 	if err != nil {
-		logger.Error("Failed to read paths", "error", err)
-		return
+		return fmt.Errorf("failed to read paths: %w", err)
 	}
 
 	// Fetch configuration
 	hostInfoBytes, err := json.MarshalIndent(pathsData.Tags, "", "  ")
 	if err != nil {
-		logger.Error("Failed to read host info", "error", err)
-		return
+		return fmt.Errorf("failed to read host info: %w", err)
 	}
 
 	// Prepare http request and send
 	logger.Info("Sending", "data", string(hostInfoBytes), "to", params.ConfigUrl)
 	req, err := utils.NewRequest("POST", params.ConfigUrl, bytes.NewReader(hostInfoBytes))
 	if err != nil {
-		logger.Error("Failed to create request", "error", err)
-		return
+		return fmt.Errorf("failed to create request: %w", err)
 	}
 	req.Header.Set("x-rewst-secret", params.ConfigSecret)
 	req.Header.Set("Content-Type", "application/json")
 
 	res, err := http.DefaultClient.Do(req)
 	if err != nil {
-		logger.Error("Failed to execute http request", "error", err)
-		return
+		return fmt.Errorf("failed to execute http request: %w", err)
 	}
 	defer res.Body.Close()
 
 	if res.StatusCode != http.StatusOK {
-		logger.Error("Failed to fetch configuration", "status_code", res.StatusCode)
-		return
+		return fmt.Errorf("failed to fetch configuration: status %d", res.StatusCode)
 	}
 	logger.Info("Successfully fetched configuration", "status_code", res.StatusCode)
 
 	bodyBytes, err := io.ReadAll(res.Body)
 	if err != nil {
-		logger.Error("Failed to read response", "error", err)
-		return
+		return fmt.Errorf("failed to read response: %w", err)
 	}
 
 	// Parse the fetch configuration response
 	var response fetchConfigurationResponse
 	err = json.Unmarshal(bodyBytes, &response)
 	if err != nil {
-		logger.Error("Failed to parse response", "error", err)
-		return
+		return fmt.Errorf("failed to parse response: %w", err)
 	}
 	response.Configuration.LoggingLevel = utils.LoggingLevel(params.LoggingLevel)
 	response.Configuration.UseSyslog = params.UseSyslog
@@ -83,18 +77,16 @@ func runConfig(params *configContext) {
 
 	// Create the data directory
 	dataDir := agent.GetDataDirectory(params.OrgId)
-	err = utils.CreateFolderIfMissing(dataDir)
+	err = params.FS.MkdirAll(dataDir)
 	if err != nil {
-		logger.Error("Failed to create data directory", "error", err)
-		return
+		return fmt.Errorf("failed to create data directory: %w", err)
 	}
 
 	// Save the configuration file
 	configFilePath := agent.GetConfigFilePath(params.OrgId)
 	configBytes, err := json.MarshalIndent(response.Configuration, "", "  ")
 	if err != nil {
-		logger.Error("Failed to print config file", "error", err)
-		return
+		return fmt.Errorf("failed to print config file: %w", err)
 	}
 
 	// Got configuration
@@ -102,8 +94,7 @@ func runConfig(params *configContext) {
 
 	err = params.FS.WriteFile(configFilePath, configBytes, utils.DefaultFileMod)
 	if err != nil {
-		logger.Error("Failed to save config", "error", err)
-		return
+		return fmt.Errorf("failed to save config: %w", err)
 	}
 
 	name := agent.GetServiceName(params.OrgId)
@@ -115,17 +106,15 @@ func runConfig(params *configContext) {
 			logger.Info("Stopping service", "service", name)
 			err = existingService.Stop()
 			if err != nil {
-				logger.Error("Failed to stop service", "service", name, "error", err)
 				existingService.Close()
-				return
+				return fmt.Errorf("failed to stop service %s: %w", name, err)
 			}
 		}
 
 		// Delete the service
 		err = existingService.Delete()
 		if err != nil {
-			logger.Error("Failed to delete service", "error", err)
-			return
+			return fmt.Errorf("failed to delete service: %w", err)
 		}
 		logger.Info("Service deleted", "service", name)
 
@@ -140,30 +129,26 @@ func runConfig(params *configContext) {
 
 	// Create the program directory
 	programDir := agent.GetProgramDirectory(params.OrgId)
-	err = utils.CreateFolderIfMissing(programDir)
+	err = params.FS.MkdirAll(programDir)
 	if err != nil {
-		logger.Error("Failed to create program directory", "error", err)
-		return
+		return fmt.Errorf("failed to create program directory: %w", err)
 	}
 
 	// Copy the agent executable
 	execFilePath, err := params.FS.Executable()
 	if err != nil {
-		logger.Error("Failed to get executable", "error", err)
-		return
+		return fmt.Errorf("failed to get executable: %w", err)
 	}
 
 	execFileBytes, err := params.FS.ReadFile(execFilePath)
 	if err != nil {
-		logger.Error("Failed to read executable file", "error", err)
-		return
+		return fmt.Errorf("failed to read executable file: %w", err)
 	}
 
 	agentExecutablePath := agent.GetAgentExecutablePath(params.OrgId)
 	err = params.FS.WriteFile(agentExecutablePath, execFileBytes, utils.DefaultExecutableFileMod)
 	if err != nil {
-		logger.Error("Failed to create agent executable", "error", err)
-		return
+		return fmt.Errorf("failed to create agent executable: %w", err)
 	}
 
 	logger.Info("Agent installed to", "path", agentExecutablePath)
@@ -180,8 +165,7 @@ func runConfig(params *configContext) {
 		LogFilePath:         agent.GetLogFilePath(params.OrgId),
 	})
 	if err != nil {
-		logger.Error("Failed to create service", "error", err)
-		return
+		return fmt.Errorf("failed to create service: %w", err)
 	}
 	defer svc.Close()
 	logger.Info("Service created")
@@ -190,9 +174,9 @@ func runConfig(params *configContext) {
 	logger.Info("Starting service", "service", name)
 	err = svc.Start()
 	if err != nil {
-		logger.Error("Failed to start service", "service", name, "error", err)
-		return
+		return fmt.Errorf("failed to start service %s: %w", name, err)
 	}
 
 	logger.Info("Service started")
+	return nil
 }

@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/RewstApp/agent-smith-go/internal/agent"
+	"github.com/RewstApp/agent-smith-go/internal/utils"
 	"github.com/hashicorp/go-hclog"
 )
 
@@ -16,6 +17,7 @@ func NewPowershellExecutor() Executor {
 		true,
 		func(command string) []string { return []string{"-Command", command} },
 		func(path string) []string { return []string{"-File", path} },
+		utils.NewFileSystem(),
 	)
 }
 
@@ -26,6 +28,7 @@ func NewPwshExecutor() Executor {
 		true,
 		func(command string) []string { return []string{"-Command", command} },
 		func(path string) []string { return []string{"-File", path} },
+		utils.NewFileSystem(),
 	)
 }
 

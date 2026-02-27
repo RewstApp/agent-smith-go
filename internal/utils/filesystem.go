@@ -8,29 +8,11 @@ const DefaultFileMod os.FileMode = 0644
 const DefaultExecutableFileMod os.FileMode = 0755
 const DefaultDirMod os.FileMode = 0755
 
-func DirExists(path string) bool {
-	info, err := os.Stat(path)
-	if os.IsNotExist(err) {
-		return false
-	}
-	return info.IsDir()
-}
-
-func CreateFolderIfMissing(dir string) error {
-	if !DirExists(dir) {
-		err := os.MkdirAll(dir, DefaultDirMod)
-		if err != nil {
-			return err
-		}
-	}
-
-	return nil
-}
-
 type FileSystem interface {
 	Executable() (string, error)
 	ReadFile(name string) ([]byte, error)
 	WriteFile(name string, data []byte, perm os.FileMode) error
+	MkdirAll(path string) error
 }
 
 type defaultFileSystem struct{}
@@ -45,6 +27,10 @@ func (*defaultFileSystem) ReadFile(name string) ([]byte, error) {
 
 func (*defaultFileSystem) WriteFile(name string, data []byte, perm os.FileMode) error {
 	return os.WriteFile(name, data, perm)
+}
+
+func (*defaultFileSystem) MkdirAll(path string) error {
+	return os.MkdirAll(path, DefaultDirMod)
 }
 
 func NewFileSystem() FileSystem {
