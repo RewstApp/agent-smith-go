@@ -52,7 +52,7 @@ func runUninstall(params *uninstallContext) {
 
 	// Delete data directory
 	dataDir := agent.GetDataDirectory(params.OrgId)
-	err = os.RemoveAll(dataDir)
+	err = params.FS.RemoveAll(dataDir)
 	if err != nil {
 		logger.Error("Failed to delete directory", "directory", dataDir, "error", err)
 		return
@@ -61,7 +61,7 @@ func runUninstall(params *uninstallContext) {
 
 	// Delete program directory
 	programDir := agent.GetProgramDirectory(params.OrgId)
-	err = os.RemoveAll(programDir)
+	err = params.FS.RemoveAll(programDir)
 	if err != nil {
 		logger.Error("Failed to delete directory", "directory", programDir, "error", err)
 		return
@@ -70,7 +70,7 @@ func runUninstall(params *uninstallContext) {
 
 	// Delete scripts directory
 	scriptsDir := agent.GetScriptsDirectory(params.OrgId)
-	err = os.RemoveAll(scriptsDir)
+	err = params.FS.RemoveAll(scriptsDir)
 	if err != nil {
 		logger.Error("Failed to delete directory", "directory", scriptsDir, "error", err)
 		return

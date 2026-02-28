@@ -72,6 +72,7 @@ type mockFileSystem struct {
 	readFileFunc   func(name string) ([]byte, error)
 	writeFileFunc  func(name string, data []byte, perm os.FileMode) error
 	mkdirAllFunc   func(path string) error
+	removeAllFunc  func(path string) error
 }
 
 func (m *mockFileSystem) Executable() (string, error) {
@@ -88,6 +89,10 @@ func (m *mockFileSystem) WriteFile(name string, data []byte, perm os.FileMode) e
 
 func (m *mockFileSystem) MkdirAll(path string) error {
 	return m.mkdirAllFunc(path)
+}
+
+func (m *mockFileSystem) RemoveAll(path string) error {
+	return m.removeAllFunc(path)
 }
 
 type mockService struct {

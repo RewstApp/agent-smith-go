@@ -30,6 +30,7 @@ func newConfigTestFS() *mockFileSystem {
 		readFileFunc:   func(string) ([]byte, error) { return []byte("binary"), nil },
 		writeFileFunc:  func(string, []byte, os.FileMode) error { return nil },
 		mkdirAllFunc:   func(string) error { return nil },
+		removeAllFunc:  func(string) error { return nil },
 	}
 }
 

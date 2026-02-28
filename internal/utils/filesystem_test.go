@@ -88,6 +88,31 @@ func TestDefaultFileSystem_ReadFile(t *testing.T) {
 	}
 }
 
+func TestDefaultFileSystem_RemoveAll(t *testing.T) {
+	fs := NewFileSystem()
+	dir := filepath.Join(t.TempDir(), "to_remove")
+
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	err := fs.RemoveAll(dir)
+
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if _, statErr := os.Stat(dir); !os.IsNotExist(statErr) {
+		t.Errorf("expected directory %s to be removed", dir)
+	}
+
+	// Calling RemoveAll on a non-existent path must also succeed.
+	err = fs.RemoveAll(dir)
+
+	if err != nil {
+		t.Fatalf("expected no error on non-existent path, got %v", err)
+	}
+}
+
 func TestDefaultFileSystem_ReadFile_NotFound(t *testing.T) {
 	fs := NewFileSystem()
 

@@ -42,7 +42,7 @@ func main() {
 	fs := utils.NewFileSystem()
 	svcMgr := service.NewServiceManager()
 
-	uninstallContext, err := newUninstallContext(os.Args[1:], svcMgr)
+	uninstallContext, err := newUninstallContext(os.Args[1:], svcMgr, fs)
 	if err == nil {
 		// Run uninstall routine
 		runUninstall(uninstallContext)

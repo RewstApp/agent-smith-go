@@ -13,6 +13,7 @@ type FileSystem interface {
 	ReadFile(name string) ([]byte, error)
 	WriteFile(name string, data []byte, perm os.FileMode) error
 	MkdirAll(path string) error
+	RemoveAll(path string) error
 }
 
 type defaultFileSystem struct{}
@@ -31,6 +32,10 @@ func (*defaultFileSystem) WriteFile(name string, data []byte, perm os.FileMode) 
 
 func (*defaultFileSystem) MkdirAll(path string) error {
 	return os.MkdirAll(path, DefaultDirMod)
+}
+
+func (*defaultFileSystem) RemoveAll(path string) error {
+	return os.RemoveAll(path)
 }
 
 func NewFileSystem() FileSystem {
