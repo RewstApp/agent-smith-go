@@ -46,7 +46,11 @@ func (svc *serviceContext) loadConfig() (agent.Device, error) {
 }
 
 func (svc *serviceContext) loadLog() (*os.File, error) {
-	logFile, err := os.OpenFile(svc.LogFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, utils.DefaultFileMod)
+	logFile, err := os.OpenFile(
+		svc.LogFile,
+		os.O_APPEND|os.O_CREATE|os.O_WRONLY,
+		utils.DefaultFileMod,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -58,7 +62,10 @@ func (svc *serviceContext) Name() string {
 	return agent.GetServiceName(svc.OrgId)
 }
 
-func (svc *serviceContext) Execute(stop <-chan struct{}, running chan<- struct{}) service.ServiceExitCode {
+func (svc *serviceContext) Execute(
+	stop <-chan struct{},
+	running chan<- struct{},
+) service.ServiceExitCode {
 	// Create context to cancel running commands
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -74,7 +81,9 @@ func (svc *serviceContext) Execute(stop <-chan struct{}, running chan<- struct{}
 	if err != nil {
 		return service.LogFileError
 	}
-	defer logFile.Close()
+	defer func() {
+		_ = logFile.Close()
+	}()
 
 	logger := utils.ConfigureLogger("agent_smith", logFile, device.LoggingLevel)
 
@@ -84,22 +93,42 @@ func (svc *serviceContext) Execute(stop <-chan struct{}, running chan<- struct{}
 		if err != nil {
 			return service.LogFileError
 		}
-		defer sysLogger.Close()
+		defer func() {
+			err = sysLogger.Close()
+			if err != nil {
+				logger.Error("Failed to close sys logger handle", "error", err)
+			}
+		}()
 
 		logger = utils.ConfigureLogger("agent_smith", sysLogger, device.LoggingLevel)
 	}
 
 	if !device.DisableAutoUpdates {
-		updater := agent.NewUpdater(logger, &device, "https://api.github.com/repos/rewstapp/agent-smith-go/releases/latest", func(path string, args []string) error {
-			return exec.Command(path, args...).Run()
-		})
+		updater := agent.NewUpdater(
+			logger,
+			&device,
+			"https://api.github.com/repos/rewstapp/agent-smith-go/releases/latest",
+			func(path string, args []string) error {
+				return exec.Command(path, args...).Run()
+			},
+		)
 		runner := agent.NewAutoUpdateRunner(logger, updater, 48*time.Hour, 5, 5*time.Minute)
 		runner.Start()
 		defer runner.Stop()
 	}
 
 	// Show header
-	logger.Info("Agent Smith started", "version", version.Version, "os", runtime.GOOS, "device_id", device.DeviceId, "logging_level", device.LoggingLevel)
+	logger.Info(
+		"Agent Smith started",
+		"version",
+		version.Version,
+		"os",
+		runtime.GOOS,
+		"device_id",
+		device.DeviceId,
+		"logging_level",
+		device.LoggingLevel,
+	)
 
 	defer func() {
 		logger.Info("Service stopped")
@@ -135,7 +164,7 @@ func (svc *serviceContext) Execute(stop <-chan struct{}, running chan<- struct{}
 	}()
 
 	running <- struct{}{}
-	notifier.Notify("AgentStarted")
+	_ = notifier.Notify("AgentStarted") // Best effort notification
 	rg := utils.ReconnectTimeoutGenerator{}
 
 	for {
@@ -147,7 +176,7 @@ func (svc *serviceContext) Execute(stop <-chan struct{}, running chan<- struct{}
 				return 0
 			case <-time.After(rg.Timeout()):
 				logger.Info("Reconnecting...")
-				notifier.Notify("AgentStatus:Reconnecting")
+				_ = notifier.Notify("AgentStatus:Reconnecting") // Best effort notification
 			}
 		}
 
@@ -195,10 +224,19 @@ func (svc *serviceContext) Execute(stop <-chan struct{}, running chan<- struct{}
 					return
 				}
 
-				notifier.Notify("AgentReceivedMessage:" + string(msg.Payload()))
+				_ = notifier.Notify(
+					"AgentReceivedMessage:" + string(msg.Payload()),
+				) // Best effort notification
 
 				// Execute the message
-				resultBytes := message.Execute(svc.Executor, ctx, device, logger, svc.Sys, svc.Domain)
+				resultBytes := message.Execute(
+					svc.Executor,
+					ctx,
+					device,
+					logger,
+					svc.Sys,
+					svc.Domain,
+				)
 
 				// Skip if there is no post_id specified
 				if message.PostId == "" {
@@ -211,7 +249,11 @@ func (svc *serviceContext) Execute(stop <-chan struct{}, running chan<- struct{}
 				}
 
 				// Postback the response
-				postbackReq, err := message.CreatePostbackRequest(ctx, device, bytes.NewReader(resultBytes))
+				postbackReq, err := message.CreatePostbackRequest(
+					ctx,
+					device,
+					bytes.NewReader(resultBytes),
+				)
 				if err != nil {
 					logger.Error("Failed to create postback request", "error", err)
 					return
@@ -224,7 +266,12 @@ func (svc *serviceContext) Execute(stop <-chan struct{}, running chan<- struct{}
 					logger.Error("Failed to send postback", "error", err)
 					return
 				}
-				defer res.Body.Close()
+				defer func() {
+					err = res.Body.Close()
+					if err != nil {
+						logger.Error("Failed to close response", "error", err)
+					}
+				}()
 
 				// Show postback response body if not empty
 				bodyBytes, err := io.ReadAll(res.Body)
@@ -245,10 +292,14 @@ func (svc *serviceContext) Execute(stop <-chan struct{}, running chan<- struct{}
 				// Process error
 				var response errorResponse
 				err = json.Unmarshal(bodyBytes, &response)
-
-				// Error with different format
 				if err != nil {
-					logger.Error("Postback failed", "post_id", message.PostId, "status_code", res.StatusCode)
+					logger.Error(
+						"Postback failed",
+						"post_id",
+						message.PostId,
+						"status_code",
+						res.StatusCode,
+					)
 					if len(bodyBytes) > 0 {
 						logger.Error("Received error response", "data", string(bodyBytes))
 					}
@@ -256,13 +307,22 @@ func (svc *serviceContext) Execute(stop <-chan struct{}, running chan<- struct{}
 				}
 
 				// Special error for webhook already fulfilled
-				if res.StatusCode == http.StatusBadRequest && strings.Contains(strings.ToLower(response.Error), "fulfilled") {
+				if res.StatusCode == http.StatusBadRequest &&
+					strings.Contains(strings.ToLower(response.Error), "fulfilled") {
 					logger.Info("Postback already sent", "post_id", message.PostId)
 					return
 				}
 
 				// Standard error format
-				logger.Error("Postback failed", "post_id", message.PostId, "status_code", res.StatusCode, "message", response.Error)
+				logger.Error(
+					"Postback failed",
+					"post_id",
+					message.PostId,
+					"status_code",
+					res.StatusCode,
+					"message",
+					response.Error,
+				)
 			}()
 		})
 
@@ -273,7 +333,7 @@ func (svc *serviceContext) Execute(stop <-chan struct{}, running chan<- struct{}
 
 		// Complete initialization
 		logger.Info("Subscribed to messages")
-		notifier.Notify("AgentStatus:Online")
+		_ = notifier.Notify("AgentStatus:Online") // Best effort notification
 
 		// Reset the timeout
 		rg.Clear()
@@ -282,10 +342,10 @@ func (svc *serviceContext) Execute(stop <-chan struct{}, running chan<- struct{}
 		// Wait for the stop/shutdown command or lost connection
 		select {
 		case <-stopped:
-			notifier.Notify("AgentStatus:Stopped")
+			_ = notifier.Notify("AgentStatus:Stopped") // Best effort notification
 			return 0
 		case <-lost:
-			notifier.Notify("AgentStatus:Offline")
+			_ = notifier.Notify("AgentStatus:Offline") // Best effort notification
 			continue
 		}
 	}

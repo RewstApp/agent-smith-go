@@ -11,7 +11,6 @@ func TestGenerateSASToken(t *testing.T) {
 	key := "c2VjcmV0a2V5" // "secretkey" in base64
 
 	token, err := generateSASToken(resourceURI, key, 1*time.Hour)
-
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}

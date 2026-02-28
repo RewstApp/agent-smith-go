@@ -14,5 +14,5 @@ func (u *defaultUpdater) SelectAsset(release Release) (Asset, error) {
 		}
 	}
 
-	return Asset{}, fmt.Errorf("No asset found for windows")
+	return Asset{}, fmt.Errorf("no asset found for windows")
 }

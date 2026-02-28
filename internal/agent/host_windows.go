@@ -43,7 +43,7 @@ func (*windowsDefaultSystemInfoProvider) CPUModelName() (string, error) {
 func (*windowsDefaultSystemInfoProvider) TotalMemoryBytes() (uint64, error) {
 	vmStat, err := mem.VirtualMemory()
 	if err != nil {
-		return 0, nil
+		return 0, err
 	}
 
 	return vmStat.Total, nil
@@ -74,12 +74,17 @@ func NewSystemInfoProvider() SystemInfoProvider {
 type windowsDefaultDomainInfoProvider struct{}
 
 func (*windowsDefaultDomainInfoProvider) ADDomain(ctx context.Context) (*string, error) {
-	cmd := exec.CommandContext(ctx, "powershell", "-Command", `$domainInfo = (Get-WmiObject Win32_ComputerSystem).Domain
+	cmd := exec.CommandContext(
+		ctx,
+		"powershell",
+		"-Command",
+		`$domainInfo = (Get-WmiObject Win32_ComputerSystem).Domain
     if ($domainInfo -and $domainInfo -ne 'WORKGROUP') {
         return $domainInfo
     } else {
         return $null
-    }`)
+    }`,
+	)
 
 	var outb bytes.Buffer
 	cmd.Stdout = &outb
@@ -98,12 +103,17 @@ func (*windowsDefaultDomainInfoProvider) ADDomain(ctx context.Context) (*string,
 }
 
 func (*windowsDefaultDomainInfoProvider) IsADDomainController(ctx context.Context) (bool, error) {
-	cmd := exec.CommandContext(ctx, "powershell", "-Command", `$domainStatus = (Get-WmiObject Win32_ComputerSystem).DomainRole
+	cmd := exec.CommandContext(
+		ctx,
+		"powershell",
+		"-Command",
+		`$domainStatus = (Get-WmiObject Win32_ComputerSystem).DomainRole
     if ($domainStatus -eq 4 -or $domainStatus -eq 5) {
         return $true
     } else {
         return $false
-    }`)
+    }`,
+	)
 
 	var outb bytes.Buffer
 	cmd.Stdout = &outb

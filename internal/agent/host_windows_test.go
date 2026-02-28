@@ -12,7 +12,6 @@ import (
 func TestWindowsDefaultSystemInfoProvider_MACAddress(t *testing.T) {
 	sys := &windowsDefaultSystemInfoProvider{}
 	result, err := sys.MACAddress()
-
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
@@ -31,7 +30,6 @@ func TestWindowsDefaultSystemInfoProvider_Hostname(t *testing.T) {
 	expected, _ := os.Hostname()
 
 	result, err := sys.Hostname()
-
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
@@ -46,7 +44,6 @@ func TestWindowsDefaultSystemInfoProvider_HostPlatform(t *testing.T) {
 	expected := "windows"
 
 	result, err := sys.HostPlatform()
-
 	if err != nil {
 		t.Errorf("expected no error, got %v", err)
 	}
@@ -59,7 +56,6 @@ func TestWindowsDefaultSystemInfoProvider_HostPlatform(t *testing.T) {
 func TestWindowsDefaultSystemInfoProvider_CPUModelName(t *testing.T) {
 	sys := &windowsDefaultSystemInfoProvider{}
 	_, err := sys.CPUModelName()
-
 	if err != nil {
 		t.Errorf("expected no error, got %v", err)
 	}
@@ -68,7 +64,6 @@ func TestWindowsDefaultSystemInfoProvider_CPUModelName(t *testing.T) {
 func TestWindowsDefaultSystemInfoProvider_TotalMemoryBytes(t *testing.T) {
 	sys := &windowsDefaultSystemInfoProvider{}
 	result, err := sys.TotalMemoryBytes()
-
 	if err != nil {
 		t.Errorf("expected no error, got %v", err)
 	}
@@ -90,7 +85,6 @@ func TestNewSystemInfoProvider(t *testing.T) {
 func TestWindowsDefaultDomainInfoProvider_ADDomain(t *testing.T) {
 	domain := &windowsDefaultDomainInfoProvider{}
 	_, err := domain.ADDomain(context.Background())
-
 	if err != nil {
 		t.Errorf("expected no error, got %v", err)
 	}
@@ -99,7 +93,6 @@ func TestWindowsDefaultDomainInfoProvider_ADDomain(t *testing.T) {
 func TestWindowsDefaultDomainInfoProvider_IsADDomainController(t *testing.T) {
 	domain := &windowsDefaultDomainInfoProvider{}
 	_, err := domain.IsADDomainController(context.Background())
-
 	if err != nil {
 		t.Errorf("expected no error, got %v", err)
 	}
@@ -108,7 +101,6 @@ func TestWindowsDefaultDomainInfoProvider_IsADDomainController(t *testing.T) {
 func TestWindowsDefaultDomainInfoProvider_IsEntraConnectServer(t *testing.T) {
 	domain := &windowsDefaultDomainInfoProvider{}
 	_, err := domain.IsEntraConnectServer()
-
 	if err != nil {
 		t.Errorf("expected no error, got %v", err)
 	}
@@ -117,7 +109,6 @@ func TestWindowsDefaultDomainInfoProvider_IsEntraConnectServer(t *testing.T) {
 func TestWindowsDefaultDomainInfoProvider_EntraDomain(t *testing.T) {
 	domain := &windowsDefaultDomainInfoProvider{}
 	_, err := domain.EntraDomain(context.Background())
-
 	if err != nil {
 		t.Errorf("expected no error, got %v", err)
 	}

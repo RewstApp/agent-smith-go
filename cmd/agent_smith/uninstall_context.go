@@ -17,7 +17,11 @@ type uninstallContext struct {
 	FS             utils.FileSystem
 }
 
-func newUninstallContext(args []string, svcMgr service.ServiceManager, fsys utils.FileSystem) (*uninstallContext, error) {
+func newUninstallContext(
+	args []string,
+	svcMgr service.ServiceManager,
+	fsys utils.FileSystem,
+) (*uninstallContext, error) {
 	var params uninstallContext
 
 	fs := flag.NewFlagSet("uninstall", flag.ContinueOnError)

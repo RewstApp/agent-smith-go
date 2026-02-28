@@ -25,7 +25,12 @@ func runUninstall(params *uninstallContext) {
 		logger.Error("Failed to open service", "service", name, "error", err)
 		return
 	}
-	defer service.Close()
+	defer func() {
+		err = service.Close()
+		if err != nil {
+			logger.Error("Failed to close service handle", "error", err)
+		}
+	}()
 
 	if service.IsActive() {
 		logger.Info("Stopping service", "service", name)

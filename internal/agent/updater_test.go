@@ -43,7 +43,10 @@ func TestCheck_Success(t *testing.T) {
 	}
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(release)
+		err := json.NewEncoder(w).Encode(release)
+		if err != nil {
+			t.Fatalf("exepcted no error, but got %v", err)
+		}
 	}))
 	defer server.Close()
 
@@ -52,7 +55,6 @@ func TestCheck_Success(t *testing.T) {
 	updater := NewUpdater(logger, device, server.URL, nil)
 
 	result, err := updater.Check()
-
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
@@ -97,7 +99,11 @@ func TestCheck_NonOkStatus(t *testing.T) {
 
 func TestCheck_InvalidJson(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte("not json"))
+		_, err := w.Write([]byte("not json"))
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte(err.Error()))
+		}
 	}))
 	defer server.Close()
 
@@ -133,7 +139,6 @@ func TestUpdate_BuildsArgs(t *testing.T) {
 	updater := NewUpdater(logger, device, "", runCmd)
 
 	err := updater.Update("/path/to/binary")
-
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
@@ -178,7 +183,6 @@ func TestUpdate_MinimalArgs(t *testing.T) {
 	updater := NewUpdater(logger, device, "", runCmd)
 
 	err := updater.Update("/path/to/binary")
-
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
@@ -213,7 +217,8 @@ func TestDownload_Success(t *testing.T) {
 		if r.Header.Get("Accept") != "application/octet-stream" {
 			t.Errorf("expected Accept: application/octet-stream, got %s", r.Header.Get("Accept"))
 		}
-		w.Write(fileContent)
+
+		_, _ = w.Write(fileContent)
 	}))
 	defer server.Close()
 
@@ -222,12 +227,16 @@ func TestDownload_Success(t *testing.T) {
 	updater := NewUpdater(logger, device, "", nil)
 
 	path, err := updater.Download(Asset{Url: server.URL})
-
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
 
-	defer os.Remove(path)
+	defer func() {
+		err = os.Remove(path)
+		if err != nil {
+			t.Errorf("expected no error, got %v", err)
+		}
+	}()
 
 	content, err := os.ReadFile(path)
 	if err != nil {
@@ -527,16 +536,23 @@ func TestRun_FullUpdateFlow(t *testing.T) {
 	}
 
 	// Serve the binary download endpoint
-	downloadServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte("fake binary"))
-	}))
+	downloadServer := httptest.NewServer(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write([]byte("fake binary"))
+		}),
+	)
 	defer downloadServer.Close()
 
 	release.Assets[0].Url = downloadServer.URL
 
-	releaseServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(release)
-	}))
+	releaseServer := httptest.NewServer(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			err := json.NewEncoder(w).Encode(release)
+			if err != nil {
+				t.Fatalf("expected no error, got %v", err)
+			}
+		}),
+	)
 	defer releaseServer.Close()
 
 	logger := hclog.NewNullLogger()
@@ -544,7 +560,6 @@ func TestRun_FullUpdateFlow(t *testing.T) {
 	updater := NewUpdater(logger, device, releaseServer.URL, runCmd)
 
 	err := updater.Run()
-
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
@@ -558,7 +573,10 @@ func TestRun_FullUpdateFlow(t *testing.T) {
 	if statErr != nil {
 		t.Errorf("expected downloaded file to exist at %s, got %v", updatedPath, statErr)
 	}
-	os.Remove(updatedPath)
+	err = os.Remove(updatedPath)
+	if err != nil {
+		t.Errorf("expected no error, got %v", err)
+	}
 }
 
 func TestRun_SelectAssetError(t *testing.T) {
@@ -569,7 +587,11 @@ func TestRun_SelectAssetError(t *testing.T) {
 	}
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(release)
+		err := json.NewEncoder(w).Encode(release)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte(err.Error()))
+		}
 	}))
 	defer server.Close()
 
@@ -591,9 +613,14 @@ func TestRun_DownloadError(t *testing.T) {
 		Assets:  []Asset{{Id: 1, Name: testAssetFileName, Url: "http://invalid.invalid.invalid"}},
 	}
 
-	releaseServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(release)
-	}))
+	releaseServer := httptest.NewServer(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			err := json.NewEncoder(w).Encode(release)
+			if err != nil {
+				t.Fatalf("expected no error, got %v", err)
+			}
+		}),
+	)
 	defer releaseServer.Close()
 
 	logger := hclog.NewNullLogger()
@@ -612,9 +639,11 @@ func TestRun_UpdateCommandError(t *testing.T) {
 		return fmt.Errorf("command failed")
 	}
 
-	downloadServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte("fake binary"))
-	}))
+	downloadServer := httptest.NewServer(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write([]byte("fake binary"))
+		}),
+	)
 	defer downloadServer.Close()
 
 	release := Release{
@@ -622,9 +651,14 @@ func TestRun_UpdateCommandError(t *testing.T) {
 		Assets:  []Asset{{Id: 1, Name: testAssetFileName, Url: downloadServer.URL}},
 	}
 
-	releaseServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(release)
-	}))
+	releaseServer := httptest.NewServer(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			err := json.NewEncoder(w).Encode(release)
+			if err != nil {
+				t.Fatalf("expected no error, got %v", err)
+			}
+		}),
+	)
 	defer releaseServer.Close()
 
 	logger := hclog.NewNullLogger()
@@ -665,7 +699,10 @@ func TestRun_NoUpdateAvailable(t *testing.T) {
 	}
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(release)
+		err := json.NewEncoder(w).Encode(release)
+		if err != nil {
+			t.Fatalf("expected no error, got %v", err)
+		}
 	}))
 	defer server.Close()
 
@@ -674,7 +711,6 @@ func TestRun_NoUpdateAvailable(t *testing.T) {
 	updater := NewUpdater(logger, device, server.URL, nil)
 
 	err := updater.Run()
-
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}

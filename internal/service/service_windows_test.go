@@ -74,7 +74,11 @@ func (m *mockWindowsServiceManager) Disconnect() error {
 	return nil
 }
 
-func (m *mockWindowsServiceManager) CreateService(name, exepath string, c mgr.Config, args ...string) (*mgr.Service, error) {
+func (m *mockWindowsServiceManager) CreateService(
+	name, exepath string,
+	c mgr.Config,
+	args ...string,
+) (*mgr.Service, error) {
 	return nil, m.createErr
 }
 
@@ -309,7 +313,10 @@ func TestDefaultServiceManager_Create_DisconnectsOnSuccess(t *testing.T) {
 	factory := &mockWindowsServiceManagerFactory{manager: manager}
 	sm := &defaultServiceManager{factory: factory}
 
-	sm.Create(AgentParams{})
+	_, err := sm.Create(AgentParams{})
+	if err != nil {
+		t.Errorf("expected no error, got %v", err)
+	}
 
 	if !manager.disconnected {
 		t.Error("expected Disconnect to be called after success")
@@ -357,7 +364,10 @@ func TestDefaultServiceManager_Open_DisconnectsOnSuccess(t *testing.T) {
 	factory := &mockWindowsServiceManagerFactory{manager: manager}
 	sm := &defaultServiceManager{factory: factory}
 
-	sm.Open("test-svc")
+	_, err := sm.Open("test-svc")
+	if err != nil {
+		t.Errorf("expected no error, got %v", err)
+	}
 
 	if !manager.disconnected {
 		t.Error("expected Disconnect to be called after success")
@@ -456,7 +466,6 @@ func TestRunWithFactory_Success(t *testing.T) {
 	runner := &mockRunner{name: "test-svc", exitCode: 0}
 
 	code, err := runWithFactory(runner, factory)
-
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}

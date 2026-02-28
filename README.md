@@ -1,6 +1,7 @@
 # Agent Smith
 [![Test](https://github.com/RewstApp/agent-smith-go/actions/workflows/test.yml/badge.svg)](https://github.com/RewstApp/agent-smith-go/actions/workflows/test.yml)
 [![Coverage](https://github.com/RewstApp/agent-smith-go/actions/workflows/coverage.yml/badge.svg)](https://github.com/RewstApp/agent-smith-go/actions/workflows/coverage.yml)
+[![Lint](https://github.com/RewstApp/agent-smith-go/actions/workflows/lint.yml/badge.svg)](https://github.com/RewstApp/agent-smith-go/actions/workflows/lint.yml)
 [![CodeQL](https://github.com/RewstApp/agent-smith-go/actions/workflows/github-code-scanning/codeql/badge.svg)](https://github.com/RewstApp/agent-smith-go/actions/workflows/github-code-scanning/codeql)
 [![Release](https://github.com/RewstApp/agent-smith-go/actions/workflows/release.yml/badge.svg)](https://github.com/RewstApp/agent-smith-go/actions/workflows/release.yml)
 
@@ -201,7 +202,34 @@ Tests run automatically on:
 **Pull requests must:**
 - ✅ Pass all tests
 - ✅ Maintain ≥80% coverage
+- ✅ Pass all linters
 - ✅ Pass CodeQL security scanning
+
+## Code Quality and Linting
+
+Agent Smith uses [golangci-lint](https://golangci-lint.run/) for strict security and code formatting enforcement.
+
+### Running Locally
+
+#### **Install golangci-lint:**
+
+See this [guide](https://golangci-lint.run/docs/welcome/install/local/) to learn how to install golangci-lint on your local machine.
+
+#### **Run linter:**
+```bash
+golangci-lint run
+```
+
+#### **Auto-fix formatting:**
+```bash
+golangci-lint run --fix
+```
+
+### CI/CD
+
+Linting runs automatically on:
+- Every pull request
+- Every push to main branch
 
 ## Contributing
 Contributions are always welcome. Please submit a PR!

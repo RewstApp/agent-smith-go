@@ -36,7 +36,6 @@ func TestNewPathsData(t *testing.T) {
 	domain := &mockDomainInfoProvider{}
 
 	result, err := NewPathsData(context.Background(), orgId, logger, sys, domain)
-
 	if err != nil {
 		t.Errorf("expected no error, got %v", err)
 	}

@@ -37,7 +37,14 @@ type defaultExecutor struct {
 	PwshExecutor       Executor
 }
 
-func (e *defaultExecutor) Execute(ctx context.Context, message *Message, device agent.Device, logger hclog.Logger, sys agent.SystemInfoProvider, domain agent.DomainInfoProvider) []byte {
+func (e *defaultExecutor) Execute(
+	ctx context.Context,
+	message *Message,
+	device agent.Device,
+	logger hclog.Logger,
+	sys agent.SystemInfoProvider,
+	domain agent.DomainInfoProvider,
+) []byte {
 	shell := strings.ToLower(message.InterpreterOverride.Value)
 	if shell == "pwsh" {
 		return e.PwshExecutor.Execute(ctx, message, device, logger, sys, domain)

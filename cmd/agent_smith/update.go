@@ -25,7 +25,12 @@ func runUpdate(params *updateContext) {
 		logger.Error("Failed to open service", "name", name, "error", err)
 		return
 	}
-	defer svc.Close()
+	defer func() {
+		err = svc.Close()
+		if err != nil {
+			logger.Error("Failed to close service handle", "error", err)
+		}
+	}()
 
 	// Stop the service if its running
 	if svc.IsActive() {
@@ -42,7 +47,13 @@ func runUpdate(params *updateContext) {
 	}
 
 	// Get installation paths data
-	pathsData, err := agent.NewPathsData(context.Background(), params.OrgId, logger, params.Sys, params.Domain)
+	pathsData, err := agent.NewPathsData(
+		context.Background(),
+		params.OrgId,
+		logger,
+		params.Sys,
+		params.Domain,
+	)
 	if err != nil {
 		logger.Error("Failed to read paths", "error", err)
 		return

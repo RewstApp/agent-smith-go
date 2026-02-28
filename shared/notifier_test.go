@@ -161,15 +161,30 @@ func TestNotifierRPC_Notify_Integration(t *testing.T) {
 
 	// Create a pipe for communication
 	clientConn, serverConn := net.Pipe()
-	defer clientConn.Close()
-	defer serverConn.Close()
+	defer func() {
+		err = clientConn.Close()
+		if err != nil {
+			t.Errorf("expected no error, got %v", err)
+		}
+	}()
+	defer func() {
+		err = serverConn.Close()
+		if err != nil {
+			t.Errorf("expected no error, got %v", err)
+		}
+	}()
 
 	// Start server in goroutine
 	go rpcServer.ServeConn(serverConn)
 
 	// Create RPC client
 	rpcClient := rpc.NewClient(clientConn)
-	defer rpcClient.Close()
+	defer func() {
+		err = rpcClient.Close()
+		if err != nil {
+			t.Errorf("expected no error, got %v", err)
+		}
+	}()
 
 	// Create NotifierRPC with the client
 	notifier := &NotifierRPC{client: rpcClient}
@@ -208,15 +223,30 @@ func TestNotifierRPC_Notify_Integration_Error(t *testing.T) {
 
 	// Create a pipe for communication
 	clientConn, serverConn := net.Pipe()
-	defer clientConn.Close()
-	defer serverConn.Close()
+	defer func() {
+		err = clientConn.Close()
+		if err != nil {
+			t.Errorf("expected no error, got %v", err)
+		}
+	}()
+	defer func() {
+		err = serverConn.Close()
+		if err != nil {
+			t.Errorf("expected no error, got %v", err)
+		}
+	}()
 
 	// Start server in goroutine
 	go rpcServer.ServeConn(serverConn)
 
 	// Create RPC client
 	rpcClient := rpc.NewClient(clientConn)
-	defer rpcClient.Close()
+	defer func() {
+		err := rpcClient.Close()
+		if err != nil {
+			t.Errorf("expected no error, got %v", err)
+		}
+	}()
 
 	// Create NotifierRPC with the client
 	notifier := &NotifierRPC{client: rpcClient}
@@ -235,11 +265,6 @@ func TestNotifierRPC_Notify_Integration_Error(t *testing.T) {
 // TestNotifierRPC_Structure tests NotifierRPC structure
 func TestNotifierRPC_Structure(t *testing.T) {
 	notifier := &NotifierRPC{client: nil}
-
-	// Verify the struct can be created
-	if notifier == nil {
-		t.Error("expected non-nil NotifierRPC")
-	}
 
 	// Verify it implements Notifier interface
 	var _ Notifier = notifier
@@ -283,7 +308,10 @@ func TestNotifierRPCServer_Notify_WithNilImpl(t *testing.T) {
 		}
 	}()
 
-	server.Notify(args, reply)
+	err := server.Notify(args, reply)
+	if err != nil {
+		t.Errorf("expected no error, got %v", err)
+	}
 }
 
 // TestNotifyArgs_MultipleMessages tests creating multiple NotifyArgs
@@ -296,7 +324,10 @@ func TestNotifyArgs_MultipleMessages(t *testing.T) {
 		{"with_spaces", "hello world"},
 		{"with_newlines", "hello\nworld"},
 		{"unicode", "hello 世界"},
-		{"long", "this is a very long message that contains a lot of text to test how the system handles longer messages"},
+		{
+			"long",
+			"this is a very long message that contains a lot of text to test how the system handles longer messages",
+		},
 	}
 
 	for _, tt := range tests {

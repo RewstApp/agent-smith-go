@@ -75,10 +75,16 @@ func main() {
 
 	// Show usage
 	loggingLevelsList := getAllowedConfigLevelsString("|")
-	configFlagsList := fmt.Sprintf("[--logging-level %s] [--syslog] [--disable-agent-postback] [--no-auto-updates]", loggingLevelsList)
+	configFlagsList := fmt.Sprintf(
+		"[--logging-level %s] [--syslog] [--disable-agent-postback] [--no-auto-updates]",
+		loggingLevelsList,
+	)
 	usages := []string{
 		"--uninstall",
-		fmt.Sprintf("--config-url <CONFIG URL> --config-secret <CONFIG SECRET> %s", configFlagsList),
+		fmt.Sprintf(
+			"--config-url <CONFIG URL> --config-secret <CONFIG SECRET> %s",
+			configFlagsList,
+		),
 		"--config-file <CONFIG FILE> --log-file <LOG FILE>",
 		fmt.Sprintf("--update %s", configFlagsList),
 	}

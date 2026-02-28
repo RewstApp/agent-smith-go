@@ -14,7 +14,13 @@ type PathsData struct {
 	Tags                  *HostInfo `json:"tags"`
 }
 
-func NewPathsData(ctx context.Context, orgId string, logger hclog.Logger, sys SystemInfoProvider, domain DomainInfoProvider) (*PathsData, error) {
+func NewPathsData(
+	ctx context.Context,
+	orgId string,
+	logger hclog.Logger,
+	sys SystemInfoProvider,
+	domain DomainInfoProvider,
+) (*PathsData, error) {
 	var paths PathsData
 
 	paths.ServiceExecutablePath = GetServiceExecutablePath(orgId)

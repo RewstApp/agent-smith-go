@@ -38,7 +38,7 @@ func TestMessage_Execute_Commands(t *testing.T) {
 func TestMessage_Execute_CommandError(t *testing.T) {
 	logger := hclog.NewNullLogger()
 	executor := NewExecutor()
-	//command = "echo 'fail' >&2; exit 1"
+	// command = "echo 'fail' >&2; exit 1"
 	command := "[Console]::Error.WriteLine('fail'); exit 1"
 
 	msg := Message{

@@ -10,7 +10,12 @@ func TestNewServiceContext(t *testing.T) {
 	configFile := "/file/config"
 	logFile := "/file/log"
 
-	result, _ := newServiceContext([]string{"--org-id", orgId, "--config-file", configFile, "--log-file", logFile}, nil, nil, nil)
+	result, _ := newServiceContext(
+		[]string{"--org-id", orgId, "--config-file", configFile, "--log-file", logFile},
+		nil,
+		nil,
+		nil,
+	)
 
 	if result.OrgId != orgId {
 		t.Errorf("expected %v, got %v", orgId, result.OrgId)

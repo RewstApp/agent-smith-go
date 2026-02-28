@@ -95,7 +95,6 @@ func TestMessage_Parse(t *testing.T) {
 	data := []byte(`{"post_id":"abc:123","commands":"dGVzdA==","get_installation":false}`)
 	var msg Message
 	err := msg.Parse(data)
-
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
@@ -126,7 +125,6 @@ func TestMessage_Parse_GetInstallation(t *testing.T) {
 	data := []byte(`{"post_id":"abc:123","get_installation":true}`)
 	var msg Message
 	err := msg.Parse(data)
-
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
@@ -144,7 +142,12 @@ func TestMessage_Execute_Noop(t *testing.T) {
 	result := msg.Execute(nil, context.Background(), device, logger, nil, nil)
 
 	var out errorResult
-	json.Unmarshal(result, &out)
+
+	err := json.Unmarshal(result, &out)
+	if err != nil {
+		t.Errorf("expected no error, got %v", err)
+	}
+
 	if out.Error != "noop" {
 		t.Errorf("expected 'noop', got %s", out.Error)
 	}
@@ -161,7 +164,12 @@ func TestMessage_Execute_InvalidBase64(t *testing.T) {
 	resultBytes := msg.Execute(executor, context.Background(), device, logger, nil, nil)
 
 	var out errorResult
-	json.Unmarshal(resultBytes, &out)
+
+	err := json.Unmarshal(resultBytes, &out)
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+
 	if out.Error == "" {
 		t.Error("expected error for invalid base64")
 	}
@@ -169,9 +177,10 @@ func TestMessage_Execute_InvalidBase64(t *testing.T) {
 
 type mockSystemInfoProvider struct{}
 
-func (m *mockSystemInfoProvider) Hostname() (string, error)         { return "test-host", nil }
-func (m *mockSystemInfoProvider) HostPlatform() (string, error)     { return "test-os", nil }
-func (m *mockSystemInfoProvider) CPUModelName() (string, error)     { return "test-cpu", nil }
+func (m *mockSystemInfoProvider) Hostname() (string, error)     { return "test-host", nil }
+func (m *mockSystemInfoProvider) HostPlatform() (string, error) { return "test-os", nil }
+func (m *mockSystemInfoProvider) CPUModelName() (string, error) { return "test-cpu", nil }
+
 func (m *mockSystemInfoProvider) TotalMemoryBytes() (uint64, error) { return 1024 * 1024 * 1024, nil }
 func (m *mockSystemInfoProvider) MACAddress() (*string, error)      { return nil, nil }
 

@@ -25,15 +25,31 @@ type updateContext struct {
 	FS             utils.FileSystem
 }
 
-func newUpdateContext(args []string, sys agent.SystemInfoProvider, domain agent.DomainInfoProvider, svcMgr service.ServiceManager, fsys utils.FileSystem) (*updateContext, error) {
+func newUpdateContext(
+	args []string,
+	sys agent.SystemInfoProvider,
+	domain agent.DomainInfoProvider,
+	svcMgr service.ServiceManager,
+	fsys utils.FileSystem,
+) (*updateContext, error) {
 	var params updateContext
 
 	fs := flag.NewFlagSet("config", flag.ContinueOnError)
 	fs.StringVar(&params.OrgId, "org-id", "", "Organization ID")
 	fs.BoolVar(&params.Update, "update", false, "Update the agent")
-	fs.StringVar(&params.LoggingLevel, "logging-level", string(utils.Default), fmt.Sprintf("Logging level: %s", getAllowedConfigLevelsString(", ")))
+	fs.StringVar(
+		&params.LoggingLevel,
+		"logging-level",
+		string(utils.Default),
+		fmt.Sprintf("Logging level: %s", getAllowedConfigLevelsString(", ")),
+	)
 	fs.BoolVar(&params.UseSyslog, "syslog", false, "Write log messages to system log")
-	fs.BoolVar(&params.DisableAgentPostback, "disable-agent-postback", false, "Disable agent postback")
+	fs.BoolVar(
+		&params.DisableAgentPostback,
+		"disable-agent-postback",
+		false,
+		"Disable agent postback",
+	)
 	fs.BoolVar(&params.NoAutoUpdates, "no-auto-updates", false, "No auto updates")
 	fs.SetOutput(bytes.NewBuffer([]byte{}))
 

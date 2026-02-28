@@ -28,7 +28,13 @@ func runConfig(params *configContext) error {
 	logger.Info("Agent Smith started", "version", version.Version, "os", runtime.GOOS)
 
 	// Get installation paths data
-	pathsData, err := agent.NewPathsData(context.Background(), params.OrgId, logger, params.Sys, params.Domain)
+	pathsData, err := agent.NewPathsData(
+		context.Background(),
+		params.OrgId,
+		logger,
+		params.Sys,
+		params.Domain,
+	)
 	if err != nil {
 		return fmt.Errorf("failed to read paths: %w", err)
 	}
@@ -52,7 +58,12 @@ func runConfig(params *configContext) error {
 	if err != nil {
 		return fmt.Errorf("failed to execute http request: %w", err)
 	}
-	defer res.Body.Close()
+	defer func() {
+		err := res.Body.Close()
+		if err != nil {
+			logger.Error("Failed to close response body", "error", err)
+		}
+	}()
 
 	if res.StatusCode != http.StatusOK {
 		return fmt.Errorf("failed to fetch configuration: status %d", res.StatusCode)
@@ -106,7 +117,10 @@ func runConfig(params *configContext) error {
 			logger.Info("Stopping service", "service", name)
 			err = existingService.Stop()
 			if err != nil {
-				existingService.Close()
+				err = existingService.Close()
+				if err != nil {
+					return fmt.Errorf("failed to close service %s: %w", name, err)
+				}
 				return fmt.Errorf("failed to stop service %s: %w", name, err)
 			}
 		}
@@ -119,7 +133,10 @@ func runConfig(params *configContext) error {
 		logger.Info("Service deleted", "service", name)
 
 		// Wait for some time for the service executable to clean up
-		existingService.Close()
+		err = existingService.Close()
+		if err != nil {
+			return fmt.Errorf("failed to close service %s: %w", name, err)
+		}
 		logger.Info("Waiting for service executable to stop")
 		time.Sleep(serviceExecutableTimeout)
 	}
@@ -152,7 +169,11 @@ func runConfig(params *configContext) error {
 	}
 
 	logger.Info("Agent installed to", "path", agentExecutablePath)
-	logger.Info("Commands will be temporarily saved to", "path", agent.GetScriptsDirectory(params.OrgId))
+	logger.Info(
+		"Commands will be temporarily saved to",
+		"path",
+		agent.GetScriptsDirectory(params.OrgId),
+	)
 
 	// Create the service
 	logger.Info("Creating service", "service", name)
@@ -167,7 +188,12 @@ func runConfig(params *configContext) error {
 	if err != nil {
 		return fmt.Errorf("failed to create service: %w", err)
 	}
-	defer svc.Close()
+	defer func() {
+		err := svc.Close()
+		if err != nil {
+			logger.Error("Failed to close service handle", "error", err)
+		}
+	}()
 	logger.Info("Service created")
 
 	// Start the service

@@ -11,7 +11,12 @@ func TestErrorResultBytes(t *testing.T) {
 	result := errorResultBytes(err)
 
 	var out errorResult
-	json.Unmarshal(result, &out)
+
+	err = json.Unmarshal(result, &out)
+	if err != nil {
+		t.Errorf("expected no error, got %v", err)
+	}
+
 	if out.Error != "test error" {
 		t.Errorf("expected 'test error', got %s", out.Error)
 	}

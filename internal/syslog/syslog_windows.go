@@ -48,9 +48,11 @@ type windowsSyslog struct {
 	log eventLogger
 }
 
-const infoEventId = 100
-const warningEventId = 200
-const errorEventId = 300
+const (
+	infoEventId    = 100
+	warningEventId = 200
+	errorEventId   = 300
+)
 
 func (s *windowsSyslog) Write(data []byte) (int, error) {
 	// Write to event log
@@ -61,11 +63,11 @@ func (s *windowsSyslog) Write(data []byte) (int, error) {
 
 	// Use different levels
 	if strings.Contains(line, "[ERROR]") {
-		s.log.Error(errorEventId, message)
+		_ = s.log.Error(errorEventId, message) // Best effort logging
 	} else if strings.Contains(line, "[WARNING]") {
-		s.log.Warning(warningEventId, message)
+		_ = s.log.Warning(warningEventId, message) // Best effort logging
 	} else {
-		s.log.Info(infoEventId, message)
+		_ = s.log.Info(infoEventId, message) // Best effort logging
 	}
 
 	// Write to original output
@@ -83,7 +85,10 @@ func New(name string, out io.Writer) (Syslog, error) {
 func newWithFactory(name string, out io.Writer, factory eventLogFactory) (Syslog, error) {
 	k, err := factory.OpenKey(name)
 	if err == nil {
-		k.Close()
+		err = k.Close()
+		if err != nil {
+			return nil, err
+		}
 	} else if errors.Is(err, registry.ErrNotExist) ||
 		errors.Is(err, syscall.ERROR_PATH_NOT_FOUND) {
 		if err = factory.Install(name); err != nil {

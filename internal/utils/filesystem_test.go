@@ -13,7 +13,6 @@ func TestDefaultFileSystem_MkdirAll(t *testing.T) {
 	newDir := filepath.Join(t.TempDir(), "sub", "dir")
 
 	err := fs.MkdirAll(newDir)
-
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
@@ -23,7 +22,6 @@ func TestDefaultFileSystem_MkdirAll(t *testing.T) {
 	}
 
 	err = fs.MkdirAll(newDir)
-
 	if err != nil {
 		t.Fatalf("expected no error on second call, got %v", err)
 	}
@@ -40,7 +38,6 @@ func TestDefaultFileSystem_Executable(t *testing.T) {
 	fs := NewFileSystem()
 
 	path, err := fs.Executable()
-
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
@@ -55,7 +52,6 @@ func TestDefaultFileSystem_WriteFile(t *testing.T) {
 	data := []byte("hello")
 
 	err := fs.WriteFile(filePath, data, DefaultFileMod)
-
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
@@ -79,7 +75,6 @@ func TestDefaultFileSystem_ReadFile(t *testing.T) {
 	}
 
 	got, err := fs.ReadFile(filePath)
-
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
@@ -92,12 +87,11 @@ func TestDefaultFileSystem_RemoveAll(t *testing.T) {
 	fs := NewFileSystem()
 	dir := filepath.Join(t.TempDir(), "to_remove")
 
-	if err := os.MkdirAll(dir, 0755); err != nil {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
 
 	err := fs.RemoveAll(dir)
-
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
@@ -107,7 +101,6 @@ func TestDefaultFileSystem_RemoveAll(t *testing.T) {
 
 	// Calling RemoveAll on a non-existent path must also succeed.
 	err = fs.RemoveAll(dir)
-
 	if err != nil {
 		t.Fatalf("expected no error on non-existent path, got %v", err)
 	}

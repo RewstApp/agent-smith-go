@@ -74,10 +74,18 @@ func TestLoadConfig(t *testing.T) {
 
 			if !tt.expectError {
 				if device.DeviceId != tt.configData.DeviceId {
-					t.Errorf("expected DeviceId %q, got %q", tt.configData.DeviceId, device.DeviceId)
+					t.Errorf(
+						"expected DeviceId %q, got %q",
+						tt.configData.DeviceId,
+						device.DeviceId,
+					)
 				}
 				if device.SharedAccessKey != tt.configData.SharedAccessKey {
-					t.Errorf("expected SharedAccessKey %q, got %q", tt.configData.SharedAccessKey, device.SharedAccessKey)
+					t.Errorf(
+						"expected SharedAccessKey %q, got %q",
+						tt.configData.SharedAccessKey,
+						device.SharedAccessKey,
+					)
 				}
 			}
 		})
@@ -129,7 +137,12 @@ func TestLoadLog(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
-	defer logFile.Close()
+	defer func() {
+		err = logFile.Close()
+		if err != nil {
+			t.Errorf("expected no error, got %v", err)
+		}
+	}()
 
 	// Verify file was created
 	if _, err := os.Stat(logPath); os.IsNotExist(err) {
@@ -172,9 +185,13 @@ func TestLoadLog_AppendMode(t *testing.T) {
 	// Write additional content
 	additionalContent := "appended content\n"
 	_, err = logFile.Write([]byte(additionalContent))
-	logFile.Close()
 	if err != nil {
 		t.Fatalf("failed to write additional content: %v", err)
+	}
+
+	err = logFile.Close()
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
 	}
 
 	// Verify content was appended
@@ -240,7 +257,14 @@ type mockExecutor struct {
 	result        []byte
 }
 
-func (m *mockExecutor) Execute(ctx context.Context, message *interpreter.Message, device agent.Device, logger hclog.Logger, sys agent.SystemInfoProvider, domain agent.DomainInfoProvider) []byte {
+func (m *mockExecutor) Execute(
+	ctx context.Context,
+	message *interpreter.Message,
+	device agent.Device,
+	logger hclog.Logger,
+	sys agent.SystemInfoProvider,
+	domain agent.DomainInfoProvider,
+) []byte {
 	m.executeCalled = true
 	return m.result
 }
@@ -285,7 +309,11 @@ func TestExecute_LogFileError(t *testing.T) {
 		AzureIotHubHost: "test.azure-devices.net",
 	}
 	configBytes, _ := json.Marshal(device)
-	os.WriteFile(configPath, configBytes, utils.DefaultFileMod)
+
+	err := os.WriteFile(configPath, configBytes, utils.DefaultFileMod)
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
 
 	svc := &serviceContext{
 		ConfigFile: configPath,
@@ -343,7 +371,11 @@ func TestExecute_WithSyslog(t *testing.T) {
 		DisableAgentPostback: true,
 	}
 	configBytes, _ := json.Marshal(device)
-	os.WriteFile(configPath, configBytes, utils.DefaultFileMod)
+
+	err := os.WriteFile(configPath, configBytes, utils.DefaultFileMod)
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
 
 	svc := &serviceContext{
 		ConfigFile: configPath,
@@ -412,7 +444,11 @@ func TestRunService_ExitCode(t *testing.T) {
 		DeviceId: "test",
 	}
 	configBytes, _ := json.Marshal(device)
-	os.WriteFile(configPath, configBytes, utils.DefaultFileMod)
+
+	err := os.WriteFile(configPath, configBytes, utils.DefaultFileMod)
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
 
 	svc := &serviceContext{
 		ConfigFile: configPath,

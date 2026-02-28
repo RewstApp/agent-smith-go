@@ -41,7 +41,12 @@ type defaultUpdater struct {
 	runCommand       RunCommandFunc
 }
 
-func NewUpdater(logger hclog.Logger, device *Device, latestReleaseUrl string, runCommand RunCommandFunc) Updater {
+func NewUpdater(
+	logger hclog.Logger,
+	device *Device,
+	latestReleaseUrl string,
+	runCommand RunCommandFunc,
+) Updater {
 	return &defaultUpdater{
 		logger:           logger,
 		device:           device,
@@ -59,10 +64,21 @@ func (u *defaultUpdater) Check() (Release, error) {
 		u.logger.Error("Failed to fetch latest release", "url", u.latestReleaseUrl, "error", err)
 		return release, err
 	}
-	defer resp.Body.Close()
+	defer func() {
+		err = resp.Body.Close()
+		if err != nil {
+			u.logger.Error("Failed to close response", "error", err)
+		}
+	}()
 
 	if resp.StatusCode != http.StatusOK {
-		u.logger.Error("Failed to fetch latest release", "url", u.latestReleaseUrl, "status", resp.StatusCode)
+		u.logger.Error(
+			"Failed to fetch latest release",
+			"url",
+			u.latestReleaseUrl,
+			"status",
+			resp.StatusCode,
+		)
 		return release, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
 	}
 
@@ -75,7 +91,13 @@ func (u *defaultUpdater) Check() (Release, error) {
 }
 
 func (u *defaultUpdater) Update(updaterExecutablePath string) error {
-	args := []string{"--org-id", u.device.RewstOrgId, "--update", "--logging-level", string(u.device.LoggingLevel)}
+	args := []string{
+		"--org-id",
+		u.device.RewstOrgId,
+		"--update",
+		"--logging-level",
+		string(u.device.LoggingLevel),
+	}
 
 	if u.device.UseSyslog {
 		args = append(args, "--syslog")
@@ -89,7 +111,7 @@ func (u *defaultUpdater) Update(updaterExecutablePath string) error {
 		args = append(args, "--no-auto-updates")
 	}
 
-	u.logger.Debug("Running update commmand", "path", updaterExecutablePath, "args", args)
+	u.logger.Debug("Running update command", "path", updaterExecutablePath, "args", args)
 
 	return u.runCommand(updaterExecutablePath, args)
 }
@@ -106,7 +128,9 @@ func (u *defaultUpdater) Download(asset Asset) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	defer resp.Body.Close()
+	defer func() {
+		_ = resp.Body.Close()
+	}()
 
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("download failed with status code: %d", resp.StatusCode)
@@ -116,7 +140,9 @@ func (u *defaultUpdater) Download(asset Asset) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	defer file.Close()
+	defer func() {
+		_ = file.Close()
+	}()
 
 	_, err = io.Copy(file, resp.Body)
 	if err != nil {
@@ -164,7 +190,13 @@ type AutoUpdateRunner struct {
 	done        chan struct{}
 }
 
-func NewAutoUpdateRunner(logger hclog.Logger, updater Updater, interval time.Duration, maxRetries int, baseBackoff time.Duration) *AutoUpdateRunner {
+func NewAutoUpdateRunner(
+	logger hclog.Logger,
+	updater Updater,
+	interval time.Duration,
+	maxRetries int,
+	baseBackoff time.Duration,
+) *AutoUpdateRunner {
 	return &AutoUpdateRunner{
 		logger:      logger,
 		updater:     updater,

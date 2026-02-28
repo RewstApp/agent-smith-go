@@ -28,7 +28,17 @@ type baseExecutor struct {
 	FS                       utils.FileSystem
 }
 
-func (e *baseExecutor) Execute(ctx context.Context, message *Message, device agent.Device, logger hclog.Logger, sys agent.SystemInfoProvider, domain agent.DomainInfoProvider) []byte {
+// SECURITY: Agent Smith is a command execution agent. The shell executable is configured
+// via device settings (not arbitrary user input) and command arguments are constructed
+// by trusted internal methods. This is the intended and documented behavior.
+func (e *baseExecutor) Execute(
+	ctx context.Context,
+	message *Message,
+	device agent.Device,
+	logger hclog.Logger,
+	sys agent.SystemInfoProvider,
+	domain agent.DomainInfoProvider,
+) []byte {
 	// Parse the commands
 	commandBytes, err := base64.StdEncoding.DecodeString(message.Commands)
 	if err != nil {
@@ -44,11 +54,21 @@ func (e *baseExecutor) Execute(ctx context.Context, message *Message, device age
 
 	// Run the command in the system using powershell
 	if logger.IsDebug() {
-		cmd := exec.CommandContext(ctx, e.Shell, e.BuildExecuteCommandArgs(e.ShellVersionCheckCommand)...)
+		// #nosec G204
+		cmd := exec.CommandContext(
+			ctx,
+			e.Shell,
+			e.BuildExecuteCommandArgs(e.ShellVersionCheckCommand)...)
 		combinedOutputBytes, err := cmd.CombinedOutput()
 		combinedOutput := string(combinedOutputBytes)
 		if err != nil {
-			logger.Error("Shell version check failed", "error", err, "combined_output", combinedOutput)
+			logger.Error(
+				"Shell version check failed",
+				"error",
+				err,
+				"combined_output",
+				combinedOutput,
+			)
 		}
 
 		version := strings.TrimSpace(combinedOutput)
@@ -58,6 +78,7 @@ func (e *baseExecutor) Execute(ctx context.Context, message *Message, device age
 	}
 
 	if logger.IsDebug() {
+		// #nosec G204
 		cmd := exec.CommandContext(ctx, e.Shell, e.BuildExecuteCommandArgs("whoami")...)
 		combinedOutputBytes, err := cmd.CombinedOutput()
 		combinedOutput := string(combinedOutputBytes)
@@ -97,9 +118,15 @@ func (e *baseExecutor) Execute(ctx context.Context, message *Message, device age
 	logger.Info("Command saved to", "message_id", message.PostId, "path", tempfile.Name())
 
 	// Close the temporary file
-	tempfile.Close()
+	err = tempfile.Close()
+	if err != nil {
+		logger.Error("Failed to close temp file handle", "error", err)
+		return errorResultBytes(err)
+	}
 
 	var stdoutBuf, stderrBuf bytes.Buffer
+
+	// #nosec G204
 	cmd := exec.CommandContext(ctx, e.Shell, e.BuildExecuteFileArgs(tempfile.Name())...)
 	cmd.Stdout = &stdoutBuf
 	cmd.Stderr = &stderrBuf
@@ -109,20 +136,50 @@ func (e *baseExecutor) Execute(ctx context.Context, message *Message, device age
 	err = cmd.Run()
 	if err != nil {
 		logger.Error("Command failed", "error", err)
-		logger.Debug("Command completed with outputs", "error", stderrBuf.String(), "info", stdoutBuf.String())
+		logger.Debug(
+			"Command completed with outputs",
+			"error",
+			stderrBuf.String(),
+			"info",
+			stdoutBuf.String(),
+		)
 		return resultBytes(stderrBuf.String(), stdoutBuf.String())
 	}
 
 	// Remove successfully executed temporary filename
-	defer os.Remove(tempfile.Name())
+	defer func() {
+		err = os.Remove(tempfile.Name())
+		if err != nil {
+			logger.Error("Failed to remove temp file", "file", tempfile.Name(), "error", err)
+		}
+	}()
 
-	logger.Info("Command completed", "message_id", message.PostId, "exit_code", cmd.ProcessState.ExitCode())
-	logger.Debug("Command completed with outputs", "error", stderrBuf.String(), "info", stdoutBuf.String())
+	logger.Info(
+		"Command completed",
+		"message_id",
+		message.PostId,
+		"exit_code",
+		cmd.ProcessState.ExitCode(),
+	)
+	logger.Debug(
+		"Command completed with outputs",
+		"error",
+		stderrBuf.String(),
+		"info",
+		stdoutBuf.String(),
+	)
 
 	return resultBytes(stderrBuf.String(), stdoutBuf.String())
 }
 
-func NewBaseExecutor(shell string, shellVersionCheckCommand string, writeUtf8BOM bool, buildExecuteCommandArgs BuildExecuteCommandArgsFunc, buildExecuteFileArgs BuildExecuteFileArgsFunc, fs utils.FileSystem) Executor {
+func NewBaseExecutor(
+	shell string,
+	shellVersionCheckCommand string,
+	writeUtf8BOM bool,
+	buildExecuteCommandArgs BuildExecuteCommandArgsFunc,
+	buildExecuteFileArgs BuildExecuteFileArgsFunc,
+	fs utils.FileSystem,
+) Executor {
 	return &baseExecutor{
 		Shell:                    shell,
 		ShellVersionCheckCommand: shellVersionCheckCommand,

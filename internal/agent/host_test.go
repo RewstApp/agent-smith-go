@@ -71,7 +71,6 @@ func (mock *mockDomainInfoProvider) EntraDomain(context.Context) (*string, error
 }
 
 func TestNewHostInfo(t *testing.T) {
-	hostInfo := &HostInfo{}
 	orgId := "test123"
 	logger := hclog.NewNullLogger()
 	const ramGb uint64 = 3
@@ -97,7 +96,6 @@ func TestNewHostInfo(t *testing.T) {
 	}
 
 	hostInfo, err := NewHostInfo(context.Background(), orgId, logger, sys, domain)
-
 	if err != nil {
 		t.Errorf("expected no error, got %v", err)
 	}
@@ -217,7 +215,6 @@ func TestNewHostInfo(t *testing.T) {
 	domain.adDomainErr = fmt.Errorf("ad domain error")
 
 	_, err = NewHostInfo(context.Background(), orgId, warningLogger, sys, domain)
-
 	if err != nil {
 		t.Errorf("expected no error, got %v", err)
 	}
@@ -232,7 +229,6 @@ func TestNewHostInfo(t *testing.T) {
 	domain.isAdDomainControllerErr = fmt.Errorf("is ad domain controller error")
 
 	_, err = NewHostInfo(context.Background(), orgId, warningLogger, sys, domain)
-
 	if err != nil {
 		t.Errorf("expected no error, got %v", err)
 	}
@@ -247,7 +243,6 @@ func TestNewHostInfo(t *testing.T) {
 	domain.isEntraConnectServerErr = fmt.Errorf("is entra connect server error")
 
 	_, err = NewHostInfo(context.Background(), orgId, warningLogger, sys, domain)
-
 	if err != nil {
 		t.Errorf("expected no error, got %v", err)
 	}
@@ -262,13 +257,12 @@ func TestNewHostInfo(t *testing.T) {
 	domain.entraDomainErr = fmt.Errorf("entra domain error")
 
 	_, err = NewHostInfo(context.Background(), orgId, warningLogger, sys, domain)
-
 	if err != nil {
 		t.Errorf("expected no error, got %v", err)
 	}
 
 	output = buf.String()
 	if !strings.Contains(output, "Entra Domain") {
-		t.Errorf("expected Entra Domain warnsing, got %v", output)
+		t.Errorf("expected Entra Domain warning, got %v", output)
 	}
 }

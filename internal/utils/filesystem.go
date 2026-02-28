@@ -4,9 +4,11 @@ import (
 	"os"
 )
 
-const DefaultFileMod os.FileMode = 0644
-const DefaultExecutableFileMod os.FileMode = 0755
-const DefaultDirMod os.FileMode = 0755
+const (
+	DefaultFileMod           os.FileMode = 0o644
+	DefaultExecutableFileMod os.FileMode = 0o755
+	DefaultDirMod            os.FileMode = 0o755
+)
 
 type FileSystem interface {
 	Executable() (string, error)

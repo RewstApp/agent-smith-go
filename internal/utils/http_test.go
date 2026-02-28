@@ -10,7 +10,12 @@ import (
 )
 
 func TestNewRequestWithContext_SetsVersionHeader(t *testing.T) {
-	req, err := NewRequestWithContext(context.Background(), http.MethodGet, "https://example.com", nil)
+	req, err := NewRequestWithContext(
+		context.Background(),
+		http.MethodGet,
+		"https://example.com",
+		nil,
+	)
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
@@ -23,7 +28,12 @@ func TestNewRequestWithContext_SetsVersionHeader(t *testing.T) {
 }
 
 func TestNewRequestWithContext_SetsMethodAndURL(t *testing.T) {
-	req, err := NewRequestWithContext(context.Background(), http.MethodPost, "https://example.com/path", nil)
+	req, err := NewRequestWithContext(
+		context.Background(),
+		http.MethodPost,
+		"https://example.com/path",
+		nil,
+	)
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
@@ -39,7 +49,12 @@ func TestNewRequestWithContext_SetsMethodAndURL(t *testing.T) {
 
 func TestNewRequestWithContext_WithBody(t *testing.T) {
 	body := bytes.NewBufferString(`{"key":"value"}`)
-	req, err := NewRequestWithContext(context.Background(), http.MethodPost, "https://example.com", body)
+	req, err := NewRequestWithContext(
+		context.Background(),
+		http.MethodPost,
+		"https://example.com",
+		body,
+	)
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}

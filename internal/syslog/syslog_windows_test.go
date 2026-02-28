@@ -76,7 +76,6 @@ func TestWindowsSyslog_Write_Info(t *testing.T) {
 
 	data := []byte("[INFO] hello world")
 	n, err := s.Write(data)
-
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
@@ -101,7 +100,6 @@ func TestWindowsSyslog_Write_Warning(t *testing.T) {
 
 	data := []byte("[WARNING] disk space low")
 	_, err := s.Write(data)
-
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
@@ -123,7 +121,6 @@ func TestWindowsSyslog_Write_Error(t *testing.T) {
 
 	data := []byte("[ERROR] something failed")
 	_, err := s.Write(data)
-
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
@@ -144,7 +141,11 @@ func TestWindowsSyslog_Write_ForwardsToOut(t *testing.T) {
 	s := &windowsSyslog{out: &out, log: mock}
 
 	data := []byte("[INFO] forwarded message")
-	s.Write(data)
+
+	_, err := s.Write(data)
+	if err != nil {
+		t.Errorf("expected no error, got %v", err)
+	}
 
 	if out.String() != string(data) {
 		t.Errorf("expected out to contain %q, got %q", string(data), out.String())
@@ -156,7 +157,6 @@ func TestWindowsSyslog_Close(t *testing.T) {
 	s := &windowsSyslog{out: &bytes.Buffer{}, log: mock}
 
 	err := s.Close()
-
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
@@ -174,7 +174,6 @@ func TestNewWithFactory_OpenKeySuccess_SkipsInstall(t *testing.T) {
 	}
 
 	syslogger, err := newWithFactory("test", &bytes.Buffer{}, factory)
-
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
@@ -194,7 +193,6 @@ func TestNewWithFactory_OpenKeyErrNotExist_CallsInstall(t *testing.T) {
 	}
 
 	syslogger, err := newWithFactory("test", &bytes.Buffer{}, factory)
-
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
@@ -214,7 +212,6 @@ func TestNewWithFactory_OpenKeyErrPathNotFound_CallsInstall(t *testing.T) {
 	}
 
 	syslogger, err := newWithFactory("test", &bytes.Buffer{}, factory)
-
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
@@ -288,11 +285,16 @@ func TestNewWithFactory_ReturnedSyslog_IsUsable(t *testing.T) {
 	}
 
 	data := []byte("[ERROR] test error")
-	syslogger.Write(data)
+
+	_, err = syslogger.Write(data)
+	if err != nil {
+		t.Errorf("expected no error, got %v", err)
+	}
 
 	if len(logger.errorMessages) != 1 {
 		t.Fatalf("expected 1 error message, got %d", len(logger.errorMessages))
 	}
+
 	if out.String() != string(data) {
 		t.Errorf("expected out %q, got %q", string(data), out.String())
 	}

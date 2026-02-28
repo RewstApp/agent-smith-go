@@ -26,16 +26,32 @@ type configContext struct {
 	ServiceManager service.ServiceManager
 }
 
-func newConfigContext(args []string, sys agent.SystemInfoProvider, domain agent.DomainInfoProvider, fsys utils.FileSystem, svcMgr service.ServiceManager) (*configContext, error) {
+func newConfigContext(
+	args []string,
+	sys agent.SystemInfoProvider,
+	domain agent.DomainInfoProvider,
+	fsys utils.FileSystem,
+	svcMgr service.ServiceManager,
+) (*configContext, error) {
 	var params configContext
 
 	fs := flag.NewFlagSet("config", flag.ContinueOnError)
 	fs.StringVar(&params.OrgId, "org-id", "", "Organization ID")
 	fs.StringVar(&params.ConfigUrl, "config-url", "", "Configuration URL")
 	fs.StringVar(&params.ConfigSecret, "config-secret", "", "Configuration Secret")
-	fs.StringVar(&params.LoggingLevel, "logging-level", string(utils.Default), fmt.Sprintf("Logging level: %s", getAllowedConfigLevelsString(", ")))
+	fs.StringVar(
+		&params.LoggingLevel,
+		"logging-level",
+		string(utils.Default),
+		fmt.Sprintf("Logging level: %s", getAllowedConfigLevelsString(", ")),
+	)
 	fs.BoolVar(&params.UseSyslog, "syslog", false, "Write log messages to system log")
-	fs.BoolVar(&params.DisableAgentPostback, "disable-agent-postback", false, "Disable agent postback")
+	fs.BoolVar(
+		&params.DisableAgentPostback,
+		"disable-agent-postback",
+		false,
+		"Disable agent postback",
+	)
 	fs.BoolVar(&params.NoAutoUpdates, "no-auto-updates", false, "No auto updates")
 	fs.SetOutput(bytes.NewBuffer([]byte{}))
 

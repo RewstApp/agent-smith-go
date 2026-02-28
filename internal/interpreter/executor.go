@@ -8,7 +8,14 @@ import (
 )
 
 type Executor interface {
-	Execute(ctx context.Context, message *Message, device agent.Device, logger hclog.Logger, sys agent.SystemInfoProvider, domain agent.DomainInfoProvider) []byte
+	Execute(
+		ctx context.Context,
+		message *Message,
+		device agent.Device,
+		logger hclog.Logger,
+		sys agent.SystemInfoProvider,
+		domain agent.DomainInfoProvider,
+	) []byte
 }
 
 type BuildExecuteCommandArgsFunc = func(command string) []string

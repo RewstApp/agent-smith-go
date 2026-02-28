@@ -432,13 +432,17 @@ func TestDefaultConstants(t *testing.T) {
 	}
 
 	if defaultMagicCookieKey != "AGENT_SMITH" {
-		t.Errorf("expected defaultMagicCookieKey to be 'AGENT_SMITH', got %q", defaultMagicCookieKey)
+		t.Errorf(
+			"expected defaultMagicCookieKey to be 'AGENT_SMITH', got %q",
+			defaultMagicCookieKey,
+		)
 	}
 }
 
 // Helper function
 func contains(s, substr string) bool {
-	return len(s) >= len(substr) && (s == substr || len(s) > len(substr) && containsHelper(s, substr))
+	return len(s) >= len(substr) &&
+		(s == substr || len(s) > len(substr) && containsHelper(s, substr))
 }
 
 func containsHelper(s, substr string) bool {

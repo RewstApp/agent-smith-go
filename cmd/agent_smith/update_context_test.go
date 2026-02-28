@@ -33,7 +33,10 @@ func TestNewUpdateContext(t *testing.T) {
 		{[]string{"--org-id", orgId}, "missing update"},
 		{[]string{"--update"}, "missing org-id"},
 		{[]string{"--=update"}, "bad flag syntax"},
-		{[]string{"--org-id", orgId, "--update", "--logging-level", "invalid"}, "invalid logging-level"},
+		{
+			[]string{"--org-id", orgId, "--update", "--logging-level", "invalid"},
+			"invalid logging-level",
+		},
 	}
 
 	for _, errorTest := range errorTests {

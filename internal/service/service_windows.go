@@ -5,6 +5,7 @@ package service
 import (
 	"context"
 	"fmt"
+	"math"
 	"time"
 
 	"golang.org/x/sys/windows/svc"
@@ -94,7 +95,7 @@ func (s *defaultServiceManager) Create(params AgentParams) (Service, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer svcMgr.Disconnect()
+	defer func() { _ = svcMgr.Disconnect() }() // Cleanup - error can be ignored
 
 	svc, err := svcMgr.CreateService(params.Name, params.AgentExecutablePath, mgr.Config{
 		StartType:        mgr.StartAutomatic,
@@ -115,7 +116,7 @@ func (s *defaultServiceManager) Open(name string) (Service, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer svcMgr.Disconnect()
+	defer func() { _ = svcMgr.Disconnect() }() // Cleanup - error can be ignored
 
 	svc, err := svcMgr.OpenService(name)
 	if err != nil {
@@ -138,7 +139,11 @@ type windowsRunner struct {
 	exitCode int
 }
 
-func (host *windowsRunner) Execute(args []string, request <-chan svc.ChangeRequest, response chan<- svc.Status) (bool, uint32) {
+func (host *windowsRunner) Execute(
+	args []string,
+	request <-chan svc.ChangeRequest,
+	response chan<- svc.Status,
+) (bool, uint32) {
 	response <- svc.Status{State: svc.StartPending}
 
 	// Make the channels
@@ -181,6 +186,9 @@ func (host *windowsRunner) Execute(args []string, request <-chan svc.ChangeReque
 	response <- svc.Status{State: svc.Stopped}
 
 	// Return the proper response
+	if host.exitCode < 0 || host.exitCode > math.MaxUint32 {
+		return false, uint32(GenericError)
+	}
 	return host.exitCode == 0, uint32(host.exitCode)
 }
 

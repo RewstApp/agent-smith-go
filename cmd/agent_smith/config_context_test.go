@@ -10,7 +10,13 @@ func TestNewConfigContext(t *testing.T) {
 	configUrl := "https://config.url/"
 	configSecret := "secret123"
 
-	result, _ := newConfigContext([]string{"--org-id", orgId, "--config-url", configUrl, "--config-secret", configSecret}, nil, nil, nil, nil)
+	result, _ := newConfigContext(
+		[]string{"--org-id", orgId, "--config-url", configUrl, "--config-secret", configSecret},
+		nil,
+		nil,
+		nil,
+		nil,
+	)
 
 	if result.OrgId != orgId {
 		t.Errorf("expected %v, got %v", orgId, result.OrgId)
@@ -40,7 +46,19 @@ func TestNewConfigContext(t *testing.T) {
 		{[]string{"--org-id", orgId, "--config-secret", configSecret}, "missing config-url"},
 		{[]string{"--org-id", orgId, "--config-url", configUrl}, "missing config-secret"},
 		{[]string{"--=uninstall"}, "bad flag syntax"},
-		{[]string{"--org-id", orgId, "--config-url", configUrl, "--config-secret", configSecret, "--logging-level", "invalid"}, "invalid logging-level"},
+		{
+			[]string{
+				"--org-id",
+				orgId,
+				"--config-url",
+				configUrl,
+				"--config-secret",
+				configSecret,
+				"--logging-level",
+				"invalid",
+			},
+			"invalid logging-level",
+		},
 	}
 
 	for _, errorTest := range errorTests {

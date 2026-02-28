@@ -83,7 +83,6 @@ func TestRunConfig_Success(t *testing.T) {
 	defer srv.Close()
 
 	err := runConfig(newBaseConfigParams(srv.URL))
-
 	if err != nil {
 		t.Errorf("expected no error, got %v", err)
 	}

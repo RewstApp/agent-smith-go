@@ -40,7 +40,13 @@ type DomainInfoProvider interface {
 	EntraDomain(ctx context.Context) (*string, error)
 }
 
-func NewHostInfo(ctx context.Context, orgId string, logger hclog.Logger, sys SystemInfoProvider, domain DomainInfoProvider) (*HostInfo, error) {
+func NewHostInfo(
+	ctx context.Context,
+	orgId string,
+	logger hclog.Logger,
+	sys SystemInfoProvider,
+	domain DomainInfoProvider,
+) (*HostInfo, error) {
 	hostPlatform, err := sys.HostPlatform()
 	if err != nil {
 		return nil, err

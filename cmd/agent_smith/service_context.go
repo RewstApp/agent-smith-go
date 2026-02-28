@@ -20,7 +20,12 @@ type serviceContext struct {
 	Executor interpreter.Executor
 }
 
-func newServiceContext(args []string, sys agent.SystemInfoProvider, domain agent.DomainInfoProvider, executor interpreter.Executor) (*serviceContext, error) {
+func newServiceContext(
+	args []string,
+	sys agent.SystemInfoProvider,
+	domain agent.DomainInfoProvider,
+	executor interpreter.Executor,
+) (*serviceContext, error) {
 	var params serviceContext
 
 	fs := flag.NewFlagSet("config", flag.ContinueOnError)

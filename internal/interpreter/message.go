@@ -26,7 +26,14 @@ func (msg *Message) Parse(data []byte) error {
 	return json.Unmarshal(data, msg)
 }
 
-func (msg *Message) Execute(executor Executor, ctx context.Context, device agent.Device, logger hclog.Logger, sys agent.SystemInfoProvider, domain agent.DomainInfoProvider) []byte {
+func (msg *Message) Execute(
+	executor Executor,
+	ctx context.Context,
+	device agent.Device,
+	logger hclog.Logger,
+	sys agent.SystemInfoProvider,
+	domain agent.DomainInfoProvider,
+) []byte {
 	// Execute commands if given
 	if msg.Commands != "" {
 		logger.Info("Executing commands", "interpreter_override", msg.InterpreterOverride.Value)
@@ -56,9 +63,17 @@ func (msg *Message) Execute(executor Executor, ctx context.Context, device agent
 	return errorResultBytes(fmt.Errorf("noop"))
 }
 
-func (msg *Message) CreatePostbackRequest(ctx context.Context, device agent.Device, body io.Reader) (*http.Request, error) {
+func (msg *Message) CreatePostbackRequest(
+	ctx context.Context,
+	device agent.Device,
+	body io.Reader,
+) (*http.Request, error) {
 	// Create a postback url
-	postBackUrl := fmt.Sprintf("https://%s/webhooks/custom/action/%s", device.RewstEngineHost, strings.ReplaceAll(msg.PostId, ":", "/"))
+	postBackUrl := fmt.Sprintf(
+		"https://%s/webhooks/custom/action/%s",
+		device.RewstEngineHost,
+		strings.ReplaceAll(msg.PostId, ":", "/"),
+	)
 
 	// Create an http request
 	req, err := utils.NewRequestWithContext(ctx, "POST", postBackUrl, body)
