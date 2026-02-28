@@ -1,5 +1,6 @@
 # Agent Smith
 [![Test](https://github.com/RewstApp/agent-smith-go/actions/workflows/test.yml/badge.svg)](https://github.com/RewstApp/agent-smith-go/actions/workflows/test.yml)
+[![Coverage](https://github.com/RewstApp/agent-smith-go/actions/workflows/coverage.yml/badge.svg)](https://github.com/RewstApp/agent-smith-go/actions/workflows/coverage.yml)
 [![CodeQL](https://github.com/RewstApp/agent-smith-go/actions/workflows/github-code-scanning/codeql/badge.svg)](https://github.com/RewstApp/agent-smith-go/actions/workflows/github-code-scanning/codeql)
 [![Release](https://github.com/RewstApp/agent-smith-go/actions/workflows/release.yml/badge.svg)](https://github.com/RewstApp/agent-smith-go/actions/workflows/release.yml)
 
@@ -105,6 +106,102 @@ Run the following command using `powershell` or `pwsh` to build the binary:
 ```
 ./scripts/build.ps1
 ```
+
+## Testing and Coverage
+
+Agent Smith maintains high code quality through comprehensive testing with an **80% coverage threshold**.
+
+### Running Tests
+
+**Run all tests:**
+```bash
+go test ./...
+```
+
+**Run tests with verbose output:**
+```bash
+go test ./... -v
+```
+
+**Run tests for a specific package:**
+```bash
+go test ./cmd/agent_smith -v
+go test ./internal/service -v
+go test ./plugins -v
+```
+
+**Run a specific test:**
+```bash
+go test ./cmd/agent_smith -v -run TestLoadConfig
+```
+
+### Coverage Reports
+
+**Generate coverage report:**
+```bash
+./scripts/coverage.ps1
+```
+
+This script:
+- Runs tests across all packages
+- Generates coverage profiles
+- **Enforces 80% minimum coverage threshold**
+
+### Test Categories
+
+**Unit Tests**: Test individual functions and components in isolation
+- Message parsing and validation
+- Configuration loading
+- SAS token generation
+- Path resolution
+
+**Integration Tests**: Test component interactions
+- MQTT message flow (with test broker)
+- Service lifecycle (start/stop/restart)
+- Plugin loading and notifications
+- Command execution and postback
+
+**Platform-Specific Tests**: Test OS-specific functionality
+- Windows service management
+- Linux systemd integration
+- macOS launchd integration
+- System information collection
+
+### Writing Tests
+
+When contributing new code, ensure:
+
+1. **Test coverage**: Aim for >80% coverage for new code
+2. **Table-driven tests**: Use for multiple test cases
+   ```go
+   tests := []struct {
+       name     string
+       input    string
+       expected string
+   }{
+       {"case1", "input1", "expected1"},
+       {"case2", "input2", "expected2"},
+   }
+   ```
+3. **Clean up resources**: Use `t.TempDir()` and `defer` statements
+4. **Avoid flaky tests**: Use proper synchronization and timeouts
+5. **Mock external dependencies**: Don't rely on network or filesystem in unit tests
+
+### CI/CD
+
+Tests run automatically on:
+- Every pull request
+- Every push to main branch
+- Pre-release validation
+
+**GitHub Actions Workflows:**
+- `.github/workflows/test.yml` - Runs test suite
+- `.github/workflows/coverage.yml` - Validates coverage threshold
+
+**Pull requests must:**
+- ✅ Pass all tests
+- ✅ Maintain ≥80% coverage
+- ✅ Pass CodeQL security scanning
 
 ## Contributing
 Contributions are always welcome. Please submit a PR!
