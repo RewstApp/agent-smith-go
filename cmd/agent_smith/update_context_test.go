@@ -8,7 +8,7 @@ import (
 func TestNewUpdateContext(t *testing.T) {
 	orgId := "test123"
 
-	result, _ := newUpdateContext([]string{"--org-id", orgId, "--update"}, nil, nil, nil)
+	result, _ := newUpdateContext([]string{"--org-id", orgId, "--update"}, nil, nil, nil, nil)
 
 	if result.OrgId != orgId {
 		t.Errorf("expected %v, got %v", orgId, result.OrgId)
@@ -37,7 +37,7 @@ func TestNewUpdateContext(t *testing.T) {
 	}
 
 	for _, errorTest := range errorTests {
-		_, err := newUpdateContext(errorTest.args, nil, nil, nil)
+		_, err := newUpdateContext(errorTest.args, nil, nil, nil, nil)
 
 		if err == nil || !strings.Contains(err.Error(), errorTest.message) {
 			t.Errorf("expected error %s, got %v", errorTest.message, err.Error())

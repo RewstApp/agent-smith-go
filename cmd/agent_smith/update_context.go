@@ -22,9 +22,10 @@ type updateContext struct {
 	Domain agent.DomainInfoProvider
 
 	ServiceManager service.ServiceManager
+	FS             utils.FileSystem
 }
 
-func newUpdateContext(args []string, sys agent.SystemInfoProvider, domain agent.DomainInfoProvider, svcMgr service.ServiceManager) (*updateContext, error) {
+func newUpdateContext(args []string, sys agent.SystemInfoProvider, domain agent.DomainInfoProvider, svcMgr service.ServiceManager, fsys utils.FileSystem) (*updateContext, error) {
 	var params updateContext
 
 	fs := flag.NewFlagSet("config", flag.ContinueOnError)
@@ -56,6 +57,7 @@ func newUpdateContext(args []string, sys agent.SystemInfoProvider, domain agent.
 	params.Sys = sys
 	params.Domain = domain
 	params.ServiceManager = svcMgr
+	params.FS = fsys
 
 	return &params, nil
 }

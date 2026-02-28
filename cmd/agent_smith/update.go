@@ -50,7 +50,7 @@ func runUpdate(params *updateContext) {
 
 	// Read and parse the config file
 	configFilePath := pathsData.ConfigFilePath
-	configFileBytes, err := os.ReadFile(configFilePath)
+	configFileBytes, err := params.FS.ReadFile(configFilePath)
 	if err != nil {
 		logger.Error("Failed to load config", "error", err)
 		return
@@ -76,7 +76,7 @@ func runUpdate(params *updateContext) {
 		return
 	}
 
-	err = os.WriteFile(configFilePath, configBytes, utils.DefaultFileMod)
+	err = params.FS.WriteFile(configFilePath, configBytes, utils.DefaultFileMod)
 	if err != nil {
 		logger.Error("Failed to save config", "error", err)
 		return
@@ -85,20 +85,20 @@ func runUpdate(params *updateContext) {
 	logger.Info("Configuration successfully updated", "path", configFilePath)
 
 	// Copy the agent executable
-	execFilePath, err := os.Executable()
+	execFilePath, err := params.FS.Executable()
 	if err != nil {
 		logger.Error("Failed to get executable", "error", err)
 		return
 	}
 
-	execFileBytes, err := os.ReadFile(execFilePath)
+	execFileBytes, err := params.FS.ReadFile(execFilePath)
 	if err != nil {
 		logger.Error("Failed to read executable file", "error", err)
 		return
 	}
 
 	agentExecutablePath := pathsData.AgentExecutablePath
-	err = os.WriteFile(agentExecutablePath, execFileBytes, utils.DefaultExecutableFileMod)
+	err = params.FS.WriteFile(agentExecutablePath, execFileBytes, utils.DefaultExecutableFileMod)
 	if err != nil {
 		logger.Error("Failed to create agent executable", "error", err)
 		return

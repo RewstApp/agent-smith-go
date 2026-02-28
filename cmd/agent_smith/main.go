@@ -66,7 +66,7 @@ func main() {
 		return
 	}
 
-	updateContext, err := newUpdateContext(os.Args[1:], sys, domain, svcMgr)
+	updateContext, err := newUpdateContext(os.Args[1:], sys, domain, svcMgr, fs)
 	if err == nil {
 		// Run update routine
 		runUpdate(updateContext)
