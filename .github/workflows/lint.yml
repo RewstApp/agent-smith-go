@@ -3,11 +3,17 @@ name: Lint
 on: push
 
 jobs:
-  golangci-lint:
-    name: golangci-lint
-    runs-on: ubuntu-latest
+  lint:
     permissions:
       contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - windows-latest
+          - ubuntu-latest
+          - macos-latest
+    runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
