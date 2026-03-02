@@ -57,7 +57,8 @@ func TestLinuxService_Start(t *testing.T) {
 	if err := svc.Start(); err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
-	if len(mock.runCalls) != 1 || mock.runCalls[0][0] != "start" || mock.runCalls[0][1] != "test-svc" {
+	if len(mock.runCalls) != 1 || mock.runCalls[0][0] != "start" ||
+		mock.runCalls[0][1] != "test-svc" {
 		t.Errorf("expected Run(start, test-svc), got %v", mock.runCalls)
 	}
 }
@@ -78,7 +79,8 @@ func TestLinuxService_Stop(t *testing.T) {
 	if err := svc.Stop(); err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
-	if len(mock.runCalls) != 1 || mock.runCalls[0][0] != "stop" || mock.runCalls[0][1] != "test-svc" {
+	if len(mock.runCalls) != 1 || mock.runCalls[0][0] != "stop" ||
+		mock.runCalls[0][1] != "test-svc" {
 		t.Errorf("expected Run(stop, test-svc), got %v", mock.runCalls)
 	}
 }
@@ -94,7 +96,7 @@ func TestLinuxService_Stop_Error(t *testing.T) {
 
 func TestLinuxService_Delete(t *testing.T) {
 	tmpFile := newTempConfigPath(t)
-	if err := os.WriteFile(tmpFile, []byte{}, 0600); err != nil {
+	if err := os.WriteFile(tmpFile, []byte{}, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	mock := &mockSystemCtl{configFilePath: tmpFile}
@@ -103,7 +105,8 @@ func TestLinuxService_Delete(t *testing.T) {
 	if err := svc.Delete(); err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
-	if len(mock.runCalls) != 1 || mock.runCalls[0][0] != "disable" || mock.runCalls[0][1] != "test-svc" {
+	if len(mock.runCalls) != 1 || mock.runCalls[0][0] != "disable" ||
+		mock.runCalls[0][1] != "test-svc" {
 		t.Errorf("expected Run(disable, test-svc), got %v", mock.runCalls)
 	}
 	if _, err := os.Stat(tmpFile); !os.IsNotExist(err) {
@@ -171,7 +174,6 @@ func TestDefaultServiceManager_Create_Success(t *testing.T) {
 	}
 
 	svc, err := sm.Create(params)
-
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
@@ -275,14 +277,14 @@ func TestDefaultServiceManager_Open_Success(t *testing.T) {
 	sm := &defaultServiceManager{system: mock}
 
 	svc, err := sm.Open("test-svc")
-
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
 	if svc == nil {
 		t.Fatal("expected service, got nil")
 	}
-	if len(mock.runCalls) != 1 || mock.runCalls[0][0] != "status" || mock.runCalls[0][1] != "test-svc" {
+	if len(mock.runCalls) != 1 || mock.runCalls[0][0] != "status" ||
+		mock.runCalls[0][1] != "test-svc" {
 		t.Errorf("expected Run(status, test-svc), got %v", mock.runCalls)
 	}
 }
@@ -312,7 +314,6 @@ func (r *immediateRunner) Execute(stop <-chan struct{}, running chan<- struct{})
 
 func TestRun_ReturnsZeroExitCode(t *testing.T) {
 	code, err := Run(&immediateRunner{exitCode: 0})
-
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
@@ -323,7 +324,6 @@ func TestRun_ReturnsZeroExitCode(t *testing.T) {
 
 func TestRun_ReturnsNonZeroExitCode(t *testing.T) {
 	code, err := Run(&immediateRunner{exitCode: GenericError})
-
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}

@@ -11,7 +11,6 @@ import (
 func TestLinuxDefaultSystemInfoProvider_MACAddress(t *testing.T) {
 	sys := &linuxDefaultSystemInfoProvider{}
 	result, err := sys.MACAddress()
-
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
@@ -30,7 +29,6 @@ func TestLinuxDefaultSystemInfoProvider_Hostname(t *testing.T) {
 	expected, _ := os.Hostname()
 
 	result, err := sys.Hostname()
-
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
@@ -44,7 +42,6 @@ func TestLinuxDefaultSystemInfoProvider_HostPlatform(t *testing.T) {
 	sys := &linuxDefaultSystemInfoProvider{}
 
 	_, err := sys.HostPlatform()
-
 	if err != nil {
 		t.Errorf("expected no error, got %v", err)
 	}
@@ -53,7 +50,6 @@ func TestLinuxDefaultSystemInfoProvider_HostPlatform(t *testing.T) {
 func TestLinuxDefaultSystemInfoProvider_CPUModelName(t *testing.T) {
 	sys := &linuxDefaultSystemInfoProvider{}
 	_, err := sys.CPUModelName()
-
 	if err != nil {
 		t.Errorf("expected no error, got %v", err)
 	}
@@ -62,7 +58,6 @@ func TestLinuxDefaultSystemInfoProvider_CPUModelName(t *testing.T) {
 func TestLinuxDefaultSystemInfoProvider_TotalMemoryBytes(t *testing.T) {
 	sys := &linuxDefaultSystemInfoProvider{}
 	result, err := sys.TotalMemoryBytes()
-
 	if err != nil {
 		t.Errorf("expected no error, got %v", err)
 	}
@@ -84,7 +79,6 @@ func TestNewSystemInfoProvider(t *testing.T) {
 func TestLinuxDefaultDomainInfoProvider_ADDomain(t *testing.T) {
 	domain := &linuxDefaultDomainInfoProvider{}
 	_, err := domain.ADDomain(context.Background())
-
 	if err != nil {
 		t.Errorf("expected no error, got %v", err)
 	}
@@ -93,7 +87,6 @@ func TestLinuxDefaultDomainInfoProvider_ADDomain(t *testing.T) {
 func TestLinuxDefaultDomainInfoProvider_IsADDomainController(t *testing.T) {
 	domain := &linuxDefaultDomainInfoProvider{}
 	_, err := domain.IsADDomainController(context.Background())
-
 	if err != nil {
 		t.Errorf("expected no error, got %v", err)
 	}
@@ -102,7 +95,6 @@ func TestLinuxDefaultDomainInfoProvider_IsADDomainController(t *testing.T) {
 func TestLinuxDefaultDomainInfoProvider_IsEntraConnectServer(t *testing.T) {
 	domain := &linuxDefaultDomainInfoProvider{}
 	_, err := domain.IsEntraConnectServer()
-
 	if err != nil {
 		t.Errorf("expected no error, got %v", err)
 	}
@@ -111,7 +103,6 @@ func TestLinuxDefaultDomainInfoProvider_IsEntraConnectServer(t *testing.T) {
 func TestLinuxDefaultDomainInfoProvider_EntraDomain(t *testing.T) {
 	domain := &linuxDefaultDomainInfoProvider{}
 	_, err := domain.EntraDomain(context.Background())
-
 	if err != nil {
 		t.Errorf("expected no error, got %v", err)
 	}

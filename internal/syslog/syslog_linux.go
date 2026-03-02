@@ -35,7 +35,10 @@ func (s *linuxSyslog) Write(data []byte) (int, error) {
 		priority = "daemon.warning"
 	}
 
-	s.runner.Run(priority, s.source, message)
+	err := s.runner.Run(priority, s.source, message)
+	if err != nil {
+		return 0, err
+	}
 
 	return s.out.Write(data)
 }
