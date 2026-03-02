@@ -148,6 +148,11 @@ This script:
 - Generates coverage profiles
 - **Enforces 80% minimum coverage threshold**
 
+> **Note:** When running tests locally on Linux, some tests write to `/tmp/rewst_remote_agent/scripts`. If that directory was created by `root` (e.g., via `sudo`), your user won't have write access. Fix it by running:
+> ```bash
+> sudo chmod -R o+w /tmp/rewst_remote_agent
+> ```
+
 ### Test Categories
 
 **Unit Tests**: Test individual functions and components in isolation
