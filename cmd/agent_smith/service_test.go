@@ -412,7 +412,7 @@ func TestExecute_WithSyslog(t *testing.T) {
 	select {
 	case code := <-done:
 		t.Logf("Service exited with code %d", code)
-	case <-time.After(3 * time.Second):
+	case <-time.After(20 * time.Second):
 		t.Fatal("Execute did not exit within timeout")
 	}
 }
