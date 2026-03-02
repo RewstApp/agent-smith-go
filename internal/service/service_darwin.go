@@ -114,14 +114,29 @@ type defaultServiceManager struct {
 func (s *defaultServiceManager) Create(params AgentParams) (Service, error) {
 	serviceConfig := strings.Builder{}
 
-	fmt.Fprintf(&serviceConfig, "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\"\n\"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n")
+	fmt.Fprintf(
+		&serviceConfig,
+		"<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\"\n\"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n",
+	)
 	fmt.Fprintf(&serviceConfig, "<plist version=\"1.0\">\n<dict>\n")
 	fmt.Fprintf(&serviceConfig, "<key>Label</key>\n<string>%s</string>\n", params.Name)
-	fmt.Fprintf(&serviceConfig, "<key>ProgramArguments</key>\n<array>\n<string>%s</string>\n<string>--org-id</string>\n<string>%s</string>\n<string>--config-file</string>\n<string>%s</string>\n<string>--log-file</string>\n<string>%s</string>\n</array>\n",
-		params.AgentExecutablePath, params.OrgId, params.ConfigFilePath, params.LogFilePath)
+	fmt.Fprintf(
+		&serviceConfig,
+		"<key>ProgramArguments</key>\n<array>\n<string>%s</string>\n<string>--org-id</string>\n<string>%s</string>\n<string>--config-file</string>\n<string>%s</string>\n<string>--log-file</string>\n<string>%s</string>\n</array>\n",
+		params.AgentExecutablePath,
+		params.OrgId,
+		params.ConfigFilePath,
+		params.LogFilePath,
+	)
 	fmt.Fprintf(&serviceConfig, "<key>RunAtLoad</key>\n<false/>\n")
-	fmt.Fprintf(&serviceConfig, "<key>KeepAlive</key>\n<dict>\n<key>SuccessfulExit</key>\n<false/>\n</dict>\n")
-	fmt.Fprintf(&serviceConfig, "<key>EnvironmentVariables</key>\n<dict>\n<key>PATH</key>\n<string>/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>\n</dict>\n")
+	fmt.Fprintf(
+		&serviceConfig,
+		"<key>KeepAlive</key>\n<dict>\n<key>SuccessfulExit</key>\n<false/>\n</dict>\n",
+	)
+	fmt.Fprintf(
+		&serviceConfig,
+		"<key>EnvironmentVariables</key>\n<dict>\n<key>PATH</key>\n<string>/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>\n</dict>\n",
+	)
 	fmt.Fprintf(&serviceConfig, "</dict>\n</plist>\n")
 
 	svc := &darwinService{name: params.Name, system: s.system}

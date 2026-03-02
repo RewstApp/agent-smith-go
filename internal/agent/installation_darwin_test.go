@@ -56,7 +56,12 @@ func TestGetAgentExecutablePath(t *testing.T) {
 	setEnvVars(t)
 
 	orgId := "org123"
-	expected := filepath.Join("/usr/local/bin", "rewst_remote_agent", orgId, "agent_smith.mac-os.bin")
+	expected := filepath.Join(
+		"/usr/local/bin",
+		"rewst_remote_agent",
+		orgId,
+		"agent_smith.mac-os.bin",
+	)
 
 	result := GetAgentExecutablePath(orgId)
 
@@ -69,7 +74,12 @@ func TestGetConfigFilePath(t *testing.T) {
 	setEnvVars(t)
 
 	orgId := "org123"
-	expected := filepath.Join("/Library/Application Support", "rewst_remote_agent", orgId, "config.json")
+	expected := filepath.Join(
+		"/Library/Application Support",
+		"rewst_remote_agent",
+		orgId,
+		"config.json",
+	)
 
 	result := GetConfigFilePath(orgId)
 
@@ -82,7 +92,12 @@ func TestGetLogFilePath(t *testing.T) {
 	setEnvVars(t)
 
 	orgId := "org123"
-	expected := filepath.Join("/Library/Application Support", "rewst_remote_agent", orgId, "rewst_agent.log")
+	expected := filepath.Join(
+		"/Library/Application Support",
+		"rewst_remote_agent",
+		orgId,
+		"rewst_agent.log",
+	)
 
 	result := GetLogFilePath(orgId)
 
