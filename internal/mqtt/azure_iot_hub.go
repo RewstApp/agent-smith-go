@@ -37,7 +37,12 @@ func generateSASToken(resourceURI, key string, duration time.Duration) (string, 
 	signature := base64.StdEncoding.EncodeToString(h.Sum(nil))
 
 	// Create the SAS token
-	token := fmt.Sprintf("SharedAccessSignature sr=%s&sig=%s&se=%d", resourceURI, signature, expiration)
+	token := fmt.Sprintf(
+		"SharedAccessSignature sr=%s&sig=%s&se=%d",
+		resourceURI,
+		signature,
+		expiration,
+	)
 	return token, nil
 }
 
@@ -52,12 +57,15 @@ func newAzureIotHubClientOptions(device azureIotHubDevice) (*mqtt.ClientOptions,
 	// Initialize MQTT options
 	opts := mqtt.NewClientOptions()
 	opts.AddBroker(fmt.Sprintf("tls://%s:8883", device.Host)) // Use port 8883 for MQTT over TLS
-	opts.AddBroker(fmt.Sprintf("wss://%s", device.Host))      // Add websocket as a backup for Azure Iot Hub
+	opts.AddBroker(
+		fmt.Sprintf("wss://%s", device.Host),
+	) // Add websocket as a backup for Azure Iot Hub
 	opts.SetClientID(device.DeviceId)
 	opts.SetUsername(fmt.Sprintf("%s/%s/?api-version=2021-04-12", device.Host, device.DeviceId))
 	opts.SetPassword(sasToken)
 	opts.SetTLSConfig(&tls.Config{
 		Renegotiation: tls.RenegotiateOnceAsClient,
+		MinVersion:    tls.VersionTLS12,
 	})
 
 	return opts, nil

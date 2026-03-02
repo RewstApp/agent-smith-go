@@ -3,14 +3,10 @@ package agent
 import (
 	"context"
 	"fmt"
-	"os"
 	"strings"
 
 	"github.com/RewstApp/agent-smith-go/internal/version"
 	"github.com/hashicorp/go-hclog"
-	"github.com/shirou/gopsutil/v4/cpu"
-	"github.com/shirou/gopsutil/v4/host"
-	"github.com/shirou/gopsutil/v4/mem"
 )
 
 type HostInfo struct {
@@ -29,50 +25,70 @@ type HostInfo struct {
 	OrgId                 string  `json:"org_id"`
 }
 
-func (hostInfo *HostInfo) Load(ctx context.Context, orgId string, logger hclog.Logger) error {
-	// Get stat objects
-	hostStat, err := host.Info()
+type SystemInfoProvider interface {
+	Hostname() (string, error)
+	HostPlatform() (string, error)
+	CPUModelName() (string, error)
+	TotalMemoryBytes() (uint64, error)
+	MACAddress() (*string, error)
+}
+
+type DomainInfoProvider interface {
+	ADDomain(ctx context.Context) (*string, error)
+	IsADDomainController(ctx context.Context) (bool, error)
+	IsEntraConnectServer() (bool, error)
+	EntraDomain(ctx context.Context) (*string, error)
+}
+
+func NewHostInfo(
+	ctx context.Context,
+	orgId string,
+	logger hclog.Logger,
+	sys SystemInfoProvider,
+	domain DomainInfoProvider,
+) (*HostInfo, error) {
+	hostPlatform, err := sys.HostPlatform()
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	hostname, err := os.Hostname()
+	cpuModelName, err := sys.CPUModelName()
 	if err != nil {
-		return err
+		return nil, err
+	}
+
+	hostname, err := sys.Hostname()
+	if err != nil {
+		return nil, err
 	}
 	hostname = strings.ToLower(hostname)
 
-	macAddress, err := getMacAddress()
+	macAddress, err := sys.MACAddress()
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	cpuStat, err := cpu.Info()
+	memoryBytes, err := sys.TotalMemoryBytes()
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	vmStat, err := mem.VirtualMemory()
-	if err != nil {
-		return err
-	}
-
-	adDomain, err := getAdDomain(ctx)
+	adDomain, err := domain.ADDomain(ctx)
 	if err != nil {
 		logger.Warn("Could not retrieve AD Domain", "error", err)
 	}
 
-	isAdDomainController, err := getIsAdDomainController(ctx)
+	isAdDomainController, err := domain.IsADDomainController(ctx)
 	if err != nil {
 		logger.Warn("Could not retrieve AD Domain Controller", "error", err)
 	}
 
-	isEntraConnectServer, err := getIsEntraConnectServer()
+	isEntraConnectServer, err := domain.IsEntraConnectServer()
 	if err != nil {
 		logger.Warn("Could not retrieve Entra Connect Server", "error", err)
 	}
 
-	entraDomain, err := getEntraDomain(ctx)
+	entraDomain, err := domain.EntraDomain(ctx)
 	if err != nil {
 		logger.Warn("Could not retrieve Entra Domain", "error", err)
 	}
@@ -80,19 +96,20 @@ func (hostInfo *HostInfo) Load(ctx context.Context, orgId string, logger hclog.L
 	agentExecutablePath := GetAgentExecutablePath(orgId)
 	serviceExecutablePath := GetServiceExecutablePath(orgId)
 
+	var hostInfo HostInfo
 	hostInfo.AgentVersion = version.Version
 	hostInfo.AgentExecutablePath = agentExecutablePath
 	hostInfo.ServiceExecutablePath = serviceExecutablePath
 	hostInfo.HostName = hostname
 	hostInfo.MacAddress = macAddress
-	hostInfo.OperatingSystem = hostStat.Platform
-	hostInfo.CpuModel = strings.TrimSpace(cpuStat[0].ModelName)
-	hostInfo.RamGb = fmt.Sprintf("%d", vmStat.Total/1024/1024/1024)
+	hostInfo.OperatingSystem = hostPlatform
+	hostInfo.CpuModel = cpuModelName
+	hostInfo.RamGb = fmt.Sprintf("%d", memoryBytes/1024/1024/1024)
 	hostInfo.AdDomain = adDomain
 	hostInfo.IsAdDomainController = isAdDomainController
 	hostInfo.IsEntraConnectServer = isEntraConnectServer
 	hostInfo.EntraDomain = entraDomain
 	hostInfo.OrgId = orgId
 
-	return nil
+	return &hostInfo, nil
 }

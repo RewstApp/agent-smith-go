@@ -1,3 +1,4 @@
+#!/usr/bin/env pwsh
 #Requires -Version 7
 param(
     [double]$MinCoverage = 80.0    # Default minimum coverage is 80.0%

@@ -8,12 +8,11 @@ import (
 	"time"
 
 	"github.com/RewstApp/agent-smith-go/internal/agent"
-	"github.com/RewstApp/agent-smith-go/internal/service"
 	"github.com/RewstApp/agent-smith-go/internal/utils"
 	"github.com/RewstApp/agent-smith-go/internal/version"
 )
 
-func runUpdate(params *updateParams) {
+func runUpdate(params *updateContext) {
 	logger := utils.ConfigureLogger("agent_smith", os.Stdout, utils.Default)
 
 	// Show header
@@ -21,12 +20,17 @@ func runUpdate(params *updateParams) {
 
 	// Open the service
 	name := agent.GetServiceName(params.OrgId)
-	svc, err := service.Open(name)
+	svc, err := params.ServiceManager.Open(name)
 	if err != nil {
 		logger.Error("Failed to open service", "name", name, "error", err)
 		return
 	}
-	defer svc.Close()
+	defer func() {
+		err = svc.Close()
+		if err != nil {
+			logger.Error("Failed to close service handle", "error", err)
+		}
+	}()
 
 	// Stop the service if its running
 	if svc.IsActive() {
@@ -43,8 +47,13 @@ func runUpdate(params *updateParams) {
 	}
 
 	// Get installation paths data
-	var pathsData agent.PathsData
-	err = pathsData.Load(context.Background(), params.OrgId, logger)
+	pathsData, err := agent.NewPathsData(
+		context.Background(),
+		params.OrgId,
+		logger,
+		params.Sys,
+		params.Domain,
+	)
 	if err != nil {
 		logger.Error("Failed to read paths", "error", err)
 		return
@@ -52,7 +61,7 @@ func runUpdate(params *updateParams) {
 
 	// Read and parse the config file
 	configFilePath := pathsData.ConfigFilePath
-	configFileBytes, err := os.ReadFile(configFilePath)
+	configFileBytes, err := params.FS.ReadFile(configFilePath)
 	if err != nil {
 		logger.Error("Failed to load config", "error", err)
 		return
@@ -78,7 +87,7 @@ func runUpdate(params *updateParams) {
 		return
 	}
 
-	err = os.WriteFile(configFilePath, configBytes, utils.DefaultFileMod)
+	err = params.FS.WriteFile(configFilePath, configBytes, utils.DefaultFileMod)
 	if err != nil {
 		logger.Error("Failed to save config", "error", err)
 		return
@@ -87,20 +96,20 @@ func runUpdate(params *updateParams) {
 	logger.Info("Configuration successfully updated", "path", configFilePath)
 
 	// Copy the agent executable
-	execFilePath, err := os.Executable()
+	execFilePath, err := params.FS.Executable()
 	if err != nil {
 		logger.Error("Failed to get executable", "error", err)
 		return
 	}
 
-	execFileBytes, err := os.ReadFile(execFilePath)
+	execFileBytes, err := params.FS.ReadFile(execFilePath)
 	if err != nil {
 		logger.Error("Failed to read executable file", "error", err)
 		return
 	}
 
 	agentExecutablePath := pathsData.AgentExecutablePath
-	err = os.WriteFile(agentExecutablePath, execFileBytes, utils.DefaultExecutableFileMod)
+	err = params.FS.WriteFile(agentExecutablePath, execFileBytes, utils.DefaultExecutableFileMod)
 	if err != nil {
 		logger.Error("Failed to create agent executable", "error", err)
 		return

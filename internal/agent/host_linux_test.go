@@ -4,75 +4,115 @@ package agent
 
 import (
 	"context"
+	"os"
 	"testing"
 )
 
-func TestGetAdDomain(t *testing.T) {
-	ctx := context.Background()
-
-	result, err := getAdDomain(ctx)
-
-	if result != nil {
-		t.Errorf("expected nil, got %v", result)
-	}
-
-	if err != nil {
-		t.Errorf("expected no error, got %v", err.Error())
-	}
-}
-
-func TestGetIsAdDomainController(t *testing.T) {
-	ctx := context.Background()
-
-	result, err := getIsAdDomainController(ctx)
-
-	if result != false {
-		t.Error("expected false, got true")
-	}
-
-	if err != nil {
-		t.Errorf("expected no error, got %v", err)
-	}
-}
-
-func TestGetIsEntraConnectServer(t *testing.T) {
-	result, err := getIsEntraConnectServer()
-
-	if result != false {
-		t.Error("expected false, got true")
-	}
-
-	if err != nil {
-		t.Errorf("expected no error, got %v", err)
-	}
-}
-
-func TestGetMacAddress(t *testing.T) {
-	mac, err := getMacAddress()
-
+func TestLinuxDefaultSystemInfoProvider_MACAddress(t *testing.T) {
+	sys := &linuxDefaultSystemInfoProvider{}
+	result, err := sys.MACAddress()
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
 
-	if mac == nil || len(*mac) == 0 {
+	if result == nil || len(*result) == 0 {
 		t.Fatal("expected a valid mac address, got nil or empty")
 	}
 
-	if len(*mac) != 12 {
-		t.Errorf("expected 12-character mac, got %s", *mac)
+	if len(*result) != 12 {
+		t.Errorf("expected 12-character mac, got %s", *result)
 	}
 }
 
-func TestGetEntraDomain(t *testing.T) {
-	ctx := context.Background()
+func TestLinuxDefaultSystemInfoProvider_Hostname(t *testing.T) {
+	sys := &linuxDefaultSystemInfoProvider{}
+	expected, _ := os.Hostname()
 
-	result, err := getEntraDomain(ctx)
-
-	if result != nil {
-		t.Fatalf("expected nil, got %v", result)
-	}
-
+	result, err := sys.Hostname()
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
+	}
+
+	if expected != result {
+		t.Errorf("expected %s, got %s", expected, result)
+	}
+}
+
+func TestLinuxDefaultSystemInfoProvider_HostPlatform(t *testing.T) {
+	sys := &linuxDefaultSystemInfoProvider{}
+
+	_, err := sys.HostPlatform()
+	if err != nil {
+		t.Errorf("expected no error, got %v", err)
+	}
+}
+
+func TestLinuxDefaultSystemInfoProvider_CPUModelName(t *testing.T) {
+	sys := &linuxDefaultSystemInfoProvider{}
+	_, err := sys.CPUModelName()
+	if err != nil {
+		t.Errorf("expected no error, got %v", err)
+	}
+}
+
+func TestLinuxDefaultSystemInfoProvider_TotalMemoryBytes(t *testing.T) {
+	sys := &linuxDefaultSystemInfoProvider{}
+	result, err := sys.TotalMemoryBytes()
+	if err != nil {
+		t.Errorf("expected no error, got %v", err)
+	}
+
+	if result == 0 {
+		t.Errorf("expected positive, got %v", result)
+	}
+}
+
+func TestNewSystemInfoProvider(t *testing.T) {
+	result := NewSystemInfoProvider()
+	_, ok := result.(*linuxDefaultSystemInfoProvider)
+
+	if !ok {
+		t.Errorf("expected *linuxDefaultSystemInfoProvider, got %T", result)
+	}
+}
+
+func TestLinuxDefaultDomainInfoProvider_ADDomain(t *testing.T) {
+	domain := &linuxDefaultDomainInfoProvider{}
+	_, err := domain.ADDomain(context.Background())
+	if err != nil {
+		t.Errorf("expected no error, got %v", err)
+	}
+}
+
+func TestLinuxDefaultDomainInfoProvider_IsADDomainController(t *testing.T) {
+	domain := &linuxDefaultDomainInfoProvider{}
+	_, err := domain.IsADDomainController(context.Background())
+	if err != nil {
+		t.Errorf("expected no error, got %v", err)
+	}
+}
+
+func TestLinuxDefaultDomainInfoProvider_IsEntraConnectServer(t *testing.T) {
+	domain := &linuxDefaultDomainInfoProvider{}
+	_, err := domain.IsEntraConnectServer()
+	if err != nil {
+		t.Errorf("expected no error, got %v", err)
+	}
+}
+
+func TestLinuxDefaultDomainInfoProvider_EntraDomain(t *testing.T) {
+	domain := &linuxDefaultDomainInfoProvider{}
+	_, err := domain.EntraDomain(context.Background())
+	if err != nil {
+		t.Errorf("expected no error, got %v", err)
+	}
+}
+
+func TestNewDomainInfoProvider(t *testing.T) {
+	result := NewDomainInfoProvider()
+	_, ok := result.(*linuxDefaultDomainInfoProvider)
+
+	if !ok {
+		t.Errorf("expected *linuxDefaultDomainInfoProvider, got %T", result)
 	}
 }

@@ -5,6 +5,7 @@ package service
 import (
 	"context"
 	"fmt"
+	"math"
 	"time"
 
 	"golang.org/x/sys/windows/svc"
@@ -14,7 +15,16 @@ import (
 const pollingInterval = 250 * time.Millisecond
 
 type windowsService struct {
-	handle *mgr.Service
+	handle windowsServiceHandle
+}
+
+// Replaces mgr.Service
+type windowsServiceHandle interface {
+	Close() error
+	Start(args ...string) error
+	Control(c svc.Cmd) (svc.Status, error)
+	Query() (svc.Status, error)
+	Delete() error
 }
 
 func (winSvc *windowsService) Close() error {
@@ -59,12 +69,33 @@ func (winSvc *windowsService) IsActive() bool {
 	return status.State == svc.Running
 }
 
-func Create(params AgentParams) (Service, error) {
-	svcMgr, err := mgr.Connect()
+// Substitute for mgr.Mgr
+type windowsServiceManager interface {
+	Disconnect() error
+	CreateService(name string, exepath string, c mgr.Config, args ...string) (*mgr.Service, error)
+	OpenService(name string) (*mgr.Service, error)
+}
+
+type windowsServiceManagerFactory interface {
+	Connect() (windowsServiceManager, error)
+}
+
+type defaultWindowsServiceManagerFactory struct{}
+
+func (f *defaultWindowsServiceManagerFactory) Connect() (windowsServiceManager, error) {
+	return mgr.Connect()
+}
+
+type defaultServiceManager struct {
+	factory windowsServiceManagerFactory
+}
+
+func (s *defaultServiceManager) Create(params AgentParams) (Service, error) {
+	svcMgr, err := s.factory.Connect()
 	if err != nil {
 		return nil, err
 	}
-	defer svcMgr.Disconnect()
+	defer func() { _ = svcMgr.Disconnect() }() // Cleanup - error can be ignored
 
 	svc, err := svcMgr.CreateService(params.Name, params.AgentExecutablePath, mgr.Config{
 		StartType:        mgr.StartAutomatic,
@@ -80,12 +111,12 @@ func Create(params AgentParams) (Service, error) {
 	}, nil
 }
 
-func Open(name string) (Service, error) {
-	svcMgr, err := mgr.Connect()
+func (s *defaultServiceManager) Open(name string) (Service, error) {
+	svcMgr, err := s.factory.Connect()
 	if err != nil {
 		return nil, err
 	}
-	defer svcMgr.Disconnect()
+	defer func() { _ = svcMgr.Disconnect() }() // Cleanup - error can be ignored
 
 	svc, err := svcMgr.OpenService(name)
 	if err != nil {
@@ -97,16 +128,26 @@ func Open(name string) (Service, error) {
 	}, nil
 }
 
+func NewServiceManager() ServiceManager {
+	return &defaultServiceManager{
+		factory: &defaultWindowsServiceManagerFactory{},
+	}
+}
+
 type windowsRunner struct {
 	runner   Runner
 	exitCode int
 }
 
-func (host *windowsRunner) Execute(args []string, request <-chan svc.ChangeRequest, response chan<- svc.Status) (bool, uint32) {
+func (host *windowsRunner) Execute(
+	args []string,
+	request <-chan svc.ChangeRequest,
+	response chan<- svc.Status,
+) (bool, uint32) {
 	response <- svc.Status{State: svc.StartPending}
 
 	// Make the channels
-	stop := make(chan struct{})
+	stop := make(chan struct{}, 1)
 	running := make(chan struct{})
 
 	// Make go routines for the channels
@@ -145,25 +186,47 @@ func (host *windowsRunner) Execute(args []string, request <-chan svc.ChangeReque
 	response <- svc.Status{State: svc.Stopped}
 
 	// Return the proper response
+	if host.exitCode < 0 || host.exitCode > math.MaxUint32 {
+		return false, uint32(GenericError)
+	}
 	return host.exitCode == 0, uint32(host.exitCode)
 }
 
+type windowsServiceFactory interface {
+	IsWindowsService() (bool, error)
+	Run(name string, handler svc.Handler) error
+}
+
+type defaultWindowsServiceFactory struct{}
+
+func (f *defaultWindowsServiceFactory) IsWindowsService() (bool, error) {
+	return svc.IsWindowsService()
+}
+
+func (f *defaultWindowsServiceFactory) Run(name string, handler svc.Handler) error {
+	return svc.Run(name, handler)
+}
+
 func Run(runner Runner) (int, error) {
+	return runWithFactory(runner, &defaultWindowsServiceFactory{})
+}
+
+func runWithFactory(runner Runner, factory windowsServiceFactory) (int, error) {
 	// Check if this is running as a service
-	isWinSvc, err := svc.IsWindowsService()
+	isWinSvc, err := factory.IsWindowsService()
 	if err != nil {
-		return 1, err
+		return int(GenericError), err
 	}
 
 	if !isWinSvc {
-		return 1, fmt.Errorf("executable should be run as a service")
+		return int(GenericError), fmt.Errorf("executable should be run as a service")
 	}
 
 	// Start the windows service
 	host := &windowsRunner{
 		runner: runner,
 	}
-	err = svc.Run(runner.Name(), host)
+	err = factory.Run(runner.Name(), host)
 	if err != nil {
 		return host.exitCode, err
 	}

@@ -4,25 +4,42 @@ import (
 	"os"
 )
 
-const DefaultFileMod os.FileMode = 0644
-const DefaultExecutableFileMod os.FileMode = 0755
-const DefaultDirMod os.FileMode = 0755
+const (
+	DefaultFileMod           os.FileMode = 0o644
+	DefaultExecutableFileMod os.FileMode = 0o755
+	DefaultDirMod            os.FileMode = 0o755
+)
 
-func DirExists(path string) bool {
-	info, err := os.Stat(path)
-	if os.IsNotExist(err) {
-		return false
-	}
-	return info.IsDir()
+type FileSystem interface {
+	Executable() (string, error)
+	ReadFile(name string) ([]byte, error)
+	WriteFile(name string, data []byte, perm os.FileMode) error
+	MkdirAll(path string) error
+	RemoveAll(path string) error
 }
 
-func CreateFolderIfMissing(dir string) error {
-	if !DirExists(dir) {
-		err := os.MkdirAll(dir, DefaultDirMod)
-		if err != nil {
-			return err
-		}
-	}
+type defaultFileSystem struct{}
 
-	return nil
+func (*defaultFileSystem) Executable() (string, error) {
+	return os.Executable()
+}
+
+func (*defaultFileSystem) ReadFile(name string) ([]byte, error) {
+	return os.ReadFile(name)
+}
+
+func (*defaultFileSystem) WriteFile(name string, data []byte, perm os.FileMode) error {
+	return os.WriteFile(name, data, perm)
+}
+
+func (*defaultFileSystem) MkdirAll(path string) error {
+	return os.MkdirAll(path, DefaultDirMod)
+}
+
+func (*defaultFileSystem) RemoveAll(path string) error {
+	return os.RemoveAll(path)
+}
+
+func NewFileSystem() FileSystem {
+	return &defaultFileSystem{}
 }

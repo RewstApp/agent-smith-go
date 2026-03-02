@@ -15,7 +15,6 @@ func TestNewClientOptions_DefaultAzureIotHub(t *testing.T) {
 	}
 
 	opts, err := NewClientOptions(device)
-
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}

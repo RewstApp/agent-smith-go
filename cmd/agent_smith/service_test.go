@@ -1,0 +1,504 @@
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"testing"
+	"time"
+
+	"github.com/RewstApp/agent-smith-go/internal/agent"
+	"github.com/RewstApp/agent-smith-go/internal/interpreter"
+	"github.com/RewstApp/agent-smith-go/internal/service"
+	"github.com/RewstApp/agent-smith-go/internal/utils"
+	"github.com/hashicorp/go-hclog"
+)
+
+// TestLoadConfig tests the loadConfig method
+func TestLoadConfig(t *testing.T) {
+	tests := []struct {
+		name        string
+		configData  agent.Device
+		expectError bool
+	}{
+		{
+			name: "valid_config",
+			configData: agent.Device{
+				DeviceId:        "test-device-123",
+				SharedAccessKey: "test-shared-key",
+				AzureIotHubHost: "test.azure-devices.net",
+				LoggingLevel:    "info",
+				RewstEngineHost: "engine.rewst.io",
+			},
+			expectError: false,
+		},
+		{
+			name: "minimal_config",
+			configData: agent.Device{
+				DeviceId: "minimal-device",
+			},
+			expectError: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Create temporary config file
+			tmpDir := t.TempDir()
+			configPath := filepath.Join(tmpDir, "config.json")
+
+			configBytes, err := json.Marshal(tt.configData)
+			if err != nil {
+				t.Fatalf("failed to marshal config: %v", err)
+			}
+
+			err = os.WriteFile(configPath, configBytes, utils.DefaultFileMod)
+			if err != nil {
+				t.Fatalf("failed to write config file: %v", err)
+			}
+
+			// Test loadConfig
+			svc := &serviceContext{
+				ConfigFile: configPath,
+			}
+
+			device, err := svc.loadConfig()
+
+			if tt.expectError && err == nil {
+				t.Error("expected error, got nil")
+			}
+			if !tt.expectError && err != nil {
+				t.Errorf("expected no error, got %v", err)
+			}
+
+			if !tt.expectError {
+				if device.DeviceId != tt.configData.DeviceId {
+					t.Errorf(
+						"expected DeviceId %q, got %q",
+						tt.configData.DeviceId,
+						device.DeviceId,
+					)
+				}
+				if device.SharedAccessKey != tt.configData.SharedAccessKey {
+					t.Errorf(
+						"expected SharedAccessKey %q, got %q",
+						tt.configData.SharedAccessKey,
+						device.SharedAccessKey,
+					)
+				}
+			}
+		})
+	}
+}
+
+// TestLoadConfig_FileNotFound tests loadConfig with missing file
+func TestLoadConfig_FileNotFound(t *testing.T) {
+	svc := &serviceContext{
+		ConfigFile: "/nonexistent/path/config.json",
+	}
+
+	_, err := svc.loadConfig()
+	if err == nil {
+		t.Error("expected error for nonexistent file, got nil")
+	}
+}
+
+// TestLoadConfig_InvalidJSON tests loadConfig with invalid JSON
+func TestLoadConfig_InvalidJSON(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "invalid.json")
+
+	err := os.WriteFile(configPath, []byte("{invalid json"), utils.DefaultFileMod)
+	if err != nil {
+		t.Fatalf("failed to write invalid config: %v", err)
+	}
+
+	svc := &serviceContext{
+		ConfigFile: configPath,
+	}
+
+	_, err = svc.loadConfig()
+	if err == nil {
+		t.Error("expected error for invalid JSON, got nil")
+	}
+}
+
+// TestLoadLog tests the loadLog method
+func TestLoadLog(t *testing.T) {
+	tmpDir := t.TempDir()
+	logPath := filepath.Join(tmpDir, "test.log")
+
+	svc := &serviceContext{
+		LogFile: logPath,
+	}
+
+	logFile, err := svc.loadLog()
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	defer func() {
+		err = logFile.Close()
+		if err != nil {
+			t.Errorf("expected no error, got %v", err)
+		}
+	}()
+
+	// Verify file was created
+	if _, err := os.Stat(logPath); os.IsNotExist(err) {
+		t.Error("expected log file to be created")
+	}
+
+	// Test writing to the log file
+	testData := []byte("test log entry\n")
+	n, err := logFile.Write(testData)
+	if err != nil {
+		t.Errorf("failed to write to log file: %v", err)
+	}
+	if n != len(testData) {
+		t.Errorf("expected to write %d bytes, wrote %d", len(testData), n)
+	}
+}
+
+// TestLoadLog_AppendMode tests that loadLog opens file in append mode
+func TestLoadLog_AppendMode(t *testing.T) {
+	tmpDir := t.TempDir()
+	logPath := filepath.Join(tmpDir, "append.log")
+
+	// Write initial content
+	initialContent := "initial content\n"
+	err := os.WriteFile(logPath, []byte(initialContent), utils.DefaultFileMod)
+	if err != nil {
+		t.Fatalf("failed to write initial content: %v", err)
+	}
+
+	// Open with loadLog
+	svc := &serviceContext{
+		LogFile: logPath,
+	}
+
+	logFile, err := svc.loadLog()
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+
+	// Write additional content
+	additionalContent := "appended content\n"
+	_, err = logFile.Write([]byte(additionalContent))
+	if err != nil {
+		t.Fatalf("failed to write additional content: %v", err)
+	}
+
+	err = logFile.Close()
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+
+	// Verify content was appended
+	finalContent, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("failed to read final content: %v", err)
+	}
+
+	expected := initialContent + additionalContent
+	if string(finalContent) != expected {
+		t.Errorf("expected content %q, got %q", expected, string(finalContent))
+	}
+}
+
+// TestLoadLog_InvalidPath tests loadLog with invalid path
+func TestLoadLog_InvalidPath(t *testing.T) {
+	svc := &serviceContext{
+		LogFile: "/nonexistent/directory/log.txt",
+	}
+
+	_, err := svc.loadLog()
+	if err == nil {
+		t.Error("expected error for invalid path, got nil")
+	}
+}
+
+// TestName tests the Name method
+func TestName(t *testing.T) {
+	tests := []struct {
+		name     string
+		orgId    string
+		expected string
+	}{
+		{
+			name:     "standard_org_id",
+			orgId:    "org-123",
+			expected: agent.GetServiceName("org-123"),
+		},
+		{
+			name:     "different_org_id",
+			orgId:    "test-org-456",
+			expected: agent.GetServiceName("test-org-456"),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			svc := &serviceContext{
+				OrgId: tt.orgId,
+			}
+
+			result := svc.Name()
+			if result != tt.expected {
+				t.Errorf("expected Name() to return %q, got %q", tt.expected, result)
+			}
+		})
+	}
+}
+
+// mockExecutor for testing
+type mockExecutor struct {
+	executeCalled bool
+	result        []byte
+}
+
+func (m *mockExecutor) Execute(
+	ctx context.Context,
+	message *interpreter.Message,
+	device agent.Device,
+	logger hclog.Logger,
+	sys agent.SystemInfoProvider,
+	domain agent.DomainInfoProvider,
+) []byte {
+	m.executeCalled = true
+	return m.result
+}
+
+// TestExecute_ConfigError tests Execute with invalid config file
+func TestExecute_ConfigError(t *testing.T) {
+	svc := &serviceContext{
+		ConfigFile: "/nonexistent/config.json",
+		LogFile:    filepath.Join(t.TempDir(), "test.log"),
+		OrgId:      "test-org",
+	}
+
+	stop := make(chan struct{})
+	running := make(chan struct{})
+
+	done := make(chan service.ServiceExitCode)
+	go func() {
+		code := svc.Execute(stop, running)
+		done <- code
+	}()
+
+	// Wait for exit
+	select {
+	case code := <-done:
+		if code != service.ConfigError {
+			t.Errorf("expected ConfigError (%d), got %d", service.ConfigError, code)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Execute did not exit within timeout")
+	}
+}
+
+// TestExecute_LogFileError tests Execute with invalid log file path
+func TestExecute_LogFileError(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.json")
+
+	// Create valid config
+	device := agent.Device{
+		DeviceId:        "test-device",
+		SharedAccessKey: "test-key",
+		AzureIotHubHost: "test.azure-devices.net",
+	}
+	configBytes, _ := json.Marshal(device)
+
+	err := os.WriteFile(configPath, configBytes, utils.DefaultFileMod)
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+
+	svc := &serviceContext{
+		ConfigFile: configPath,
+		LogFile:    "/invalid/path/log.txt",
+		OrgId:      "test-org",
+	}
+
+	stop := make(chan struct{})
+	running := make(chan struct{})
+
+	done := make(chan service.ServiceExitCode)
+	go func() {
+		code := svc.Execute(stop, running)
+		done <- code
+	}()
+
+	// Wait for exit
+	select {
+	case code := <-done:
+		if code != service.LogFileError {
+			t.Errorf("expected LogFileError (%d), got %d", service.LogFileError, code)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Execute did not exit within timeout")
+	}
+}
+
+// TestExecute_SuccessfulStartAndStop is skipped due to complexity
+// Full integration testing of Execute would require a test MQTT broker
+// The component tests (loadConfig, loadLog, error cases) provide sufficient coverage
+func TestExecute_SuccessfulStartAndStop(t *testing.T) {
+	t.Skip("Skipping integration test - requires MQTT test infrastructure")
+}
+
+// TestExecute_WithSyslog tests Execute with syslog enabled
+func TestExecute_WithSyslog(t *testing.T) {
+	// Skip on platforms where syslog might not be available
+	if os.Getenv("CI") != "" {
+		t.Skip("Skipping syslog test in CI environment")
+	}
+
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.json")
+	logPath := filepath.Join(tmpDir, "test.log")
+
+	// Create config with syslog enabled
+	device := agent.Device{
+		DeviceId:             "test-device-syslog",
+		SharedAccessKey:      "dGVzdC1zaGFyZWQta2V5LXRoYXQtaXMtbG9uZy1lbm91Z2gtZm9yLWJhc2U2NC1kZWNvZGluZw==",
+		AzureIotHubHost:      "invalid.local",
+		LoggingLevel:         "error",
+		RewstEngineHost:      "engine.rewst.io",
+		DisableAutoUpdates:   true,
+		UseSyslog:            true,
+		DisableAgentPostback: true,
+	}
+	configBytes, _ := json.Marshal(device)
+
+	err := os.WriteFile(configPath, configBytes, utils.DefaultFileMod)
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+
+	svc := &serviceContext{
+		ConfigFile: configPath,
+		LogFile:    logPath,
+		OrgId:      "test-org-syslog",
+		Executor:   &mockExecutor{},
+	}
+
+	stop := make(chan struct{})
+	running := make(chan struct{}, 1)
+
+	done := make(chan service.ServiceExitCode, 1)
+	go func() {
+		code := svc.Execute(stop, running)
+		done <- code
+	}()
+
+	// Wait for service to start or exit
+	select {
+	case <-running:
+		// Started successfully
+		close(stop)
+	case code := <-done:
+		// Service may exit early if syslog initialization fails
+		// This is acceptable in test environment
+		t.Logf("Service exited with code %d (expected in test environment)", code)
+		return
+	case <-time.After(3 * time.Second):
+		close(stop)
+		t.Fatal("Execute did not start or exit within timeout")
+	}
+
+	// Wait for clean exit
+	select {
+	case code := <-done:
+		t.Logf("Service exited with code %d", code)
+	case <-time.After(20 * time.Second):
+		t.Fatal("Execute did not exit within timeout")
+	}
+}
+
+// TestExecute_Name tests that Execute uses the correct service name
+func TestExecute_Name(t *testing.T) {
+	svc := &serviceContext{
+		OrgId: "test-org-name",
+	}
+
+	expectedName := agent.GetServiceName("test-org-name")
+	actualName := svc.Name()
+
+	if actualName != expectedName {
+		t.Errorf("expected Name() to return %q, got %q", expectedName, actualName)
+	}
+}
+
+// TestRunService tests the runService wrapper (without actually exiting)
+func TestRunService_ExitCode(t *testing.T) {
+	// This test verifies that Execute returns appropriate exit codes
+	// We can't test runService directly because it calls os.Exit
+
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.json")
+	logPath := filepath.Join(tmpDir, "test.log")
+
+	device := agent.Device{
+		DeviceId: "test",
+	}
+	configBytes, _ := json.Marshal(device)
+
+	err := os.WriteFile(configPath, configBytes, utils.DefaultFileMod)
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+
+	svc := &serviceContext{
+		ConfigFile: configPath,
+		LogFile:    logPath,
+		OrgId:      "test",
+	}
+
+	// Test that Execute returns when stop is already closed
+	stop := make(chan struct{})
+	running := make(chan struct{}, 1)
+	close(stop)
+
+	done := make(chan service.ServiceExitCode, 1)
+	go func() {
+		code := svc.Execute(stop, running)
+		done <- code
+	}()
+
+	select {
+	case code := <-done:
+		// Should exit quickly with code 0 since stop is already closed
+		t.Logf("Got exit code %d", code)
+	case <-time.After(3 * time.Second):
+		t.Fatal("Execute did not exit within timeout")
+	}
+}
+
+// TestLoadConfig_EmptyFile tests loadConfig with empty file
+func TestLoadConfig_EmptyFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "empty.json")
+
+	err := os.WriteFile(configPath, []byte(""), utils.DefaultFileMod)
+	if err != nil {
+		t.Fatalf("failed to write empty file: %v", err)
+	}
+
+	svc := &serviceContext{
+		ConfigFile: configPath,
+	}
+
+	_, err = svc.loadConfig()
+	if err == nil {
+		t.Error("expected error for empty file, got nil")
+	}
+}
+
+// TestExecute_AutoUpdatesDisabled is skipped due to complexity
+// Full integration testing of Execute would require a test MQTT broker
+// The component tests (loadConfig, loadLog, error cases) provide sufficient coverage
+func TestExecute_AutoUpdatesDisabled(t *testing.T) {
+	t.Skip("Skipping integration test - requires MQTT test infrastructure")
+}

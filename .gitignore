@@ -5,3 +5,5 @@
 # Coverage files
 /coverage
 /coverage.out
+*.out
+*.exe

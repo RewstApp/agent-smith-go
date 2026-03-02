@@ -15,7 +15,14 @@ import (
 	"github.com/RewstApp/agent-smith-go/internal/utils"
 )
 
-func runSystemCtl(args ...string) error {
+type systemCtl interface {
+	Run(args ...string) error
+	ServiceConfigFilePath(name string) string
+}
+
+type defaultSystemCtl struct{}
+
+func (s *defaultSystemCtl) Run(args ...string) error {
 	cmd := exec.Command("systemctl", args...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -25,8 +32,13 @@ func runSystemCtl(args ...string) error {
 	return nil
 }
 
+func (s *defaultSystemCtl) ServiceConfigFilePath(name string) string {
+	return filepath.Join("/etc/systemd/system", fmt.Sprintf("%s.service", name))
+}
+
 type linuxService struct {
-	name string
+	name   string
+	system systemCtl
 }
 
 func (linuxSvc *linuxService) Close() error {
@@ -34,74 +46,83 @@ func (linuxSvc *linuxService) Close() error {
 }
 
 func (linuxSvc *linuxService) Start() error {
-	return runSystemCtl("start", linuxSvc.name)
+	return linuxSvc.system.Run("start", linuxSvc.name)
 }
 
 func (linuxSvc *linuxService) Stop() error {
-	return runSystemCtl("stop", linuxSvc.name)
+	return linuxSvc.system.Run("stop", linuxSvc.name)
 }
 
 func (linuxSvc *linuxService) Delete() error {
-	err := runSystemCtl("disable", linuxSvc.name)
+	err := linuxSvc.system.Run("disable", linuxSvc.name)
 	if err != nil {
 		return err
 	}
 
 	// Delete the service configuration file
-	serviceConfigFilePath := filepath.Join("/etc/systemd/system", fmt.Sprintf("%s.service", linuxSvc.name))
-	return os.Remove(serviceConfigFilePath)
+	return os.Remove(linuxSvc.system.ServiceConfigFilePath(linuxSvc.name))
 }
 
 func (linuxSvc *linuxService) IsActive() bool {
-	return runSystemCtl("is-active", linuxSvc.name) == nil
+	return linuxSvc.system.Run("is-active", linuxSvc.name) == nil
 }
 
-func Create(params AgentParams) (Service, error) {
+type defaultServiceManager struct {
+	system systemCtl
+}
+
+func (s *defaultServiceManager) Create(params AgentParams) (Service, error) {
 	serviceConfig := strings.Builder{}
 
-	serviceConfig.WriteString("[Unit]\n")
-	serviceConfig.WriteString(fmt.Sprintf("Description=%s\n", params.Name))
-	serviceConfig.WriteString("\n")
+	fmt.Fprintf(&serviceConfig, "[Unit]\nDescription=%s\n\n", params.Name)
+	fmt.Fprintf(
+		&serviceConfig,
+		"[Service]\nExecStart=%s --org-id %s --config-file %s --log-file %s\nRestart=always\n\n",
+		params.AgentExecutablePath,
+		params.OrgId,
+		params.ConfigFilePath,
+		params.LogFilePath,
+	)
+	fmt.Fprintf(&serviceConfig, "[Install]\nWantedBy=multi-user.target\n")
 
-	serviceConfig.WriteString("[Service]\n")
-	serviceConfig.WriteString(fmt.Sprintf("ExecStart=%s --org-id %s --config-file %s --log-file %s\n",
-		params.AgentExecutablePath, params.OrgId, params.ConfigFilePath, params.LogFilePath))
-	serviceConfig.WriteString("Restart=always\n")
-	serviceConfig.WriteString("\n")
-
-	serviceConfig.WriteString("[Install]\n")
-	serviceConfig.WriteString("WantedBy=multi-user.target\n")
-
-	serviceConfigFilePath := filepath.Join("/etc/systemd/system", fmt.Sprintf("%s.service", params.Name))
+	serviceConfigFilePath := s.system.ServiceConfigFilePath(params.Name)
 	err := os.WriteFile(serviceConfigFilePath, []byte(serviceConfig.String()), utils.DefaultFileMod)
 	if err != nil {
 		return nil, err
 	}
 
-	err = runSystemCtl("daemon-reload")
+	err = s.system.Run("daemon-reload")
 	if err != nil {
 		return nil, err
 	}
 
-	err = runSystemCtl("enable", params.Name)
+	err = s.system.Run("enable", params.Name)
 	if err != nil {
 		return nil, err
 	}
 
 	return &linuxService{
-		name: params.Name,
+		name:   params.Name,
+		system: s.system,
 	}, nil
 }
 
-func Open(name string) (Service, error) {
-	err := runSystemCtl("status", name)
+func (s *defaultServiceManager) Open(name string) (Service, error) {
+	err := s.system.Run("status", name)
 	if err != nil {
 		return nil, err
 	}
 
 	return &linuxService{
-		name: name,
+		name:   name,
+		system: s.system,
 	}, nil
+}
+
+func NewServiceManager() ServiceManager {
+	return &defaultServiceManager{
+		system: &defaultSystemCtl{},
+	}
 }
 
 func Run(runner Runner) (int, error) {

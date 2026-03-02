@@ -11,8 +11,10 @@ import (
 	"github.com/hashicorp/go-plugin"
 )
 
-const defaultProtocolVersion = 1
-const defaultMagicCookieKey = "AGENT_SMITH"
+const (
+	defaultProtocolVersion = 1
+	defaultMagicCookieKey  = "AGENT_SMITH"
+)
 
 var pluginMap = map[string]plugin.Plugin{
 	"notifier": &shared.NotifierPlugin{},
@@ -75,7 +77,6 @@ func (s *notifierSetWrapper) Notify(message string) error {
 
 	for _, notifier := range s.notifiers {
 		err := notifier.Notify(message)
-
 		if err != nil {
 			combinedErrors = errors.Join(combinedErrors, err)
 		}
@@ -97,11 +98,18 @@ func LoadNotifer(plugins []agent.Plugin, logWriter io.Writer) (NotifierWrapper, 
 			MagicCookieValue: magicCookieValueUuid.String(),
 		}
 
+		// #nosec G204
 		client := plugin.NewClient(&plugin.ClientConfig{
 			HandshakeConfig: handshakeConfig,
 			Plugins:         pluginMap,
-			Cmd:             exec.Command(pluginInfo.ExecutablePath, "--magic-cookie-key", handshakeConfig.MagicCookieKey, "--magic-cookie-value", handshakeConfig.MagicCookieValue),
-			Stderr:          logWriter,
+			Cmd: exec.Command(
+				pluginInfo.ExecutablePath,
+				"--magic-cookie-key",
+				handshakeConfig.MagicCookieKey,
+				"--magic-cookie-value",
+				handshakeConfig.MagicCookieValue,
+			),
+			Stderr: logWriter,
 		})
 
 		rpcClient, err := client.Client()

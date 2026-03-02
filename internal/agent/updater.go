@@ -2,95 +2,121 @@ package agent
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
-	"os/exec"
-	"runtime"
-	"strings"
 	"time"
 
 	"github.com/RewstApp/agent-smith-go/internal/version"
 	"github.com/hashicorp/go-hclog"
 )
 
-const latestReleaseUrl = "https://api.github.com/repos/rewstapp/agent-smith-go/releases/latest"
-const updateInterval = 48 * time.Hour
-
-type asset struct {
+type Asset struct {
 	Id   int    `json:"id"`
 	Name string `json:"name"`
 	Url  string `json:"url"`
 }
 
-type release struct {
+type Release struct {
 	Id      int     `json:"id"`
 	TagName string  `json:"tag_name"`
-	Assets  []asset `json:"assets"`
+	Assets  []Asset `json:"assets"`
 }
 
-func autoUpdate(logger hclog.Logger, device Device) {
-	logger.Info("Checking for updates")
+type Updater interface {
+	Check() (Release, error)
+	Update(updaterExecutablePath string) error
+	SelectAsset(release Release) (Asset, error)
+	Download(asset Asset) (string, error)
+	Run() error
+}
 
-	resp, err := http.Get(latestReleaseUrl)
-	if err != nil {
-		logger.Error("Failed to fetch latest release", "url", latestReleaseUrl, "error", err)
-		return
+type RunCommandFunc = func(path string, args []string) error
+
+type defaultUpdater struct {
+	logger           hclog.Logger
+	device           *Device
+	latestReleaseUrl string
+	runCommand       RunCommandFunc
+}
+
+func NewUpdater(
+	logger hclog.Logger,
+	device *Device,
+	latestReleaseUrl string,
+	runCommand RunCommandFunc,
+) Updater {
+	return &defaultUpdater{
+		logger:           logger,
+		device:           device,
+		latestReleaseUrl: latestReleaseUrl,
+		runCommand:       runCommand,
 	}
-	defer resp.Body.Close()
+}
+
+func (u *defaultUpdater) Check() (Release, error) {
+	release := Release{}
+	u.logger.Info("Checking for updates")
+
+	resp, err := http.Get(u.latestReleaseUrl)
+	if err != nil {
+		u.logger.Error("Failed to fetch latest release", "url", u.latestReleaseUrl, "error", err)
+		return release, err
+	}
+	defer func() {
+		err = resp.Body.Close()
+		if err != nil {
+			u.logger.Error("Failed to close response", "error", err)
+		}
+	}()
 
 	if resp.StatusCode != http.StatusOK {
-		logger.Error("Failed to fetch latest release", "url", latestReleaseUrl, "status", resp.StatusCode)
-		return
+		u.logger.Error(
+			"Failed to fetch latest release",
+			"url",
+			u.latestReleaseUrl,
+			"status",
+			resp.StatusCode,
+		)
+		return release, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
 	}
 
-	var release release
 	if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
-		logger.Error("Failed to parse release", "error", err)
-		return
+		u.logger.Error("Failed to parse release", "error", err)
+		return release, err
 	}
 
-	logger.Info("Latest release", "tag_name", release.TagName)
-
-	if release.TagName == version.Version {
-		logger.Info("No updates available")
-		return
-	}
-
-	applicableAsset := findAsset(release.Assets)
-	if applicableAsset == nil {
-		logger.Error("No applicable asset", "os", runtime.GOOS)
-		return
-	}
-
-	logger.Info("Updating agent", "version", release.TagName)
-
-	err = update(logger, *applicableAsset, device)
-	if err != nil {
-		logger.Error("Failed to update agent", "error", err)
-		return
-	}
+	return release, nil
 }
 
-func findAsset(assets []asset) *asset {
-	for _, asset := range assets {
-		if runtime.GOOS == "windows" && strings.HasSuffix(asset.Name, ".win.exe") {
-			return &asset
-		}
-
-		if runtime.GOOS == "linux" && strings.HasSuffix(asset.Name, ".linux.bin") {
-			return &asset
-		}
-
-		if runtime.GOOS == "darwin" && strings.HasSuffix(asset.Name, ".mac-os.bin") {
-			return &asset
-		}
+func (u *defaultUpdater) Update(updaterExecutablePath string) error {
+	args := []string{
+		"--org-id",
+		u.device.RewstOrgId,
+		"--update",
+		"--logging-level",
+		string(u.device.LoggingLevel),
 	}
 
-	return nil
+	if u.device.UseSyslog {
+		args = append(args, "--syslog")
+	}
+
+	if u.device.DisableAgentPostback {
+		args = append(args, "--disable-agent-postback")
+	}
+
+	if u.device.DisableAutoUpdates {
+		args = append(args, "--no-auto-updates")
+	}
+
+	u.logger.Debug("Running update command", "path", updaterExecutablePath, "args", args)
+
+	return u.runCommand(updaterExecutablePath, args)
 }
 
-func download(asset asset) (string, error) {
+func (u *defaultUpdater) Download(asset Asset) (string, error) {
 	req, err := http.NewRequest(http.MethodGet, asset.Url, nil)
 	if err != nil {
 		return "", err
@@ -102,13 +128,21 @@ func download(asset asset) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	defer resp.Body.Close()
+	defer func() {
+		_ = resp.Body.Close()
+	}()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("download failed with status code: %d", resp.StatusCode)
+	}
 
 	file, err := os.CreateTemp("", "installer-*.bin")
 	if err != nil {
 		return "", err
 	}
-	defer file.Close()
+	defer func() {
+		_ = file.Close()
+	}()
 
 	_, err = io.Copy(file, resp.Body)
 	if err != nil {
@@ -118,41 +152,114 @@ func download(asset asset) (string, error) {
 	return file.Name(), nil
 }
 
-func update(logger hclog.Logger, asset asset, device Device) error {
-	path, err := download(asset)
+func (u *defaultUpdater) Run() error {
+	latestRelease, err := u.Check()
 	if err != nil {
 		return err
 	}
 
-	args := []string{"--org-id", device.RewstOrgId, "--update", "--logging-level", string(device.LoggingLevel)}
+	u.logger.Info("Latest release", "tag_name", latestRelease.TagName)
 
-	if device.UseSyslog {
-		args = append(args, "--syslog")
+	if latestRelease.TagName == version.Version {
+		u.logger.Info("No updates available")
+		return nil
 	}
 
-	if device.DisableAgentPostback {
-		args = append(args, "--disable-agent-postback")
+	u.logger.Info("Updating agent", "version", latestRelease.TagName)
+
+	applicableAsset, err := u.SelectAsset(latestRelease)
+	if err != nil {
+		return err
 	}
 
-	if device.DisableAutoUpdates {
-		args = append(args, "--no-auto-updates")
+	executablePath, err := u.Download(applicableAsset)
+	if err != nil {
+		return err
 	}
 
-	logger.Debug("Running update commmand", "path", path, "args", args)
-
-	cmd := exec.Command(path, args...)
-	err = cmd.Run()
-
-	return err
+	return u.Update(executablePath)
 }
 
-func RunAutoUpdater(logger hclog.Logger, device Device) {
-	logger.Info("Running auto updater", "version", version.Version)
+type AutoUpdateRunner struct {
+	logger      hclog.Logger
+	updater     Updater
+	interval    time.Duration
+	maxRetries  int
+	baseBackoff time.Duration
+	stop        chan struct{}
+	done        chan struct{}
+}
 
-	ticker := time.NewTicker(updateInterval)
-	defer ticker.Stop()
-
-	for range ticker.C {
-		autoUpdate(logger, device)
+func NewAutoUpdateRunner(
+	logger hclog.Logger,
+	updater Updater,
+	interval time.Duration,
+	maxRetries int,
+	baseBackoff time.Duration,
+) *AutoUpdateRunner {
+	return &AutoUpdateRunner{
+		logger:      logger,
+		updater:     updater,
+		interval:    interval,
+		maxRetries:  maxRetries,
+		baseBackoff: baseBackoff,
+		stop:        make(chan struct{}),
+		done:        make(chan struct{}),
 	}
+}
+
+func (r *AutoUpdateRunner) Start() {
+	r.logger.Info("Starting auto updater", "version", version.Version, "interval", r.interval)
+
+	go func() {
+		defer close(r.done)
+
+		timer := time.NewTimer(r.interval)
+		defer timer.Stop()
+
+		for {
+			select {
+			case <-r.stop:
+				r.logger.Info("Auto updater stopped")
+				return
+			case <-timer.C:
+				if err := r.updater.Run(); err != nil {
+					r.logger.Error("Update failed, starting retry backoff", "error", err)
+					if r.retryWithBackoff() {
+						return
+					}
+				}
+				timer.Reset(r.interval)
+			}
+		}
+	}()
+}
+
+func (r *AutoUpdateRunner) Stop() {
+	close(r.stop)
+	<-r.done
+}
+
+func (r *AutoUpdateRunner) retryWithBackoff() bool {
+	for attempt := range r.maxRetries {
+		backoff := r.baseBackoff * (1 << attempt)
+		r.logger.Info("Retrying update", "attempt", attempt+1, "backoff", backoff)
+
+		select {
+		case <-r.stop:
+			return true
+		case <-time.After(backoff):
+		}
+
+		if err := r.updater.Run(); err != nil {
+			r.logger.Error("Retry failed", "attempt", attempt+1, "error", err)
+			continue
+		}
+
+		r.logger.Info("Update succeeded on retry", "attempt", attempt+1)
+		return false
+	}
+
+	r.logger.Error("All retries exhausted")
+	return false
 }

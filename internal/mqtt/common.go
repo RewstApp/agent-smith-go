@@ -7,8 +7,10 @@ import (
 	mqtt "github.com/eclipse/paho.mqtt.golang"
 )
 
-type Client = mqtt.Client
-type Message = mqtt.Message
+type (
+	Client  = mqtt.Client
+	Message = mqtt.Message
+)
 
 var NewClient = mqtt.NewClient
 

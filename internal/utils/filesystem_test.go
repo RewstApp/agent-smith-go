@@ -1,41 +1,117 @@
 package utils
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 )
 
-func TestDirExists(t *testing.T) {
-	tmpDir := t.TempDir()
+// defaultFileSystem tests
 
-	if !DirExists(tmpDir) {
-		t.Errorf("expected true for existing directory %s", tmpDir)
+func TestDefaultFileSystem_MkdirAll(t *testing.T) {
+	fs := NewFileSystem()
+	newDir := filepath.Join(t.TempDir(), "sub", "dir")
+
+	err := fs.MkdirAll(newDir)
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	info, err := os.Stat(newDir)
+	if err != nil || !info.IsDir() {
+		t.Errorf("expected directory %s to exist", newDir)
 	}
 
-	nonExistentPath := filepath.Join(tmpDir, "does_not_exist")
-
-	if DirExists(nonExistentPath) {
-		t.Errorf("expected false for non-existent directory %s", nonExistentPath)
+	err = fs.MkdirAll(newDir)
+	if err != nil {
+		t.Fatalf("expected no error on second call, got %v", err)
 	}
 }
 
-func TestCreateFolderIfMissing(t *testing.T) {
-	tmpDir := t.TempDir()
-	newDir := filepath.Join(tmpDir, "new_folder")
+func TestNewFileSystem_ReturnsNonNil(t *testing.T) {
+	fs := NewFileSystem()
+	if fs == nil {
+		t.Fatal("expected non-nil FileSystem")
+	}
+}
 
-	err := CreateFolderIfMissing(newDir)
+func TestDefaultFileSystem_Executable(t *testing.T) {
+	fs := NewFileSystem()
 
+	path, err := fs.Executable()
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if path == "" {
+		t.Error("expected non-empty executable path")
+	}
+}
+
+func TestDefaultFileSystem_WriteFile(t *testing.T) {
+	fs := NewFileSystem()
+	filePath := filepath.Join(t.TempDir(), "test.txt")
+	data := []byte("hello")
+
+	err := fs.WriteFile(filePath, data, DefaultFileMod)
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
 
-	if !DirExists(newDir) {
-		t.Errorf("expected the directory %s to be created", newDir)
+	got, err := os.ReadFile(filePath)
+	if err != nil {
+		t.Fatalf("failed to read back file: %v", err)
+	}
+	if string(got) != string(data) {
+		t.Errorf("expected %q, got %q", data, got)
+	}
+}
+
+func TestDefaultFileSystem_ReadFile(t *testing.T) {
+	fs := NewFileSystem()
+	filePath := filepath.Join(t.TempDir(), "test.txt")
+	data := []byte("hello")
+
+	if err := os.WriteFile(filePath, data, DefaultFileMod); err != nil {
+		t.Fatal(err)
 	}
 
-	err = CreateFolderIfMissing(newDir)
-
+	got, err := fs.ReadFile(filePath)
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
+	}
+	if string(got) != string(data) {
+		t.Errorf("expected %q, got %q", data, got)
+	}
+}
+
+func TestDefaultFileSystem_RemoveAll(t *testing.T) {
+	fs := NewFileSystem()
+	dir := filepath.Join(t.TempDir(), "to_remove")
+
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	err := fs.RemoveAll(dir)
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if _, statErr := os.Stat(dir); !os.IsNotExist(statErr) {
+		t.Errorf("expected directory %s to be removed", dir)
+	}
+
+	// Calling RemoveAll on a non-existent path must also succeed.
+	err = fs.RemoveAll(dir)
+	if err != nil {
+		t.Fatalf("expected no error on non-existent path, got %v", err)
+	}
+}
+
+func TestDefaultFileSystem_ReadFile_NotFound(t *testing.T) {
+	fs := NewFileSystem()
+
+	_, err := fs.ReadFile(filepath.Join(t.TempDir(), "nonexistent.txt"))
+
+	if err == nil {
+		t.Error("expected error reading nonexistent file, got nil")
 	}
 }

@@ -6,14 +6,13 @@ import (
 	"time"
 
 	"github.com/RewstApp/agent-smith-go/internal/agent"
-	"github.com/RewstApp/agent-smith-go/internal/service"
 	"github.com/RewstApp/agent-smith-go/internal/utils"
 	"github.com/RewstApp/agent-smith-go/internal/version"
 )
 
 const serviceExecutableTimeout = time.Second * 5
 
-func runUninstall(params *uninstallParams) {
+func runUninstall(params *uninstallContext) {
 	logger := utils.ConfigureLogger("agent_smith", os.Stdout, utils.Default)
 
 	// Show header
@@ -21,12 +20,17 @@ func runUninstall(params *uninstallParams) {
 
 	name := agent.GetServiceName(params.OrgId)
 
-	service, err := service.Open(name)
+	service, err := params.ServiceManager.Open(name)
 	if err != nil {
 		logger.Error("Failed to open service", "service", name, "error", err)
 		return
 	}
-	defer service.Close()
+	defer func() {
+		err = service.Close()
+		if err != nil {
+			logger.Error("Failed to close service handle", "error", err)
+		}
+	}()
 
 	if service.IsActive() {
 		logger.Info("Stopping service", "service", name)
@@ -53,7 +57,7 @@ func runUninstall(params *uninstallParams) {
 
 	// Delete data directory
 	dataDir := agent.GetDataDirectory(params.OrgId)
-	err = os.RemoveAll(dataDir)
+	err = params.FS.RemoveAll(dataDir)
 	if err != nil {
 		logger.Error("Failed to delete directory", "directory", dataDir, "error", err)
 		return
@@ -62,7 +66,7 @@ func runUninstall(params *uninstallParams) {
 
 	// Delete program directory
 	programDir := agent.GetProgramDirectory(params.OrgId)
-	err = os.RemoveAll(programDir)
+	err = params.FS.RemoveAll(programDir)
 	if err != nil {
 		logger.Error("Failed to delete directory", "directory", programDir, "error", err)
 		return
@@ -71,7 +75,7 @@ func runUninstall(params *uninstallParams) {
 
 	// Delete scripts directory
 	scriptsDir := agent.GetScriptsDirectory(params.OrgId)
-	err = os.RemoveAll(scriptsDir)
+	err = params.FS.RemoveAll(scriptsDir)
 	if err != nil {
 		logger.Error("Failed to delete directory", "directory", scriptsDir, "error", err)
 		return

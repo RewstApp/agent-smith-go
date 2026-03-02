@@ -3,21 +3,56 @@
 package syslog
 
 import (
+	"errors"
 	"io"
 	"strings"
+	"syscall"
 
 	"golang.org/x/sys/windows/registry"
 	"golang.org/x/sys/windows/svc/eventlog"
 )
 
-type windowsSyslog struct {
-	out io.Writer
-	log *eventlog.Log
+type eventLogger interface {
+	Info(eid uint32, msg string) error
+	Warning(eid uint32, msg string) error
+	Error(eid uint32, msg string) error
+	Close() error
 }
 
-const infoEventId = 100
-const warningEventId = 200
-const errorEventId = 300
+type eventLogFactory interface {
+	OpenKey(name string) (io.Closer, error)
+	Install(name string) error
+	Open(name string) (eventLogger, error)
+}
+
+type windowsEventLogFactory struct{}
+
+func (f *windowsEventLogFactory) OpenKey(name string) (io.Closer, error) {
+	return registry.OpenKey(
+		registry.LOCAL_MACHINE,
+		`SYSTEM\CurrentControlSet\Services\EventLog\Application\`+name,
+		registry.READ,
+	)
+}
+
+func (f *windowsEventLogFactory) Install(name string) error {
+	return eventlog.InstallAsEventCreate(name, eventlog.Info|eventlog.Error|eventlog.Warning)
+}
+
+func (f *windowsEventLogFactory) Open(name string) (eventLogger, error) {
+	return eventlog.Open(name)
+}
+
+type windowsSyslog struct {
+	out io.Writer
+	log eventLogger
+}
+
+const (
+	infoEventId    = 100
+	warningEventId = 200
+	errorEventId   = 300
+)
 
 func (s *windowsSyslog) Write(data []byte) (int, error) {
 	// Write to event log
@@ -28,11 +63,11 @@ func (s *windowsSyslog) Write(data []byte) (int, error) {
 
 	// Use different levels
 	if strings.Contains(line, "[ERROR]") {
-		s.log.Error(errorEventId, message)
+		_ = s.log.Error(errorEventId, message) // Best effort logging
 	} else if strings.Contains(line, "[WARNING]") {
-		s.log.Warning(warningEventId, message)
+		_ = s.log.Warning(warningEventId, message) // Best effort logging
 	} else {
-		s.log.Info(infoEventId, message)
+		_ = s.log.Info(infoEventId, message) // Best effort logging
 	}
 
 	// Write to original output
@@ -43,48 +78,30 @@ func (s *windowsSyslog) Close() error {
 	return s.log.Close()
 }
 
-func eventSourceExists(name string) (bool, error) {
-	k, err := registry.OpenKey(
-		registry.LOCAL_MACHINE,
-		`SYSTEM\CurrentControlSet\Services\EventLog\Application\`+name,
-		registry.READ,
-	)
-
-	if err != nil {
-		if err == registry.ErrNotExist {
-			return false, nil
-		}
-		return false, err
-	}
-
-	k.Close()
-
-	return true, nil
+func New(name string, out io.Writer) (Syslog, error) {
+	return newWithFactory(name, out, &windowsEventLogFactory{})
 }
 
-func New(name string, out io.Writer) (Syslog, error) {
-
-	exists, err := eventSourceExists(name)
-	if err != nil {
-		return nil, err
-	}
-
-	if !exists {
-		err = eventlog.InstallAsEventCreate(name, eventlog.Info|eventlog.Error|eventlog.Warning)
+func newWithFactory(name string, out io.Writer, factory eventLogFactory) (Syslog, error) {
+	k, err := factory.OpenKey(name)
+	if err == nil {
+		err = k.Close()
 		if err != nil {
 			return nil, err
 		}
+	} else if errors.Is(err, registry.ErrNotExist) ||
+		errors.Is(err, syscall.ERROR_PATH_NOT_FOUND) {
+		if err = factory.Install(name); err != nil {
+			return nil, err
+		}
+	} else {
+		return nil, err
 	}
 
-	log, err := eventlog.Open(name)
+	log, err := factory.Open(name)
 	if err != nil {
 		return nil, err
 	}
 
-	syslogger := &windowsSyslog{
-		out: out,
-		log: log,
-	}
-
-	return syslogger, nil
+	return &windowsSyslog{out: out, log: log}, nil
 }
