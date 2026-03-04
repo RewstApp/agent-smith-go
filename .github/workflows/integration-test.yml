@@ -123,6 +123,12 @@ jobs:
           $postData = $PS_Results | ConvertTo-Json
           Invoke-RestMethod -Method \"Post\" -Uri $post_url -Body $postData -ContentType \"application/json\""'
 
+      - name: Check logs
+        shell: pwsh
+        run: |
+          Start-sleep -Seconds 10
+          Get-Content C:\ProgramData\RewstRemoteAgent\${{ vars.IT_ORG_ID }}\rewst_agent.log
+
       - name: Uninstall agent
         shell: pwsh
         run: |
