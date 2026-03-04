@@ -8,6 +8,11 @@ on:
         required: false
         type: string
         default: "['ubuntu-latest','windows-latest','macos-latest']"
+      skip_cache:
+        description: "Skip build cache (set to false to enable caching)"
+        required: false
+        type: boolean
+        default: true
 
 jobs:
   build:
@@ -25,17 +30,28 @@ jobs:
           ref: ${{ github.ref }}
           fetch-depth: 0
 
+      - name: Cache build output
+        if: ${{ !inputs.skip_cache }}
+        id: cache-build
+        uses: actions/cache@v4
+        with:
+          path: ./dist
+          key: build-${{ matrix.os }}-go1.24.0-${{ hashFiles('**/*.go', 'go.sum', 'go.mod') }}
+
       - name: Setup go
+        if: ${{ inputs.skip_cache || steps.cache-build.outputs.cache-hit != 'true' }}
         uses: actions/setup-go@v5
         with:
           go-version: "1.24.0"
 
       - name: Setup python
+        if: ${{ inputs.skip_cache || steps.cache-build.outputs.cache-hit != 'true' }}
         uses: actions/setup-python@v4
         with:
           python-version: "3.12"
 
       - name: Setup python packages
+        if: ${{ inputs.skip_cache || steps.cache-build.outputs.cache-hit != 'true' }}
         run: |
           pip install pipx
           pipx ensurepath
@@ -43,6 +59,7 @@ jobs:
           pipx upgrade commitizen
 
       - name: Build binary
+        if: ${{ inputs.skip_cache || steps.cache-build.outputs.cache-hit != 'true' }}
         shell: pwsh
         id: build
         run: ./scripts/build.ps1 | % { "binary_path=$_" } >> $env:GITHUB_OUTPUT
@@ -51,4 +68,4 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.os }}
-          path: ${{ steps.build.outputs.binary_path }}
+          path: ${{ steps.build.outputs.binary_path || './dist/*' }}
