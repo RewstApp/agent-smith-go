@@ -127,8 +127,24 @@ jobs:
       - name: Check logs
         shell: pwsh
         run: |
-          Start-sleep -Seconds 10
-          Get-Content C:\ProgramData\RewstRemoteAgent\${{ vars.IT_ORG_ID }}\rewst_agent.log
+          Start-Sleep -Seconds 10
+          $logFile = "C:\ProgramData\RewstRemoteAgent\${{ vars.IT_ORG_ID }}\rewst_agent.log"
+          $logContent = Get-Content $logFile -Raw
+          Write-Output $logContent
+
+          $expectedPatterns = @(
+            "Command completed",
+            "Sending postback",
+            "Postback already sent"
+          )
+
+          foreach ($pattern in $expectedPatterns) {
+            if ($logContent -notmatch [regex]::Escape($pattern)) {
+              Write-Error "Expected log line not found: $pattern"
+              exit 1
+            }
+          }
+          Write-Output "All expected log lines found"
 
       - name: Uninstall agent
         shell: pwsh
