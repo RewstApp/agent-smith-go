@@ -25,6 +25,7 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version: "1.24.0"
+          cache: true
 
       - name: Setup python
         uses: actions/setup-python@v4

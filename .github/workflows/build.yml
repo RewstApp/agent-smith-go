@@ -43,12 +43,14 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version: "1.24.0"
+          cache: true
 
       - name: Setup python
         if: ${{ inputs.skip_cache || steps.cache-build.outputs.cache-hit != 'true' }}
         uses: actions/setup-python@v4
         with:
           python-version: "3.12"
+          cache: "pip"
 
       - name: Setup python packages
         if: ${{ inputs.skip_cache || steps.cache-build.outputs.cache-hit != 'true' }}
