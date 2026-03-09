@@ -127,7 +127,6 @@ jobs:
       - name: Check logs
         shell: pwsh
         run: |
-          Start-Sleep -Seconds 10
           $logFile = "C:\ProgramData\RewstRemoteAgent\${{ vars.IT_ORG_ID }}\rewst_agent.log"
           $logContent = Get-Content $logFile -Raw
           Write-Output $logContent
@@ -143,6 +142,41 @@ jobs:
               Write-Error "Expected log line not found: $pattern"
               exit 1
             }
+          }
+          Write-Output "All expected log lines found"
+
+      - name: Update logging level to debug
+        shell: pwsh
+        run: |
+          ./dist/rewst_agent_config.win.exe --update --org-id ${{ vars.IT_ORG_ID }} --logging-level debug
+          Write-Output "Logging level successfully updated to debug"
+
+      - name: Send test command
+        shell: pwsh
+        run: |
+          curl --location '${{ vars.IT_SEND_COMMAND_TRIGGER_URL }}' `
+          --form 'device_id="${{ steps.get_device_id.outputs.value }}"' `
+          --form 'commands="[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
+          $PS_Results = New-Object -TypeName psobject
+
+          # Start of typed powershell
+          $PS_Results | Add-Member -MemberType NoteProperty -Name \"error\" -Value \"\"
+          $PS_Results | Add-Member -MemberType NoteProperty -Name \"output\" -Value \"hello world`n\"
+
+          # Post results back to Rewst
+          $postData = $PS_Results | ConvertTo-Json
+          Invoke-RestMethod -Method \"Post\" -Uri $post_url -Body $postData -ContentType \"application/json\""'
+
+      - name: Check logs
+        shell: pwsh
+        run: |
+          $logFile = "C:\ProgramData\RewstRemoteAgent\${{ vars.IT_ORG_ID }}\rewst_agent.log"
+          $logContent = Get-Content $logFile -Raw
+          Write-Output $logContent
+
+          if ($logContent -notmatch [regex]::Escape("DEBUG") {
+            Write-Error "Expected log line not found: DEBUG"
           }
           Write-Output "All expected log lines found"
 
