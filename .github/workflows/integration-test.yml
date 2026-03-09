@@ -175,7 +175,7 @@ jobs:
           $logContent = Get-Content $logFile -Raw
           Write-Output $logContent
 
-          if ($logContent -notmatch [regex]::Escape("DEBUG") {
+          if ($logContent -notmatch [regex]::Escape("DEBUG")) {
             Write-Error "Expected log line not found: DEBUG"
           }
           Write-Output "All expected log lines found"
