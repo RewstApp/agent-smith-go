@@ -8,11 +8,11 @@ on:
         required: false
         type: string
         default: "['ubuntu-latest','windows-latest','macos-latest']"
-      skip_cache:
-        description: "Skip build cache (set to false to enable caching)"
+      cache:
+        description: "Enable build cache"
         required: false
         type: boolean
-        default: true
+        default: false
 
 jobs:
   build:
@@ -31,7 +31,7 @@ jobs:
           fetch-depth: 0
 
       - name: Cache build output
-        if: ${{ !inputs.skip_cache }}
+        if: ${{ inputs.cache }}
         id: cache-build
         uses: actions/cache@v5
         with:
@@ -39,20 +39,20 @@ jobs:
           key: build-${{ matrix.os }}-go1.24.0-${{ hashFiles('**/*.go', 'go.sum', 'go.mod') }}
 
       - name: Setup go
-        if: ${{ inputs.skip_cache || steps.cache-build.outputs.cache-hit != 'true' }}
+        if: ${{ !inputs.cache || steps.cache-build.outputs.cache-hit != 'true' }}
         uses: actions/setup-go@v6
         with:
           go-version: "1.24.0"
           cache: true
 
       - name: Setup python
-        if: ${{ inputs.skip_cache || steps.cache-build.outputs.cache-hit != 'true' }}
+        if: ${{ !inputs.cache || steps.cache-build.outputs.cache-hit != 'true' }}
         uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
       - name: Setup python packages
-        if: ${{ inputs.skip_cache || steps.cache-build.outputs.cache-hit != 'true' }}
+        if: ${{ !inputs.cache || steps.cache-build.outputs.cache-hit != 'true' }}
         run: |
           pip install pipx
           pipx ensurepath
@@ -60,7 +60,7 @@ jobs:
           pipx upgrade commitizen
 
       - name: Build binary
-        if: ${{ inputs.skip_cache || steps.cache-build.outputs.cache-hit != 'true' }}
+        if: ${{ !inputs.cache || steps.cache-build.outputs.cache-hit != 'true' }}
         shell: pwsh
         id: build
         run: ./scripts/build.ps1 | % { "binary_path=$_" } >> $env:GITHUB_OUTPUT

@@ -20,7 +20,7 @@ jobs:
     uses: ./.github/workflows/build.yml
     with:
       os_list: "${{ inputs.os == 'all' && '[''windows-latest'',''ubuntu-latest'',''macos-latest'']' || format('[{0}{1}{0}]', '''', inputs.os) }}"
-      skip_cache: false
+      cache: true
 
   test-ubuntu-latest:
     permissions:
