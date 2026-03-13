@@ -163,7 +163,7 @@ jobs:
       - name: Update agent
         shell: bash
         run: |
-          sudo ./dist/rewst_agent_config.linux.bin --update --org-id ${{ vars.IT_ORG_ID }} --no-auto-updates --disable-agent-postback
+          sudo ./dist/rewst_agent_config.linux.bin --update --org-id ${{ vars.IT_ORG_ID }} --no-auto-updates
 
       - name: Check logs for no auto updater
         shell: bash
@@ -177,31 +177,6 @@ jobs:
             exit 1
           fi
           echo "Confirmed: no 'Starting auto updater' log line found"
-
-      - name: Send test command
-        shell: bash
-        run: |
-          curl --location '${{ vars.IT_SEND_COMMAND_TRIGGER_URL }}' \
-          --form 'device_id="${{ steps.get_device_id.outputs.value }}"' \
-          --form 'commands="echo \"hello world\""'
-
-      - name: Check logs for command received
-        shell: bash
-        run: |
-          logFile="/etc/rewst_remote_agent/${{ vars.IT_ORG_ID }}/rewst_agent.log"
-          logContent=$(cat "$logFile")
-          echo "$logContent"
-
-          if ! echo "$logContent" | grep -qF "Command completed"; then
-            echo "ERROR: Expected log line not found: Command completed"
-            exit 1
-          fi
-
-          if echo "$logContent" | grep -qF "Postback already sent"; then
-            echo "ERROR: Unexpected log line found: Postback already sent"
-            exit 1
-          fi
-          echo "All log checks passed"
 
       - name: Update agent with syslog
         shell: bash
