@@ -624,7 +624,7 @@ jobs:
       - name: Stop service
         shell: bash
         run: |
-          sudo launchctl bootout system/${{ steps.install_agent.outputs.service }} || true
+          sudo launchctl stop system/${{ steps.install_agent.outputs.service }} || true
 
       - name: Delete log file
         shell: bash
