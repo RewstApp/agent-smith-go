@@ -35,7 +35,7 @@ func (s *darwinSyslog) Write(data []byte) (int, error) {
 		priority = "daemon.warning"
 	}
 
-	err := s.runner.Run(priority, s.source, message)
+	err := s.runner.Run(priority, s.source, s.source+": "+message)
 	if err != nil {
 		return 0, err
 	}

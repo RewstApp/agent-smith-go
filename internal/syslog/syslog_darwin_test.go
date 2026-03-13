@@ -93,8 +93,8 @@ func TestDarwinSyslog_Write_PassesSourceAndMessage(t *testing.T) {
 	if runner.source != "my-app" {
 		t.Errorf("expected source 'my-app', got %q", runner.source)
 	}
-	if runner.message != "hello world" {
-		t.Errorf("expected message 'hello world', got %q", runner.message)
+	if runner.message != "my-app: hello world" {
+		t.Errorf("expected message 'my-app: hello world', got %q", runner.message)
 	}
 }
 
