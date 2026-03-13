@@ -56,12 +56,152 @@ jobs:
         run: |
           echo "value=$(cat /etc/rewst_remote_agent/${{ vars.IT_ORG_ID }}/config.json | jq -r '.device_id')" >> "$GITHUB_OUTPUT"
 
+      - name: Validate config.json fields
+        shell: bash
+        run: |
+          config="/etc/rewst_remote_agent/${{ vars.IT_ORG_ID }}/config.json"
+          failed=false
+
+          for field in device_id rewst_org_id rewst_engine_host shared_access_key azure_iot_hub_host; do
+            val=$(jq -r ".$field" "$config")
+            if [ -z "$val" ] || [ "$val" = "null" ]; then
+              echo "ERROR: Config field '$field' is missing or empty"
+              failed=true
+            else
+              echo "OK: $field = $val"
+            fi
+          done
+
+          org_id=$(jq -r '.rewst_org_id' "$config")
+          if [ "$org_id" != "${{ vars.IT_ORG_ID }}" ]; then
+            echo "ERROR: rewst_org_id '$org_id' does not match expected '${{ vars.IT_ORG_ID }}'"
+            failed=true
+          fi
+
+          if [ "$failed" = true ]; then exit 1; fi
+          echo "All config.json fields validated"
+
       - name: Send test command
         shell: bash
         run: |
           curl --location '${{ vars.IT_SEND_COMMAND_TRIGGER_URL }}' \
           --form 'device_id="${{ steps.get_device_id.outputs.value }}"' \
           --form 'commands="echo \"hello world\""'
+
+      - name: Check logs
+        shell: bash
+        run: |
+          logFile="/etc/rewst_remote_agent/${{ vars.IT_ORG_ID }}/rewst_agent.log"
+          logContent=$(cat "$logFile")
+          echo "$logContent"
+
+          for pattern in "Command completed" "Sending postback" "Postback sent"; do
+            if ! echo "$logContent" | grep -qF "$pattern"; then
+              echo "ERROR: Expected log line not found: $pattern"
+              exit 1
+            fi
+          done
+          echo "All expected log lines found"
+
+      - name: Send failing command
+        shell: bash
+        run: |
+          curl --location '${{ vars.IT_SEND_COMMAND_TRIGGER_URL }}' \
+          --form 'device_id="${{ steps.get_device_id.outputs.value }}"' \
+          --form 'commands="exit 1"'
+
+      - name: Check logs for error handling
+        shell: bash
+        run: |
+          sleep 15
+          logFile="/etc/rewst_remote_agent/${{ vars.IT_ORG_ID }}/rewst_agent.log"
+          logContent=$(cat "$logFile")
+          echo "$logContent"
+
+          if ! echo "$logContent" | grep -qF "Command failed"; then
+            echo "ERROR: Expected 'Command failed' not found in logs"
+            exit 1
+          fi
+          echo "Error handling verified: failing command error was captured"
+
+      - name: Update logging level to debug
+        shell: bash
+        run: |
+          sudo ./dist/rewst_agent_config.linux.bin --update --org-id ${{ vars.IT_ORG_ID }} --logging-level debug
+          echo "Logging level successfully updated to debug"
+
+      - name: Send test command
+        shell: bash
+        run: |
+          curl --location '${{ vars.IT_SEND_COMMAND_TRIGGER_URL }}' \
+          --form 'device_id="${{ steps.get_device_id.outputs.value }}"' \
+          --form 'commands="echo \"hello world\""'
+
+      - name: Check logs for debug level
+        shell: bash
+        run: |
+          logFile="/etc/rewst_remote_agent/${{ vars.IT_ORG_ID }}/rewst_agent.log"
+          logContent=$(cat "$logFile")
+          echo "$logContent"
+
+          if ! echo "$logContent" | grep -qF "DEBUG"; then
+            echo "ERROR: Expected log line not found: DEBUG"
+            exit 1
+          fi
+          echo "All expected log lines found"
+
+      - name: Stop service
+        shell: bash
+        run: |
+          sudo systemctl stop ${{ steps.install_agent.outputs.service }}
+
+      - name: Delete log file
+        shell: bash
+        run: |
+          sudo rm -f "/etc/rewst_remote_agent/${{ vars.IT_ORG_ID }}/rewst_agent.log"
+
+      - name: Update agent
+        shell: bash
+        run: |
+          sudo ./dist/rewst_agent_config.linux.bin --update --org-id ${{ vars.IT_ORG_ID }} --no-auto-updates
+
+      - name: Check logs for no auto updater
+        shell: bash
+        run: |
+          logFile="/etc/rewst_remote_agent/${{ vars.IT_ORG_ID }}/rewst_agent.log"
+          logContent=$(cat "$logFile")
+          echo "$logContent"
+
+          if echo "$logContent" | grep -qF "Starting auto updater"; then
+            echo "ERROR: Unexpected log line found: Starting auto updater"
+            exit 1
+          fi
+          echo "Confirmed: no 'Starting auto updater' log line found"
+
+      - name: Update agent with syslog
+        shell: bash
+        run: |
+          sudo ./dist/rewst_agent_config.linux.bin --update --org-id ${{ vars.IT_ORG_ID }} --syslog
+
+      - name: Send test command
+        shell: bash
+        run: |
+          curl --location '${{ vars.IT_SEND_COMMAND_TRIGGER_URL }}' \
+          --form 'device_id="${{ steps.get_device_id.outputs.value }}"' \
+          --form 'commands="echo \"hello world\""'
+
+      - name: Check syslog for command completed
+        shell: bash
+        run: |
+          sleep 15
+          entries=$(journalctl -t "rewst_remote_agent_${{ vars.IT_ORG_ID }}" --no-pager 2>/dev/null || sudo grep "rewst_remote_agent_${{ vars.IT_ORG_ID }}" /var/log/syslog 2>/dev/null || sudo grep "rewst_remote_agent_${{ vars.IT_ORG_ID }}" /var/log/messages 2>/dev/null || true)
+          echo "$entries"
+
+          if ! echo "$entries" | grep -qF "Command completed"; then
+            echo "ERROR: Expected 'Command completed' entry not found in syslog"
+            exit 1
+          fi
+          echo "Found 'Command completed' in syslog"
 
       - name: Uninstall agent
         shell: bash

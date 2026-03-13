@@ -283,9 +283,9 @@ func TestDefaultServiceManager_Open_Success(t *testing.T) {
 	if svc == nil {
 		t.Fatal("expected service, got nil")
 	}
-	if len(mock.runCalls) != 1 || mock.runCalls[0][0] != "status" ||
+	if len(mock.runCalls) != 1 || mock.runCalls[0][0] != "is-enabled" ||
 		mock.runCalls[0][1] != "test-svc" {
-		t.Errorf("expected Run(status, test-svc), got %v", mock.runCalls)
+		t.Errorf("expected Run(is-enabled, test-svc), got %v", mock.runCalls)
 	}
 }
 
