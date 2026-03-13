@@ -680,7 +680,8 @@ jobs:
         shell: bash
         run: |
           sleep 15
-          entries=$(log show --predicate 'process == "rewst_remote_agent_${{ vars.IT_ORG_ID }}"' --last 5m 2>/dev/null || sudo grep "rewst_remote_agent_${{ vars.IT_ORG_ID }}" /var/log/system.log 2>/dev/null || true)
+          SERVICE_NAME="io.rewst.remote_agent_${{ vars.IT_ORG_ID }}"
+          entries=$(log show --predicate "process == 'logger'" --last 5m 2>/dev/null | grep "$SERVICE_NAME" || sudo grep "$SERVICE_NAME" /var/log/system.log 2>/dev/null || true)
           echo "$entries"
 
           if ! echo "$entries" | grep -qF "Command completed"; then
