@@ -20,6 +20,7 @@ jobs:
     uses: ./.github/workflows/build.yml
     with:
       os_list: "${{ inputs.os == 'all' && '[''windows-latest'',''ubuntu-latest'',''macos-latest'']' || format('[{0}{1}{0}]', '''', inputs.os) }}"
+      cache: true
 
   test-ubuntu-latest:
     permissions:
@@ -29,7 +30,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Download compiled binary
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: ubuntu-latest
           path: ./dist
@@ -83,7 +84,7 @@ jobs:
     runs-on: windows-latest
     steps:
       - name: Download compiled binary
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: windows-latest
           path: ./dist
@@ -106,6 +107,37 @@ jobs:
         run: |
           (Get-Content C:\ProgramData\RewstRemoteAgent\${{ vars.IT_ORG_ID }}\config.json | ConvertFrom-Json).device_id | % { "value=$_" } >> $env:GITHUB_OUTPUT
 
+      - name: Validate config.json fields
+        shell: pwsh
+        run: |
+          $config = Get-Content C:\ProgramData\RewstRemoteAgent\${{ vars.IT_ORG_ID }}\config.json | ConvertFrom-Json
+
+          $requiredFields = @(
+            @{ Name = "device_id";          Value = $config.device_id },
+            @{ Name = "rewst_org_id";       Value = $config.rewst_org_id },
+            @{ Name = "rewst_engine_host";  Value = $config.rewst_engine_host },
+            @{ Name = "shared_access_key";  Value = $config.shared_access_key },
+            @{ Name = "azure_iot_hub_host"; Value = $config.azure_iot_hub_host }
+          )
+
+          $failed = $false
+          foreach ($field in $requiredFields) {
+            if ([string]::IsNullOrWhiteSpace($field.Value)) {
+              Write-Error "Config field '$($field.Name)' is missing or empty"
+              $failed = $true
+            } else {
+              Write-Output "OK: $($field.Name) = $($field.Value)"
+            }
+          }
+
+          if ($config.rewst_org_id -ne "${{ vars.IT_ORG_ID }}") {
+            Write-Error "rewst_org_id '$($config.rewst_org_id)' does not match expected '${{ vars.IT_ORG_ID }}'"
+            $failed = $true
+          }
+
+          if ($failed) { exit 1 }
+          Write-Output "All config.json fields validated"
+
       - name: Send test command
         shell: pwsh
         run: |
@@ -122,6 +154,191 @@ jobs:
           # Post results back to Rewst
           $postData = $PS_Results | ConvertTo-Json
           Invoke-RestMethod -Method \"Post\" -Uri $post_url -Body $postData -ContentType \"application/json\""'
+
+      - name: Check logs
+        shell: pwsh
+        run: |
+          $logFile = "C:\ProgramData\RewstRemoteAgent\${{ vars.IT_ORG_ID }}\rewst_agent.log"
+          $logContent = Get-Content $logFile -Raw
+          Write-Output $logContent
+
+          $expectedPatterns = @(
+            "Command completed",
+            "Sending postback",
+            "Postback already sent"
+          )
+
+          foreach ($pattern in $expectedPatterns) {
+            if ($logContent -notmatch [regex]::Escape($pattern)) {
+              Write-Error "Expected log line not found: $pattern"
+              exit 1
+            }
+          }
+          Write-Output "All expected log lines found"
+
+      - name: Send failing command
+        shell: pwsh
+        run: |
+          curl --location '${{ vars.IT_SEND_COMMAND_TRIGGER_URL }}' `
+          --form 'device_id="${{ steps.get_device_id.outputs.value }}"' `
+          --form 'commands="[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
+          $PS_Results = New-Object -TypeName psobject
+
+          # Start of typed powershell
+          throw \"this is a test error\"
+
+          # Post results back to Rewst
+          $postData = $PS_Results | ConvertTo-Json
+          Invoke-RestMethod -Method \"Post\" -Uri $post_url -Body $postData -ContentType \"application/json\""'
+
+      - name: Check logs for error handling
+        shell: pwsh
+        run: |
+          Start-Sleep -Seconds 15
+          $logFile = "C:\ProgramData\RewstRemoteAgent\${{ vars.IT_ORG_ID }}\rewst_agent.log"
+          $logContent = Get-Content $logFile -Raw
+          Write-Output $logContent
+
+          if ($logContent -notmatch "Command failed") {
+            Write-Error "Expected error message 'Command failed' not found in logs"
+            exit 1
+          }
+          Write-Output "Error handling verified: failing command error was captured"
+
+      - name: Update logging level to debug
+        shell: pwsh
+        run: |
+          ./dist/rewst_agent_config.win.exe --update --org-id ${{ vars.IT_ORG_ID }} --logging-level debug
+          Write-Output "Logging level successfully updated to debug"
+
+      - name: Send test command
+        shell: pwsh
+        run: |
+          curl --location '${{ vars.IT_SEND_COMMAND_TRIGGER_URL }}' `
+          --form 'device_id="${{ steps.get_device_id.outputs.value }}"' `
+          --form 'commands="[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
+          $PS_Results = New-Object -TypeName psobject
+
+          # Start of typed powershell
+          $PS_Results | Add-Member -MemberType NoteProperty -Name \"error\" -Value \"\"
+          $PS_Results | Add-Member -MemberType NoteProperty -Name \"output\" -Value \"hello world`n\"
+
+          # Post results back to Rewst
+          $postData = $PS_Results | ConvertTo-Json
+          Invoke-RestMethod -Method \"Post\" -Uri $post_url -Body $postData -ContentType \"application/json\""'
+
+      - name: Check logs
+        shell: pwsh
+        run: |
+          $logFile = "C:\ProgramData\RewstRemoteAgent\${{ vars.IT_ORG_ID }}\rewst_agent.log"
+          $logContent = Get-Content $logFile -Raw
+          Write-Output $logContent
+
+          if ($logContent -notmatch [regex]::Escape("DEBUG")) {
+            Write-Error "Expected log line not found: DEBUG"
+          }
+          Write-Output "All expected log lines found"
+
+      - name: Stop service
+        shell: pwsh
+        run: |
+          sc.exe stop ${{ steps.install_agent.outputs.service }}
+
+      - name: Delete log file
+        shell: pwsh
+        run: |
+          Remove-Item -Force "C:\ProgramData\RewstRemoteAgent\${{ vars.IT_ORG_ID }}\rewst_agent.log"
+
+      - name: Update agent
+        shell: pwsh
+        run: |
+          ./dist/rewst_agent_config.win.exe --update --org-id ${{ vars.IT_ORG_ID }} --no-auto-updates --disable-agent-postback
+
+      - name: Check logs for no auto updater
+        shell: pwsh
+        run: |
+          $logFile = "C:\ProgramData\RewstRemoteAgent\${{ vars.IT_ORG_ID }}\rewst_agent.log"
+          $logContent = Get-Content $logFile -Raw
+          Write-Output $logContent
+
+          if ($logContent -match [regex]::Escape("Starting auto updater")) {
+            Write-Error "Unexpected log line found: Starting auto updater"
+            exit 1
+          }
+          Write-Output "Confirmed: no 'Starting auto updater' log line found"
+
+      - name: Send test command
+        shell: pwsh
+        run: |
+          curl --location '${{ vars.IT_SEND_COMMAND_TRIGGER_URL }}' `
+          --form 'device_id="${{ steps.get_device_id.outputs.value }}"' `
+          --form 'commands="[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
+          $PS_Results = New-Object -TypeName psobject
+
+          # Start of typed powershell
+          $PS_Results | Add-Member -MemberType NoteProperty -Name \"error\" -Value \"\"
+          $PS_Results | Add-Member -MemberType NoteProperty -Name \"output\" -Value \"hello world`n\"
+
+          # Post results back to Rewst
+          $postData = $PS_Results | ConvertTo-Json
+          Invoke-RestMethod -Method \"Post\" -Uri $post_url -Body $postData -ContentType \"application/json\""'
+
+      - name: Check logs for command received
+        shell: pwsh
+        run: |
+          $logFile = "C:\ProgramData\RewstRemoteAgent\${{ vars.IT_ORG_ID }}\rewst_agent.log"
+          $logContent = Get-Content $logFile -Raw
+          Write-Output $logContent
+
+          if ($logContent -notmatch [regex]::Escape("Command completed")) {
+            Write-Error "Expected log line not found: Command completed"
+            exit 1
+          }
+
+          if ($logContent -match [regex]::Escape("Postback already sent")) {
+            Write-Error "Unexpected log line found: Postback already sent"
+            exit 1
+          }
+          Write-Output "All log checks passed"
+
+      - name: Update agent with syslog
+        shell: pwsh
+        run: |
+          ./dist/rewst_agent_config.win.exe --update --org-id ${{ vars.IT_ORG_ID }} --syslog
+
+      - name: Send test command
+        shell: pwsh
+        run: |
+          curl --location '${{ vars.IT_SEND_COMMAND_TRIGGER_URL }}' `
+          --form 'device_id="${{ steps.get_device_id.outputs.value }}"' `
+          --form 'commands="[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
+          $PS_Results = New-Object -TypeName psobject
+
+          # Start of typed powershell
+          $PS_Results | Add-Member -MemberType NoteProperty -Name \"error\" -Value \"\"
+          $PS_Results | Add-Member -MemberType NoteProperty -Name \"output\" -Value \"hello world`n\"
+
+          # Post results back to Rewst
+          $postData = $PS_Results | ConvertTo-Json
+          Invoke-RestMethod -Method \"Post\" -Uri $post_url -Body $postData -ContentType \"application/json\""'
+
+      - name: Check Windows Event Log for command completed
+        shell: pwsh
+        run: |
+          $events = Get-WinEvent -LogName Application -FilterXPath "*[System[Provider[@Name='RewstRemoteAgent_${{ vars.IT_ORG_ID }}']]]"
+          Write-Output "Found $($events.Count) event(s)"
+          $events | ForEach-Object { Write-Output $_.Message }
+
+          $matched = $events | Where-Object { $_.Message -match "Command completed" }
+          if (-not $matched) {
+            Write-Error "Expected 'Command completed' entry not found in Windows Event Log"
+            exit 1
+          }
+          Write-Output "Found 'Command completed' in Windows Event Log"
 
       - name: Uninstall agent
         shell: pwsh
@@ -144,7 +361,7 @@ jobs:
     runs-on: macos-latest
     steps:
       - name: Download compiled binary
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: macos-latest
           path: ./dist

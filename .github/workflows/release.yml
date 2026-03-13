@@ -10,13 +10,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           ref: ${{ github.ref }}
           fetch-depth: 0
 
       - name: Setup python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
@@ -59,13 +59,13 @@ jobs:
       contents: write
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           ref: ${{ github.ref }}
           fetch-depth: 0
 
       - name: Setup python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
@@ -81,19 +81,19 @@ jobs:
         run: echo "version=v$(cz version -p)" >> $GITHUB_OUTPUT
 
       - name: Download windows signed assets
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: windows-latest-signed
           path: ./signed
 
       - name: Download linux signed assets
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: ubuntu-latest-signed
           path: ./signed
 
       - name: Download macos signed assets
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: macos-latest-signed
           path: ./signed
