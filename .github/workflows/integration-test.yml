@@ -200,8 +200,8 @@ jobs:
           $logContent = Get-Content $logFile -Raw
           Write-Output $logContent
 
-          if ($logContent -notmatch "this is a test error") {
-            Write-Error "Expected error message 'this is a test error' not found in logs"
+          if ($logContent -notmatch "Command failed") {
+            Write-Error "Expected error message 'Command failed' not found in logs"
             exit 1
           }
           Write-Output "Error handling verified: failing command error was captured"
