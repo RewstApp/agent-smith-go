@@ -107,6 +107,37 @@ jobs:
         run: |
           (Get-Content C:\ProgramData\RewstRemoteAgent\${{ vars.IT_ORG_ID }}\config.json | ConvertFrom-Json).device_id | % { "value=$_" } >> $env:GITHUB_OUTPUT
 
+      - name: Validate config.json fields
+        shell: pwsh
+        run: |
+          $config = Get-Content C:\ProgramData\RewstRemoteAgent\${{ vars.IT_ORG_ID }}\config.json | ConvertFrom-Json
+
+          $requiredFields = @(
+            @{ Name = "device_id";          Value = $config.device_id },
+            @{ Name = "rewst_org_id";       Value = $config.rewst_org_id },
+            @{ Name = "rewst_engine_host";  Value = $config.rewst_engine_host },
+            @{ Name = "shared_access_key";  Value = $config.shared_access_key },
+            @{ Name = "azure_iot_hub_host"; Value = $config.azure_iot_hub_host }
+          )
+
+          $failed = $false
+          foreach ($field in $requiredFields) {
+            if ([string]::IsNullOrWhiteSpace($field.Value)) {
+              Write-Error "Config field '$($field.Name)' is missing or empty"
+              $failed = $true
+            } else {
+              Write-Output "OK: $($field.Name) = $($field.Value)"
+            }
+          }
+
+          if ($config.rewst_org_id -ne "${{ vars.IT_ORG_ID }}") {
+            Write-Error "rewst_org_id '$($config.rewst_org_id)' does not match expected '${{ vars.IT_ORG_ID }}'"
+            $failed = $true
+          }
+
+          if ($failed) { exit 1 }
+          Write-Output "All config.json fields validated"
+
       - name: Send test command
         shell: pwsh
         run: |
@@ -144,6 +175,36 @@ jobs:
             }
           }
           Write-Output "All expected log lines found"
+
+      - name: Send failing command
+        shell: pwsh
+        run: |
+          curl --location '${{ vars.IT_SEND_COMMAND_TRIGGER_URL }}' `
+          --form 'device_id="${{ steps.get_device_id.outputs.value }}"' `
+          --form 'commands="[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
+          $PS_Results = New-Object -TypeName psobject
+
+          # Start of typed powershell
+          throw \"this is a test error\"
+
+          # Post results back to Rewst
+          $postData = $PS_Results | ConvertTo-Json
+          Invoke-RestMethod -Method \"Post\" -Uri $post_url -Body $postData -ContentType \"application/json\""'
+
+      - name: Check logs for error handling
+        shell: pwsh
+        run: |
+          Start-Sleep -Seconds 15
+          $logFile = "C:\ProgramData\RewstRemoteAgent\${{ vars.IT_ORG_ID }}\rewst_agent.log"
+          $logContent = Get-Content $logFile -Raw
+          Write-Output $logContent
+
+          if ($logContent -notmatch "this is a test error") {
+            Write-Error "Expected error message 'this is a test error' not found in logs"
+            exit 1
+          }
+          Write-Output "Error handling verified: failing command error was captured"
 
       - name: Update logging level to debug
         shell: pwsh
