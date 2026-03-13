@@ -243,6 +243,42 @@ jobs:
           }
           Write-Output "All log checks passed"
 
+      - name: Update agent with syslog
+        shell: pwsh
+        run: |
+          ./dist/rewst_agent_config.win.exe --update --org-id ${{ vars.IT_ORG_ID }} --syslog
+
+      - name: Send test command
+        shell: pwsh
+        run: |
+          curl --location '${{ vars.IT_SEND_COMMAND_TRIGGER_URL }}' `
+          --form 'device_id="${{ steps.get_device_id.outputs.value }}"' `
+          --form 'commands="[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
+          $PS_Results = New-Object -TypeName psobject
+
+          # Start of typed powershell
+          $PS_Results | Add-Member -MemberType NoteProperty -Name \"error\" -Value \"\"
+          $PS_Results | Add-Member -MemberType NoteProperty -Name \"output\" -Value \"hello world`n\"
+
+          # Post results back to Rewst
+          $postData = $PS_Results | ConvertTo-Json
+          Invoke-RestMethod -Method \"Post\" -Uri $post_url -Body $postData -ContentType \"application/json\""'
+
+      - name: Check Windows Event Log for command completed
+        shell: pwsh
+        run: |
+          $events = Get-WinEvent -LogName Application -FilterXPath "*[System[Provider[@Name='RewstRemoteAgent']]]" -ErrorAction SilentlyContinue
+          Write-Output "Found $($events.Count) event(s)"
+          $events | ForEach-Object { Write-Output $_.Message }
+
+          $matched = $events | Where-Object { $_.Message -match "Command completed" }
+          if (-not $matched) {
+            Write-Error "Expected 'Command completed' entry not found in Windows Event Log"
+            exit 1
+          }
+          Write-Output "Found 'Command completed' in Windows Event Log"
+
       - name: Uninstall agent
         shell: pwsh
         run: |
