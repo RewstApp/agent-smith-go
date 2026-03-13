@@ -183,7 +183,7 @@ jobs:
       - name: Delete log file
         shell: pwsh
         run: |
-          Remove-Item -Force -ErrorAction SilentlyContinue "C:\ProgramData\RewstRemoteAgent\${{ vars.IT_ORG_ID }}\rewst_agent.log"
+          Remove-Item -Force "C:\ProgramData\RewstRemoteAgent\${{ vars.IT_ORG_ID }}\rewst_agent.log"
 
       - name: Update agent
         shell: pwsh
