@@ -95,7 +95,7 @@ jobs:
           logContent=$(cat "$logFile")
           echo "$logContent"
 
-          for pattern in "Command completed" "Sending postback" "Postback already sent"; do
+          for pattern in "Command completed" "Sending postback" "Postback sent"; do
             if ! echo "$logContent" | grep -qF "$pattern"; then
               echo "ERROR: Expected log line not found: $pattern"
               exit 1
