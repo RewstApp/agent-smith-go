@@ -268,7 +268,7 @@ jobs:
       - name: Check Windows Event Log for command completed
         shell: pwsh
         run: |
-          $events = Get-WinEvent -LogName Application -FilterXPath "*[System[Provider[@Name='RewstRemoteAgent']]]" -ErrorAction SilentlyContinue
+          $events = Get-WinEvent -LogName Application -FilterXPath "*[System[Provider[@Name='RewstRemoteAgent_${{ vars.IT_ORG_ID }}']]]"
           Write-Output "Found $($events.Count) event(s)"
           $events | ForEach-Object { Write-Output $_.Message }
 
