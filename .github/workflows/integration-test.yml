@@ -180,6 +180,11 @@ jobs:
           }
           Write-Output "All expected log lines found"
 
+      - name: Stop service
+        shell: pwsh
+        run: |
+          sc.exe stop ${{ steps.install_agent.outputs.service }}
+
       - name: Delete log file
         shell: pwsh
         run: |
