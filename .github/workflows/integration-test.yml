@@ -681,11 +681,35 @@ jobs:
         run: |
           sleep 15
           SERVICE_NAME="io.rewst.remote_agent_${{ vars.IT_ORG_ID }}"
-          entries=$(log show --predicate "process == 'logger'" --last 5m 2>/dev/null | grep "$SERVICE_NAME" || sudo grep "$SERVICE_NAME" /var/log/system.log 2>/dev/null || true)
+
+          # Try multiple approaches to find syslog entries
+          # 1. Use log show with eventMessage predicate (most reliable for logger entries)
+          entries=$(log show --predicate "eventMessage CONTAINS '$SERVICE_NAME'" --last 5m 2>/dev/null || true)
+
+          # 2. Fallback: search by process name 'logger' and grep for service name
+          if [ -z "$entries" ] || ! echo "$entries" | grep -qF "Command completed"; then
+            entries=$(log show --predicate "process == 'logger'" --last 5m 2>/dev/null | grep "$SERVICE_NAME" || true)
+          fi
+
+          # 3. Fallback: check /var/log/system.log
+          if [ -z "$entries" ] || ! echo "$entries" | grep -qF "Command completed"; then
+            entries=$(sudo grep "$SERVICE_NAME" /var/log/system.log 2>/dev/null || true)
+          fi
+
+          # 4. Fallback: broad search in log show output
+          if [ -z "$entries" ] || ! echo "$entries" | grep -qF "Command completed"; then
+            entries=$(log show --last 5m 2>/dev/null | grep "$SERVICE_NAME" || true)
+          fi
+
+          echo "=== Syslog entries ==="
           echo "$entries"
 
           if ! echo "$entries" | grep -qF "Command completed"; then
             echo "ERROR: Expected 'Command completed' entry not found in syslog"
+            echo "=== Debug: showing all logger entries in last 5m ==="
+            log show --predicate "process == 'logger'" --last 5m 2>/dev/null || true
+            echo "=== Debug: showing all entries containing 'rewst' ==="
+            log show --last 5m 2>/dev/null | grep -i "rewst" || true
             exit 1
           fi
           echo "Found 'Command completed' in syslog"
