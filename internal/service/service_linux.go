@@ -108,7 +108,10 @@ func (s *defaultServiceManager) Create(params AgentParams) (Service, error) {
 }
 
 func (s *defaultServiceManager) Open(name string) (Service, error) {
-	err := s.system.Run("status", name)
+	// Use "is-enabled" instead of "status" to check if the service exists.
+	// "status" fails for inactive services, but we only need to verify
+	// the service is registered, not that it's currently running.
+	err := s.system.Run("is-enabled", name)
 	if err != nil {
 		return nil, err
 	}
