@@ -50,7 +50,6 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-          cache: "pip"
 
       - name: Setup python packages
         if: ${{ inputs.skip_cache || steps.cache-build.outputs.cache-hit != 'true' }}
