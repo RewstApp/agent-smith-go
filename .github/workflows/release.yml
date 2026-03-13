@@ -83,19 +83,19 @@ jobs:
         run: echo "version=v$(cz version -p)" >> $GITHUB_OUTPUT
 
       - name: Download windows signed assets
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: windows-latest-signed
           path: ./signed
 
       - name: Download linux signed assets
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: ubuntu-latest-signed
           path: ./signed
 
       - name: Download macos signed assets
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: macos-latest-signed
           path: ./signed
