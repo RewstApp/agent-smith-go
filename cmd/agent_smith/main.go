@@ -42,6 +42,13 @@ func main() {
 	fs := utils.NewFileSystem()
 	svcMgr := service.NewServiceManager()
 
+	diagnosticCtx, err := newDiagnosticContext(os.Args[1:], sys, domain, svcMgr, fs)
+	if err == nil {
+		// Run diagnostic routine
+		runDiagnostic(diagnosticCtx)
+		return
+	}
+
 	uninstallContext, err := newUninstallContext(os.Args[1:], svcMgr, fs)
 	if err == nil {
 		// Run uninstall routine
@@ -80,6 +87,7 @@ func main() {
 		loggingLevelsList,
 	)
 	usages := []string{
+		"--diagnostic",
 		"--uninstall",
 		fmt.Sprintf(
 			"--config-url <CONFIG URL> --config-secret <CONFIG SECRET> %s",
