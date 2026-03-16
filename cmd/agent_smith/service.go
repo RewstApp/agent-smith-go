@@ -109,7 +109,7 @@ func (svc *serviceContext) Execute(
 			&device,
 			"https://api.github.com/repos/rewstapp/agent-smith-go/releases/latest",
 			func(path string, args []string) error {
-				return exec.Command(path, args...).Run()
+				return exec.Command(path, args...).Start()
 			},
 		)
 		runner := agent.NewAutoUpdateRunner(logger, updater, 48*time.Hour, 5, 5*time.Minute)
