@@ -32,6 +32,21 @@ type Updater interface {
 	Run() error
 }
 
+// updateIntervalStr is overridable via -ldflags for integration testing.
+// Example: -ldflags "-X github.com/RewstApp/agent-smith-go/internal/agent.updateIntervalStr=30s"
+var updateIntervalStr = ""
+
+// DefaultUpdateInterval returns the auto-update check interval.
+// Uses updateIntervalStr if set via ldflags, otherwise defaults to 48 hours.
+func DefaultUpdateInterval() time.Duration {
+	if updateIntervalStr != "" {
+		if d, err := time.ParseDuration(updateIntervalStr); err == nil {
+			return d
+		}
+	}
+	return 48 * time.Hour
+}
+
 type RunCommandFunc = func(path string, args []string) error
 
 type defaultUpdater struct {
