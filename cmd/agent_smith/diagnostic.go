@@ -32,7 +32,7 @@ func runDiagnostic(params *diagnosticContext) {
 	printHeader()
 
 	// Scan for installed agents
-	agents := scanAgents(params)
+	agents := scanAgents()
 
 	if len(agents) == 0 && params.OrgId == "" {
 		fmt.Println("\n  No installed agents found.")
@@ -75,7 +75,7 @@ func runDiagnostic(params *diagnosticContext) {
 		case "1":
 			runCheckAgents(params, agents)
 		case "2":
-			runCommandTest(target)
+			runCommandTest()
 		case "3":
 			runConnectivityTest(target)
 		case "4":
@@ -146,7 +146,7 @@ func selectAgent(reader *bufio.Reader, agents []agentInfo) agentInfo {
 }
 
 // scanAgents discovers installed agents by scanning the data directory
-func scanAgents(params *diagnosticContext) []agentInfo {
+func scanAgents() []agentInfo {
 	root := getAgentDataRoot()
 	entries, err := os.ReadDir(root)
 	if err != nil {
@@ -183,12 +183,8 @@ func scanAgents(params *diagnosticContext) []agentInfo {
 			}
 		}
 
-		// Check service status
-		svc, err := params.ServiceManager.Open(info.ServiceName)
-		if err == nil {
-			info.IsRunning = svc.IsActive()
-			_ = svc.Close()
-		}
+		// Check service status via platform-native query
+		_, info.IsRunning = queryServiceStatus(info.ServiceName)
 
 		agents = append(agents, info)
 	}
@@ -236,7 +232,7 @@ func runCheckAgents(params *diagnosticContext, agents []agentInfo) {
 
 // ── Check 2: Command execution test ──
 
-func runCommandTest(target agentInfo) {
+func runCommandTest() {
 	printSection("Command Execution Test")
 
 	shell, args := getTestCommand()
@@ -446,7 +442,7 @@ func runLiveLogs(target agentInfo) {
 
 func runAllChecks(params *diagnosticContext, agents []agentInfo, target agentInfo) {
 	runCheckAgents(params, agents)
-	runCommandTest(target)
+	runCommandTest()
 	runConnectivityTest(target)
 	runTempDirTest(target)
 }
