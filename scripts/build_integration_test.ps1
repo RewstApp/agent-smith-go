@@ -7,7 +7,7 @@
 
 $env:GOARCH = "amd64"
 
-$versionFlag = "-X github.com/RewstApp/agent-smith-go/internal/version.Version=0.0.0-it"
+$versionFlag = "-X github.com/RewstApp/agent-smith-go/internal/version.Version=v0.0.0-it"
 $intervalFlag = "-X github.com/RewstApp/agent-smith-go/internal/agent.updateIntervalStr=30s"
 $ldflags = "-w -s $versionFlag $intervalFlag"
 
