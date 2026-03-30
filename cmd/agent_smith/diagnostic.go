@@ -30,18 +30,6 @@ func (d *defaultTLSDialer) Dial(host, port string) bool {
 	return testTLSConnection(host, port)
 }
 
-// serviceStatusQuerier abstracts per-platform service status so tests can
-// inject fakes into scanAgentsFrom.
-type serviceStatusQuerier interface {
-	QueryStatus(name string) (installed, running bool)
-}
-
-type osServiceQuerier struct{}
-
-func (q *osServiceQuerier) QueryStatus(name string) (bool, bool) {
-	return queryServiceStatus(name)
-}
-
 // logFileOpener abstracts os.Open so tests can inject an in-memory reader.
 type logFileOpener interface {
 	Open(name string) (io.ReadCloser, error)
@@ -54,24 +42,33 @@ func (o *osLogFileOpener) Open(name string) (io.ReadCloser, error) {
 }
 
 type agentInfo struct {
-	OrgId      string
-	ConfigFile string
-	LogFile    string
+	OrgId       string
+	ConfigFile  string
+	LogFile     string
 	ServiceName string
-	IsRunning  bool
-	Device     *agent.Device
+	IsRunning   bool
+	Device      *agent.Device
 }
 
 func runDiagnostic(params *diagnosticContext) {
-	runDiagnosticFull(context.Background(), params, os.Stdin, &defaultTLSDialer{}, &osLogFileOpener{}, getAgentDataRoot())
+	runDiagnosticFull(
+		context.Background(),
+		params,
+		os.Stdin,
+		&defaultTLSDialer{},
+		&osLogFileOpener{},
+		getAgentDataRoot(),
+	)
 }
 
-// runDiagnosticWith is the testable entry point with all dependencies injected.
-func runDiagnosticWith(params *diagnosticContext, input io.Reader, dialer tlsDialer, opener logFileOpener) {
-	runDiagnosticFull(context.Background(), params, input, dialer, opener, getAgentDataRoot())
-}
-
-func runDiagnosticFull(ctx context.Context, params *diagnosticContext, input io.Reader, dialer tlsDialer, opener logFileOpener, agentRoot string) {
+func runDiagnosticFull(
+	ctx context.Context,
+	params *diagnosticContext,
+	input io.Reader,
+	dialer tlsDialer,
+	opener logFileOpener,
+	agentRoot string,
+) {
 	reader := bufio.NewReader(input)
 
 	printHeader()
@@ -128,7 +125,7 @@ func runDiagnosticFull(ctx context.Context, params *diagnosticContext, input io.
 		case "5":
 			runLiveLogsWith(ctx, target, opener)
 		case "6":
-			runAllChecksWith(params, agents, target, dialer, opener)
+			runAllChecksWith(params, agents, target, dialer)
 		case "0", "q", "quit", "exit":
 			fmt.Println("\n  Exiting diagnostic mode.")
 			return
@@ -188,11 +185,6 @@ func selectAgent(reader *bufio.Reader, agents []agentInfo) agentInfo {
 		}
 		fmt.Println("  Invalid selection. Please try again.")
 	}
-}
-
-// scanAgents discovers installed agents by scanning the platform data directory.
-func scanAgents() []agentInfo {
-	return scanAgentsFrom(getAgentDataRoot())
 }
 
 // scanAgentsFrom is the testable core of scanAgents.
@@ -434,7 +426,9 @@ func runLiveLogsWith(ctx context.Context, target agentInfo, opener logFileOpener
 	rc, err := opener.Open(logFile)
 	if err != nil {
 		printResult(false, fmt.Sprintf("Cannot open log file: %v", err))
-		fmt.Println("    The agent may not have been started yet, or the log file path is incorrect.")
+		fmt.Println(
+			"    The agent may not have been started yet, or the log file path is incorrect.",
+		)
 		return
 	}
 	defer func() { _ = rc.Close() }()
@@ -471,7 +465,12 @@ func runLiveLogsWith(ctx context.Context, target agentInfo, opener logFileOpener
 
 // ── Check 6: Run all checks ──
 
-func runAllChecksWith(params *diagnosticContext, agents []agentInfo, target agentInfo, dialer tlsDialer, opener logFileOpener) {
+func runAllChecksWith(
+	params *diagnosticContext,
+	agents []agentInfo,
+	target agentInfo,
+	dialer tlsDialer,
+) {
 	runCheckAgents(params, agents)
 	runCommandTest()
 	runConnectivityTestWith(target, dialer)

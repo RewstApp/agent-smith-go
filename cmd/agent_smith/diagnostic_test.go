@@ -289,7 +289,13 @@ func newDiagnosticParams(orgId string) *diagnosticContext {
 // runDiag is a helper that uses runDiagnosticFull with an empty temp root so
 // tests are fully isolated from any real installed agents on the machine.
 // It uses a short-lived context (2s) so live-log tail loops exit promptly.
-func runDiag(t *testing.T, params *diagnosticContext, input string, dialer tlsDialer, opener logFileOpener) {
+func runDiag(
+	t *testing.T,
+	params *diagnosticContext,
+	input string,
+	dialer tlsDialer,
+	opener logFileOpener,
+) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -323,7 +329,13 @@ func TestRunDiagnosticWith_Option2_CommandTest(t *testing.T) {
 }
 
 func TestRunDiagnosticWith_Option3_Connectivity(t *testing.T) {
-	runDiag(t, newDiagnosticParams("org-1"), "3\n0\n", &mockTLSDialer{result: true}, &mockLogFileOpener{})
+	runDiag(
+		t,
+		newDiagnosticParams("org-1"),
+		"3\n0\n",
+		&mockTLSDialer{result: true},
+		&mockLogFileOpener{},
+	)
 }
 
 func TestRunDiagnosticWith_Option4_TempDir(t *testing.T) {
@@ -333,7 +345,13 @@ func TestRunDiagnosticWith_Option4_TempDir(t *testing.T) {
 }
 
 func TestRunDiagnosticWith_Option5_LiveLogs(t *testing.T) {
-	runDiag(t, newDiagnosticParams("org-1"), "5\n0\n", &mockTLSDialer{}, &mockLogFileOpener{content: "log line\n"})
+	runDiag(
+		t,
+		newDiagnosticParams("org-1"),
+		"5\n0\n",
+		&mockTLSDialer{},
+		&mockLogFileOpener{content: "log line\n"},
+	)
 }
 
 func TestRunDiagnosticWith_Option6_AllChecks(t *testing.T) {
@@ -359,7 +377,9 @@ func TestRunDiagnosticWith_AgentSelectionFromScan(t *testing.T) {
 	defer cancel()
 	runDiagnosticFull(
 		ctx,
-		&diagnosticContext{ServiceManager: &mockServiceManager{openService: &mockService{isActive: true}}},
+		&diagnosticContext{
+			ServiceManager: &mockServiceManager{openService: &mockService{isActive: true}},
+		},
 		strings.NewReader("1\n0\n"),
 		&mockTLSDialer{},
 		&mockLogFileOpener{},
@@ -379,6 +399,6 @@ func TestRunAllChecksWith(t *testing.T) {
 		LogFile: "fake.log",
 		Device:  &agent.Device{AzureIotHubHost: "hub.example.com"},
 	}
-	runAllChecksWith(params, agents, target, &mockTLSDialer{result: true}, &mockLogFileOpener{content: "log\n"})
+	runAllChecksWith(params, agents, target, &mockTLSDialer{result: true})
 	_ = os.RemoveAll(agent.GetScriptsDirectory(target.OrgId))
 }
