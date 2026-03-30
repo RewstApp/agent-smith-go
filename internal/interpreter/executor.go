@@ -16,6 +16,7 @@ type Executor interface {
 		sys agent.SystemInfoProvider,
 		domain agent.DomainInfoProvider,
 	) []byte
+	AlwaysPostback() bool
 }
 
 type BuildExecuteCommandArgsFunc = func(command string) []string

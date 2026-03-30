@@ -172,6 +172,10 @@ func (e *baseExecutor) Execute(
 	return resultBytes(stderrBuf.String(), stdoutBuf.String())
 }
 
+func (e *baseExecutor) AlwaysPostback() bool {
+	return false
+}
+
 func NewBaseExecutor(
 	shell string,
 	shellVersionCheckCommand string,
