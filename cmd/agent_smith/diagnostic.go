@@ -2,9 +2,11 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -17,6 +19,40 @@ import (
 	"github.com/RewstApp/agent-smith-go/internal/version"
 )
 
+// tlsDialer abstracts TLS connectivity checks so tests can inject fakes.
+type tlsDialer interface {
+	Dial(host, port string) bool
+}
+
+type defaultTLSDialer struct{}
+
+func (d *defaultTLSDialer) Dial(host, port string) bool {
+	return testTLSConnection(host, port)
+}
+
+// serviceStatusQuerier abstracts per-platform service status so tests can
+// inject fakes into scanAgentsFrom.
+type serviceStatusQuerier interface {
+	QueryStatus(name string) (installed, running bool)
+}
+
+type osServiceQuerier struct{}
+
+func (q *osServiceQuerier) QueryStatus(name string) (bool, bool) {
+	return queryServiceStatus(name)
+}
+
+// logFileOpener abstracts os.Open so tests can inject an in-memory reader.
+type logFileOpener interface {
+	Open(name string) (io.ReadCloser, error)
+}
+
+type osLogFileOpener struct{}
+
+func (o *osLogFileOpener) Open(name string) (io.ReadCloser, error) {
+	return os.Open(name) // #nosec G304 - path comes from internal config
+}
+
 type agentInfo struct {
 	OrgId      string
 	ConfigFile string
@@ -27,12 +63,21 @@ type agentInfo struct {
 }
 
 func runDiagnostic(params *diagnosticContext) {
-	reader := bufio.NewReader(os.Stdin)
+	runDiagnosticFull(context.Background(), params, os.Stdin, &defaultTLSDialer{}, &osLogFileOpener{}, getAgentDataRoot())
+}
+
+// runDiagnosticWith is the testable entry point with all dependencies injected.
+func runDiagnosticWith(params *diagnosticContext, input io.Reader, dialer tlsDialer, opener logFileOpener) {
+	runDiagnosticFull(context.Background(), params, input, dialer, opener, getAgentDataRoot())
+}
+
+func runDiagnosticFull(ctx context.Context, params *diagnosticContext, input io.Reader, dialer tlsDialer, opener logFileOpener, agentRoot string) {
+	reader := bufio.NewReader(input)
 
 	printHeader()
 
 	// Scan for installed agents
-	agents := scanAgents()
+	agents := scanAgentsFrom(agentRoot)
 
 	if len(agents) == 0 && params.OrgId == "" {
 		fmt.Println("\n  No installed agents found.")
@@ -77,13 +122,13 @@ func runDiagnostic(params *diagnosticContext) {
 		case "2":
 			runCommandTest()
 		case "3":
-			runConnectivityTest(target)
+			runConnectivityTestWith(target, dialer)
 		case "4":
 			runTempDirTest(target)
 		case "5":
-			runLiveLogs(target)
+			runLiveLogsWith(ctx, target, opener)
 		case "6":
-			runAllChecks(params, agents, target)
+			runAllChecksWith(params, agents, target, dialer, opener)
 		case "0", "q", "quit", "exit":
 			fmt.Println("\n  Exiting diagnostic mode.")
 			return
@@ -145,9 +190,13 @@ func selectAgent(reader *bufio.Reader, agents []agentInfo) agentInfo {
 	}
 }
 
-// scanAgents discovers installed agents by scanning the data directory
+// scanAgents discovers installed agents by scanning the platform data directory.
 func scanAgents() []agentInfo {
-	root := getAgentDataRoot()
+	return scanAgentsFrom(getAgentDataRoot())
+}
+
+// scanAgentsFrom is the testable core of scanAgents.
+func scanAgentsFrom(root string) []agentInfo {
 	entries, err := os.ReadDir(root)
 	if err != nil {
 		return nil
@@ -258,7 +307,7 @@ func runCommandTest() {
 
 // ── Check 3: MQTT/WebSocket connectivity ──
 
-func runConnectivityTest(target agentInfo) {
+func runConnectivityTestWith(target agentInfo, dialer tlsDialer) {
 	printSection("MQTT/WebSocket Connectivity")
 
 	if target.Device == nil {
@@ -277,7 +326,7 @@ func runConnectivityTest(target agentInfo) {
 
 	// Test MQTT port (8883)
 	fmt.Printf("    Testing MQTT (TLS port 8883)... ")
-	mqttOk := testTLSConnection(host, "8883")
+	mqttOk := dialer.Dial(host, "8883")
 	if mqttOk {
 		fmt.Println("OK")
 	} else {
@@ -287,7 +336,7 @@ func runConnectivityTest(target agentInfo) {
 
 	// Test WebSocket port (443)
 	fmt.Printf("    Testing WebSocket (port 443)... ")
-	wsOk := testTLSConnection(host, "443")
+	wsOk := dialer.Dial(host, "443")
 	if wsOk {
 		fmt.Println("OK")
 	} else {
@@ -374,7 +423,7 @@ func runTempDirTest(target agentInfo) {
 
 // ── Check 5: Live log viewer ──
 
-func runLiveLogs(target agentInfo) {
+func runLiveLogsWith(ctx context.Context, target agentInfo, opener logFileOpener) {
 	printSection("Live Log Viewer")
 
 	logFile := target.LogFile
@@ -382,68 +431,50 @@ func runLiveLogs(target agentInfo) {
 	fmt.Println("    Press Ctrl+C to stop watching.")
 	fmt.Println()
 
-	file, err := os.Open(logFile)
+	rc, err := opener.Open(logFile)
 	if err != nil {
 		printResult(false, fmt.Sprintf("Cannot open log file: %v", err))
 		fmt.Println("    The agent may not have been started yet, or the log file path is incorrect.")
 		return
 	}
-	defer func() { _ = file.Close() }()
+	defer func() { _ = rc.Close() }()
 
-	// Seek to the last 4KB to show recent entries
-	info, err := file.Stat()
-	if err == nil && info.Size() > 4096 {
-		_, _ = file.Seek(-4096, 2)
-		// Discard partial line
-		reader := bufio.NewReader(file)
-		_, _ = reader.ReadString('\n')
-
-		fmt.Println("    ... (showing last entries)")
-		fmt.Println()
-
-		// Print remaining buffered content
-		for {
-			line, err := reader.ReadString('\n')
-			if line != "" {
-				fmt.Print("    ", line)
-			}
-			if err != nil {
-				break
-			}
+	// Read all buffered content line by line
+	reader := bufio.NewReader(rc)
+	for {
+		line, err := reader.ReadString('\n')
+		if line != "" {
+			fmt.Print("    ", line)
 		}
-	} else {
-		// Small file, read from beginning
-		reader := bufio.NewReader(file)
-		for {
-			line, err := reader.ReadString('\n')
-			if line != "" {
-				fmt.Print("    ", line)
-			}
-			if err != nil {
-				break
-			}
+		if err != nil {
+			break
 		}
 	}
 
-	// Tail the file for new entries
+	// Tail for new entries until context is cancelled
+	buf := make([]byte, 4096)
 	for {
-		line := make([]byte, 4096)
-		n, err := file.Read(line)
-		if n > 0 {
-			fmt.Print("    ", string(line[:n]))
-		}
-		if err != nil {
-			time.Sleep(500 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			return
+		default:
+			n, err := rc.Read(buf)
+			if n > 0 {
+				fmt.Print("    ", string(buf[:n]))
+			}
+			if err != nil {
+				time.Sleep(500 * time.Millisecond)
+			}
 		}
 	}
 }
 
 // ── Check 6: Run all checks ──
 
-func runAllChecks(params *diagnosticContext, agents []agentInfo, target agentInfo) {
+func runAllChecksWith(params *diagnosticContext, agents []agentInfo, target agentInfo, dialer tlsDialer, opener logFileOpener) {
 	runCheckAgents(params, agents)
 	runCommandTest()
-	runConnectivityTest(target)
+	runConnectivityTestWith(target, dialer)
 	runTempDirTest(target)
 }
 
