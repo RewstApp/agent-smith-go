@@ -257,6 +257,10 @@ type mockExecutor struct {
 	result        []byte
 }
 
+func (m *mockExecutor) AlwaysPostback() bool {
+	return false
+}
+
 func (m *mockExecutor) Execute(
 	ctx context.Context,
 	message *interpreter.Message,

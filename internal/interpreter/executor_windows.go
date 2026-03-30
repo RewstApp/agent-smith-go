@@ -37,6 +37,10 @@ type defaultExecutor struct {
 	PwshExecutor       Executor
 }
 
+func (e *defaultExecutor) AlwaysPostback() bool {
+	return false
+}
+
 func (e *defaultExecutor) Execute(
 	ctx context.Context,
 	message *Message,

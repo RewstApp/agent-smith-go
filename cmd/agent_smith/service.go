@@ -243,8 +243,8 @@ func (svc *serviceContext) Execute(
 					return
 				}
 
-				// Skip postback if disabled in config
-				if device.DisableAgentPostback {
+				// Skip postback if disabled in config (ignored when executor always posts back)
+				if device.DisableAgentPostback && !svc.Executor.AlwaysPostback() {
 					return
 				}
 
