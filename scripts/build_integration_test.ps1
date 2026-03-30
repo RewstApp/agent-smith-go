@@ -14,20 +14,20 @@ $ldflags = "-w -s $versionFlag $intervalFlag"
 if ($IsWindows) {
     $buildOutput = "./dist/rewst_agent_config.win.it.exe"
     $env:GOOS = "windows"
-    go build -ldflags=$ldflags -o $buildOutput "./cmd/agent_smith"
+    go build -ldflags="$ldflags" -o $buildOutput "./cmd/agent_smith"
     Write-Output $buildOutput
 }
 
 if ($IsLinux) {
     $buildOutput = "./dist/rewst_agent_config.linux.it.bin"
     $env:GOOS = "linux"
-    go build -ldflags=$ldflags -o $buildOutput "./cmd/agent_smith"
+    go build -ldflags="$ldflags" -o $buildOutput "./cmd/agent_smith"
     Write-Output $buildOutput
 }
 
 if ($IsMacOS) {
     $buildOutput = "./dist/rewst_agent_config.mac-os.it.bin"
     $env:GOOS = "darwin"
-    go build -ldflags=$ldflags -o $buildOutput "./cmd/agent_smith"
+    go build -ldflags="$ldflags" -o $buildOutput "./cmd/agent_smith"
     Write-Output $buildOutput
 }
