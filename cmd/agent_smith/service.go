@@ -212,6 +212,16 @@ func (svc *serviceContext) Execute(
 		}
 		defer client.Disconnect((uint)(mqtt.DefaultDisconnectQuiesce / time.Millisecond))
 
+		// Update device twin reported properties before subscribing
+		err = mqtt.UpdateReportedProperties(client, mqtt.ReportedProperties{
+			AgentVersion: version.Version,
+		})
+		if err != nil {
+			logger.Warn("Failed to update device twin reported properties", "error", err)
+		} else {
+			logger.Info("Device twin reported properties updated", "agent_version", version.Version)
+		}
+
 		// Subscribe to the topic
 		topic := fmt.Sprintf("devices/%s/messages/devicebound/#", device.DeviceId)
 		token = client.Subscribe(topic, 1, func(client mqtt.Client, msg mqtt.Message) {
