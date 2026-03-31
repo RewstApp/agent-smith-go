@@ -111,7 +111,9 @@ func (svc *serviceContext) Execute(
 				return detachedCommand(path, args, logFile, logFile).Start()
 			},
 		)
-		runner := agent.NewAutoUpdateRunner(logger, updater, agent.DefaultUpdateInterval(), 5, 5*time.Minute)
+		runner := agent.NewAutoUpdateRunner(
+			logger, updater, agent.DefaultUpdateInterval(), 5, 5*time.Minute,
+		)
 		runner.Start()
 		defer runner.Stop()
 	}

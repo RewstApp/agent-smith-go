@@ -163,8 +163,7 @@ func (u *defaultUpdater) Download(asset Asset) (string, error) {
 	if err != nil {
 		return "", err
 	}
-
-	if err = os.Chmod(file.Name(), 0755); err != nil {
+	if err = os.Chmod(file.Name(), 0o755); err != nil {
 		return "", fmt.Errorf("failed to set executable permission on installer: %w", err)
 	}
 
