@@ -8,7 +8,6 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"os/exec"
 	"runtime"
 	"strings"
 	"time"
@@ -109,10 +108,12 @@ func (svc *serviceContext) Execute(
 			&device,
 			"https://api.github.com/repos/rewstapp/agent-smith-go/releases/latest",
 			func(path string, args []string) error {
-				return exec.Command(path, args...).Start()
+				return detachedCommand(path, args, logFile, logFile).Start()
 			},
 		)
-		runner := agent.NewAutoUpdateRunner(logger, updater, 48*time.Hour, 5, 5*time.Minute)
+		runner := agent.NewAutoUpdateRunner(
+			logger, updater, agent.DefaultUpdateInterval(), 5, 5*time.Minute,
+		)
 		runner.Start()
 		defer runner.Stop()
 	}

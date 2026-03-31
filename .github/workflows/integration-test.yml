@@ -22,10 +22,51 @@ jobs:
       os_list: "${{ inputs.os == 'all' && '[''windows-latest'',''ubuntu-latest'',''macos-latest'']' || format('[{0}{1}{0}]', '''', inputs.os) }}"
       cache: true
 
+  build-integration-test:
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ${{ fromJson(inputs.os == 'all' && '[''windows-latest'',''ubuntu-latest'',''macos-latest'']' || format('[{0}{1}{0}]', '''', inputs.os)) }}
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ github.ref }}
+          fetch-depth: 0
+
+      - name: Cache integration test build output
+        id: cache-build
+        uses: actions/cache@v5
+        with:
+          path: ./dist
+          key: build-it-${{ matrix.os }}-go1.24.0-${{ hashFiles('**/*.go', 'go.sum', 'go.mod') }}
+
+      - name: Setup go
+        if: steps.cache-build.outputs.cache-hit != 'true'
+        uses: actions/setup-go@v6
+        with:
+          go-version: "1.24.0"
+          cache: true
+
+      - name: Build integration test binary
+        if: steps.cache-build.outputs.cache-hit != 'true'
+        shell: pwsh
+        id: build
+        run: ./scripts/build_integration_test.ps1 | % { "binary_path=$_" } >> $env:GITHUB_OUTPUT
+
+      - name: Upload integration test binary
+        uses: actions/upload-artifact@v6
+        with:
+          name: it-${{ matrix.os }}
+          path: ${{ steps.build.outputs.binary_path || './dist/*' }}
+
   test-ubuntu-latest:
     permissions:
       contents: read
-    needs: build
+    needs: [build, build-integration-test]
     if: inputs.os == 'ubuntu-latest' || inputs.os == 'all'
     runs-on: ubuntu-latest
     steps:
@@ -35,8 +76,16 @@ jobs:
           name: ubuntu-latest
           path: ./dist
 
-      - name: Make binary executable
-        run: chmod +x ./dist/rewst_agent_config.linux.bin
+      - name: Download integration test binary
+        uses: actions/download-artifact@v8
+        with:
+          name: it-ubuntu-latest
+          path: ./dist
+
+      - name: Make binaries executable
+        run: |
+          chmod +x ./dist/rewst_agent_config.linux.bin
+          chmod +x ./dist/rewst_agent_config.linux.it.bin
 
       - name: Install agent
         id: install_agent
@@ -123,6 +172,50 @@ jobs:
             exit 1
           fi
           echo "Error handling verified: failing command error was captured"
+
+      - name: Install integration test binary (old version)
+        shell: bash
+        run: |
+          sudo ./dist/rewst_agent_config.linux.it.bin --update --org-id ${{ vars.IT_ORG_ID }}
+          echo "Installed integration test binary (version 0.0.0-it)"
+
+      - name: Wait for auto updater to trigger and update
+        shell: bash
+        run: |
+          logFile="/etc/rewst_remote_agent/${{ vars.IT_ORG_ID }}/rewst_agent.log"
+          echo "Waiting for auto updater to detect newer version and update..."
+          for i in $(seq 1 60); do
+            logContent=$(cat "$logFile" 2>/dev/null || true)
+            if echo "$logContent" | grep -qF "Updating agent"; then
+              echo "Auto update triggered after ${i}s"
+              break
+            fi
+            sleep 2
+          done
+
+      - name: Verify auto update completed
+        shell: bash
+        run: |
+          sleep 15
+          logFile="/etc/rewst_remote_agent/${{ vars.IT_ORG_ID }}/rewst_agent.log"
+          logContent=$(cat "$logFile")
+          echo "$logContent"
+
+          for pattern in "Checking for updates" "Updating agent"; do
+            if ! echo "$logContent" | grep -qF "$pattern"; then
+              echo "ERROR: Expected auto update log line not found: $pattern"
+              exit 1
+            fi
+          done
+
+          if echo "$logContent" | grep -qF "version=0.0.0-it"; then
+            lastVersion=$(echo "$logContent" | grep "Agent Smith started" | tail -1)
+            if echo "$lastVersion" | grep -qF "version=0.0.0-it"; then
+              echo "ERROR: Agent is still running the integration test version after update"
+              exit 1
+            fi
+          fi
+          echo "Auto updater integration test passed"
 
       - name: Update logging level to debug
         shell: bash
@@ -224,7 +317,7 @@ jobs:
   test-windows-latest:
     permissions:
       contents: read
-    needs: build
+    needs: [build, build-integration-test]
     if: inputs.os == 'windows-latest' || inputs.os == 'all'
     runs-on: windows-latest
     steps:
@@ -232,6 +325,12 @@ jobs:
         uses: actions/download-artifact@v8
         with:
           name: windows-latest
+          path: ./dist
+
+      - name: Download integration test binary
+        uses: actions/download-artifact@v8
+        with:
+          name: it-windows-latest
           path: ./dist
 
       - name: Install agent
@@ -350,6 +449,48 @@ jobs:
             exit 1
           }
           Write-Output "Error handling verified: failing command error was captured"
+
+      - name: Install integration test binary (old version)
+        shell: pwsh
+        run: |
+          ./dist/rewst_agent_config.win.it.exe --update --org-id ${{ vars.IT_ORG_ID }}
+          Write-Output "Installed integration test binary (version 0.0.0-it)"
+
+      - name: Wait for auto updater to trigger and update
+        shell: pwsh
+        run: |
+          $logFile = "C:\ProgramData\RewstRemoteAgent\${{ vars.IT_ORG_ID }}\rewst_agent.log"
+          Write-Output "Waiting for auto updater to detect newer version and update..."
+          for ($i = 1; $i -le 60; $i++) {
+            $logContent = Get-Content $logFile -Raw -ErrorAction SilentlyContinue
+            if ($logContent -match [regex]::Escape("Updating agent")) {
+              Write-Output "Auto update triggered after ${i}s"
+              break
+            }
+            Start-Sleep -Seconds 2
+          }
+
+      - name: Verify auto update completed
+        shell: pwsh
+        run: |
+          Start-Sleep -Seconds 15
+          $logFile = "C:\ProgramData\RewstRemoteAgent\${{ vars.IT_ORG_ID }}\rewst_agent.log"
+          $logContent = Get-Content $logFile -Raw
+          Write-Output $logContent
+
+          foreach ($pattern in @("Checking for updates", "Updating agent")) {
+            if ($logContent -notmatch [regex]::Escape($pattern)) {
+              Write-Error "Expected auto update log line not found: $pattern"
+              exit 1
+            }
+          }
+
+          $lastStartLine = ($logContent -split "`n" | Where-Object { $_ -match "Agent Smith started" } | Select-Object -Last 1)
+          if ($lastStartLine -match [regex]::Escape("version=0.0.0-it")) {
+            Write-Error "Agent is still running the integration test version after update"
+            exit 1
+          }
+          Write-Output "Auto updater integration test passed"
 
       - name: Update logging level to debug
         shell: pwsh
@@ -506,7 +647,7 @@ jobs:
   test-macos-latest:
     permissions:
       contents: read
-    needs: build
+    needs: [build, build-integration-test]
     if: inputs.os == 'macos-latest' || inputs.os == 'all'
     runs-on: macos-latest
     steps:
@@ -516,8 +657,16 @@ jobs:
           name: macos-latest
           path: ./dist
 
-      - name: Make binary executable
-        run: chmod +x ./dist/rewst_agent_config.mac-os.bin
+      - name: Download integration test binary
+        uses: actions/download-artifact@v8
+        with:
+          name: it-macos-latest
+          path: ./dist
+
+      - name: Make binaries executable
+        run: |
+          chmod +x ./dist/rewst_agent_config.mac-os.bin
+          chmod +x ./dist/rewst_agent_config.mac-os.it.bin
 
       - name: Install agent
         id: install_agent
@@ -604,6 +753,48 @@ jobs:
             exit 1
           fi
           echo "Error handling verified: failing command error was captured"
+
+      - name: Install integration test binary (old version)
+        shell: bash
+        run: |
+          sudo ./dist/rewst_agent_config.mac-os.it.bin --update --org-id ${{ vars.IT_ORG_ID }}
+          echo "Installed integration test binary (version 0.0.0-it)"
+
+      - name: Wait for auto updater to trigger and update
+        shell: bash
+        run: |
+          logFile="/Library/Application Support/rewst_remote_agent/${{ vars.IT_ORG_ID }}/rewst_agent.log"
+          echo "Waiting for auto updater to detect newer version and update..."
+          for i in $(seq 1 60); do
+            logContent=$(cat "$logFile" 2>/dev/null || true)
+            if echo "$logContent" | grep -qF "Updating agent"; then
+              echo "Auto update triggered after ${i}s"
+              break
+            fi
+            sleep 2
+          done
+
+      - name: Verify auto update completed
+        shell: bash
+        run: |
+          sleep 15
+          logFile="/Library/Application Support/rewst_remote_agent/${{ vars.IT_ORG_ID }}/rewst_agent.log"
+          logContent=$(cat "$logFile")
+          echo "$logContent"
+
+          for pattern in "Checking for updates" "Updating agent"; do
+            if ! echo "$logContent" | grep -qF "$pattern"; then
+              echo "ERROR: Expected auto update log line not found: $pattern"
+              exit 1
+            fi
+          done
+
+          lastVersion=$(echo "$logContent" | grep "Agent Smith started" | tail -1)
+          if echo "$lastVersion" | grep -qF "version=0.0.0-it"; then
+            echo "ERROR: Agent is still running the integration test version after update"
+            exit 1
+          fi
+          echo "Auto updater integration test passed"
 
       - name: Update logging level to debug
         shell: bash
