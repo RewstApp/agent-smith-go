@@ -21,6 +21,21 @@ type fetchConfigurationResponse struct {
 	Configuration agent.Device `json:"configuration"`
 }
 
+func validateConfiguration(device agent.Device) error {
+	required := map[string]string{
+		"device_id":          device.DeviceId,
+		"rewst_engine_host":  device.RewstEngineHost,
+		"shared_access_key":  device.SharedAccessKey,
+		"azure_iot_hub_host": device.AzureIotHubHost,
+	}
+	for field, value := range required {
+		if value == "" {
+			return fmt.Errorf("missing required field: %s", field)
+		}
+	}
+	return nil
+}
+
 func runConfig(params *configContext) error {
 	logger := utils.ConfigureLogger("agent_smith", os.Stdout, utils.Default)
 
@@ -81,6 +96,11 @@ func runConfig(params *configContext) error {
 	if err != nil {
 		return fmt.Errorf("failed to parse response: %w", err)
 	}
+
+	if err := validateConfiguration(response.Configuration); err != nil {
+		return fmt.Errorf("invalid configuration: %w", err)
+	}
+
 	response.Configuration.LoggingLevel = utils.LoggingLevel(params.LoggingLevel)
 	response.Configuration.UseSyslog = params.UseSyslog
 	response.Configuration.DisableAgentPostback = params.DisableAgentPostback

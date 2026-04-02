@@ -76,6 +76,91 @@ func newBaseConfigParams(configURL string) *configContext {
 	}
 }
 
+// ── validateConfiguration tests ──────────────────────────────────────────────
+
+func TestValidateConfiguration_Valid(t *testing.T) {
+	device := agent.Device{
+		DeviceId:        "device-123",
+		RewstEngineHost: "engine.example.com",
+		SharedAccessKey: "key123",
+		AzureIotHubHost: "hub.example.com",
+	}
+	if err := validateConfiguration(device); err != nil {
+		t.Errorf("expected no error, got %v", err)
+	}
+}
+
+func TestValidateConfiguration_MissingFields(t *testing.T) {
+	tests := []struct {
+		name   string
+		device agent.Device
+		field  string
+	}{
+		{
+			name: "missing device_id",
+			device: agent.Device{
+				RewstEngineHost: "engine.example.com",
+				SharedAccessKey: "key123",
+				AzureIotHubHost: "hub.example.com",
+			},
+			field: "device_id",
+		},
+		{
+			name: "missing rewst_engine_host",
+			device: agent.Device{
+				DeviceId:        "device-123",
+				SharedAccessKey: "key123",
+				AzureIotHubHost: "hub.example.com",
+			},
+			field: "rewst_engine_host",
+		},
+		{
+			name: "missing shared_access_key",
+			device: agent.Device{
+				DeviceId:        "device-123",
+				RewstEngineHost: "engine.example.com",
+				AzureIotHubHost: "hub.example.com",
+			},
+			field: "shared_access_key",
+		},
+		{
+			name: "missing azure_iot_hub_host",
+			device: agent.Device{
+				DeviceId:        "device-123",
+				RewstEngineHost: "engine.example.com",
+				SharedAccessKey: "key123",
+			},
+			field: "azure_iot_hub_host",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateConfiguration(tt.device)
+			if err == nil {
+				t.Errorf("expected error for missing %s, got nil", tt.field)
+				return
+			}
+			if !strings.Contains(err.Error(), tt.field) {
+				t.Errorf("expected error to mention %q, got %v", tt.field, err)
+			}
+		})
+	}
+}
+
+func TestRunConfig_InvalidConfiguration(t *testing.T) {
+	// Response missing required fields (no device_id, engine host, etc.)
+	body := `{"configuration": {}}`
+	srv := newConfigServer(t, http.StatusOK, body)
+	defer srv.Close()
+
+	err := runConfig(newBaseConfigParams(srv.URL))
+
+	if err == nil || !strings.Contains(err.Error(), "invalid configuration") {
+		t.Errorf("expected 'invalid configuration' error, got %v", err)
+	}
+}
+
 // ── tests ─────────────────────────────────────────────────────────────────────
 
 func TestRunConfig_Success(t *testing.T) {
