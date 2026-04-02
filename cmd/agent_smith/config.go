@@ -22,16 +22,17 @@ type fetchConfigurationResponse struct {
 }
 
 func validateConfiguration(device agent.Device) error {
-	required := map[string]string{
-		"device_id":          device.DeviceId,
-		"rewst_engine_host":  device.RewstEngineHost,
-		"shared_access_key":  device.SharedAccessKey,
-		"azure_iot_hub_host": device.AzureIotHubHost,
+	if device.DeviceId == "" {
+		return fmt.Errorf("missing required field: device_id")
 	}
-	for field, value := range required {
-		if value == "" {
-			return fmt.Errorf("missing required field: %s", field)
-		}
+	if device.RewstEngineHost == "" {
+		return fmt.Errorf("missing required field: rewst_engine_host")
+	}
+	if device.SharedAccessKey == "" {
+		return fmt.Errorf("missing required field: shared_access_key")
+	}
+	if device.AzureIotHubHost == "" {
+		return fmt.Errorf("missing required field: azure_iot_hub_host")
 	}
 	return nil
 }

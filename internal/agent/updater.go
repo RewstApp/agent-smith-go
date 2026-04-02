@@ -44,6 +44,12 @@ var baseBackoffStr = ""
 // Example: -ldflags "-X github.com/RewstApp/agent-smith-go/internal/agent.maxRetriesStr=3"
 var maxRetriesStr = ""
 
+const (
+	defaultUpdateInterval = 48 * time.Hour
+	defaultBaseBackoff    = 5 * time.Minute
+	defaultMaxRetries     = 5
+)
+
 // DefaultUpdateInterval returns the auto-update check interval.
 // Uses updateIntervalStr if set via ldflags, otherwise defaults to 48 hours.
 func DefaultUpdateInterval() time.Duration {
@@ -52,7 +58,7 @@ func DefaultUpdateInterval() time.Duration {
 			return d
 		}
 	}
-	return 48 * time.Hour
+	return defaultUpdateInterval
 }
 
 // DefaultBaseBackoff returns the base backoff duration for update retries.
@@ -63,7 +69,7 @@ func DefaultBaseBackoff() time.Duration {
 			return d
 		}
 	}
-	return 5 * time.Minute
+	return defaultBaseBackoff
 }
 
 // DefaultMaxRetries returns the maximum number of update retry attempts.
@@ -75,7 +81,7 @@ func DefaultMaxRetries() int {
 			return n
 		}
 	}
-	return 5
+	return defaultMaxRetries
 }
 
 type RunCommandFunc = func(path string, args []string) error
