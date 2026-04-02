@@ -112,7 +112,7 @@ func (svc *serviceContext) Execute(
 			},
 		)
 		runner := agent.NewAutoUpdateRunner(
-			logger, updater, agent.DefaultUpdateInterval(), 5, 5*time.Minute,
+			logger, updater, agent.DefaultUpdateInterval(), agent.DefaultMaxRetries(), agent.DefaultBaseBackoff(),
 		)
 		runner.Start()
 		defer runner.Stop()

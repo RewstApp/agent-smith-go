@@ -36,6 +36,14 @@ type Updater interface {
 // Example: -ldflags "-X github.com/RewstApp/agent-smith-go/internal/agent.updateIntervalStr=30s"
 var updateIntervalStr = ""
 
+// baseBackoffStr is overridable via -ldflags for integration testing.
+// Example: -ldflags "-X github.com/RewstApp/agent-smith-go/internal/agent.baseBackoffStr=5s"
+var baseBackoffStr = ""
+
+// maxRetriesStr is overridable via -ldflags for integration testing.
+// Example: -ldflags "-X github.com/RewstApp/agent-smith-go/internal/agent.maxRetriesStr=3"
+var maxRetriesStr = ""
+
 // DefaultUpdateInterval returns the auto-update check interval.
 // Uses updateIntervalStr if set via ldflags, otherwise defaults to 48 hours.
 func DefaultUpdateInterval() time.Duration {
@@ -45,6 +53,29 @@ func DefaultUpdateInterval() time.Duration {
 		}
 	}
 	return 48 * time.Hour
+}
+
+// DefaultBaseBackoff returns the base backoff duration for update retries.
+// Uses baseBackoffStr if set via ldflags, otherwise defaults to 5 minutes.
+func DefaultBaseBackoff() time.Duration {
+	if baseBackoffStr != "" {
+		if d, err := time.ParseDuration(baseBackoffStr); err == nil {
+			return d
+		}
+	}
+	return 5 * time.Minute
+}
+
+// DefaultMaxRetries returns the maximum number of update retry attempts.
+// Uses maxRetriesStr if set via ldflags, otherwise defaults to 5.
+func DefaultMaxRetries() int {
+	if maxRetriesStr != "" {
+		var n int
+		if _, err := fmt.Sscanf(maxRetriesStr, "%d", &n); err == nil && n > 0 {
+			return n
+		}
+	}
+	return 5
 }
 
 type RunCommandFunc = func(path string, args []string) error
