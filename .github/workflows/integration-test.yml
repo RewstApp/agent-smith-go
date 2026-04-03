@@ -177,7 +177,7 @@ jobs:
         shell: bash
         run: |
           sudo ./dist/rewst_agent_config.linux.it.bin --update --org-id ${{ vars.IT_ORG_ID }}
-          echo "Installed integration test binary (version 0.0.0-it)"
+          echo "Installed integration test binary (version v0.0.0-it)"
 
       - name: Wait for auto updater to trigger and update
         shell: bash
@@ -208,9 +208,9 @@ jobs:
             fi
           done
 
-          if echo "$logContent" | grep -qF "version=0.0.0-it"; then
+          if echo "$logContent" | grep -qF "version=v0.0.0-it"; then
             lastVersion=$(echo "$logContent" | grep "Agent Smith started" | tail -1)
-            if echo "$lastVersion" | grep -qF "version=0.0.0-it"; then
+            if echo "$lastVersion" | grep -qF "version=v0.0.0-it"; then
               echo "ERROR: Agent is still running the integration test version after update"
               exit 1
             fi
@@ -454,7 +454,7 @@ jobs:
         shell: pwsh
         run: |
           ./dist/rewst_agent_config.win.it.exe --update --org-id ${{ vars.IT_ORG_ID }}
-          Write-Output "Installed integration test binary (version 0.0.0-it)"
+          Write-Output "Installed integration test binary (version v0.0.0-it)"
 
       - name: Wait for auto updater to trigger and update
         shell: pwsh
@@ -486,7 +486,7 @@ jobs:
           }
 
           $lastStartLine = ($logContent -split "`n" | Where-Object { $_ -match "Agent Smith started" } | Select-Object -Last 1)
-          if ($lastStartLine -match [regex]::Escape("version=0.0.0-it")) {
+          if ($lastStartLine -match [regex]::Escape("version=v0.0.0-it")) {
             Write-Error "Agent is still running the integration test version after update"
             exit 1
           }
@@ -758,7 +758,7 @@ jobs:
         shell: bash
         run: |
           sudo ./dist/rewst_agent_config.mac-os.it.bin --update --org-id ${{ vars.IT_ORG_ID }}
-          echo "Installed integration test binary (version 0.0.0-it)"
+          echo "Installed integration test binary (version v0.0.0-it)"
 
       - name: Wait for auto updater to trigger and update
         shell: bash
@@ -790,7 +790,7 @@ jobs:
           done
 
           lastVersion=$(echo "$logContent" | grep "Agent Smith started" | tail -1)
-          if echo "$lastVersion" | grep -qF "version=0.0.0-it"; then
+          if echo "$lastVersion" | grep -qF "version=v0.0.0-it"; then
             echo "ERROR: Agent is still running the integration test version after update"
             exit 1
           fi

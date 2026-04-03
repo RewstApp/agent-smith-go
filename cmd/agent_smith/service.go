@@ -107,12 +107,17 @@ func (svc *serviceContext) Execute(
 			logger,
 			&device,
 			"https://api.github.com/repos/rewstapp/agent-smith-go/releases/latest",
+			os.Getenv("GITHUB_TOKEN"),
 			func(path string, args []string) error {
 				return detachedCommand(path, args, logFile, logFile).Start()
 			},
 		)
 		runner := agent.NewAutoUpdateRunner(
-			logger, updater, agent.DefaultUpdateInterval(), 5, 5*time.Minute,
+			logger,
+			updater,
+			agent.DefaultUpdateInterval(),
+			agent.DefaultMaxRetries(),
+			agent.DefaultBaseBackoff(),
 		)
 		runner.Start()
 		defer runner.Stop()

@@ -36,6 +36,20 @@ type Updater interface {
 // Example: -ldflags "-X github.com/RewstApp/agent-smith-go/internal/agent.updateIntervalStr=30s"
 var updateIntervalStr = ""
 
+// baseBackoffStr is overridable via -ldflags for integration testing.
+// Example: -ldflags "-X github.com/RewstApp/agent-smith-go/internal/agent.baseBackoffStr=5s"
+var baseBackoffStr = ""
+
+// maxRetriesStr is overridable via -ldflags for integration testing.
+// Example: -ldflags "-X github.com/RewstApp/agent-smith-go/internal/agent.maxRetriesStr=3"
+var maxRetriesStr = ""
+
+const (
+	defaultUpdateInterval = 48 * time.Hour
+	defaultBaseBackoff    = 5 * time.Minute
+	defaultMaxRetries     = 5
+)
+
 // DefaultUpdateInterval returns the auto-update check interval.
 // Uses updateIntervalStr if set via ldflags, otherwise defaults to 48 hours.
 func DefaultUpdateInterval() time.Duration {
@@ -44,7 +58,30 @@ func DefaultUpdateInterval() time.Duration {
 			return d
 		}
 	}
-	return 48 * time.Hour
+	return defaultUpdateInterval
+}
+
+// DefaultBaseBackoff returns the base backoff duration for update retries.
+// Uses baseBackoffStr if set via ldflags, otherwise defaults to 5 minutes.
+func DefaultBaseBackoff() time.Duration {
+	if baseBackoffStr != "" {
+		if d, err := time.ParseDuration(baseBackoffStr); err == nil {
+			return d
+		}
+	}
+	return defaultBaseBackoff
+}
+
+// DefaultMaxRetries returns the maximum number of update retry attempts.
+// Uses maxRetriesStr if set via ldflags, otherwise defaults to 5.
+func DefaultMaxRetries() int {
+	if maxRetriesStr != "" {
+		var n int
+		if _, err := fmt.Sscanf(maxRetriesStr, "%d", &n); err == nil && n > 0 {
+			return n
+		}
+	}
+	return defaultMaxRetries
 }
 
 type RunCommandFunc = func(path string, args []string) error
@@ -53,6 +90,7 @@ type defaultUpdater struct {
 	logger           hclog.Logger
 	device           *Device
 	latestReleaseUrl string
+	githubToken      string
 	runCommand       RunCommandFunc
 }
 
@@ -60,12 +98,14 @@ func NewUpdater(
 	logger hclog.Logger,
 	device *Device,
 	latestReleaseUrl string,
+	githubToken string,
 	runCommand RunCommandFunc,
 ) Updater {
 	return &defaultUpdater{
 		logger:           logger,
 		device:           device,
 		latestReleaseUrl: latestReleaseUrl,
+		githubToken:      githubToken,
 		runCommand:       runCommand,
 	}
 }
@@ -74,7 +114,15 @@ func (u *defaultUpdater) Check() (Release, error) {
 	release := Release{}
 	u.logger.Info("Checking for updates")
 
-	resp, err := http.Get(u.latestReleaseUrl)
+	req, err := http.NewRequest(http.MethodGet, u.latestReleaseUrl, nil)
+	if err != nil {
+		return release, err
+	}
+	if u.githubToken != "" {
+		req.Header.Set("Authorization", "Bearer "+u.githubToken)
+	}
+
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		u.logger.Error("Failed to fetch latest release", "url", u.latestReleaseUrl, "error", err)
 		return release, err
@@ -138,6 +186,9 @@ func (u *defaultUpdater) Download(asset Asset) (string, error) {
 	}
 
 	req.Header.Add("Accept", "application/octet-stream")
+	if u.githubToken != "" {
+		req.Header.Set("Authorization", "Bearer "+u.githubToken)
+	}
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
