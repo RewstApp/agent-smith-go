@@ -90,6 +90,7 @@ type defaultUpdater struct {
 	logger           hclog.Logger
 	device           *Device
 	latestReleaseUrl string
+	githubToken      string
 	runCommand       RunCommandFunc
 }
 
@@ -97,12 +98,14 @@ func NewUpdater(
 	logger hclog.Logger,
 	device *Device,
 	latestReleaseUrl string,
+	githubToken string,
 	runCommand RunCommandFunc,
 ) Updater {
 	return &defaultUpdater{
 		logger:           logger,
 		device:           device,
 		latestReleaseUrl: latestReleaseUrl,
+		githubToken:      githubToken,
 		runCommand:       runCommand,
 	}
 }
@@ -111,7 +114,15 @@ func (u *defaultUpdater) Check() (Release, error) {
 	release := Release{}
 	u.logger.Info("Checking for updates")
 
-	resp, err := http.Get(u.latestReleaseUrl)
+	req, err := http.NewRequest(http.MethodGet, u.latestReleaseUrl, nil)
+	if err != nil {
+		return release, err
+	}
+	if u.githubToken != "" {
+		req.Header.Set("Authorization", "Bearer "+u.githubToken)
+	}
+
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		u.logger.Error("Failed to fetch latest release", "url", u.latestReleaseUrl, "error", err)
 		return release, err
@@ -175,6 +186,9 @@ func (u *defaultUpdater) Download(asset Asset) (string, error) {
 	}
 
 	req.Header.Add("Accept", "application/octet-stream")
+	if u.githubToken != "" {
+		req.Header.Set("Authorization", "Bearer "+u.githubToken)
+	}
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {

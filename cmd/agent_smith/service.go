@@ -107,6 +107,7 @@ func (svc *serviceContext) Execute(
 			logger,
 			&device,
 			"https://api.github.com/repos/rewstapp/agent-smith-go/releases/latest",
+			os.Getenv("GITHUB_TOKEN"),
 			func(path string, args []string) error {
 				return detachedCommand(path, args, logFile, logFile).Start()
 			},

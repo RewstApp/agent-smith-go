@@ -450,12 +450,6 @@ jobs:
           }
           Write-Output "Error handling verified: failing command error was captured"
 
-      - name: Stagger auto-updater start to avoid GitHub API rate limiting
-        shell: pwsh
-        run: |
-          Write-Output "Waiting 45s to stagger GitHub API calls across platforms..."
-          Start-Sleep -Seconds 45
-
       - name: Install integration test binary (old version)
         shell: pwsh
         run: |
@@ -759,12 +753,6 @@ jobs:
             exit 1
           fi
           echo "Error handling verified: failing command error was captured"
-
-      - name: Stagger auto-updater start to avoid GitHub API rate limiting
-        shell: bash
-        run: |
-          echo "Waiting 90s to stagger GitHub API calls across platforms..."
-          sleep 90
 
       - name: Install integration test binary (old version)
         shell: bash

@@ -28,7 +28,7 @@ func TestNewUpdater(t *testing.T) {
 	device := newTestDevice()
 	runCmd := func(path string, args []string) error { return nil }
 
-	updater := NewUpdater(logger, device, "http://example.com", runCmd)
+	updater := NewUpdater(logger, device, "http://example.com", "", runCmd)
 
 	if updater == nil {
 		t.Fatal("expected updater, got nil")
@@ -52,7 +52,7 @@ func TestCheck_Success(t *testing.T) {
 
 	logger := hclog.NewNullLogger()
 	device := newTestDevice()
-	updater := NewUpdater(logger, device, server.URL, nil)
+	updater := NewUpdater(logger, device, server.URL, "", nil)
 
 	result, err := updater.Check()
 	if err != nil {
@@ -71,7 +71,7 @@ func TestCheck_Success(t *testing.T) {
 func TestCheck_HttpError(t *testing.T) {
 	logger := hclog.NewNullLogger()
 	device := newTestDevice()
-	updater := NewUpdater(logger, device, "http://invalid.invalid.invalid", nil)
+	updater := NewUpdater(logger, device, "http://invalid.invalid.invalid", "", nil)
 
 	_, err := updater.Check()
 
@@ -88,7 +88,7 @@ func TestCheck_NonOkStatus(t *testing.T) {
 
 	logger := hclog.NewNullLogger()
 	device := newTestDevice()
-	updater := NewUpdater(logger, device, server.URL, nil)
+	updater := NewUpdater(logger, device, server.URL, "", nil)
 
 	_, err := updater.Check()
 
@@ -109,7 +109,7 @@ func TestCheck_InvalidJson(t *testing.T) {
 
 	logger := hclog.NewNullLogger()
 	device := newTestDevice()
-	updater := NewUpdater(logger, device, server.URL, nil)
+	updater := NewUpdater(logger, device, server.URL, "", nil)
 
 	_, err := updater.Check()
 
@@ -136,7 +136,7 @@ func TestUpdate_BuildsArgs(t *testing.T) {
 	}
 
 	logger := hclog.NewNullLogger()
-	updater := NewUpdater(logger, device, "", runCmd)
+	updater := NewUpdater(logger, device, "", "", runCmd)
 
 	err := updater.Update("/path/to/binary")
 	if err != nil {
@@ -180,7 +180,7 @@ func TestUpdate_MinimalArgs(t *testing.T) {
 	}
 
 	logger := hclog.NewNullLogger()
-	updater := NewUpdater(logger, device, "", runCmd)
+	updater := NewUpdater(logger, device, "", "", runCmd)
 
 	err := updater.Update("/path/to/binary")
 	if err != nil {
@@ -202,7 +202,7 @@ func TestUpdate_RunCommandError(t *testing.T) {
 
 	logger := hclog.NewNullLogger()
 	device := newTestDevice()
-	updater := NewUpdater(logger, device, "", runCmd)
+	updater := NewUpdater(logger, device, "", "", runCmd)
 
 	err := updater.Update("/path/to/binary")
 
@@ -224,7 +224,7 @@ func TestDownload_Success(t *testing.T) {
 
 	logger := hclog.NewNullLogger()
 	device := newTestDevice()
-	updater := NewUpdater(logger, device, "", nil)
+	updater := NewUpdater(logger, device, "", "", nil)
 
 	path, err := updater.Download(Asset{Url: server.URL})
 	if err != nil {
@@ -251,7 +251,7 @@ func TestDownload_Success(t *testing.T) {
 func TestDownload_HttpError(t *testing.T) {
 	logger := hclog.NewNullLogger()
 	device := newTestDevice()
-	updater := NewUpdater(logger, device, "", nil)
+	updater := NewUpdater(logger, device, "", "", nil)
 
 	_, err := updater.Download(Asset{Url: "http://invalid.invalid.invalid"})
 
@@ -268,7 +268,7 @@ func TestDownload_NonOkStatus(t *testing.T) {
 
 	logger := hclog.NewNullLogger()
 	device := newTestDevice()
-	updater := NewUpdater(logger, device, "", nil)
+	updater := NewUpdater(logger, device, "", "", nil)
 
 	_, err := updater.Download(Asset{Url: server.URL})
 
@@ -557,7 +557,7 @@ func TestRun_FullUpdateFlow(t *testing.T) {
 
 	logger := hclog.NewNullLogger()
 	device := newTestDevice()
-	updater := NewUpdater(logger, device, releaseServer.URL, runCmd)
+	updater := NewUpdater(logger, device, releaseServer.URL, "", runCmd)
 
 	err := updater.Run()
 	if err != nil {
@@ -597,7 +597,7 @@ func TestRun_SelectAssetError(t *testing.T) {
 
 	logger := hclog.NewNullLogger()
 	device := newTestDevice()
-	updater := NewUpdater(logger, device, server.URL, nil)
+	updater := NewUpdater(logger, device, server.URL, "", nil)
 
 	err := updater.Run()
 
@@ -625,7 +625,7 @@ func TestRun_DownloadError(t *testing.T) {
 
 	logger := hclog.NewNullLogger()
 	device := newTestDevice()
-	updater := NewUpdater(logger, device, releaseServer.URL, nil)
+	updater := NewUpdater(logger, device, releaseServer.URL, "", nil)
 
 	err := updater.Run()
 
@@ -663,7 +663,7 @@ func TestRun_UpdateCommandError(t *testing.T) {
 
 	logger := hclog.NewNullLogger()
 	device := newTestDevice()
-	updater := NewUpdater(logger, device, releaseServer.URL, runCmd)
+	updater := NewUpdater(logger, device, releaseServer.URL, "", runCmd)
 
 	err := updater.Run()
 
@@ -684,7 +684,7 @@ func TestRun_CheckError(t *testing.T) {
 
 	logger := hclog.NewNullLogger()
 	device := newTestDevice()
-	updater := NewUpdater(logger, device, server.URL, nil)
+	updater := NewUpdater(logger, device, server.URL, "", nil)
 
 	err := updater.Run()
 
@@ -708,7 +708,7 @@ func TestRun_NoUpdateAvailable(t *testing.T) {
 
 	logger := hclog.NewNullLogger()
 	device := newTestDevice()
-	updater := NewUpdater(logger, device, server.URL, nil)
+	updater := NewUpdater(logger, device, server.URL, "", nil)
 
 	err := updater.Run()
 	if err != nil {
