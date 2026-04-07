@@ -66,6 +66,8 @@ jobs:
   test-ubuntu-latest:
     permissions:
       contents: read
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     needs: [build, build-integration-test]
     if: inputs.os == 'ubuntu-latest' || inputs.os == 'all'
     runs-on: ubuntu-latest
@@ -317,6 +319,8 @@ jobs:
   test-windows-latest:
     permissions:
       contents: read
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     needs: [build, build-integration-test]
     if: inputs.os == 'windows-latest' || inputs.os == 'all'
     runs-on: windows-latest
@@ -647,6 +651,8 @@ jobs:
   test-macos-latest:
     permissions:
       contents: read
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     needs: [build, build-integration-test]
     if: inputs.os == 'macos-latest' || inputs.os == 'all'
     runs-on: macos-latest
