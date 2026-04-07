@@ -2,6 +2,7 @@ package plugins
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"os/exec"
 
@@ -124,12 +125,27 @@ func LoadNotifer(plugins []agent.Plugin, logWriter io.Writer) (NotifierWrapper, 
 			continue
 		}
 
+		notifier, ok := raw.(shared.Notifier)
+		if !ok {
+			combinedErrors = errors.Join(
+				combinedErrors,
+				fmt.Errorf("plugin %q: Dispense returned unexpected type", pluginInfo.Name),
+			)
+			continue
+		}
+
 		set.notifiers = append(set.notifiers, &optionalNotifierWrapper{
 			client: client,
-			plugin: raw.(shared.Notifier),
+			plugin: notifier,
 			name:   pluginInfo.Name,
 		})
 	}
 
 	return set, combinedErrors
+}
+
+// toNotifier safely asserts raw to shared.Notifier, returning (nil, false) on failure.
+func toNotifier(raw interface{}) (shared.Notifier, bool) {
+	n, ok := raw.(shared.Notifier)
+	return n, ok
 }

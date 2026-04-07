@@ -113,6 +113,9 @@ func NewUpdater(
 func (u *defaultUpdater) Check() (Release, error) {
 	release := Release{}
 	u.logger.Info("Checking for updates")
+	if u.githubToken != "" {
+		u.logger.Info("GitHub token provided for update check")
+	}
 
 	req, err := http.NewRequest(http.MethodGet, u.latestReleaseUrl, nil)
 	if err != nil {

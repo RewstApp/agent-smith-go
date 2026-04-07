@@ -79,6 +79,7 @@ func runUpdate(params *updateContext) {
 	device.UseSyslog = params.UseSyslog
 	device.DisableAgentPostback = params.DisableAgentPostback
 	device.DisableAutoUpdates = params.NoAutoUpdates
+	device.GithubToken = params.GithubToken
 
 	// Save the updated configuration file
 	configBytes, err := json.MarshalIndent(device, "", "  ")

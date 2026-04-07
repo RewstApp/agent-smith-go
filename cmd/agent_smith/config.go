@@ -106,6 +106,7 @@ func runConfig(params *configContext) error {
 	response.Configuration.UseSyslog = params.UseSyslog
 	response.Configuration.DisableAgentPostback = params.DisableAgentPostback
 	response.Configuration.DisableAutoUpdates = params.NoAutoUpdates
+	response.Configuration.GithubToken = params.GithubToken
 
 	// Create the data directory
 	dataDir := agent.GetDataDirectory(params.OrgId)

@@ -14,6 +14,7 @@ type Device struct {
 	Plugins              []Plugin           `json:"plugins"`
 	DisableAgentPostback bool               `json:"disable_agent_postback"`
 	DisableAutoUpdates   bool               `json:"disable_auto_updates"`
+	GithubToken          string             `json:"github_token,omitempty"`
 }
 
 type Plugin struct {

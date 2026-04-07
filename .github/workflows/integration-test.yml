@@ -66,6 +66,8 @@ jobs:
   test-ubuntu-latest:
     permissions:
       contents: read
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     needs: [build, build-integration-test]
     if: inputs.os == 'ubuntu-latest' || inputs.os == 'all'
     runs-on: ubuntu-latest
@@ -91,7 +93,7 @@ jobs:
         id: install_agent
         shell: bash
         run: |
-          sudo ./dist/rewst_agent_config.linux.bin --config-url ${{ vars.IT_CONFIG_URL }} --config-secret ${{ secrets.IT_CONFIG_SECRET }} --org-id ${{ vars.IT_ORG_ID }}
+          sudo ./dist/rewst_agent_config.linux.bin --config-url ${{ vars.IT_CONFIG_URL }} --config-secret ${{ secrets.IT_CONFIG_SECRET }} --org-id ${{ vars.IT_ORG_ID }} --github-token ${{ secrets.GITHUB_TOKEN }}
           echo "service=rewst_remote_agent_${{ vars.IT_ORG_ID }}" >> $GITHUB_OUTPUT
 
       - name: Check service
@@ -176,7 +178,7 @@ jobs:
       - name: Install integration test binary (old version)
         shell: bash
         run: |
-          sudo ./dist/rewst_agent_config.linux.it.bin --update --org-id ${{ vars.IT_ORG_ID }}
+          sudo ./dist/rewst_agent_config.linux.it.bin --update --org-id ${{ vars.IT_ORG_ID }} --github-token ${{ secrets.GITHUB_TOKEN }}
           echo "Installed integration test binary (version v0.0.0-it)"
 
       - name: Wait for auto updater to trigger and update
@@ -220,7 +222,7 @@ jobs:
       - name: Update logging level to debug
         shell: bash
         run: |
-          sudo ./dist/rewst_agent_config.linux.bin --update --org-id ${{ vars.IT_ORG_ID }} --logging-level debug
+          sudo ./dist/rewst_agent_config.linux.bin --update --org-id ${{ vars.IT_ORG_ID }} --logging-level debug --github-token ${{ secrets.GITHUB_TOKEN }}
           echo "Logging level successfully updated to debug"
 
       - name: Send test command
@@ -256,7 +258,7 @@ jobs:
       - name: Update agent
         shell: bash
         run: |
-          sudo ./dist/rewst_agent_config.linux.bin --update --org-id ${{ vars.IT_ORG_ID }} --no-auto-updates
+          sudo ./dist/rewst_agent_config.linux.bin --update --org-id ${{ vars.IT_ORG_ID }} --no-auto-updates --github-token ${{ secrets.GITHUB_TOKEN }}
 
       - name: Check logs for no auto updater
         shell: bash
@@ -279,7 +281,7 @@ jobs:
       - name: Update agent with syslog
         shell: bash
         run: |
-          sudo ./dist/rewst_agent_config.linux.bin --update --org-id ${{ vars.IT_ORG_ID }} --syslog
+          sudo ./dist/rewst_agent_config.linux.bin --update --org-id ${{ vars.IT_ORG_ID }} --syslog --github-token ${{ secrets.GITHUB_TOKEN }}
 
       - name: Send test command
         shell: bash
@@ -317,6 +319,8 @@ jobs:
   test-windows-latest:
     permissions:
       contents: read
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     needs: [build, build-integration-test]
     if: inputs.os == 'windows-latest' || inputs.os == 'all'
     runs-on: windows-latest
@@ -337,7 +341,7 @@ jobs:
         id: install_agent
         shell: pwsh
         run: |
-          ./dist/rewst_agent_config.win.exe --config-url ${{ vars.IT_CONFIG_URL }} --config-secret ${{ secrets.IT_CONFIG_SECRET }} --org-id ${{ vars.IT_ORG_ID }}
+          ./dist/rewst_agent_config.win.exe --config-url ${{ vars.IT_CONFIG_URL }} --config-secret ${{ secrets.IT_CONFIG_SECRET }} --org-id ${{ vars.IT_ORG_ID }} --github-token ${{ secrets.GITHUB_TOKEN }}
           Write-Output "service=RewstRemoteAgent_${{ vars.IT_ORG_ID }}" >> $env:GITHUB_OUTPUT
 
       - name: Check service
@@ -453,7 +457,7 @@ jobs:
       - name: Install integration test binary (old version)
         shell: pwsh
         run: |
-          ./dist/rewst_agent_config.win.it.exe --update --org-id ${{ vars.IT_ORG_ID }}
+          ./dist/rewst_agent_config.win.it.exe --update --org-id ${{ vars.IT_ORG_ID }} --github-token ${{ secrets.GITHUB_TOKEN }}
           Write-Output "Installed integration test binary (version v0.0.0-it)"
 
       - name: Wait for auto updater to trigger and update
@@ -495,7 +499,7 @@ jobs:
       - name: Update logging level to debug
         shell: pwsh
         run: |
-          ./dist/rewst_agent_config.win.exe --update --org-id ${{ vars.IT_ORG_ID }} --logging-level debug
+          ./dist/rewst_agent_config.win.exe --update --org-id ${{ vars.IT_ORG_ID }} --logging-level debug --github-token ${{ secrets.GITHUB_TOKEN }}
           Write-Output "Logging level successfully updated to debug"
 
       - name: Send test command
@@ -540,7 +544,7 @@ jobs:
       - name: Update agent
         shell: pwsh
         run: |
-          ./dist/rewst_agent_config.win.exe --update --org-id ${{ vars.IT_ORG_ID }} --no-auto-updates --disable-agent-postback
+          ./dist/rewst_agent_config.win.exe --update --org-id ${{ vars.IT_ORG_ID }} --no-auto-updates --disable-agent-postback --github-token ${{ secrets.GITHUB_TOKEN }}
 
       - name: Check logs for no auto updater
         shell: pwsh
@@ -598,7 +602,7 @@ jobs:
       - name: Update agent with syslog
         shell: pwsh
         run: |
-          ./dist/rewst_agent_config.win.exe --update --org-id ${{ vars.IT_ORG_ID }} --syslog
+          ./dist/rewst_agent_config.win.exe --update --org-id ${{ vars.IT_ORG_ID }} --syslog --github-token ${{ secrets.GITHUB_TOKEN }}
 
       - name: Send test command
         shell: pwsh
@@ -647,6 +651,8 @@ jobs:
   test-macos-latest:
     permissions:
       contents: read
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     needs: [build, build-integration-test]
     if: inputs.os == 'macos-latest' || inputs.os == 'all'
     runs-on: macos-latest
@@ -672,7 +678,7 @@ jobs:
         id: install_agent
         shell: bash
         run: |
-          sudo ./dist/rewst_agent_config.mac-os.bin --config-url ${{ vars.IT_CONFIG_URL }} --config-secret ${{ secrets.IT_CONFIG_SECRET }} --org-id ${{ vars.IT_ORG_ID }}
+          sudo ./dist/rewst_agent_config.mac-os.bin --config-url ${{ vars.IT_CONFIG_URL }} --config-secret ${{ secrets.IT_CONFIG_SECRET }} --org-id ${{ vars.IT_ORG_ID }} --github-token ${{ secrets.GITHUB_TOKEN }}
           echo "service=io.rewst.remote_agent_${{ vars.IT_ORG_ID }}" >> $GITHUB_OUTPUT
 
       - name: Check service
@@ -757,7 +763,7 @@ jobs:
       - name: Install integration test binary (old version)
         shell: bash
         run: |
-          sudo ./dist/rewst_agent_config.mac-os.it.bin --update --org-id ${{ vars.IT_ORG_ID }}
+          sudo ./dist/rewst_agent_config.mac-os.it.bin --update --org-id ${{ vars.IT_ORG_ID }} --github-token ${{ secrets.GITHUB_TOKEN }}
           echo "Installed integration test binary (version v0.0.0-it)"
 
       - name: Wait for auto updater to trigger and update
@@ -799,7 +805,7 @@ jobs:
       - name: Update logging level to debug
         shell: bash
         run: |
-          sudo ./dist/rewst_agent_config.mac-os.bin --update --org-id ${{ vars.IT_ORG_ID }} --logging-level debug
+          sudo ./dist/rewst_agent_config.mac-os.bin --update --org-id ${{ vars.IT_ORG_ID }} --logging-level debug --github-token ${{ secrets.GITHUB_TOKEN }}
           echo "Logging level successfully updated to debug"
 
       - name: Send test command
@@ -835,7 +841,7 @@ jobs:
       - name: Update agent
         shell: bash
         run: |
-          sudo ./dist/rewst_agent_config.mac-os.bin --update --org-id ${{ vars.IT_ORG_ID }} --no-auto-updates
+          sudo ./dist/rewst_agent_config.mac-os.bin --update --org-id ${{ vars.IT_ORG_ID }} --no-auto-updates --github-token ${{ secrets.GITHUB_TOKEN }}
 
       - name: Check logs for no auto updater
         shell: bash
@@ -858,7 +864,7 @@ jobs:
       - name: Update agent with syslog
         shell: bash
         run: |
-          sudo ./dist/rewst_agent_config.mac-os.bin --update --org-id ${{ vars.IT_ORG_ID }} --syslog
+          sudo ./dist/rewst_agent_config.mac-os.bin --update --org-id ${{ vars.IT_ORG_ID }} --syslog --github-token ${{ secrets.GITHUB_TOKEN }}
 
       - name: Send test command
         shell: bash

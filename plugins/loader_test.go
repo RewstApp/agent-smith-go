@@ -439,6 +439,40 @@ func TestDefaultConstants(t *testing.T) {
 	}
 }
 
+// TestToNotifier_ValidNotifier tests that a valid shared.Notifier passes the assertion
+func TestToNotifier_ValidNotifier(t *testing.T) {
+	mock := &mockNotifier{}
+	notifier, ok := toNotifier(mock)
+	if !ok {
+		t.Fatal("expected ok=true for a valid shared.Notifier")
+	}
+	if notifier == nil {
+		t.Fatal("expected non-nil notifier")
+	}
+}
+
+// TestToNotifier_NonNotifierType tests that an incompatible type fails the assertion
+func TestToNotifier_NonNotifierType(t *testing.T) {
+	notifier, ok := toNotifier("not a notifier")
+	if ok {
+		t.Fatal("expected ok=false for a non-Notifier type")
+	}
+	if notifier != nil {
+		t.Fatal("expected nil notifier on failed assertion")
+	}
+}
+
+// TestToNotifier_Nil tests that a nil interface fails the assertion
+func TestToNotifier_Nil(t *testing.T) {
+	notifier, ok := toNotifier(nil)
+	if ok {
+		t.Fatal("expected ok=false for nil")
+	}
+	if notifier != nil {
+		t.Fatal("expected nil notifier")
+	}
+}
+
 // Helper function
 func contains(s, substr string) bool {
 	return len(s) >= len(substr) &&
