@@ -86,12 +86,19 @@ func DefaultMaxRetries() int {
 
 type RunCommandFunc = func(path string, args []string) error
 
+const (
+	checkTimeout    = 30 * time.Second
+	downloadTimeout = 5 * time.Minute
+)
+
 type defaultUpdater struct {
 	logger           hclog.Logger
 	device           *Device
 	latestReleaseUrl string
 	githubToken      string
 	runCommand       RunCommandFunc
+	checkClient      *http.Client
+	downloadClient   *http.Client
 }
 
 func NewUpdater(
@@ -107,6 +114,8 @@ func NewUpdater(
 		latestReleaseUrl: latestReleaseUrl,
 		githubToken:      githubToken,
 		runCommand:       runCommand,
+		checkClient:      &http.Client{Timeout: checkTimeout},
+		downloadClient:   &http.Client{Timeout: downloadTimeout},
 	}
 }
 
@@ -125,7 +134,7 @@ func (u *defaultUpdater) Check() (Release, error) {
 		req.Header.Set("Authorization", "Bearer "+u.githubToken)
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := u.checkClient.Do(req)
 	if err != nil {
 		u.logger.Error("Failed to fetch latest release", "url", u.latestReleaseUrl, "error", err)
 		return release, err
@@ -193,7 +202,7 @@ func (u *defaultUpdater) Download(asset Asset) (string, error) {
 		req.Header.Set("Authorization", "Bearer "+u.githubToken)
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := u.downloadClient.Do(req)
 	if err != nil {
 		return "", err
 	}

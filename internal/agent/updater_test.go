@@ -715,3 +715,49 @@ func TestRun_NoUpdateAvailable(t *testing.T) {
 		t.Fatalf("expected no error, got %v", err)
 	}
 }
+
+func TestCheck_Timeout(t *testing.T) {
+	done := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-done:
+		case <-r.Context().Done():
+		}
+	}))
+	defer server.Close()
+	defer close(done) // unblocks handler before server.Close() drains connections
+
+	logger := hclog.NewNullLogger()
+	device := newTestDevice()
+	u := NewUpdater(logger, device, server.URL, "", nil).(*defaultUpdater)
+	u.checkClient = &http.Client{Timeout: 50 * time.Millisecond}
+
+	_, err := u.Check()
+
+	if err == nil {
+		t.Fatal("expected timeout error, got nil")
+	}
+}
+
+func TestDownload_Timeout(t *testing.T) {
+	done := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-done:
+		case <-r.Context().Done():
+		}
+	}))
+	defer server.Close()
+	defer close(done) // unblocks handler before server.Close() drains connections
+
+	logger := hclog.NewNullLogger()
+	device := newTestDevice()
+	u := NewUpdater(logger, device, "", "", nil).(*defaultUpdater)
+	u.downloadClient = &http.Client{Timeout: 50 * time.Millisecond}
+
+	_, err := u.Download(Asset{Url: server.URL})
+
+	if err == nil {
+		t.Fatal("expected timeout error, got nil")
+	}
+}

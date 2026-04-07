@@ -8,6 +8,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/RewstApp/agent-smith-go/internal/agent"
 	"github.com/RewstApp/agent-smith-go/internal/utils"
@@ -407,5 +408,26 @@ func TestRunConfig_ServiceStartFails(t *testing.T) {
 
 	if err == nil || !strings.Contains(err.Error(), "failed to start service") {
 		t.Errorf("expected 'failed to start service' error, got %v", err)
+	}
+}
+
+func TestRunConfig_HTTPTimeout(t *testing.T) {
+	done := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-done:
+		case <-r.Context().Done():
+		}
+	}))
+	defer srv.Close()
+	defer close(done) // unblocks handler before srv.Close() drains connections
+
+	params := newBaseConfigParams(srv.URL)
+	params.HTTPClient = &http.Client{Timeout: 50 * time.Millisecond}
+
+	err := runConfig(params)
+
+	if err == nil || !strings.Contains(err.Error(), "failed to execute http request") {
+		t.Errorf("expected 'failed to execute http request' error, got %v", err)
 	}
 }

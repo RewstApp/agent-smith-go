@@ -70,7 +70,11 @@ func runConfig(params *configContext) error {
 	req.Header.Set("x-rewst-secret", params.ConfigSecret)
 	req.Header.Set("Content-Type", "application/json")
 
-	res, err := http.DefaultClient.Do(req)
+	httpClient := params.HTTPClient
+	if httpClient == nil {
+		httpClient = &http.Client{Timeout: configHTTPTimeout}
+	}
+	res, err := httpClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("failed to execute http request: %w", err)
 	}

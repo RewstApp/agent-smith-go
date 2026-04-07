@@ -4,11 +4,15 @@ import (
 	"bytes"
 	"flag"
 	"fmt"
+	"net/http"
+	"time"
 
 	"github.com/RewstApp/agent-smith-go/internal/agent"
 	"github.com/RewstApp/agent-smith-go/internal/service"
 	"github.com/RewstApp/agent-smith-go/internal/utils"
 )
+
+const configHTTPTimeout = 5 * time.Minute
 
 type configContext struct {
 	OrgId                string
@@ -25,6 +29,7 @@ type configContext struct {
 
 	FS             utils.FileSystem
 	ServiceManager service.ServiceManager
+	HTTPClient     *http.Client
 }
 
 func newConfigContext(
@@ -82,6 +87,7 @@ func newConfigContext(
 	params.Domain = domain
 	params.FS = fsys
 	params.ServiceManager = svcMgr
+	params.HTTPClient = &http.Client{Timeout: configHTTPTimeout}
 
 	return &params, nil
 }
