@@ -12,7 +12,7 @@ import (
 	"github.com/RewstApp/agent-smith-go/internal/utils"
 )
 
-const configHTTPTimeout = 30 * time.Second
+const configHTTPTimeout = 5 * time.Minute
 
 type configContext struct {
 	OrgId                string
