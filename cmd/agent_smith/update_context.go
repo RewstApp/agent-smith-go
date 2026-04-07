@@ -17,6 +17,7 @@ type updateContext struct {
 	UseSyslog            bool
 	DisableAgentPostback bool
 	NoAutoUpdates        bool
+	GithubToken          string
 
 	Sys    agent.SystemInfoProvider
 	Domain agent.DomainInfoProvider
@@ -51,6 +52,7 @@ func newUpdateContext(
 		"Disable agent postback",
 	)
 	fs.BoolVar(&params.NoAutoUpdates, "no-auto-updates", false, "No auto updates")
+	fs.StringVar(&params.GithubToken, "github-token", "", "GitHub token for update checks")
 	fs.SetOutput(bytes.NewBuffer([]byte{}))
 
 	err := fs.Parse(args)
