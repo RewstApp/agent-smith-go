@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"flag"
 	"fmt"
+	"net/http"
 
 	"github.com/RewstApp/agent-smith-go/internal/agent"
 	"github.com/RewstApp/agent-smith-go/internal/interpreter"
@@ -17,7 +18,8 @@ type serviceContext struct {
 	Sys    agent.SystemInfoProvider
 	Domain agent.DomainInfoProvider
 
-	Executor interpreter.Executor
+	Executor   interpreter.Executor
+	HTTPClient *http.Client // if nil, processMessage uses a default client
 }
 
 func newServiceContext(

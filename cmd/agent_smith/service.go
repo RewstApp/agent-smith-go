@@ -20,6 +20,12 @@ import (
 	"github.com/RewstApp/agent-smith-go/internal/utils"
 	"github.com/RewstApp/agent-smith-go/internal/version"
 	"github.com/RewstApp/agent-smith-go/plugins"
+	"github.com/hashicorp/go-hclog"
+)
+
+const (
+	workerCount      = 10
+	messageQueueSize = 100
 )
 
 type errorResponse struct {
@@ -173,6 +179,31 @@ func (svc *serviceContext) Execute(
 	_ = notifier.Notify("AgentStarted") // Best effort notification
 	rg := utils.ReconnectTimeoutGenerator{}
 
+	msgQueue := make(chan []byte, messageQueueSize)
+	for i := range workerCount {
+		go func() {
+			logger.Debug("Message worker started", "worker", i)
+			for {
+				select {
+				case payload, ok := <-msgQueue:
+					if !ok {
+						logger.Debug("Message worker stopped: queue closed", "worker", i)
+						return
+					}
+					logger.Debug(
+						"Message worker processing",
+						"worker", i,
+						"queue_length", len(msgQueue),
+					)
+					svc.processMessage(payload, ctx, device, logger, notifier)
+				case <-ctx.Done():
+					logger.Debug("Message worker stopped: context cancelled", "worker", i)
+					return
+				}
+			}
+		}()
+	}
+
 	for {
 		// Wait for the timeout
 		if rg.Timeout() > 0 {
@@ -231,115 +262,16 @@ func (svc *serviceContext) Execute(
 		// Subscribe to the topic
 		topic := fmt.Sprintf("devices/%s/messages/devicebound/#", device.DeviceId)
 		token = client.Subscribe(topic, 1, func(client mqtt.Client, msg mqtt.Message) {
-			// Execute the payload on a goroutine so it won't block the receiver
-			go func() {
-				var message interpreter.Message
-				err := message.Parse(msg.Payload())
-				if err != nil {
-					logger.Error("Parse failed", "error", err)
-					return
-				}
-
-				_ = notifier.Notify(
-					"AgentReceivedMessage:" + string(msg.Payload()),
-				) // Best effort notification
-
-				// Execute the message
-				resultBytes := message.Execute(
-					svc.Executor,
-					ctx,
-					device,
-					logger,
-					svc.Sys,
-					svc.Domain,
+			payload := msg.Payload()
+			select {
+			case msgQueue <- payload:
+			default:
+				logger.Warn(
+					"Message dropped: queue full",
+					"queue_size",
+					messageQueueSize,
 				)
-
-				// Skip if there is no post_id specified
-				if message.PostId == "" {
-					return
-				}
-
-				// Skip postback if disabled in config (ignored when executor always posts back)
-				if device.DisableAgentPostback && !svc.Executor.AlwaysPostback() {
-					return
-				}
-
-				// Postback the response
-				postbackReq, err := message.CreatePostbackRequest(
-					ctx,
-					device,
-					bytes.NewReader(resultBytes),
-				)
-				if err != nil {
-					logger.Error("Failed to create postback request", "error", err)
-					return
-				}
-				// Send the postback
-				logger.Info("Sending postback", "post_id", message.PostId, "url", postbackReq.URL)
-				client := &http.Client{}
-				res, err := client.Do(postbackReq)
-				if err != nil {
-					logger.Error("Failed to send postback", "error", err)
-					return
-				}
-				defer func() {
-					err = res.Body.Close()
-					if err != nil {
-						logger.Error("Failed to close response", "error", err)
-					}
-				}()
-
-				// Show postback response body if not empty
-				bodyBytes, err := io.ReadAll(res.Body)
-				if err != nil {
-					logger.Error("Failed to read postback response body", "error", err)
-					return
-				}
-
-				// Show success response
-				if res.StatusCode == http.StatusOK {
-					logger.Info("Postback sent", "post_id", message.PostId)
-					if len(bodyBytes) > 0 {
-						logger.Info("Received response", "data", string(bodyBytes))
-					}
-					return
-				}
-
-				// Process error
-				var response errorResponse
-				err = json.Unmarshal(bodyBytes, &response)
-				if err != nil {
-					logger.Error(
-						"Postback failed",
-						"post_id",
-						message.PostId,
-						"status_code",
-						res.StatusCode,
-					)
-					if len(bodyBytes) > 0 {
-						logger.Error("Received error response", "data", string(bodyBytes))
-					}
-					return
-				}
-
-				// Special error for webhook already fulfilled
-				if res.StatusCode == http.StatusBadRequest &&
-					strings.Contains(strings.ToLower(response.Error), "fulfilled") {
-					logger.Info("Postback already sent", "post_id", message.PostId)
-					return
-				}
-
-				// Standard error format
-				logger.Error(
-					"Postback failed",
-					"post_id",
-					message.PostId,
-					"status_code",
-					res.StatusCode,
-					"message",
-					response.Error,
-				)
-			}()
+			}
 		})
 
 		if token.Wait() && token.Error() != nil {
@@ -365,6 +297,119 @@ func (svc *serviceContext) Execute(
 			continue
 		}
 	}
+}
+
+func (svc *serviceContext) processMessage(
+	payload []byte,
+	ctx context.Context,
+	device agent.Device,
+	logger hclog.Logger,
+	notifier plugins.NotifierWrapper,
+) {
+	var message interpreter.Message
+	err := message.Parse(payload)
+	if err != nil {
+		logger.Error("Parse failed", "error", err)
+		return
+	}
+
+	_ = notifier.Notify(
+		"AgentReceivedMessage:" + string(payload),
+	) // Best effort notification
+
+	// Execute the message
+	resultBytes := message.Execute(
+		svc.Executor,
+		ctx,
+		device,
+		logger,
+		svc.Sys,
+		svc.Domain,
+	)
+
+	// Skip if there is no post_id specified
+	if message.PostId == "" {
+		return
+	}
+
+	// Skip postback if disabled in config (ignored when executor always posts back)
+	if device.DisableAgentPostback && !svc.Executor.AlwaysPostback() {
+		return
+	}
+
+	// Postback the response
+	postbackReq, err := message.CreatePostbackRequest(
+		ctx,
+		device,
+		bytes.NewReader(resultBytes),
+	)
+	if err != nil {
+		logger.Error("Failed to create postback request", "error", err)
+		return
+	}
+
+	logger.Info("Sending postback", "post_id", message.PostId, "url", postbackReq.URL)
+	httpClient := svc.HTTPClient
+	if httpClient == nil {
+		httpClient = &http.Client{}
+	}
+	res, err := httpClient.Do(postbackReq)
+	if err != nil {
+		logger.Error("Failed to send postback", "error", err)
+		return
+	}
+	defer func() {
+		err = res.Body.Close()
+		if err != nil {
+			logger.Error("Failed to close response", "error", err)
+		}
+	}()
+
+	bodyBytes, err := io.ReadAll(res.Body)
+	if err != nil {
+		logger.Error("Failed to read postback response body", "error", err)
+		return
+	}
+
+	if res.StatusCode == http.StatusOK {
+		logger.Info("Postback sent", "post_id", message.PostId)
+		if len(bodyBytes) > 0 {
+			logger.Info("Received response", "data", string(bodyBytes))
+		}
+		return
+	}
+
+	var response errorResponse
+	err = json.Unmarshal(bodyBytes, &response)
+	if err != nil {
+		logger.Error(
+			"Postback failed",
+			"post_id",
+			message.PostId,
+			"status_code",
+			res.StatusCode,
+		)
+		if len(bodyBytes) > 0 {
+			logger.Error("Received error response", "data", string(bodyBytes))
+		}
+		return
+	}
+
+	if res.StatusCode == http.StatusBadRequest &&
+		strings.Contains(strings.ToLower(response.Error), "fulfilled") {
+		logger.Info("Postback already sent", "post_id", message.PostId)
+		return
+	}
+
+	logger.Error(
+		"Postback failed",
+		"post_id",
+		message.PostId,
+		"status_code",
+		res.StatusCode,
+		"message",
+		response.Error,
+	)
 }
 
 func runService(params *serviceContext) {
