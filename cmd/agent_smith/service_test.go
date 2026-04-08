@@ -3,15 +3,19 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/RewstApp/agent-smith-go/internal/agent"
 	"github.com/RewstApp/agent-smith-go/internal/interpreter"
+	inmqtt "github.com/RewstApp/agent-smith-go/internal/mqtt"
 	"github.com/RewstApp/agent-smith-go/internal/service"
 	"github.com/RewstApp/agent-smith-go/internal/utils"
+	pahomqtt "github.com/eclipse/paho.mqtt.golang"
 	"github.com/hashicorp/go-hclog"
 )
 
@@ -505,4 +509,128 @@ func TestLoadConfig_EmptyFile(t *testing.T) {
 // The component tests (loadConfig, loadLog, error cases) provide sufficient coverage
 func TestExecute_AutoUpdatesDisabled(t *testing.T) {
 	t.Skip("Skipping integration test - requires MQTT test infrastructure")
+}
+
+// mockMQTTToken implements pahomqtt.Token for testing.
+type mockMQTTToken struct {
+	err error
+}
+
+func (t *mockMQTTToken) Wait() bool                       { return true }
+func (t *mockMQTTToken) WaitTimeout(_ time.Duration) bool { return true }
+func (t *mockMQTTToken) Done() <-chan struct{} {
+	ch := make(chan struct{})
+	close(ch)
+	return ch
+}
+func (t *mockMQTTToken) Error() error { return t.err }
+
+// mockMQTTClient implements pahomqtt.Client for testing.
+// Connect and Publish succeed; Subscribe returns subscribeErr.
+type mockMQTTClient struct {
+	subscribeErr error
+}
+
+func (m *mockMQTTClient) IsConnected() bool      { return true }
+func (m *mockMQTTClient) IsConnectionOpen() bool { return true }
+func (m *mockMQTTClient) Connect() pahomqtt.Token {
+	return &mockMQTTToken{}
+}
+func (m *mockMQTTClient) Disconnect(_ uint) {}
+func (m *mockMQTTClient) Publish(_ string, _ byte, _ bool, _ interface{}) pahomqtt.Token {
+	return &mockMQTTToken{}
+}
+
+func (m *mockMQTTClient) Subscribe(_ string, _ byte, _ pahomqtt.MessageHandler) pahomqtt.Token {
+	return &mockMQTTToken{err: m.subscribeErr}
+}
+
+func (m *mockMQTTClient) SubscribeMultiple(
+	_ map[string]byte,
+	_ pahomqtt.MessageHandler,
+) pahomqtt.Token {
+	return &mockMQTTToken{}
+}
+func (m *mockMQTTClient) Unsubscribe(_ ...string) pahomqtt.Token       { return &mockMQTTToken{} }
+func (m *mockMQTTClient) AddRoute(_ string, _ pahomqtt.MessageHandler) {}
+func (m *mockMQTTClient) OptionsReader() pahomqtt.ClientOptionsReader {
+	return pahomqtt.NewOptionsReader(pahomqtt.NewClientOptions())
+}
+
+// TestExecute_SubscribeFailure verifies that when MQTT subscription fails,
+// the logged error comes from token.Error() and not from a stale err variable.
+func TestExecute_SubscribeFailure(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.json")
+	logPath := filepath.Join(tmpDir, "test.log")
+
+	// SharedAccessKey must be valid base64 so NewClientOptions succeeds.
+	device := agent.Device{
+		DeviceId:             "test-device",
+		SharedAccessKey:      "dGVzdC1zaGFyZWQta2V5LXRoYXQtaXMtbG9uZy1lbm91Z2gtZm9yLWJhc2U2NC1kZWNvZGluZw==",
+		AzureIotHubHost:      "test.azure-devices.net",
+		LoggingLevel:         "error",
+		DisableAutoUpdates:   true,
+		DisableAgentPostback: true,
+	}
+	configBytes, _ := json.Marshal(device)
+	if err := os.WriteFile(configPath, configBytes, utils.DefaultFileMod); err != nil {
+		t.Fatalf("failed to write config: %v", err)
+	}
+
+	subscribeErrMsg := "subscription denied by broker"
+	origNewClient := inmqtt.NewClient
+	inmqtt.NewClient = func(o *pahomqtt.ClientOptions) pahomqtt.Client {
+		return &mockMQTTClient{subscribeErr: errors.New(subscribeErrMsg)}
+	}
+	defer func() { inmqtt.NewClient = origNewClient }()
+
+	svc := &serviceContext{
+		ConfigFile: configPath,
+		LogFile:    logPath,
+		OrgId:      "test-org",
+		Executor:   &mockExecutor{},
+	}
+
+	stop := make(chan struct{})
+	running := make(chan struct{}, 1)
+
+	done := make(chan service.ServiceExitCode, 1)
+	go func() {
+		done <- svc.Execute(stop, running)
+	}()
+
+	// Wait for service to signal it is running.
+	select {
+	case <-running:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Execute did not signal running within timeout")
+	}
+
+	// Close stop so that after the subscribe failure + reconnect wait, the
+	// service exits cleanly.
+	close(stop)
+
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Execute did not exit within timeout")
+	}
+
+	logBytes, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("failed to read log: %v", err)
+	}
+	logContent := string(logBytes)
+
+	if !strings.Contains(logContent, "Failed to subscribe") {
+		t.Error("expected log to contain 'Failed to subscribe'")
+	}
+	if !strings.Contains(logContent, subscribeErrMsg) {
+		t.Errorf(
+			"expected log to contain the token error %q, but log was:\n%s",
+			subscribeErrMsg,
+			logContent,
+		)
+	}
 }
