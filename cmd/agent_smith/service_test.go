@@ -540,13 +540,18 @@ func (m *mockMQTTClient) Disconnect(_ uint) {}
 func (m *mockMQTTClient) Publish(_ string, _ byte, _ bool, _ interface{}) pahomqtt.Token {
 	return &mockMQTTToken{}
 }
+
 func (m *mockMQTTClient) Subscribe(_ string, _ byte, _ pahomqtt.MessageHandler) pahomqtt.Token {
 	return &mockMQTTToken{err: m.subscribeErr}
 }
-func (m *mockMQTTClient) SubscribeMultiple(_ map[string]byte, _ pahomqtt.MessageHandler) pahomqtt.Token {
+
+func (m *mockMQTTClient) SubscribeMultiple(
+	_ map[string]byte,
+	_ pahomqtt.MessageHandler,
+) pahomqtt.Token {
 	return &mockMQTTToken{}
 }
-func (m *mockMQTTClient) Unsubscribe(_ ...string) pahomqtt.Token { return &mockMQTTToken{} }
+func (m *mockMQTTClient) Unsubscribe(_ ...string) pahomqtt.Token       { return &mockMQTTToken{} }
 func (m *mockMQTTClient) AddRoute(_ string, _ pahomqtt.MessageHandler) {}
 func (m *mockMQTTClient) OptionsReader() pahomqtt.ClientOptionsReader {
 	return pahomqtt.NewOptionsReader(pahomqtt.NewClientOptions())
