@@ -275,7 +275,7 @@ func (svc *serviceContext) Execute(
 		})
 
 		if token.Wait() && token.Error() != nil {
-			logger.Error("Failed to subscribe", "error", err)
+			logger.Error("Failed to subscribe", "error", token.Error())
 			continue
 		}
 
