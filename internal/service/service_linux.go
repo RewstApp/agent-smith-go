@@ -3,14 +3,11 @@
 package service
 
 import (
-	"context"
 	"fmt"
 	"os"
 	"os/exec"
-	"os/signal"
 	"path/filepath"
 	"strings"
-	"syscall"
 
 	"github.com/RewstApp/agent-smith-go/internal/utils"
 )
@@ -128,38 +125,3 @@ func NewServiceManager() ServiceManager {
 	}
 }
 
-func Run(runner Runner) (int, error) {
-	// Create a channel to listen for termination signals
-	signalReceived := make(chan os.Signal, 1)
-	signal.Notify(signalReceived, os.Interrupt, syscall.SIGTERM)
-
-	// Make go routines for the channels
-	stop := make(chan struct{})
-	ctxStop, cancelStop := context.WithCancel(context.Background())
-	defer cancelStop()
-
-	go func() {
-		select {
-		case <-signalReceived:
-			stop <- struct{}{}
-		case <-ctxStop.Done():
-		}
-	}()
-
-	// This channel is unused in linux
-	running := make(chan struct{})
-	ctxRunning, cancelRunning := context.WithCancel(context.Background())
-	defer cancelRunning()
-
-	go func() {
-		select {
-		case <-running:
-		case <-ctxRunning.Done():
-		}
-	}()
-
-	// Execute the runner
-	exitCode := runner.Execute(stop, running)
-
-	return int(exitCode), nil
-}
