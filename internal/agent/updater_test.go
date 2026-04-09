@@ -260,6 +260,46 @@ func TestDownload_HttpError(t *testing.T) {
 	}
 }
 
+func TestDownload_ChmodFailure(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("fake binary content"))
+	}))
+	defer server.Close()
+
+	logger := hclog.NewNullLogger()
+	device := newTestDevice()
+	u := NewUpdater(logger, device, "", "", nil).(*defaultUpdater)
+
+	var capturedTempPath string
+	u.chmod = func(name string, mode os.FileMode) error {
+		capturedTempPath = name
+		return fmt.Errorf("chmod not supported on this filesystem")
+	}
+
+	path, err := u.Download(Asset{Url: server.URL})
+
+	if err == nil {
+		t.Fatal("expected error from chmod failure, got nil")
+	}
+
+	if path != "" {
+		t.Errorf("expected empty path on error, got %s", path)
+	}
+
+	if capturedTempPath == "" {
+		t.Fatal("chmod mock was never called; test setup is broken")
+	}
+
+	// The temp file must not exist after the error — core assertion of the bug fix
+	if _, statErr := os.Stat(capturedTempPath); !os.IsNotExist(statErr) {
+		t.Errorf(
+			"expected temp file %s to be removed after chmod failure, but it still exists",
+			capturedTempPath,
+		)
+		_ = os.Remove(capturedTempPath)
+	}
+}
+
 func TestDownload_NonOkStatus(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)

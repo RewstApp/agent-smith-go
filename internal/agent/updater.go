@@ -99,6 +99,7 @@ type defaultUpdater struct {
 	runCommand       RunCommandFunc
 	checkClient      *http.Client
 	downloadClient   *http.Client
+	chmod            func(name string, mode os.FileMode) error
 }
 
 func NewUpdater(
@@ -116,6 +117,7 @@ func NewUpdater(
 		runCommand:       runCommand,
 		checkClient:      &http.Client{Timeout: checkTimeout},
 		downloadClient:   &http.Client{Timeout: downloadTimeout},
+		chmod:            os.Chmod,
 	}
 }
 
@@ -218,18 +220,30 @@ func (u *defaultUpdater) Download(asset Asset) (string, error) {
 	if err != nil {
 		return "", err
 	}
+
+	success := false
 	defer func() {
 		_ = file.Close()
+		if !success {
+			if removeErr := os.Remove(file.Name()); removeErr != nil {
+				u.logger.Error(
+					"Failed to remove temp installer file",
+					"path", file.Name(),
+					"error", removeErr,
+				)
+			}
+		}
 	}()
 
 	_, err = io.Copy(file, resp.Body)
 	if err != nil {
 		return "", err
 	}
-	if err = os.Chmod(file.Name(), 0o755); err != nil {
+	if err = u.chmod(file.Name(), 0o755); err != nil {
 		return "", fmt.Errorf("failed to set executable permission on installer: %w", err)
 	}
 
+	success = true
 	return file.Name(), nil
 }
 
