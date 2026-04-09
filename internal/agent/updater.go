@@ -226,7 +226,11 @@ func (u *defaultUpdater) Download(asset Asset) (string, error) {
 		_ = file.Close()
 		if !success {
 			if removeErr := os.Remove(file.Name()); removeErr != nil {
-				u.logger.Error("Failed to remove temp installer file", "path", file.Name(), "error", removeErr)
+				u.logger.Error(
+					"Failed to remove temp installer file",
+					"path", file.Name(),
+					"error", removeErr,
+				)
 			}
 		}
 	}()

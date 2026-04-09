@@ -292,7 +292,10 @@ func TestDownload_ChmodFailure(t *testing.T) {
 
 	// The temp file must not exist after the error — core assertion of the bug fix
 	if _, statErr := os.Stat(capturedTempPath); !os.IsNotExist(statErr) {
-		t.Errorf("expected temp file %s to be removed after chmod failure, but it still exists", capturedTempPath)
+		t.Errorf(
+			"expected temp file %s to be removed after chmod failure, but it still exists",
+			capturedTempPath,
+		)
 		_ = os.Remove(capturedTempPath)
 	}
 }
