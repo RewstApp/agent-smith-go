@@ -299,4 +299,3 @@ func TestDefaultServiceManager_Open_Error(t *testing.T) {
 		t.Error("expected error, got nil")
 	}
 }
-

@@ -124,4 +124,3 @@ func NewServiceManager() ServiceManager {
 		system: &defaultSystemCtl{},
 	}
 }
-
