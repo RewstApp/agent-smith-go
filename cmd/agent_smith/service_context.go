@@ -19,7 +19,7 @@ type serviceContext struct {
 	Domain agent.DomainInfoProvider
 
 	Executor   interpreter.Executor
-	HTTPClient *http.Client // if nil, processMessage uses a default client
+	HTTPClient *http.Client
 }
 
 func newServiceContext(
@@ -56,6 +56,7 @@ func newServiceContext(
 	params.Sys = sys
 	params.Domain = domain
 	params.Executor = executor
+	params.HTTPClient = &http.Client{Timeout: postbackHTTPTimeout}
 
 	return &params, nil
 }

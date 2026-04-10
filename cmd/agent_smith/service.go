@@ -24,8 +24,9 @@ import (
 )
 
 const (
-	workerCount      = 10
-	messageQueueSize = 100
+	workerCount          = 10
+	messageQueueSize     = 100
+	postbackHTTPTimeout  = 30 * time.Second
 )
 
 type errorResponse struct {
@@ -349,11 +350,7 @@ func (svc *serviceContext) processMessage(
 	}
 
 	logger.Info("Sending postback", "post_id", message.PostId, "url", postbackReq.URL)
-	httpClient := svc.HTTPClient
-	if httpClient == nil {
-		httpClient = &http.Client{}
-	}
-	res, err := httpClient.Do(postbackReq)
+	res, err := svc.HTTPClient.Do(postbackReq)
 	if err != nil {
 		logger.Error("Failed to send postback", "error", err)
 		return
