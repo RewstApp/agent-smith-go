@@ -24,9 +24,9 @@ import (
 )
 
 const (
-	workerCount          = 10
-	messageQueueSize     = 100
-	postbackHTTPTimeout  = 30 * time.Second
+	workerCount         = 10
+	messageQueueSize    = 100
+	postbackHTTPTimeout = 30 * time.Second
 )
 
 type errorResponse struct {
