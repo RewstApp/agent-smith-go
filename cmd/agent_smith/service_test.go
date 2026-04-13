@@ -531,6 +531,20 @@ type mockMQTTClient struct {
 	subscribeErr error
 }
 
+// disconnectTrackingClient wraps mockMQTTClient and invokes onDisconnect when
+// Disconnect is called. Used to verify that Disconnect is called explicitly at
+// each loop-exit path rather than only when Execute returns.
+type disconnectTrackingClient struct {
+	mockMQTTClient
+	onDisconnect func()
+}
+
+func (m *disconnectTrackingClient) Disconnect(_ uint) {
+	if m.onDisconnect != nil {
+		m.onDisconnect()
+	}
+}
+
 func (m *mockMQTTClient) IsConnected() bool      { return true }
 func (m *mockMQTTClient) IsConnectionOpen() bool { return true }
 func (m *mockMQTTClient) Connect() pahomqtt.Token {
@@ -632,5 +646,142 @@ func TestExecute_SubscribeFailure(t *testing.T) {
 			subscribeErrMsg,
 			logContent,
 		)
+	}
+}
+
+// TestExecute_DisconnectCalledOnStop verifies that the MQTT client is
+// disconnected when the stop signal is received. This tests the explicit
+// client.Disconnect call on the <-stopped path added to fix sc-86631.
+func TestExecute_DisconnectCalledOnStop(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.json")
+	logPath := filepath.Join(tmpDir, "test.log")
+
+	device := agent.Device{
+		DeviceId:             "test-device",
+		SharedAccessKey:      "dGVzdC1zaGFyZWQta2V5LXRoYXQtaXMtbG9uZy1lbm91Z2gtZm9yLWJhc2U2NC1kZWNvZGluZw==",
+		AzureIotHubHost:      "test.azure-devices.net",
+		LoggingLevel:         "error",
+		DisableAutoUpdates:   true,
+		DisableAgentPostback: true,
+	}
+	configBytes, _ := json.Marshal(device)
+	if err := os.WriteFile(configPath, configBytes, utils.DefaultFileMod); err != nil {
+		t.Fatalf("failed to write config: %v", err)
+	}
+
+	disconnected := make(chan struct{}, 1)
+	origNewClient := inmqtt.NewClient
+	inmqtt.NewClient = func(_ *pahomqtt.ClientOptions) pahomqtt.Client {
+		return &disconnectTrackingClient{
+			onDisconnect: func() { disconnected <- struct{}{} },
+		}
+	}
+	defer func() { inmqtt.NewClient = origNewClient }()
+
+	svc := &serviceContext{
+		ConfigFile: configPath,
+		LogFile:    logPath,
+		OrgId:      "test-org",
+		Executor:   &mockExecutor{},
+	}
+
+	stop := make(chan struct{})
+	running := make(chan struct{}, 1)
+	done := make(chan service.ServiceExitCode, 1)
+	go func() { done <- svc.Execute(stop, running) }()
+
+	select {
+	case <-running:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Execute did not signal running within timeout")
+	}
+
+	close(stop)
+
+	select {
+	case <-disconnected:
+	case <-time.After(5 * time.Second):
+		t.Fatal("client.Disconnect was not called after stop signal")
+	}
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Execute did not exit within timeout")
+	}
+}
+
+// TestExecute_DisconnectCalledOnSubscribeFailure verifies that the MQTT client
+// is disconnected immediately when subscription fails — before the reconnect
+// delay begins — rather than only when Execute returns. This is the regression
+// test for the defer-inside-loop bug (sc-86631): with the old defer, Disconnect
+// would only fire at function exit; with the fix it fires before continue.
+func TestExecute_DisconnectCalledOnSubscribeFailure(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.json")
+	logPath := filepath.Join(tmpDir, "test.log")
+
+	device := agent.Device{
+		DeviceId:             "test-device",
+		SharedAccessKey:      "dGVzdC1zaGFyZWQta2V5LXRoYXQtaXMtbG9uZy1lbm91Z2gtZm9yLWJhc2U2NC1kZWNvZGluZw==",
+		AzureIotHubHost:      "test.azure-devices.net",
+		LoggingLevel:         "error",
+		DisableAutoUpdates:   true,
+		DisableAgentPostback: true,
+	}
+	configBytes, _ := json.Marshal(device)
+	if err := os.WriteFile(configPath, configBytes, utils.DefaultFileMod); err != nil {
+		t.Fatalf("failed to write config: %v", err)
+	}
+
+	// disconnected is sent to by the client's Disconnect method. The test
+	// receives from it *before* closing stop, proving that Disconnect fired
+	// during the loop iteration (explicit call) and not only when Execute
+	// returned (which is what the old defer-based code would do).
+	disconnected := make(chan struct{}, 1)
+	origNewClient := inmqtt.NewClient
+	inmqtt.NewClient = func(_ *pahomqtt.ClientOptions) pahomqtt.Client {
+		return &disconnectTrackingClient{
+			mockMQTTClient: mockMQTTClient{subscribeErr: errors.New("broker denied")},
+			onDisconnect:   func() { disconnected <- struct{}{} },
+		}
+	}
+	defer func() { inmqtt.NewClient = origNewClient }()
+
+	svc := &serviceContext{
+		ConfigFile: configPath,
+		LogFile:    logPath,
+		OrgId:      "test-org",
+		Executor:   &mockExecutor{},
+	}
+
+	stop := make(chan struct{})
+	running := make(chan struct{}, 1)
+	done := make(chan service.ServiceExitCode, 1)
+	go func() { done <- svc.Execute(stop, running) }()
+
+	select {
+	case <-running:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Execute did not signal running within timeout")
+	}
+
+	// Wait for Disconnect to be called before closing stop. With the old
+	// defer-inside-loop bug this would block until the function returned,
+	// but stop is not yet closed so it would deadlock / timeout here.
+	select {
+	case <-disconnected:
+	case <-time.After(5 * time.Second):
+		t.Fatal("client.Disconnect was not called after subscribe failure")
+	}
+
+	// Now let Execute exit cleanly via the reconnect-wait select.
+	close(stop)
+
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Execute did not exit within timeout")
 	}
 }
