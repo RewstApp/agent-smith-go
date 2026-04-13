@@ -248,7 +248,7 @@ func (svc *serviceContext) Execute(
 			logger.Error("Failed to connect", "error", token.Error())
 			continue
 		}
-		defer client.Disconnect((uint)(mqtt.DefaultDisconnectQuiesce / time.Millisecond))
+		disconnectQuiesce := (uint)(mqtt.DefaultDisconnectQuiesce / time.Millisecond)
 
 		// Update device twin reported properties before subscribing
 		err = mqtt.UpdateReportedProperties(client, mqtt.ReportedProperties{
@@ -277,6 +277,7 @@ func (svc *serviceContext) Execute(
 
 		if token.Wait() && token.Error() != nil {
 			logger.Error("Failed to subscribe", "error", token.Error())
+			client.Disconnect(disconnectQuiesce)
 			continue
 		}
 
@@ -292,9 +293,11 @@ func (svc *serviceContext) Execute(
 		select {
 		case <-stopped:
 			_ = notifier.Notify("AgentStatus:Stopped") // Best effort notification
+			client.Disconnect(disconnectQuiesce)
 			return 0
 		case <-lost:
 			_ = notifier.Notify("AgentStatus:Offline") // Best effort notification
+			client.Disconnect(disconnectQuiesce)
 			continue
 		}
 	}
