@@ -124,6 +124,14 @@ func (e *baseExecutor) Execute(
 		return errorResultBytes(err)
 	}
 
+	// Remove temp file on both success and failure paths
+	defer func() {
+		err = os.Remove(tempfile.Name())
+		if err != nil {
+			logger.Error("Failed to remove temp file", "file", tempfile.Name(), "error", err)
+		}
+	}()
+
 	var stdoutBuf, stderrBuf bytes.Buffer
 
 	// #nosec G204
@@ -145,14 +153,6 @@ func (e *baseExecutor) Execute(
 		)
 		return resultBytes(stderrBuf.String(), stdoutBuf.String())
 	}
-
-	// Remove successfully executed temporary filename
-	defer func() {
-		err = os.Remove(tempfile.Name())
-		if err != nil {
-			logger.Error("Failed to remove temp file", "file", tempfile.Name(), "error", err)
-		}
-	}()
 
 	logger.Info(
 		"Command completed",

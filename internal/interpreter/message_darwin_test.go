@@ -4,6 +4,7 @@ package interpreter
 import (
 	"context"
 	"encoding/json"
+	"os"
 	"strings"
 	"testing"
 
@@ -56,6 +57,30 @@ func TestMessage_Execute_CommandError(t *testing.T) {
 
 	if !strings.Contains(out.Error, "fail") {
 		t.Errorf("expected stderr to contain 'fail', got %s", out.Error)
+	}
+}
+
+func TestExecute_TempFileRemovedOnCommandFailure(t *testing.T) {
+	logger := hclog.NewNullLogger()
+	executor := NewExecutor()
+	orgId := "test-org-tempcleanup"
+	device := agent.Device{RewstOrgId: orgId}
+
+	scriptsDir := agent.GetScriptsDirectory(orgId)
+
+	msg := Message{
+		PostId:   "test:tempcleanup",
+		Commands: encodeCommand("exit 1"),
+	}
+
+	msg.Execute(executor, context.Background(), device, logger, nil, nil)
+
+	entries, err := os.ReadDir(scriptsDir)
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatalf("unexpected error reading scripts dir: %v", err)
+	}
+	for _, e := range entries {
+		t.Errorf("orphaned temp file found after failed execution: %s", e.Name())
 	}
 }
 
