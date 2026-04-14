@@ -38,6 +38,23 @@ func TestNewConfigContext(t *testing.T) {
 		t.Errorf("expected nil, got %v", result.Domain)
 	}
 
+	if result.MqttQos != -1 {
+		t.Errorf("expected MqttQos -1 (unset), got %v", result.MqttQos)
+	}
+
+	resultWithQos, _ := newConfigContext(
+		[]string{
+			"--org-id", orgId,
+			"--config-url", configUrl,
+			"--config-secret", configSecret,
+			"--mqtt-qos", "2",
+		},
+		nil, nil, nil, nil,
+	)
+	if resultWithQos.MqttQos != 2 {
+		t.Errorf("expected MqttQos 2, got %v", resultWithQos.MqttQos)
+	}
+
 	errorTests := []struct {
 		args    []string
 		message string
@@ -58,6 +75,19 @@ func TestNewConfigContext(t *testing.T) {
 				"invalid",
 			},
 			"invalid logging-level",
+		},
+		{
+			[]string{
+				"--org-id",
+				orgId,
+				"--config-url",
+				configUrl,
+				"--config-secret",
+				configSecret,
+				"--mqtt-qos",
+				"3",
+			},
+			"invalid mqtt-qos",
 		},
 	}
 

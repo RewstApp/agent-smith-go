@@ -112,6 +112,11 @@ func runConfig(params *configContext) error {
 	response.Configuration.DisableAutoUpdates = params.NoAutoUpdates
 	response.Configuration.GithubToken = params.GithubToken
 
+	if params.MqttQos != -1 {
+		qos := byte(params.MqttQos)
+		response.Configuration.MqttQos = &qos
+	}
+
 	// Create the data directory
 	dataDir := agent.GetDataDirectory(params.OrgId)
 	err = params.FS.MkdirAll(dataDir)
