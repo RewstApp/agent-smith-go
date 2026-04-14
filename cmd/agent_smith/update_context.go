@@ -18,6 +18,7 @@ type updateContext struct {
 	DisableAgentPostback bool
 	NoAutoUpdates        bool
 	GithubToken          string
+	MqttQos              int
 
 	Sys    agent.SystemInfoProvider
 	Domain agent.DomainInfoProvider
@@ -53,6 +54,7 @@ func newUpdateContext(
 	)
 	fs.BoolVar(&params.NoAutoUpdates, "no-auto-updates", false, "No auto updates")
 	fs.StringVar(&params.GithubToken, "github-token", "", "GitHub token for update checks")
+	fs.IntVar(&params.MqttQos, "mqtt-qos", -1, "MQTT subscription QoS level (0, 1, or 2)")
 	fs.SetOutput(bytes.NewBuffer([]byte{}))
 
 	err := fs.Parse(args)
@@ -70,6 +72,10 @@ func newUpdateContext(
 
 	if !allowedLoggingLevels[params.LoggingLevel] {
 		return nil, fmt.Errorf("invalid logging-level")
+	}
+
+	if params.MqttQos != -1 && (params.MqttQos < 0 || params.MqttQos > 2) {
+		return nil, fmt.Errorf("invalid mqtt-qos: must be 0, 1, or 2")
 	}
 
 	params.Sys = sys

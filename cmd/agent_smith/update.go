@@ -81,6 +81,13 @@ func runUpdate(params *updateContext) {
 	device.DisableAutoUpdates = params.NoAutoUpdates
 	device.GithubToken = params.GithubToken
 
+	if params.MqttQos != -1 {
+		qos := byte(params.MqttQos)
+		device.MqttQos = &qos
+	} else {
+		device.MqttQos = nil
+	}
+
 	// Save the updated configuration file
 	configBytes, err := json.MarshalIndent(device, "", "  ")
 	if err != nil {

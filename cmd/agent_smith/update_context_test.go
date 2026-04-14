@@ -26,6 +26,18 @@ func TestNewUpdateContext(t *testing.T) {
 		t.Errorf("expected nil, got %v", result.Domain)
 	}
 
+	if result.MqttQos != -1 {
+		t.Errorf("expected MqttQos -1 (unset), got %v", result.MqttQos)
+	}
+
+	resultWithQos, _ := newUpdateContext(
+		[]string{"--org-id", orgId, "--update", "--mqtt-qos", "0"},
+		nil, nil, nil, nil,
+	)
+	if resultWithQos.MqttQos != 0 {
+		t.Errorf("expected MqttQos 0, got %v", resultWithQos.MqttQos)
+	}
+
 	errorTests := []struct {
 		args    []string
 		message string
@@ -36,6 +48,10 @@ func TestNewUpdateContext(t *testing.T) {
 		{
 			[]string{"--org-id", orgId, "--update", "--logging-level", "invalid"},
 			"invalid logging-level",
+		},
+		{
+			[]string{"--org-id", orgId, "--update", "--mqtt-qos", "3"},
+			"invalid mqtt-qos",
 		},
 	}
 

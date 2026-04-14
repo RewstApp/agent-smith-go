@@ -40,10 +40,11 @@ rewst_agent_config.win.exe --org-id YOUR_ORG_ID --config-url CONFIG_URL --config
 - `--syslog`: Write logs to system log instead of file (Linux/macOS)
 - `--disable-agent-postback`: Disable agent postback
 - `--no-auto-updates`: Disable auto updates
+- `--mqtt-qos`: MQTT subscription QoS level (`0` = at-most-once, `1` = at-least-once, `2` = exactly-once). Defaults to `1` when omitted.
 
 Example with optional parameters:
 ```bash
-./rewst_agent_config --org-id YOUR_ORG_ID --config-url CONFIG_URL --config-secret CONFIG_SECRET --logging-level info --syslog --disable-agent-postback --no-auto-updates
+./rewst_agent_config --org-id YOUR_ORG_ID --config-url CONFIG_URL --config-secret CONFIG_SECRET --logging-level info --syslog --disable-agent-postback --no-auto-updates --mqtt-qos 1
 ```
 
 ## Update
@@ -51,7 +52,7 @@ Example with optional parameters:
 Once installed, the agent can be updated and configured using the config executable. The optional parameters are also available.
 
 ```bash
-./rewst_agent_config --org-id YOUR_ORG_ID --update --logging-level info --syslog --disable-agent-postback --no-auto-updates
+./rewst_agent_config --org-id YOUR_ORG_ID --update --logging-level info --syslog --disable-agent-postback --no-auto-updates --mqtt-qos 1
 ```
 
 ## Service Mode
@@ -131,6 +132,7 @@ Once launched, the menu guides you through the following checks:
       Log Level:    info
       Syslog:       false
       Auto-Updates: true
+      MQTT QoS:     1
 
   ── MQTT/WebSocket Connectivity ──
 

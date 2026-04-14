@@ -83,7 +83,7 @@ func main() {
 	// Show usage
 	loggingLevelsList := getAllowedConfigLevelsString("|")
 	configFlagsList := fmt.Sprintf(
-		"[--logging-level %s] [--syslog] [--disable-agent-postback] [--no-auto-updates]",
+		"[--logging-level %s] [--syslog] [--disable-agent-postback] [--no-auto-updates] [--mqtt-qos 0|1|2]",
 		loggingLevelsList,
 	)
 	usages := []string{

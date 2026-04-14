@@ -96,6 +96,64 @@ func TestLoadConfig(t *testing.T) {
 	}
 }
 
+// TestLoadConfig_MqttQos tests QoS validation in loadConfig
+func TestLoadConfig_MqttQos(t *testing.T) {
+	qos := func(v byte) *byte { return &v }
+
+	tests := []struct {
+		name        string
+		mqttQos     *byte
+		expectError bool
+	}{
+		{name: "qos_absent_defaults_to_1", mqttQos: nil, expectError: false},
+		{name: "qos_0_accepted", mqttQos: qos(0), expectError: false},
+		{name: "qos_1_accepted", mqttQos: qos(1), expectError: false},
+		{name: "qos_2_accepted", mqttQos: qos(2), expectError: false},
+		{name: "qos_3_rejected", mqttQos: qos(3), expectError: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tmpDir := t.TempDir()
+			configPath := filepath.Join(tmpDir, "config.json")
+
+			device := agent.Device{DeviceId: "test-device", MqttQos: tt.mqttQos}
+			configBytes, err := json.Marshal(device)
+			if err != nil {
+				t.Fatalf("failed to marshal config: %v", err)
+			}
+
+			if err = os.WriteFile(configPath, configBytes, utils.DefaultFileMod); err != nil {
+				t.Fatalf("failed to write config: %v", err)
+			}
+
+			svc := &serviceContext{ConfigFile: configPath}
+			got, err := svc.loadConfig()
+
+			if tt.expectError {
+				if err == nil {
+					t.Error("expected error, got nil")
+				}
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			if tt.mqttQos == nil {
+				if got.MqttQos != nil {
+					t.Errorf("expected MqttQos nil, got %d", *got.MqttQos)
+				}
+			} else {
+				if got.MqttQos == nil || *got.MqttQos != *tt.mqttQos {
+					t.Errorf("expected MqttQos %d, got %v", *tt.mqttQos, got.MqttQos)
+				}
+			}
+		})
+	}
+}
+
 // TestLoadConfig_FileNotFound tests loadConfig with missing file
 func TestLoadConfig_FileNotFound(t *testing.T) {
 	svc := &serviceContext{

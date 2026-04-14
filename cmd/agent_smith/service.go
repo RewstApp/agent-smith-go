@@ -48,6 +48,10 @@ func (svc *serviceContext) loadConfig() (agent.Device, error) {
 		return device, err
 	}
 
+	if device.MqttQos != nil && *device.MqttQos > 2 {
+		return device, fmt.Errorf("mqtt_qos must be 0, 1, or 2; got %d", *device.MqttQos)
+	}
+
 	return device, nil
 }
 
@@ -262,7 +266,11 @@ func (svc *serviceContext) Execute(
 
 		// Subscribe to the topic
 		topic := fmt.Sprintf("devices/%s/messages/devicebound/#", device.DeviceId)
-		token = client.Subscribe(topic, 1, func(client mqtt.Client, msg mqtt.Message) {
+		qos := byte(1)
+		if device.MqttQos != nil {
+			qos = *device.MqttQos
+		}
+		token = client.Subscribe(topic, qos, func(client mqtt.Client, msg mqtt.Message) {
 			payload := msg.Payload()
 			select {
 			case msgQueue <- payload:

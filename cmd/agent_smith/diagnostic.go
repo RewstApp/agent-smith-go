@@ -267,6 +267,9 @@ func runCheckAgents(params *diagnosticContext, agents []agentInfo) {
 			fmt.Printf("      Log Level:    %s\n", a.Device.LoggingLevel)
 			fmt.Printf("      Syslog:       %v\n", a.Device.UseSyslog)
 			fmt.Printf("      Auto-Updates: %v\n", !a.Device.DisableAutoUpdates)
+			if a.Device.MqttQos != nil {
+				fmt.Printf("      MQTT QoS:     %d\n", *a.Device.MqttQos)
+			}
 		}
 	}
 }

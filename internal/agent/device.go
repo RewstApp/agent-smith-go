@@ -15,6 +15,7 @@ type Device struct {
 	DisableAgentPostback bool               `json:"disable_agent_postback"`
 	DisableAutoUpdates   bool               `json:"disable_auto_updates"`
 	GithubToken          string             `json:"github_token,omitempty"`
+	MqttQos              *byte              `json:"mqtt_qos,omitempty"`
 }
 
 type Plugin struct {
