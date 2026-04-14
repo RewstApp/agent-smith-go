@@ -8,6 +8,9 @@ type Syslog interface {
 }
 
 func extractMessage(line string) string {
-	start := strings.Index(line, "]") + 2
-	return line[start:]
+	idx := strings.Index(line, "]")
+	if idx < 0 || idx+2 > len(line) {
+		return line
+	}
+	return line[idx+2:]
 }

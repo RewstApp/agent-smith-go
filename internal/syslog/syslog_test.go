@@ -35,8 +35,18 @@ func TestExtractMessage(t *testing.T) {
 		},
 		{
 			name:     "no bracket in line",
-			input:    "xno bracket here",
+			input:    "no bracket here",
 			expected: "no bracket here",
+		},
+		{
+			name:     "bracket is last character",
+			input:    "2024-01-01 [ERROR]",
+			expected: "2024-01-01 [ERROR]",
+		},
+		{
+			name:     "bracket followed by exactly one character",
+			input:    "[INFO]x",
+			expected: "",
 		},
 	}
 
