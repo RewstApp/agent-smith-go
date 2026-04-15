@@ -4,9 +4,23 @@ package agent
 
 import (
 	"context"
+	"errors"
+	"net"
 	"os"
 	"testing"
 )
+
+func TestLinuxDefaultSystemInfoProvider_MACAddress_NoInterface(t *testing.T) {
+	orig := netInterfaces
+	netInterfaces = func() ([]net.Interface, error) { return nil, nil }
+	defer func() { netInterfaces = orig }()
+
+	sys := &linuxDefaultSystemInfoProvider{}
+	_, err := sys.MACAddress()
+	if !errors.Is(err, ErrNoMACAddress) {
+		t.Errorf("expected ErrNoMACAddress, got %v", err)
+	}
+}
 
 func TestLinuxDefaultSystemInfoProvider_MACAddress(t *testing.T) {
 	sys := &linuxDefaultSystemInfoProvider{}

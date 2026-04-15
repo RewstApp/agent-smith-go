@@ -2,12 +2,17 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
 	"github.com/RewstApp/agent-smith-go/internal/version"
 	"github.com/hashicorp/go-hclog"
 )
+
+// ErrNoMACAddress is returned by MACAddress when no network interface
+// with a hardware address is found.
+var ErrNoMACAddress = errors.New("no MAC address found")
 
 type HostInfo struct {
 	AgentVersion          string  `json:"agent_version"`
