@@ -4,7 +4,6 @@ package agent
 
 import (
 	"context"
-	"fmt"
 	"net"
 	"os"
 	"strings"
@@ -13,6 +12,8 @@ import (
 	"github.com/shirou/gopsutil/v4/host"
 	"github.com/shirou/gopsutil/v4/mem"
 )
+
+var netInterfaces = net.Interfaces
 
 type linuxDefaultSystemInfoProvider struct{}
 
@@ -48,7 +49,7 @@ func (*linuxDefaultSystemInfoProvider) TotalMemoryBytes() (uint64, error) {
 }
 
 func (*linuxDefaultSystemInfoProvider) MACAddress() (*string, error) {
-	ifas, err := net.Interfaces()
+	ifas, err := netInterfaces()
 	if err != nil {
 		return nil, err
 	}
@@ -62,7 +63,7 @@ func (*linuxDefaultSystemInfoProvider) MACAddress() (*string, error) {
 		}
 	}
 
-	return nil, fmt.Errorf("%s", "No mac address found")
+	return nil, ErrNoMACAddress
 }
 
 func NewSystemInfoProvider() SystemInfoProvider {
