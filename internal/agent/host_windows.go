@@ -75,7 +75,9 @@ func NewSystemInfoProvider() SystemInfoProvider {
 type psRunnerFunc func(ctx context.Context, script string) (string, error)
 
 func defaultPSRunner(ctx context.Context, script string) (string, error) {
-	cmd := exec.CommandContext(ctx, "powershell", "-NoProfile", "-NonInteractive", "-Command", script)
+	cmd := exec.CommandContext(
+		ctx, "powershell", "-NoProfile", "-NonInteractive", "-Command", script,
+	)
 	var outb bytes.Buffer
 	cmd.Stdout = &outb
 	if err := cmd.Run(); err != nil {

@@ -153,7 +153,9 @@ func TestWindowsDefaultDomainInfoProvider_ADDomain_ProfileNoise(t *testing.T) {
 	}
 	// Without -NoProfile the full contaminated string is returned, not just the domain.
 	if *result == "example.com" {
-		t.Error("expected contamination to corrupt the domain value; -NoProfile suppresses this in production")
+		t.Error(
+			"profile noise corrupts domain value; -NoProfile suppresses this in production",
+		)
 	}
 }
 
@@ -211,7 +213,9 @@ func TestWindowsDefaultDomainInfoProvider_IsADDomainController_ProfileNoise(t *t
 	}
 	// Without -NoProfile the comparison fails and a DC is reported as non-DC.
 	if result {
-		t.Error("expected contamination to suppress true result; -NoProfile suppresses this in production")
+		t.Error(
+			"profile noise suppresses DC true result; -NoProfile suppresses this in production",
+		)
 	}
 }
 
