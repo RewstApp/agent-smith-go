@@ -4,16 +4,21 @@ import (
 	"encoding/json"
 	"errors"
 	"testing"
+
+	"github.com/hashicorp/go-hclog"
 )
 
 func TestErrorResultBytes(t *testing.T) {
+	logger := hclog.NewNullLogger()
 	err := errors.New("test error")
-	result := errorResultBytes(err)
+	b := errorResultBytes(logger, err)
+
+	if b == nil {
+		t.Fatal("expected non-nil bytes")
+	}
 
 	var out errorResult
-
-	err = json.Unmarshal(result, &out)
-	if err != nil {
+	if err = json.Unmarshal(b, &out); err != nil {
 		t.Errorf("expected no error, got %v", err)
 	}
 
@@ -23,7 +28,12 @@ func TestErrorResultBytes(t *testing.T) {
 }
 
 func TestResultBytes(t *testing.T) {
-	b := resultBytes("some error", "some output")
+	logger := hclog.NewNullLogger()
+	b := resultBytes(logger, "some error", "some output")
+
+	if b == nil {
+		t.Fatal("expected non-nil bytes")
+	}
 
 	var out result
 	err := json.Unmarshal(b, &out)
@@ -37,5 +47,27 @@ func TestResultBytes(t *testing.T) {
 
 	if out.Output != "some output" {
 		t.Errorf("expected 'some output', got %s", out.Output)
+	}
+}
+
+func TestErrorResultBytesNeverNil(t *testing.T) {
+	logger := hclog.NewNullLogger()
+	b := errorResultBytes(logger, errors.New("any error"))
+	if len(b) == 0 {
+		t.Fatal("expected non-empty bytes")
+	}
+	if !json.Valid(b) {
+		t.Errorf("expected valid JSON, got %s", b)
+	}
+}
+
+func TestResultBytesNeverNil(t *testing.T) {
+	logger := hclog.NewNullLogger()
+	b := resultBytes(logger, "", "")
+	if len(b) == 0 {
+		t.Fatal("expected non-empty bytes")
+	}
+	if !json.Valid(b) {
+		t.Errorf("expected valid JSON, got %s", b)
 	}
 }

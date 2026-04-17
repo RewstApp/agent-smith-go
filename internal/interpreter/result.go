@@ -1,6 +1,10 @@
 package interpreter
 
-import "encoding/json"
+import (
+	"encoding/json"
+
+	"github.com/hashicorp/go-hclog"
+)
 
 type errorResult struct {
 	Error string `json:"error"`
@@ -11,19 +15,27 @@ type result struct {
 	Output string `json:"output"`
 }
 
-func errorResultBytes(err error) []byte {
-	result := &errorResult{
+func errorResultBytes(logger hclog.Logger, err error) []byte {
+	r := &errorResult{
 		Error: err.Error(),
 	}
-	bytes, _ := json.MarshalIndent(result, "", "  ")
-	return bytes
+	b, marshalErr := json.MarshalIndent(r, "", "  ")
+	if marshalErr != nil {
+		logger.Error("Failed to marshal error result", "error", marshalErr)
+		return []byte(`{"error":"failed to marshal error result"}`)
+	}
+	return b
 }
 
-func resultBytes(err string, out string) []byte {
-	result := &result{
+func resultBytes(logger hclog.Logger, err string, out string) []byte {
+	r := &result{
 		Error:  err,
 		Output: out,
 	}
-	bytes, _ := json.MarshalIndent(result, "", "  ")
-	return bytes
+	b, marshalErr := json.MarshalIndent(r, "", "  ")
+	if marshalErr != nil {
+		logger.Error("Failed to marshal result", "error", marshalErr)
+		return []byte(`{"error":"failed to marshal result","output":""}`)
+	}
+	return b
 }

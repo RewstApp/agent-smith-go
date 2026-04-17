@@ -47,20 +47,20 @@ func (msg *Message) Execute(
 		// Load the paths data
 		paths, err := agent.NewPathsData(ctx, device.RewstOrgId, logger, sys, domain)
 		if err != nil {
-			return errorResultBytes(err)
+			return errorResultBytes(logger, err)
 		}
 
 		// Convert to bytes in json
 		pathsBytes, err := json.MarshalIndent(&paths, "", "  ")
 		if err != nil {
-			return errorResultBytes(err)
+			return errorResultBytes(logger, err)
 		}
 
 		return pathsBytes
 	}
 
 	// No command
-	return errorResultBytes(fmt.Errorf("noop"))
+	return errorResultBytes(logger, fmt.Errorf("noop"))
 }
 
 func (msg *Message) CreatePostbackRequest(
