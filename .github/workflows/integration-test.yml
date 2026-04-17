@@ -337,12 +337,37 @@ jobs:
           name: it-windows-latest
           path: ./dist
 
+      - name: Inject PowerShell profile noise
+        id: inject_profile_noise
+        shell: powershell
+        run: |
+          $noise = "PROFILE_NOISE_$(New-Guid)"
+          $profilePath = $PROFILE.AllUsersAllHosts
+          New-Item -ItemType Directory -Force -Path (Split-Path $profilePath) | Out-Null
+          Add-Content -Path $profilePath -Value "Write-Output '$noise'"
+          Write-Output "Profile noise '$noise' injected to: $profilePath"
+          "noise=$noise" >> $env:GITHUB_OUTPUT
+
       - name: Install agent
         id: install_agent
         shell: pwsh
         run: |
-          ./dist/rewst_agent_config.win.exe --config-url ${{ vars.IT_CONFIG_URL }} --config-secret ${{ secrets.IT_CONFIG_SECRET }} --org-id ${{ vars.IT_ORG_ID }} --github-token ${{ secrets.GITHUB_TOKEN }}
+          ./dist/rewst_agent_config.win.exe --config-url ${{ vars.IT_CONFIG_URL }} --config-secret ${{ secrets.IT_CONFIG_SECRET }} --org-id ${{ vars.IT_ORG_ID }} --github-token ${{ secrets.GITHUB_TOKEN }} 2>&1 | Tee-Object -FilePath install_output.txt
           Write-Output "service=RewstRemoteAgent_${{ vars.IT_ORG_ID }}" >> $env:GITHUB_OUTPUT
+
+      - name: Check install output for profile noise
+        shell: pwsh
+        run: |
+          $noise = "${{ steps.inject_profile_noise.outputs.noise }}"
+          $installOutput = Get-Content install_output.txt -Raw
+          Write-Output "=== Install output ==="
+          Write-Output $installOutput
+          Write-Output "======================"
+          if ($installOutput -match [regex]::Escape($noise)) {
+            Write-Error "FAIL: Profile noise '$noise' found in install output — PowerShell profile output contaminated agent data"
+            exit 1
+          }
+          Write-Output "PASS: Profile noise not found in install output — -NoProfile flag correctly suppresses profile output"
 
       - name: Check service
         shell: pwsh
