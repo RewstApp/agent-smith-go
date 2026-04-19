@@ -42,14 +42,14 @@ func (e *baseExecutor) Execute(
 	// Parse the commands
 	commandBytes, err := base64.StdEncoding.DecodeString(message.Commands)
 	if err != nil {
-		return errorResultBytes(err)
+		return errorResultBytes(logger, err)
 	}
 
 	// Decode using UTF16LE
 	decoder := unicode.UTF16(unicode.LittleEndian, unicode.IgnoreBOM).NewDecoder()
 	commands, _, err := transform.String(decoder, string(commandBytes))
 	if err != nil {
-		return errorResultBytes(err)
+		return errorResultBytes(logger, err)
 	}
 
 	// Run the command in the system using powershell
@@ -93,26 +93,26 @@ func (e *baseExecutor) Execute(
 	scriptsDir := agent.GetScriptsDirectory(device.RewstOrgId)
 	err = e.FS.MkdirAll(scriptsDir)
 	if err != nil {
-		return errorResultBytes(err)
+		return errorResultBytes(logger, err)
 	}
 
 	tempfile, err := os.CreateTemp(scriptsDir, "exec-*.ps1")
 	if err != nil {
-		return errorResultBytes(err)
+		return errorResultBytes(logger, err)
 	}
 
 	if e.WriteUtf8BOM {
 		_, err = tempfile.Write(utf8BOM)
 		if err != nil {
 			logger.Error("Failed to write BOM", "error", err)
-			return errorResultBytes(err)
+			return errorResultBytes(logger, err)
 		}
 	}
 
 	_, err = tempfile.WriteString(commands)
 	if err != nil {
 		logger.Error("Failed to write command file", "error", err)
-		return errorResultBytes(err)
+		return errorResultBytes(logger, err)
 	}
 
 	logger.Info("Command saved to", "message_id", message.PostId, "path", tempfile.Name())
@@ -121,7 +121,7 @@ func (e *baseExecutor) Execute(
 	err = tempfile.Close()
 	if err != nil {
 		logger.Error("Failed to close temp file handle", "error", err)
-		return errorResultBytes(err)
+		return errorResultBytes(logger, err)
 	}
 
 	// Remove temp file on both success and failure paths
@@ -151,7 +151,7 @@ func (e *baseExecutor) Execute(
 			"info",
 			stdoutBuf.String(),
 		)
-		return resultBytes(stderrBuf.String(), stdoutBuf.String())
+		return resultBytes(logger, stderrBuf.String(), stdoutBuf.String())
 	}
 
 	logger.Info(
@@ -169,7 +169,7 @@ func (e *baseExecutor) Execute(
 		stdoutBuf.String(),
 	)
 
-	return resultBytes(stderrBuf.String(), stdoutBuf.String())
+	return resultBytes(logger, stderrBuf.String(), stdoutBuf.String())
 }
 
 func (e *baseExecutor) AlwaysPostback() bool {
