@@ -132,6 +132,28 @@ jobs:
           if [ "$failed" = true ]; then exit 1; fi
           echo "All config.json fields validated"
 
+      - name: Check subscribed messages log for topic and QoS
+        shell: bash
+        run: |
+          logFile="/etc/rewst_remote_agent/${{ vars.IT_ORG_ID }}/rewst_agent.log"
+          logContent=$(cat "$logFile")
+          echo "$logContent"
+
+          subscribedLine=$(echo "$logContent" | grep "Subscribed to messages" | head -1)
+          if [ -z "$subscribedLine" ]; then
+            echo "ERROR: Expected 'Subscribed to messages' not found in logs"
+            exit 1
+          fi
+          if ! echo "$subscribedLine" | grep -qF "topic="; then
+            echo "ERROR: Expected 'topic=' not found in 'Subscribed to messages' log line"
+            exit 1
+          fi
+          if ! echo "$subscribedLine" | grep -qF "qos="; then
+            echo "ERROR: Expected 'qos=' not found in 'Subscribed to messages' log line"
+            exit 1
+          fi
+          echo "Subscribed messages log includes topic and QoS: $subscribedLine"
+
       - name: Send test command
         shell: bash
         run: |
@@ -410,6 +432,28 @@ jobs:
 
           if ($failed) { exit 1 }
           Write-Output "All config.json fields validated"
+
+      - name: Check subscribed messages log for topic and QoS
+        shell: pwsh
+        run: |
+          $logFile = "C:\ProgramData\RewstRemoteAgent\${{ vars.IT_ORG_ID }}\rewst_agent.log"
+          $logContent = Get-Content $logFile -Raw
+          Write-Output $logContent
+
+          $subscribedLine = ($logContent -split "`n" | Where-Object { $_ -match "Subscribed to messages" } | Select-Object -First 1)
+          if (-not $subscribedLine) {
+            Write-Error "Expected 'Subscribed to messages' not found in logs"
+            exit 1
+          }
+          if ($subscribedLine -notmatch [regex]::Escape("topic=")) {
+            Write-Error "Expected 'topic=' not found in 'Subscribed to messages' log line"
+            exit 1
+          }
+          if ($subscribedLine -notmatch [regex]::Escape("qos=")) {
+            Write-Error "Expected 'qos=' not found in 'Subscribed to messages' log line"
+            exit 1
+          }
+          Write-Output "Subscribed messages log includes topic and QoS: $subscribedLine"
 
       - name: Send test command
         shell: pwsh
@@ -741,6 +785,28 @@ jobs:
 
           if [ "$failed" = true ]; then exit 1; fi
           echo "All config.json fields validated"
+
+      - name: Check subscribed messages log for topic and QoS
+        shell: bash
+        run: |
+          logFile="/Library/Application Support/rewst_remote_agent/${{ vars.IT_ORG_ID }}/rewst_agent.log"
+          logContent=$(cat "$logFile")
+          echo "$logContent"
+
+          subscribedLine=$(echo "$logContent" | grep "Subscribed to messages" | head -1)
+          if [ -z "$subscribedLine" ]; then
+            echo "ERROR: Expected 'Subscribed to messages' not found in logs"
+            exit 1
+          fi
+          if ! echo "$subscribedLine" | grep -qF "topic="; then
+            echo "ERROR: Expected 'topic=' not found in 'Subscribed to messages' log line"
+            exit 1
+          fi
+          if ! echo "$subscribedLine" | grep -qF "qos="; then
+            echo "ERROR: Expected 'qos=' not found in 'Subscribed to messages' log line"
+            exit 1
+          fi
+          echo "Subscribed messages log includes topic and QoS: $subscribedLine"
 
       - name: Send test command
         shell: bash
