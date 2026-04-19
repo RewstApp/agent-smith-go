@@ -135,6 +135,7 @@ jobs:
       - name: Check subscribed messages log for topic and QoS
         shell: bash
         run: |
+          sleep 10
           logFile="/etc/rewst_remote_agent/${{ vars.IT_ORG_ID }}/rewst_agent.log"
           logContent=$(cat "$logFile")
           echo "$logContent"
@@ -436,6 +437,7 @@ jobs:
       - name: Check subscribed messages log for topic and QoS
         shell: pwsh
         run: |
+          Start-Sleep -Seconds 10
           $logFile = "C:\ProgramData\RewstRemoteAgent\${{ vars.IT_ORG_ID }}\rewst_agent.log"
           $logContent = Get-Content $logFile -Raw
           Write-Output $logContent
@@ -789,6 +791,7 @@ jobs:
       - name: Check subscribed messages log for topic and QoS
         shell: bash
         run: |
+          sleep 10
           logFile="/Library/Application Support/rewst_remote_agent/${{ vars.IT_ORG_ID }}/rewst_agent.log"
           logContent=$(cat "$logFile")
           echo "$logContent"
