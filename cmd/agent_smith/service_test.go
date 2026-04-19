@@ -843,3 +843,103 @@ func TestExecute_DisconnectCalledOnSubscribeFailure(t *testing.T) {
 		t.Fatal("Execute did not exit within timeout")
 	}
 }
+
+// TestExecute_SubscribedMessagesLogIncludesQoS verifies that the "Subscribed
+// to messages" log entry includes the topic and QoS level being used.
+func TestExecute_SubscribedMessagesLogIncludesQoS(t *testing.T) {
+	tests := []struct {
+		name        string
+		mqttQos     *byte
+		expectedQoS string
+	}{
+		{
+			name:        "default_qos_1",
+			mqttQos:     nil,
+			expectedQoS: "qos=1",
+		},
+		{
+			name:        "explicit_qos_0",
+			mqttQos:     func() *byte { b := byte(0); return &b }(),
+			expectedQoS: "qos=0",
+		},
+		{
+			name:        "explicit_qos_2",
+			mqttQos:     func() *byte { b := byte(2); return &b }(),
+			expectedQoS: "qos=2",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tmpDir := t.TempDir()
+			configPath := filepath.Join(tmpDir, "config.json")
+			logPath := filepath.Join(tmpDir, "test.log")
+
+			device := agent.Device{
+				DeviceId:             "test-device",
+				SharedAccessKey:      "dGVzdC1zaGFyZWQta2V5LXRoYXQtaXMtbG9uZy1lbm91Z2gtZm9yLWJhc2U2NC1kZWNvZGluZw==",
+				AzureIotHubHost:      "test.azure-devices.net",
+				LoggingLevel:         "info",
+				DisableAutoUpdates:   true,
+				DisableAgentPostback: true,
+				MqttQos:              tt.mqttQos,
+			}
+			configBytes, _ := json.Marshal(device)
+			if err := os.WriteFile(configPath, configBytes, utils.DefaultFileMod); err != nil {
+				t.Fatalf("failed to write config: %v", err)
+			}
+
+			origNewClient := inmqtt.NewClient
+			inmqtt.NewClient = func(_ *pahomqtt.ClientOptions) pahomqtt.Client {
+				return &mockMQTTClient{}
+			}
+			defer func() { inmqtt.NewClient = origNewClient }()
+
+			svc := &serviceContext{
+				ConfigFile: configPath,
+				LogFile:    logPath,
+				OrgId:      "test-org",
+				Executor:   &mockExecutor{},
+			}
+
+			stop := make(chan struct{})
+			running := make(chan struct{}, 1)
+			done := make(chan service.ServiceExitCode, 1)
+			go func() { done <- svc.Execute(stop, running) }()
+
+			select {
+			case <-running:
+			case <-time.After(5 * time.Second):
+				t.Fatal("Execute did not signal running within timeout")
+			}
+
+			close(stop)
+
+			select {
+			case <-done:
+			case <-time.After(10 * time.Second):
+				t.Fatal("Execute did not exit within timeout")
+			}
+
+			logBytes, err := os.ReadFile(logPath)
+			if err != nil {
+				t.Fatalf("failed to read log: %v", err)
+			}
+			logContent := string(logBytes)
+
+			if !strings.Contains(logContent, "Subscribed to messages") {
+				t.Error("expected log to contain 'Subscribed to messages'")
+			}
+			if !strings.Contains(logContent, tt.expectedQoS) {
+				t.Errorf(
+					"expected log to contain %q, but log was:\n%s",
+					tt.expectedQoS,
+					logContent,
+				)
+			}
+			if !strings.Contains(logContent, "topic=") {
+				t.Errorf("expected log to contain 'topic=', but log was:\n%s", logContent)
+			}
+		})
+	}
+}
