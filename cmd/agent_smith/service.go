@@ -290,7 +290,7 @@ func (svc *serviceContext) Execute(
 		}
 
 		// Complete initialization
-		logger.Info("Subscribed to messages")
+		logger.Info("Subscribed to messages", "topic", topic, "qos", qos)
 		_ = notifier.Notify("AgentStatus:Online") // Best effort notification
 
 		// Reset the timeout
