@@ -39,6 +39,34 @@ func (m *mockLogFileOpener) Open(_ string) (io.ReadCloser, error) {
 	return io.NopCloser(strings.NewReader(m.content)), nil
 }
 
+// ── isValidOrgId ─────────────────────────────────────────────────────────────
+
+func TestIsValidOrgId(t *testing.T) {
+	valid := []string{
+		"43fb08b0-92cf-462a-924d-0b6be7a43a48",
+		"53f5b9c3-a168-4fa4-b155-e2dca1d1d40a",
+		"00000000-0000-0000-0000-000000000000",
+	}
+	for _, id := range valid {
+		if !isValidOrgId(id) {
+			t.Errorf("expected %q to be a valid org ID", id)
+		}
+	}
+
+	invalid := []string{
+		"43fb08b0-92cf-462a-924d-0b6be7a43a48--syslog",
+		"43fb08b0-92cf-462a-924d-0b6be7a43a48-syslog",
+		"not-a-uuid",
+		"",
+		"43fb08b0-92cf-462a-924d-0b6be7a43a48 ",
+	}
+	for _, id := range invalid {
+		if isValidOrgId(id) {
+			t.Errorf("expected %q to be an invalid org ID", id)
+		}
+	}
+}
+
 // ── scanAgentsFrom ────────────────────────────────────────────────────────────
 
 func TestScanAgentsFrom_NonExistentRoot(t *testing.T) {
@@ -53,6 +81,27 @@ func TestScanAgentsFrom_EmptyRoot(t *testing.T) {
 	agents := scanAgentsFrom(root)
 	if len(agents) != 0 {
 		t.Errorf("expected 0 agents, got %d", len(agents))
+	}
+}
+
+func TestScanAgentsFrom_SkipsSyslogSuffixedEntries(t *testing.T) {
+	root := t.TempDir()
+	realOrgId := "43fb08b0-92cf-462a-924d-0b6be7a43a48"
+	syslogOrgId := realOrgId + "--syslog"
+
+	for _, dir := range []string{realOrgId, syslogOrgId} {
+		orgDir := filepath.Join(root, dir)
+		_ = os.MkdirAll(orgDir, 0o755)
+		data, _ := json.Marshal(agent.Device{DeviceId: dir})
+		_ = os.WriteFile(filepath.Join(orgDir, "config.json"), data, 0o644)
+	}
+
+	agents := scanAgentsFrom(root)
+	if len(agents) != 1 {
+		t.Fatalf("expected 1 agent (syslog entry filtered), got %d", len(agents))
+	}
+	if agents[0].OrgId != realOrgId {
+		t.Errorf("expected OrgId %q, got %q", realOrgId, agents[0].OrgId)
 	}
 }
 
@@ -78,7 +127,7 @@ func TestScanAgentsFrom_SkipsFiles(t *testing.T) {
 
 func TestScanAgentsFrom_ValidConfig(t *testing.T) {
 	root := t.TempDir()
-	orgId := "test-org-123"
+	orgId := "43fb08b0-92cf-462a-924d-0b6be7a43a48"
 	orgDir := filepath.Join(root, orgId)
 	_ = os.MkdirAll(orgDir, 0o755)
 
@@ -109,7 +158,7 @@ func TestScanAgentsFrom_ValidConfig(t *testing.T) {
 
 func TestScanAgentsFrom_InvalidConfigJSON(t *testing.T) {
 	root := t.TempDir()
-	orgId := "org-bad-json"
+	orgId := "53f5b9c3-a168-4fa4-b155-e2dca1d1d40a"
 	orgDir := filepath.Join(root, orgId)
 	_ = os.MkdirAll(orgDir, 0o755)
 	_ = os.WriteFile(filepath.Join(orgDir, "config.json"), []byte("not-json"), 0o644)
@@ -125,7 +174,11 @@ func TestScanAgentsFrom_InvalidConfigJSON(t *testing.T) {
 
 func TestScanAgentsFrom_MultipleOrgs(t *testing.T) {
 	root := t.TempDir()
-	for _, orgId := range []string{"org-a", "org-b", "org-c"} {
+	for _, orgId := range []string{
+		"43fb08b0-92cf-462a-924d-0b6be7a43a48",
+		"53f5b9c3-a168-4fa4-b155-e2dca1d1d40a",
+		"60a1c2d3-e4f5-6789-abcd-ef0123456789",
+	} {
 		orgDir := filepath.Join(root, orgId)
 		_ = os.MkdirAll(orgDir, 0o755)
 		data, _ := json.Marshal(agent.Device{DeviceId: orgId})
@@ -249,7 +302,10 @@ func TestRunLiveLogs_SmallFile(t *testing.T) {
 
 func TestSelectAgent_ValidChoice(t *testing.T) {
 	agents := []agentInfo{{OrgId: "org-a", IsRunning: true}, {OrgId: "org-b"}}
-	result := selectAgent(bufio.NewReader(strings.NewReader("2\n")), agents)
+	result, ok := selectAgent(bufio.NewReader(strings.NewReader("2\n")), agents)
+	if !ok {
+		t.Fatal("expected ok=true")
+	}
 	if result.OrgId != "org-b" {
 		t.Errorf("expected 'org-b', got %q", result.OrgId)
 	}
@@ -257,7 +313,10 @@ func TestSelectAgent_ValidChoice(t *testing.T) {
 
 func TestSelectAgent_InvalidThenValid(t *testing.T) {
 	agents := []agentInfo{{OrgId: "org-a"}, {OrgId: "org-b"}}
-	result := selectAgent(bufio.NewReader(strings.NewReader("abc\n1\n")), agents)
+	result, ok := selectAgent(bufio.NewReader(strings.NewReader("abc\n1\n")), agents)
+	if !ok {
+		t.Fatal("expected ok=true")
+	}
 	if result.OrgId != "org-a" {
 		t.Errorf("expected 'org-a', got %q", result.OrgId)
 	}
@@ -265,9 +324,20 @@ func TestSelectAgent_InvalidThenValid(t *testing.T) {
 
 func TestSelectAgent_OutOfRangeThenValid(t *testing.T) {
 	agents := []agentInfo{{OrgId: "org-a"}}
-	result := selectAgent(bufio.NewReader(strings.NewReader("99\n1\n")), agents)
+	result, ok := selectAgent(bufio.NewReader(strings.NewReader("99\n1\n")), agents)
+	if !ok {
+		t.Fatal("expected ok=true")
+	}
 	if result.OrgId != "org-a" {
 		t.Errorf("expected 'org-a', got %q", result.OrgId)
+	}
+}
+
+func TestSelectAgent_ExitChoice(t *testing.T) {
+	agents := []agentInfo{{OrgId: "org-a"}, {OrgId: "org-b"}}
+	_, ok := selectAgent(bufio.NewReader(strings.NewReader("0\n")), agents)
+	if ok {
+		t.Error("expected ok=false when user selects exit")
 	}
 }
 
@@ -367,7 +437,10 @@ func TestRunDiagnosticWith_InvalidOption(t *testing.T) {
 func TestRunDiagnosticWith_AgentSelectionFromScan(t *testing.T) {
 	// Two agents in the temp root → selectAgent is called; "1" picks first, "0" exits
 	root := t.TempDir()
-	for _, orgId := range []string{"org-a", "org-b"} {
+	for _, orgId := range []string{
+		"43fb08b0-92cf-462a-924d-0b6be7a43a48",
+		"53f5b9c3-a168-4fa4-b155-e2dca1d1d40a",
+	} {
 		orgDir := filepath.Join(root, orgId)
 		_ = os.MkdirAll(orgDir, 0o755)
 		data, _ := json.Marshal(agent.Device{DeviceId: orgId, RewstOrgId: orgId})

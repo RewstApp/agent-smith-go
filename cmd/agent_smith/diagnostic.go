@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"time"
@@ -106,7 +107,12 @@ func runDiagnosticFull(
 	if len(agents) == 1 {
 		target = agents[0]
 	} else {
-		target = selectAgent(reader, agents)
+		selected, ok := selectAgent(reader, agents)
+		if !ok {
+			fmt.Println("\n  Exiting diagnostic mode.")
+			return
+		}
+		target = selected
 	}
 
 	for {
@@ -165,7 +171,7 @@ func prompt(reader *bufio.Reader, message string) string {
 	return strings.TrimSpace(input)
 }
 
-func selectAgent(reader *bufio.Reader, agents []agentInfo) agentInfo {
+func selectAgent(reader *bufio.Reader, agents []agentInfo) (agentInfo, bool) {
 	fmt.Println("\n  Multiple agents found. Select one to diagnose:")
 	fmt.Println()
 	for i, a := range agents {
@@ -175,16 +181,26 @@ func selectAgent(reader *bufio.Reader, agents []agentInfo) agentInfo {
 		}
 		fmt.Printf("  [%d] %s (%s)\n", i+1, a.OrgId, status)
 	}
+	fmt.Printf("  [0] Exit\n")
 	fmt.Println()
 
 	for {
 		choice := prompt(reader, "  Select agent number: ")
+		if strings.TrimSpace(choice) == "0" {
+			return agentInfo{}, false
+		}
 		var idx int
 		if _, err := fmt.Sscanf(choice, "%d", &idx); err == nil && idx >= 1 && idx <= len(agents) {
-			return agents[idx-1]
+			return agents[idx-1], true
 		}
 		fmt.Println("  Invalid selection. Please try again.")
 	}
+}
+
+var uuidRE = regexp.MustCompile(`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+
+func isValidOrgId(s string) bool {
+	return uuidRE.MatchString(s)
 }
 
 // scanAgentsFrom is the testable core of scanAgents.
@@ -201,6 +217,10 @@ func scanAgentsFrom(root string) []agentInfo {
 		}
 
 		orgId := entry.Name()
+		if !isValidOrgId(orgId) {
+			continue
+		}
+
 		configPath := filepath.Join(root, orgId, "config.json")
 
 		// Verify this is an agent directory by checking for config.json

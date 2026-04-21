@@ -18,7 +18,7 @@ func formatServiceName(orgId string) string {
 	return fmt.Sprintf("io.rewst.remote_agent_%s", orgId)
 }
 
-// queryServiceStatus checks the plist file for installation and launchctl list
+// queryServiceStatus checks the plist file for installation and launchctl print
 // for running state. Returns (installed, running).
 func queryServiceStatus(name string) (bool, bool) {
 	plistPath := filepath.Join("/Library/LaunchDaemons", fmt.Sprintf("%s.plist", name))
@@ -26,17 +26,19 @@ func queryServiceStatus(name string) (bool, bool) {
 		return false, false
 	}
 
-	// "launchctl list <name>" prints a tab-separated line: PID  LastExit  Label
-	// If PID is non-zero the service is running.
-	out, err := exec.Command("launchctl", "list", name).CombinedOutput() // #nosec G204
+	// "launchctl print system/<name>" outputs a plist-style dict; parse the
+	// "state = running" line — consistent with IsActive() in service_darwin.go.
+	out, err := exec.Command("launchctl", "print", fmt.Sprintf("system/%s", name)).CombinedOutput() // #nosec G204
 	if err != nil {
-		// Plist exists but not loaded — installed, stopped
+		// Plist exists but service is not loaded — installed, stopped
 		return true, false
 	}
 
-	parts := strings.Fields(string(out))
-	if len(parts) >= 1 && parts[0] != "-" && parts[0] != "0" {
-		return true, true
+	for _, line := range strings.Split(string(out), "\n") {
+		parts := strings.SplitN(strings.TrimSpace(line), "=", 2)
+		if len(parts) == 2 && strings.TrimSpace(parts[0]) == "state" {
+			return true, strings.TrimSpace(parts[1]) == "running"
+		}
 	}
 	return true, false
 }
