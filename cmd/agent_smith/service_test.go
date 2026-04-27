@@ -629,6 +629,40 @@ func (m *mockMQTTClient) OptionsReader() pahomqtt.ClientOptionsReader {
 	return pahomqtt.NewOptionsReader(pahomqtt.NewClientOptions())
 }
 
+// blockingToken is a mock MQTT token whose Wait blocks until release is closed.
+// started is a buffered channel that receives one item when Wait is first called.
+type blockingToken struct {
+	started chan struct{}
+	release chan struct{}
+}
+
+func (t *blockingToken) Wait() bool {
+	select {
+	case t.started <- struct{}{}:
+	default:
+	}
+	<-t.release
+	return true
+}
+func (t *blockingToken) WaitTimeout(_ time.Duration) bool { return true }
+func (t *blockingToken) Done() <-chan struct{} {
+	ch := make(chan struct{})
+	go func() { <-t.release; close(ch) }()
+	return ch
+}
+func (t *blockingToken) Error() error { return nil }
+
+// blockingPublishClient embeds mockMQTTClient and returns a blockingToken from
+// Publish to hold the main goroutine in UpdateReportedProperties.
+type blockingPublishClient struct {
+	mockMQTTClient
+	publishToken *blockingToken
+}
+
+func (m *blockingPublishClient) Publish(_ string, _ byte, _ bool, _ interface{}) pahomqtt.Token {
+	return m.publishToken
+}
+
 // TestExecute_SubscribeFailure verifies that when MQTT subscription fails,
 // the logged error comes from token.Error() and not from a stale err variable.
 func TestExecute_SubscribeFailure(t *testing.T) {
@@ -941,5 +975,88 @@ func TestExecute_SubscribedMessagesLogIncludesQoS(t *testing.T) {
 				t.Errorf("expected log to contain 'topic=', but log was:\n%s", logContent)
 			}
 		})
+	}
+}
+
+// TestExecute_ConnectionLostChannelIsBuffered verifies that the lost channel
+// is buffered (capacity 1) so OnConnectionLost never blocks the MQTT library's
+// internal goroutine when the main goroutine is occupied mid-command.
+// Regression test for sc-89434: with an unbuffered channel a network drop
+// during command execution deadlocked the service permanently.
+func TestExecute_ConnectionLostChannelIsBuffered(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.json")
+	logPath := filepath.Join(tmpDir, "test.log")
+
+	device := agent.Device{
+		DeviceId:             "test-device",
+		SharedAccessKey:      "dGVzdC1zaGFyZWQta2V5LXRoYXQtaXMtbG9uZy1lbm91Z2gtZm9yLWJhc2U2NC1kZWNvZGluZw==",
+		AzureIotHubHost:      "test.azure-devices.net",
+		LoggingLevel:         "error",
+		DisableAutoUpdates:   true,
+		DisableAgentPostback: true,
+	}
+	configBytes, _ := json.Marshal(device)
+	if err := os.WriteFile(configPath, configBytes, utils.DefaultFileMod); err != nil {
+		t.Fatalf("failed to write config: %v", err)
+	}
+
+	token := &blockingToken{
+		started: make(chan struct{}, 1),
+		release: make(chan struct{}),
+	}
+
+	var capturedConnectionLost pahomqtt.ConnectionLostHandler
+
+	origNewClient := inmqtt.NewClient
+	inmqtt.NewClient = func(o *pahomqtt.ClientOptions) pahomqtt.Client {
+		capturedConnectionLost = o.OnConnectionLost
+		return &blockingPublishClient{publishToken: token}
+	}
+	defer func() { inmqtt.NewClient = origNewClient }()
+
+	svc := &serviceContext{
+		ConfigFile: configPath,
+		LogFile:    logPath,
+		OrgId:      "test-org",
+		Executor:   &mockExecutor{},
+	}
+
+	stop := make(chan struct{})
+	running := make(chan struct{}, 1)
+	done := make(chan service.ServiceExitCode, 1)
+	go func() { done <- svc.Execute(stop, running) }()
+
+	// Wait until UpdateReportedProperties is blocked in token.Wait(), meaning
+	// the main goroutine is occupied and cannot receive from the lost channel.
+	select {
+	case <-token.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Publish token.Wait did not start within timeout")
+	}
+
+	// Fire OnConnectionLost from a separate goroutine, simulating the MQTT
+	// library's internal goroutine. With an unbuffered lost channel this send
+	// blocks forever; with a buffered channel (capacity 1) it returns immediately.
+	callbackDone := make(chan struct{})
+	go func() {
+		capturedConnectionLost(nil, errors.New("simulated network drop"))
+		close(callbackDone)
+	}()
+
+	select {
+	case <-callbackDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("OnConnectionLost blocked — lost channel must be buffered with capacity 1")
+	}
+
+	// Signal stop before unblocking so the reconnect wait exits immediately.
+	close(stop)
+	close(token.release)
+
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Execute did not exit within timeout")
 	}
 }

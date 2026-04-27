@@ -237,7 +237,7 @@ func (svc *serviceContext) Execute(
 		}
 
 		// Create a channel to wait for lost connection
-		lost := make(chan struct{})
+		lost := make(chan struct{}, 1)
 
 		// Create MQTT options
 		opts, err := mqtt.NewClientOptions(device)
