@@ -153,11 +153,10 @@ func (svc *serviceContext) Execute(
 	}()
 
 	notifier, err := plugins.LoadNotifer(device.Plugins, logFile)
-	defer notifier.Kill()
-
 	if err != nil {
 		logger.Warn("Failed to load plugin", "error", err)
 	}
+	defer notifier.Kill()
 
 	plugins := notifier.Plugins()
 	if len(plugins) == 1 {
