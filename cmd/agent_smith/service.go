@@ -201,129 +201,131 @@ func (svc *serviceContext) Execute(
 		// Move to the next timeout
 		rg.Next()
 
-		// Create a fresh message queue and worker pool for this connection attempt.
-		// Workers are closed and drained at every exit point so goroutines do not
-		// accumulate across reconnection cycles.
-		msgQueue := make(chan []byte, messageQueueSize)
-		var wg sync.WaitGroup
-		for i := range workerCount {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				logger.Debug("Message worker started", "worker", i)
-				for {
-					select {
-					case payload, ok := <-msgQueue:
-						if !ok {
-							logger.Debug("Message worker stopped: queue closed", "worker", i)
-							return
-						}
-						logger.Debug(
-							"Message worker processing",
-							"worker", i,
-							"queue_length", len(msgQueue),
-						)
-						svc.processMessage(payload, ctx, device, logger, notifier)
-					case <-ctx.Done():
-						logger.Debug("Message worker stopped: context cancelled", "worker", i)
+		shouldReturn, clearBackoff, exitCode := svc.runCycle(ctx, device, logger, notifier, stopped)
+		if clearBackoff {
+			rg.Clear()
+			rg.Next()
+		}
+		if shouldReturn {
+			return exitCode
+		}
+	}
+}
+
+// runCycle runs one MQTT connection attempt through to disconnect. It returns
+// (shouldReturn, clearBackoff, exitCode): shouldReturn signals Execute to exit
+// with exitCode; clearBackoff signals that a successful connection was
+// established and the reconnect backoff should be reset.
+//
+// Cleanup is guaranteed on all exit paths: drainWorkers is deferred first, then
+// client.Disconnect is deferred after the client is created (LIFO order means
+// Disconnect runs before drainWorkers).
+func (svc *serviceContext) runCycle(
+	ctx context.Context,
+	device agent.Device,
+	logger hclog.Logger,
+	notifier plugins.NotifierWrapper,
+	stopped <-chan struct{},
+) (bool, bool, service.ServiceExitCode) {
+	msgQueue := make(chan []byte, messageQueueSize)
+	var wg sync.WaitGroup
+	for i := range workerCount {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			logger.Debug("Message worker started", "worker", i)
+			for {
+				select {
+				case payload, ok := <-msgQueue:
+					if !ok {
+						logger.Debug("Message worker stopped: queue closed", "worker", i)
 						return
 					}
+					logger.Debug(
+						"Message worker processing",
+						"worker", i,
+						"queue_length", len(msgQueue),
+					)
+					svc.processMessage(payload, ctx, device, logger, notifier)
+				case <-ctx.Done():
+					logger.Debug("Message worker stopped: context cancelled", "worker", i)
+					return
 				}
-			}()
-		}
-		drainWorkers := func() {
-			close(msgQueue)
-			wg.Wait()
-		}
-
-		// Create a channel to wait for lost connection
-		lost := make(chan struct{}, 1)
-
-		// Create MQTT options
-		opts, err := mqtt.NewClientOptions(device)
-		if err != nil {
-			logger.Error("Failed to create client options", "error", err)
-			drainWorkers()
-			return service.GenericError
-		}
-
-		// Manually handle auto reconnection
-		opts.SetAutoReconnect(false)
-
-		// Add event handlers
-		opts.OnConnectionLost = func(client mqtt.Client, err error) {
-			logger.Error("Connection lost", "error", err)
-			lost <- struct{}{}
-		}
-
-		// Connect to the broker
-		client := mqtt.NewClient(opts)
-		token := client.Connect()
-
-		if token.Wait() && token.Error() != nil {
-			logger.Error("Failed to connect", "error", token.Error())
-			drainWorkers()
-			continue
-		}
-		disconnectQuiesce := (uint)(mqtt.DefaultDisconnectQuiesce / time.Millisecond)
-
-		// Update device twin reported properties before subscribing
-		err = mqtt.UpdateReportedProperties(client, mqtt.ReportedProperties{
-			AgentVersion: version.Version,
-		})
-		if err != nil {
-			logger.Warn("Failed to update device twin reported properties", "error", err)
-		} else {
-			logger.Info("Device twin reported properties updated", "agent_version", version.Version)
-		}
-
-		// Subscribe to the topic
-		topic := fmt.Sprintf("devices/%s/messages/devicebound/#", device.DeviceId)
-		qos := byte(1)
-		if device.MqttQos != nil {
-			qos = *device.MqttQos
-		}
-		token = client.Subscribe(topic, qos, func(client mqtt.Client, msg mqtt.Message) {
-			payload := msg.Payload()
-			select {
-			case msgQueue <- payload:
-			default:
-				logger.Warn(
-					"Message dropped: queue full",
-					"queue_size",
-					messageQueueSize,
-				)
 			}
-		})
+		}()
+	}
+	defer func() {
+		close(msgQueue)
+		wg.Wait()
+	}()
 
-		if token.Wait() && token.Error() != nil {
-			logger.Error("Failed to subscribe", "error", token.Error())
-			client.Disconnect(disconnectQuiesce)
-			drainWorkers()
-			continue
-		}
+	// Create a channel to wait for lost connection
+	lost := make(chan struct{}, 1)
 
-		// Complete initialization
-		logger.Info("Subscribed to messages", "topic", topic, "qos", qos)
-		_ = notifier.Notify("AgentStatus:Online") // Best effort notification
+	opts, err := mqtt.NewClientOptions(device)
+	if err != nil {
+		logger.Error("Failed to create client options", "error", err)
+		return true, false, service.GenericError
+	}
 
-		// Reset the timeout
-		rg.Clear()
-		rg.Next()
+	opts.SetAutoReconnect(false)
+	opts.OnConnectionLost = func(client mqtt.Client, err error) {
+		logger.Error("Connection lost", "error", err)
+		lost <- struct{}{}
+	}
 
-		// Wait for the stop/shutdown command or lost connection
+	disconnectQuiesce := (uint)(mqtt.DefaultDisconnectQuiesce / time.Millisecond)
+	client := mqtt.NewClient(opts)
+	defer client.Disconnect(disconnectQuiesce)
+
+	token := client.Connect()
+	if token.Wait() && token.Error() != nil {
+		logger.Error("Failed to connect", "error", token.Error())
+		return false, false, 0
+	}
+
+	err = mqtt.UpdateReportedProperties(client, mqtt.ReportedProperties{
+		AgentVersion: version.Version,
+	})
+	if err != nil {
+		logger.Warn("Failed to update device twin reported properties", "error", err)
+	} else {
+		logger.Info("Device twin reported properties updated", "agent_version", version.Version)
+	}
+
+	topic := fmt.Sprintf("devices/%s/messages/devicebound/#", device.DeviceId)
+	qos := byte(1)
+	if device.MqttQos != nil {
+		qos = *device.MqttQos
+	}
+	token = client.Subscribe(topic, qos, func(client mqtt.Client, msg mqtt.Message) {
+		payload := msg.Payload()
 		select {
-		case <-stopped:
-			_ = notifier.Notify("AgentStatus:Stopped") // Best effort notification
-			client.Disconnect(disconnectQuiesce)
-			drainWorkers()
-			return 0
-		case <-lost:
-			_ = notifier.Notify("AgentStatus:Offline") // Best effort notification
-			client.Disconnect(disconnectQuiesce)
-			drainWorkers()
-			continue
+		case msgQueue <- payload:
+		default:
+			logger.Warn(
+				"Message dropped: queue full",
+				"queue_size",
+				messageQueueSize,
+			)
 		}
+	})
+
+	if token.Wait() && token.Error() != nil {
+		logger.Error("Failed to subscribe", "error", token.Error())
+		return false, false, 0
+	}
+
+	logger.Info("Subscribed to messages", "topic", topic, "qos", qos)
+	_ = notifier.Notify("AgentStatus:Online") // Best effort notification
+
+	select {
+	case <-stopped:
+		_ = notifier.Notify("AgentStatus:Stopped") // Best effort notification
+		return true, true, 0
+	case <-lost:
+		_ = notifier.Notify("AgentStatus:Offline") // Best effort notification
+		return false, true, 0
 	}
 }
 

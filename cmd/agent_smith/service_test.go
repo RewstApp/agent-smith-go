@@ -584,8 +584,9 @@ func (t *mockMQTTToken) Done() <-chan struct{} {
 func (t *mockMQTTToken) Error() error { return t.err }
 
 // mockMQTTClient implements pahomqtt.Client for testing.
-// Connect and Publish succeed; Subscribe returns subscribeErr.
+// Connect returns connectErr (nil = success); Subscribe returns subscribeErr.
 type mockMQTTClient struct {
+	connectErr   error
 	subscribeErr error
 }
 
@@ -606,7 +607,7 @@ func (m *disconnectTrackingClient) Disconnect(_ uint) {
 func (m *mockMQTTClient) IsConnected() bool      { return true }
 func (m *mockMQTTClient) IsConnectionOpen() bool { return true }
 func (m *mockMQTTClient) Connect() pahomqtt.Token {
-	return &mockMQTTToken{}
+	return &mockMQTTToken{err: m.connectErr}
 }
 func (m *mockMQTTClient) Disconnect(_ uint) {}
 func (m *mockMQTTClient) Publish(_ string, _ byte, _ bool, _ interface{}) pahomqtt.Token {
@@ -869,6 +870,77 @@ func TestExecute_DisconnectCalledOnSubscribeFailure(t *testing.T) {
 	}
 
 	// Now let Execute exit cleanly via the reconnect-wait select.
+	close(stop)
+
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Execute did not exit within timeout")
+	}
+}
+
+// TestExecute_DisconnectCalledOnConnectFailure verifies that client.Disconnect
+// is called even when Connect() itself fails. This exercises the deferred
+// cleanup path added to fix sc-89438: the old explicit-call approach had no
+// Disconnect call on the connect-failure path, leaking TCP resources.
+func TestExecute_DisconnectCalledOnConnectFailure(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.json")
+	logPath := filepath.Join(tmpDir, "test.log")
+
+	device := agent.Device{
+		DeviceId:             "test-device",
+		SharedAccessKey:      "dGVzdC1zaGFyZWQta2V5LXRoYXQtaXMtbG9uZy1lbm91Z2gtZm9yLWJhc2U2NC1kZWNvZGluZw==",
+		AzureIotHubHost:      "test.azure-devices.net",
+		LoggingLevel:         "error",
+		DisableAutoUpdates:   true,
+		DisableAgentPostback: true,
+	}
+	configBytes, _ := json.Marshal(device)
+	if err := os.WriteFile(configPath, configBytes, utils.DefaultFileMod); err != nil {
+		t.Fatalf("failed to write config: %v", err)
+	}
+
+	// disconnected is sent to by the client's Disconnect method. The test
+	// receives from it *before* closing stop, proving that Disconnect fired
+	// even when Connect() returned an error (deferred cleanup).
+	disconnected := make(chan struct{}, 1)
+	origNewClient := inmqtt.NewClient
+	inmqtt.NewClient = func(_ *pahomqtt.ClientOptions) pahomqtt.Client {
+		return &disconnectTrackingClient{
+			mockMQTTClient: mockMQTTClient{connectErr: errors.New("connection refused")},
+			onDisconnect:   func() { disconnected <- struct{}{} },
+		}
+	}
+	defer func() { inmqtt.NewClient = origNewClient }()
+
+	svc := &serviceContext{
+		ConfigFile: configPath,
+		LogFile:    logPath,
+		OrgId:      "test-org",
+		Executor:   &mockExecutor{},
+	}
+
+	stop := make(chan struct{})
+	running := make(chan struct{}, 1)
+	done := make(chan service.ServiceExitCode, 1)
+	go func() { done <- svc.Execute(stop, running) }()
+
+	select {
+	case <-running:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Execute did not signal running within timeout")
+	}
+
+	// Wait for Disconnect to be called on the failed-connect cycle before
+	// closing stop. With the old code (no Disconnect on connect failure)
+	// this would block indefinitely.
+	select {
+	case <-disconnected:
+	case <-time.After(5 * time.Second):
+		t.Fatal("client.Disconnect was not called after connect failure")
+	}
+
 	close(stop)
 
 	select {
