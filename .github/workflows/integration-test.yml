@@ -245,16 +245,17 @@ jobs:
           fi
           echo "PASS: Command executed as service account 'rewst_agent_it'"
 
-      - name: Re-install agent (default system account)
+      - name: Re-install agent (with service account)
         shell: bash
         run: |
           sudo ./dist/rewst_agent_config.linux.bin \
             --config-url ${{ vars.IT_CONFIG_URL }} \
             --config-secret ${{ secrets.IT_CONFIG_SECRET }} \
             --org-id ${{ vars.IT_ORG_ID }} \
-            --github-token ${{ secrets.GITHUB_TOKEN }}
+            --github-token ${{ secrets.GITHUB_TOKEN }} \
+            --service-username rewst_agent_it
 
-      - name: Send whoami command (system account)
+      - name: Send whoami command (service account after re-install)
         shell: bash
         run: |
           sleep 10
@@ -262,17 +263,17 @@ jobs:
           --form 'device_id="${{ steps.get_device_id.outputs.value }}"' \
           --form 'commands="whoami > /tmp/rewst_whoami_result2.txt"'
 
-      - name: Validate whoami output matches system account
+      - name: Validate whoami output matches service account after re-install
         shell: bash
         run: |
           sleep 15
           result=$(cat /tmp/rewst_whoami_result2.txt 2>/dev/null | tr -d '[:space:]')
           echo "whoami returned: '$result'"
-          if [ "$result" != "root" ]; then
-            echo "ERROR: Expected whoami to return 'root', got '$result'"
+          if [ "$result" != "rewst_agent_it" ]; then
+            echo "ERROR: Expected whoami to return 'rewst_agent_it', got '$result'"
             exit 1
           fi
-          echo "PASS: Command executed as default system account 'root'"
+          echo "PASS: Command executed as service account 'rewst_agent_it' after re-install"
 
       - name: Install integration test binary (old version)
         shell: bash
@@ -670,24 +671,24 @@ jobs:
           }
           Write-Output "PASS: Command executed as service account 'rewst_agent_it'"
 
-      - name: Re-install agent (default system account)
+      - name: Re-install agent (with service account)
         shell: pwsh
         run: |
-          ./dist/rewst_agent_config.win.exe --config-url ${{ vars.IT_CONFIG_URL }} --config-secret ${{ secrets.IT_CONFIG_SECRET }} --org-id ${{ vars.IT_ORG_ID }} --github-token ${{ secrets.GITHUB_TOKEN }} 2>&1 | Tee-Object -FilePath reinstall_output.txt
-          Write-Output "Agent re-installed with default system account"
+          ./dist/rewst_agent_config.win.exe --config-url ${{ vars.IT_CONFIG_URL }} --config-secret ${{ secrets.IT_CONFIG_SECRET }} --org-id ${{ vars.IT_ORG_ID }} --github-token ${{ secrets.GITHUB_TOKEN }} --service-username ".\rewst_agent_it" --service-password "TestP@ss123!" 2>&1 | Tee-Object -FilePath reinstall_output.txt
+          Write-Output "Agent re-installed with service account"
 
-      - name: Verify service logon account reverted to LocalSystem
+      - name: Verify service logon account after re-install
         shell: pwsh
         run: |
           $output = (sc.exe qc ${{ steps.install_agent.outputs.service }}) -join "`n"
           Write-Output $output
-          if ($output -notmatch "LocalSystem") {
-            Write-Error "Expected 'LocalSystem' not found in sc.exe qc output after re-install"
+          if ($output -notmatch "rewst_agent_it") {
+            Write-Error "Expected 'rewst_agent_it' not found in sc.exe qc output after re-install"
             exit 1
           }
-          Write-Output "PASS: Service logon account reverted to LocalSystem"
+          Write-Output "PASS: Service logon account is 'rewst_agent_it' after re-install"
 
-      - name: Send whoami command (system account)
+      - name: Send whoami command (service account after re-install)
         shell: pwsh
         run: |
           Start-Sleep -Seconds 10
@@ -695,17 +696,17 @@ jobs:
           --form 'device_id="${{ steps.get_device_id.outputs.value }}"' `
           --form 'commands="(whoami) | Out-File -FilePath C:\RewstTest\rewst_whoami_result2.txt -Encoding utf8"'
 
-      - name: Validate whoami output matches system account
+      - name: Validate whoami output matches service account after re-install
         shell: pwsh
         run: |
           Start-Sleep -Seconds 15
           $result = (Get-Content -Path "C:\RewstTest\rewst_whoami_result2.txt" -Raw -ErrorAction SilentlyContinue).Trim()
           Write-Output "whoami returned: '$result'"
-          if ($result -notmatch "nt authority\\system") {
-            Write-Error "Expected whoami to contain 'nt authority\system', got '$result'"
+          if ($result -notmatch "rewst_agent_it") {
+            Write-Error "Expected whoami to contain 'rewst_agent_it', got '$result'"
             exit 1
           }
-          Write-Output "PASS: Command executed as default system account 'nt authority\system'"
+          Write-Output "PASS: Command executed as service account 'rewst_agent_it' after re-install"
 
       - name: Install integration test binary (old version)
         shell: pwsh
@@ -1093,16 +1094,17 @@ jobs:
           fi
           echo "PASS: Command executed as service account 'rewst_agent_it'"
 
-      - name: Re-install agent (default system account)
+      - name: Re-install agent (with service account)
         shell: bash
         run: |
           sudo ./dist/rewst_agent_config.mac-os.bin \
             --config-url ${{ vars.IT_CONFIG_URL }} \
             --config-secret ${{ secrets.IT_CONFIG_SECRET }} \
             --org-id ${{ vars.IT_ORG_ID }} \
-            --github-token ${{ secrets.GITHUB_TOKEN }}
+            --github-token ${{ secrets.GITHUB_TOKEN }} \
+            --service-username rewst_agent_it
 
-      - name: Send whoami command (system account)
+      - name: Send whoami command (service account after re-install)
         shell: bash
         run: |
           sleep 10
@@ -1110,17 +1112,17 @@ jobs:
           --form 'device_id="${{ steps.get_device_id.outputs.value }}"' \
           --form 'commands="whoami > /tmp/rewst_whoami_result2.txt"'
 
-      - name: Validate whoami output matches system account
+      - name: Validate whoami output matches service account after re-install
         shell: bash
         run: |
           sleep 15
           result=$(cat /tmp/rewst_whoami_result2.txt 2>/dev/null | tr -d '[:space:]')
           echo "whoami returned: '$result'"
-          if [ "$result" != "root" ]; then
-            echo "ERROR: Expected whoami to return 'root', got '$result'"
+          if [ "$result" != "rewst_agent_it" ]; then
+            echo "ERROR: Expected whoami to return 'rewst_agent_it', got '$result'"
             exit 1
           fi
-          echo "PASS: Command executed as default system account 'root'"
+          echo "PASS: Command executed as service account 'rewst_agent_it' after re-install"
 
       - name: Install integration test binary (old version)
         shell: bash
