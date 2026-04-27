@@ -99,3 +99,41 @@ func TestNewConfigContext(t *testing.T) {
 		}
 	}
 }
+
+func TestNewConfigContext_ServiceCredentials(t *testing.T) {
+	result, err := newConfigContext(
+		[]string{
+			"--org-id", "test123",
+			"--config-url", "https://config.url/",
+			"--config-secret", "secret123",
+			"--service-username", `DOMAIN\svc_rewst`,
+			"--service-password", "p@ssw0rd",
+		},
+		nil, nil, nil, nil,
+	)
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if result.ServiceUsername != `DOMAIN\svc_rewst` {
+		t.Errorf("expected ServiceUsername 'DOMAIN\\svc_rewst', got %q", result.ServiceUsername)
+	}
+	if result.ServicePassword != "p@ssw0rd" {
+		t.Errorf("expected ServicePassword 'p@ssw0rd', got %q", result.ServicePassword)
+	}
+}
+
+func TestNewConfigContext_ServiceCredentialsDefaultEmpty(t *testing.T) {
+	result, err := newConfigContext(
+		[]string{"--org-id", "test123", "--config-url", "https://config.url/", "--config-secret", "secret123"},
+		nil, nil, nil, nil,
+	)
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if result.ServiceUsername != "" {
+		t.Errorf("expected empty ServiceUsername by default, got %q", result.ServiceUsername)
+	}
+	if result.ServicePassword != "" {
+		t.Errorf("expected empty ServicePassword by default, got %q", result.ServicePassword)
+	}
+}

@@ -394,6 +394,54 @@ func TestRunConfig_ServiceCreateFails(t *testing.T) {
 	}
 }
 
+func TestRunConfig_ServiceCredentialsPassedToCreate(t *testing.T) {
+	srv := newConfigServer(t, http.StatusOK, validConfigResponseBody("test-org"))
+	defer srv.Close()
+
+	sm := &mockServiceManager{
+		openErr:       errors.New("no existing service"),
+		createService: &mockService{},
+	}
+	params := newBaseConfigParams(srv.URL)
+	params.ServiceUsername = `DOMAIN\svc_rewst`
+	params.ServicePassword = "p@ssw0rd"
+	params.ServiceManager = sm
+
+	err := runConfig(params)
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if sm.capturedCreateParams.ServiceUsername != `DOMAIN\svc_rewst` {
+		t.Errorf("expected ServiceUsername to be passed to Create, got %q", sm.capturedCreateParams.ServiceUsername)
+	}
+	if sm.capturedCreateParams.ServicePassword != "p@ssw0rd" {
+		t.Errorf("expected ServicePassword to be passed to Create, got %q", sm.capturedCreateParams.ServicePassword)
+	}
+}
+
+func TestRunConfig_NoServiceCredentials_EmptyInCreate(t *testing.T) {
+	srv := newConfigServer(t, http.StatusOK, validConfigResponseBody("test-org"))
+	defer srv.Close()
+
+	sm := &mockServiceManager{
+		openErr:       errors.New("no existing service"),
+		createService: &mockService{},
+	}
+	params := newBaseConfigParams(srv.URL)
+	params.ServiceManager = sm
+
+	err := runConfig(params)
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if sm.capturedCreateParams.ServiceUsername != "" {
+		t.Errorf("expected empty ServiceUsername when not provided, got %q", sm.capturedCreateParams.ServiceUsername)
+	}
+	if sm.capturedCreateParams.ServicePassword != "" {
+		t.Errorf("expected empty ServicePassword when not provided, got %q", sm.capturedCreateParams.ServicePassword)
+	}
+}
+
 func TestRunConfig_ServiceStartFails(t *testing.T) {
 	srv := newConfigServer(t, http.StatusOK, validConfigResponseBody("test-org"))
 	defer srv.Close()

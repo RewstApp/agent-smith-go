@@ -6,6 +6,8 @@ type AgentParams struct {
 	OrgId               string
 	ConfigFilePath      string
 	LogFilePath         string
+	ServiceUsername     string
+	ServicePassword     string
 }
 
 type Service interface {

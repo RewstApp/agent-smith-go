@@ -215,6 +215,8 @@ func runConfig(params *configContext) error {
 		OrgId:               params.OrgId,
 		ConfigFilePath:      configFilePath,
 		LogFilePath:         agent.GetLogFilePath(params.OrgId),
+		ServiceUsername:     params.ServiceUsername,
+		ServicePassword:     params.ServicePassword,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create service: %w", err)

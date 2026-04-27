@@ -299,3 +299,61 @@ func TestDefaultServiceManager_Open_Error(t *testing.T) {
 		t.Error("expected error, got nil")
 	}
 }
+
+func TestDefaultServiceManager_Create_WithServiceUsername(t *testing.T) {
+	tmpFile := newTempConfigPath(t)
+	mock := &mockSystemCtl{configFilePath: tmpFile}
+	sm := &defaultServiceManager{system: mock}
+	params := AgentParams{
+		Name:                "my-service",
+		AgentExecutablePath: "/usr/bin/agent",
+		OrgId:               "org-abc",
+		ConfigFilePath:      "/etc/agent.json",
+		LogFilePath:         "/var/log/agent.log",
+		ServiceUsername:     "rewst",
+	}
+
+	if _, err := sm.Create(params); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	data, err := os.ReadFile(tmpFile)
+	if err != nil {
+		t.Fatalf("failed to read config file: %v", err)
+	}
+	content := string(data)
+
+	if !strings.Contains(content, "User=rewst") {
+		t.Errorf("expected config to contain 'User=rewst', got:\n%s", content)
+	}
+	if !strings.Contains(content, "Group=rewst") {
+		t.Errorf("expected config to contain 'Group=rewst', got:\n%s", content)
+	}
+}
+
+func TestDefaultServiceManager_Create_WithoutServiceUsername_NoUserDirective(t *testing.T) {
+	tmpFile := newTempConfigPath(t)
+	mock := &mockSystemCtl{configFilePath: tmpFile}
+	sm := &defaultServiceManager{system: mock}
+	params := AgentParams{
+		Name:                "my-service",
+		AgentExecutablePath: "/usr/bin/agent",
+		OrgId:               "org-abc",
+		ConfigFilePath:      "/etc/agent.json",
+		LogFilePath:         "/var/log/agent.log",
+	}
+
+	if _, err := sm.Create(params); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	data, err := os.ReadFile(tmpFile)
+	if err != nil {
+		t.Fatalf("failed to read config file: %v", err)
+	}
+	content := string(data)
+
+	if strings.Contains(content, "User=") {
+		t.Errorf("expected config not to contain 'User=', got:\n%s", content)
+	}
+}

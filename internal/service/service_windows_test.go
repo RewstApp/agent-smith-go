@@ -64,9 +64,10 @@ func (m *mockWindowsServiceHandle) Query() (svc.Status, error) {
 // mockWindowsServiceManager
 
 type mockWindowsServiceManager struct {
-	createErr    error
-	openErr      error
-	disconnected bool
+	createErr      error
+	openErr        error
+	disconnected   bool
+	capturedConfig mgr.Config
 }
 
 func (m *mockWindowsServiceManager) Disconnect() error {
@@ -79,6 +80,7 @@ func (m *mockWindowsServiceManager) CreateService(
 	c mgr.Config,
 	args ...string,
 ) (*mgr.Service, error) {
+	m.capturedConfig = c
 	return nil, m.createErr
 }
 
@@ -305,6 +307,43 @@ func TestDefaultServiceManager_Create_CreateServiceError(t *testing.T) {
 	}
 	if !manager.disconnected {
 		t.Error("expected Disconnect to be called on error")
+	}
+}
+
+func TestDefaultServiceManager_Create_WithServiceUsername(t *testing.T) {
+	manager := &mockWindowsServiceManager{}
+	factory := &mockWindowsServiceManagerFactory{manager: manager}
+	sm := &defaultServiceManager{factory: factory}
+
+	_, err := sm.Create(AgentParams{
+		ServiceUsername: `DOMAIN\svc_rewst`,
+		ServicePassword: "p@ssw0rd",
+	})
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if manager.capturedConfig.ServiceStartName != `DOMAIN\svc_rewst` {
+		t.Errorf("expected ServiceStartName 'DOMAIN\\svc_rewst', got %q", manager.capturedConfig.ServiceStartName)
+	}
+	if manager.capturedConfig.Password != "p@ssw0rd" {
+		t.Errorf("expected Password 'p@ssw0rd', got %q", manager.capturedConfig.Password)
+	}
+}
+
+func TestDefaultServiceManager_Create_WithoutServiceUsername_NoCredentials(t *testing.T) {
+	manager := &mockWindowsServiceManager{}
+	factory := &mockWindowsServiceManagerFactory{manager: manager}
+	sm := &defaultServiceManager{factory: factory}
+
+	_, err := sm.Create(AgentParams{})
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if manager.capturedConfig.ServiceStartName != "" {
+		t.Errorf("expected empty ServiceStartName when not provided, got %q", manager.capturedConfig.ServiceStartName)
+	}
+	if manager.capturedConfig.Password != "" {
+		t.Errorf("expected empty Password when not provided, got %q", manager.capturedConfig.Password)
 	}
 }
 

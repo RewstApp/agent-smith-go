@@ -97,11 +97,18 @@ func (s *defaultServiceManager) Create(params AgentParams) (Service, error) {
 	}
 	defer func() { _ = svcMgr.Disconnect() }() // Cleanup - error can be ignored
 
-	svc, err := svcMgr.CreateService(params.Name, params.AgentExecutablePath, mgr.Config{
+	config := mgr.Config{
 		StartType:        mgr.StartAutomatic,
 		Description:      fmt.Sprintf("Rewst Remote Agent for Org %s", params.OrgId),
 		DelayedAutoStart: true,
-	}, "--org-id", params.OrgId, "--config-file", params.ConfigFilePath, "--log-file", params.LogFilePath)
+	}
+	if params.ServiceUsername != "" {
+		config.ServiceStartName = params.ServiceUsername
+		config.Password = params.ServicePassword
+	}
+
+	svc, err := svcMgr.CreateService(params.Name, params.AgentExecutablePath, config,
+		"--org-id", params.OrgId, "--config-file", params.ConfigFilePath, "--log-file", params.LogFilePath)
 	if err != nil {
 		return nil, err
 	}

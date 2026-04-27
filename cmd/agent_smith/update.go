@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/RewstApp/agent-smith-go/internal/agent"
+	"github.com/RewstApp/agent-smith-go/internal/service"
 	"github.com/RewstApp/agent-smith-go/internal/utils"
 	"github.com/RewstApp/agent-smith-go/internal/version"
 )
@@ -25,12 +26,6 @@ func runUpdate(params *updateContext) {
 		logger.Error("Failed to open service", "name", name, "error", err)
 		return
 	}
-	defer func() {
-		err = svc.Close()
-		if err != nil {
-			logger.Error("Failed to close service handle", "error", err)
-		}
-	}()
 
 	// Stop the service if its running
 	if svc.IsActive() {
@@ -38,6 +33,7 @@ func runUpdate(params *updateContext) {
 		err = svc.Stop()
 		if err != nil {
 			logger.Error("Failed to stop service", "service", name, "error", err)
+			_ = svc.Close()
 			return
 		}
 
@@ -56,6 +52,7 @@ func runUpdate(params *updateContext) {
 	)
 	if err != nil {
 		logger.Error("Failed to read paths", "error", err)
+		_ = svc.Close()
 		return
 	}
 
@@ -64,6 +61,7 @@ func runUpdate(params *updateContext) {
 	configFileBytes, err := params.FS.ReadFile(configFilePath)
 	if err != nil {
 		logger.Error("Failed to load config", "error", err)
+		_ = svc.Close()
 		return
 	}
 
@@ -72,6 +70,7 @@ func runUpdate(params *updateContext) {
 	err = json.Unmarshal(configFileBytes, &device)
 	if err != nil {
 		logger.Error("Failed to decode config", "error", err)
+		_ = svc.Close()
 		return
 	}
 
@@ -92,12 +91,14 @@ func runUpdate(params *updateContext) {
 	configBytes, err := json.MarshalIndent(device, "", "  ")
 	if err != nil {
 		logger.Error("Failed to print config file", "error", err)
+		_ = svc.Close()
 		return
 	}
 
 	err = params.FS.WriteFile(configFilePath, configBytes, utils.DefaultFileMod)
 	if err != nil {
 		logger.Error("Failed to save config", "error", err)
+		_ = svc.Close()
 		return
 	}
 
@@ -107,12 +108,14 @@ func runUpdate(params *updateContext) {
 	execFilePath, err := params.FS.Executable()
 	if err != nil {
 		logger.Error("Failed to get executable", "error", err)
+		_ = svc.Close()
 		return
 	}
 
 	execFileBytes, err := params.FS.ReadFile(execFilePath)
 	if err != nil {
 		logger.Error("Failed to read executable file", "error", err)
+		_ = svc.Close()
 		return
 	}
 
@@ -120,15 +123,61 @@ func runUpdate(params *updateContext) {
 	err = params.FS.WriteFile(agentExecutablePath, execFileBytes, utils.DefaultExecutableFileMod)
 	if err != nil {
 		logger.Error("Failed to create agent executable", "error", err)
+		_ = svc.Close()
 		return
 	}
 
 	logger.Info("Agent installed to", "path", agentExecutablePath)
 
+	// When a new service username is requested, re-register the service under the
+	// new account instead of starting the existing registration.
+	if params.ServiceUsername != "" {
+		logger.Info("Re-registering service with new account", "username", params.ServiceUsername)
+
+		if err = svc.Delete(); err != nil {
+			logger.Error("Failed to delete service for re-registration", "service", name, "error", err)
+			_ = svc.Close()
+			return
+		}
+		if err = svc.Close(); err != nil {
+			logger.Error("Failed to close service handle", "error", err)
+			return
+		}
+
+		logger.Info("Waiting for service executable to stop")
+		time.Sleep(serviceExecutableTimeout)
+
+		svc, err = params.ServiceManager.Create(service.AgentParams{
+			Name:                name,
+			AgentExecutablePath: agentExecutablePath,
+			OrgId:               params.OrgId,
+			ConfigFilePath:      configFilePath,
+			LogFilePath:         agent.GetLogFilePath(params.OrgId),
+			ServiceUsername:     params.ServiceUsername,
+			ServicePassword:     params.ServicePassword,
+		})
+		if err != nil {
+			logger.Error("Failed to re-create service", "service", name, "error", err)
+			return
+		}
+		defer func() {
+			if err := svc.Close(); err != nil {
+				logger.Error("Failed to close service handle", "error", err)
+			}
+		}()
+
+		logger.Info("Service re-registered", "service", name)
+	} else {
+		defer func() {
+			if err := svc.Close(); err != nil {
+				logger.Error("Failed to close service handle", "error", err)
+			}
+		}()
+	}
+
 	// Starting the service
 	logger.Info("Starting service", "service", name)
-	err = svc.Start()
-	if err != nil {
+	if err = svc.Start(); err != nil {
 		logger.Error("Failed to start service", "service", name, "error", err)
 		return
 	}
