@@ -10,6 +10,7 @@ import (
 	"os"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/RewstApp/agent-smith-go/internal/agent"
@@ -184,31 +185,6 @@ func (svc *serviceContext) Execute(
 	_ = notifier.Notify("AgentStarted") // Best effort notification
 	rg := utils.ReconnectTimeoutGenerator{}
 
-	msgQueue := make(chan []byte, messageQueueSize)
-	for i := range workerCount {
-		go func() {
-			logger.Debug("Message worker started", "worker", i)
-			for {
-				select {
-				case payload, ok := <-msgQueue:
-					if !ok {
-						logger.Debug("Message worker stopped: queue closed", "worker", i)
-						return
-					}
-					logger.Debug(
-						"Message worker processing",
-						"worker", i,
-						"queue_length", len(msgQueue),
-					)
-					svc.processMessage(payload, ctx, device, logger, notifier)
-				case <-ctx.Done():
-					logger.Debug("Message worker stopped: context cancelled", "worker", i)
-					return
-				}
-			}
-		}()
-	}
-
 	for {
 		// Wait for the timeout
 		if rg.Timeout() > 0 {
@@ -225,6 +201,41 @@ func (svc *serviceContext) Execute(
 		// Move to the next timeout
 		rg.Next()
 
+		// Create a fresh message queue and worker pool for this connection attempt.
+		// Workers are closed and drained at every exit point so goroutines do not
+		// accumulate across reconnection cycles.
+		msgQueue := make(chan []byte, messageQueueSize)
+		var wg sync.WaitGroup
+		for i := range workerCount {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				logger.Debug("Message worker started", "worker", i)
+				for {
+					select {
+					case payload, ok := <-msgQueue:
+						if !ok {
+							logger.Debug("Message worker stopped: queue closed", "worker", i)
+							return
+						}
+						logger.Debug(
+							"Message worker processing",
+							"worker", i,
+							"queue_length", len(msgQueue),
+						)
+						svc.processMessage(payload, ctx, device, logger, notifier)
+					case <-ctx.Done():
+						logger.Debug("Message worker stopped: context cancelled", "worker", i)
+						return
+					}
+				}
+			}()
+		}
+		drainWorkers := func() {
+			close(msgQueue)
+			wg.Wait()
+		}
+
 		// Create a channel to wait for lost connection
 		lost := make(chan struct{})
 
@@ -232,6 +243,7 @@ func (svc *serviceContext) Execute(
 		opts, err := mqtt.NewClientOptions(device)
 		if err != nil {
 			logger.Error("Failed to create client options", "error", err)
+			drainWorkers()
 			return service.GenericError
 		}
 
@@ -250,6 +262,7 @@ func (svc *serviceContext) Execute(
 
 		if token.Wait() && token.Error() != nil {
 			logger.Error("Failed to connect", "error", token.Error())
+			drainWorkers()
 			continue
 		}
 		disconnectQuiesce := (uint)(mqtt.DefaultDisconnectQuiesce / time.Millisecond)
@@ -286,6 +299,7 @@ func (svc *serviceContext) Execute(
 		if token.Wait() && token.Error() != nil {
 			logger.Error("Failed to subscribe", "error", token.Error())
 			client.Disconnect(disconnectQuiesce)
+			drainWorkers()
 			continue
 		}
 
@@ -302,10 +316,12 @@ func (svc *serviceContext) Execute(
 		case <-stopped:
 			_ = notifier.Notify("AgentStatus:Stopped") // Best effort notification
 			client.Disconnect(disconnectQuiesce)
+			drainWorkers()
 			return 0
 		case <-lost:
 			_ = notifier.Notify("AgentStatus:Offline") // Best effort notification
 			client.Disconnect(disconnectQuiesce)
+			drainWorkers()
 			continue
 		}
 	}
