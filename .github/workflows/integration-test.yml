@@ -198,6 +198,82 @@ jobs:
           fi
           echo "Error handling verified: failing command error was captured"
 
+      - name: Create service account
+        shell: bash
+        run: |
+          sudo useradd -r -s /bin/false rewst_agent_it
+          echo "Created local service account: rewst_agent_it"
+
+      - name: Update service with service account credentials
+        shell: bash
+        run: |
+          sudo ./dist/rewst_agent_config.linux.bin \
+            --update \
+            --org-id ${{ vars.IT_ORG_ID }} \
+            --service-username rewst_agent_it \
+            --github-token ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Verify User= directive in systemd unit file
+        shell: bash
+        run: |
+          unitFile="/etc/systemd/system/${{ steps.install_agent.outputs.service }}.service"
+          content=$(cat "$unitFile")
+          echo "$content"
+          if ! echo "$content" | grep -qF "User=rewst_agent_it"; then
+            echo "ERROR: Expected 'User=rewst_agent_it' not found in unit file"
+            exit 1
+          fi
+          echo "PASS: User=rewst_agent_it confirmed in systemd unit file"
+
+      - name: Send whoami command (service account)
+        shell: bash
+        run: |
+          sleep 10
+          curl --location '${{ vars.IT_SEND_COMMAND_TRIGGER_URL }}' \
+          --form 'device_id="${{ steps.get_device_id.outputs.value }}"' \
+          --form 'commands="whoami > /tmp/rewst_whoami_result.txt"'
+
+      - name: Validate whoami output matches service account
+        shell: bash
+        run: |
+          sleep 15
+          result=$(cat /tmp/rewst_whoami_result.txt 2>/dev/null | tr -d '[:space:]')
+          echo "whoami returned: '$result'"
+          if [ "$result" != "rewst_agent_it" ]; then
+            echo "ERROR: Expected whoami to return 'rewst_agent_it', got '$result'"
+            exit 1
+          fi
+          echo "PASS: Command executed as service account 'rewst_agent_it'"
+
+      - name: Re-install agent (default system account)
+        shell: bash
+        run: |
+          sudo ./dist/rewst_agent_config.linux.bin \
+            --config-url ${{ vars.IT_CONFIG_URL }} \
+            --config-secret ${{ secrets.IT_CONFIG_SECRET }} \
+            --org-id ${{ vars.IT_ORG_ID }} \
+            --github-token ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Send whoami command (system account)
+        shell: bash
+        run: |
+          sleep 10
+          curl --location '${{ vars.IT_SEND_COMMAND_TRIGGER_URL }}' \
+          --form 'device_id="${{ steps.get_device_id.outputs.value }}"' \
+          --form 'commands="whoami > /tmp/rewst_whoami_result2.txt"'
+
+      - name: Validate whoami output matches system account
+        shell: bash
+        run: |
+          sleep 15
+          result=$(cat /tmp/rewst_whoami_result2.txt 2>/dev/null | tr -d '[:space:]')
+          echo "whoami returned: '$result'"
+          if [ "$result" != "root" ]; then
+            echo "ERROR: Expected whoami to return 'root', got '$result'"
+            exit 1
+          fi
+          echo "PASS: Command executed as default system account 'root'"
+
       - name: Install integration test binary (old version)
         shell: bash
         run: |
@@ -524,6 +600,112 @@ jobs:
             exit 1
           }
           Write-Output "Error handling verified: failing command error was captured"
+
+      - name: Create service account
+        shell: pwsh
+        run: |
+          $password = ConvertTo-SecureString "TestP@ss123!" -AsPlainText -Force
+          New-LocalUser -Name "rewst_agent_it" -Password $password -Description "Rewst IT integration test service account" -PasswordNeverExpires
+          Write-Output "Created local service account: rewst_agent_it"
+
+      - name: Grant Log on as a service right
+        shell: pwsh
+        run: |
+          $sidStr = ([System.Security.Principal.NTAccount]".\rewst_agent_it").Translate([System.Security.Principal.SecurityIdentifier]).Value
+          $tmpInf = [System.IO.Path]::GetTempFileName() -replace '\.tmp$', '.inf'
+          secedit /export /cfg $tmpInf /quiet
+          $policy = Get-Content $tmpInf -Raw -Encoding Unicode
+          if ($policy -match 'SeServiceLogonRight') {
+            $policy = $policy -replace '(SeServiceLogonRight\s*=\s*)([^\r\n]+)', "`$1`$2,*$sidStr"
+          } elseif ($policy -match '\[Privilege Rights\]') {
+            $policy = $policy -replace '(\[Privilege Rights\])', "`$1`r`nSeServiceLogonRight = *$sidStr"
+          } else {
+            $policy += "`r`n[Privilege Rights]`r`nSeServiceLogonRight = *$sidStr`r`n"
+          }
+          [System.IO.File]::WriteAllText($tmpInf, $policy, [System.Text.Encoding]::Unicode)
+          secedit /configure /db "$env:TEMP\secedit.sdb" /cfg $tmpInf /areas USER_RIGHTS /quiet
+          Remove-Item $tmpInf -Force -ErrorAction SilentlyContinue
+          Write-Output "Granted SeServiceLogonRight to rewst_agent_it ($sidStr)"
+
+      - name: Create test output directory
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force "C:\RewstTest" | Out-Null
+          icacls "C:\RewstTest" /grant "Everyone:(OI)(CI)F" | Out-Null
+          Write-Output "Created C:\RewstTest with world-writable permissions"
+
+      - name: Update service with service account credentials
+        shell: pwsh
+        run: |
+          ./dist/rewst_agent_config.win.exe --update --org-id ${{ vars.IT_ORG_ID }} --service-username ".\rewst_agent_it" --service-password "TestP@ss123!" --github-token ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Verify service logon account
+        shell: pwsh
+        run: |
+          $output = (sc.exe qc ${{ steps.install_agent.outputs.service }}) -join "`n"
+          Write-Output $output
+          if ($output -notmatch "rewst_agent_it") {
+            Write-Error "Expected 'rewst_agent_it' not found in sc.exe qc output"
+            exit 1
+          }
+          Write-Output "PASS: Service logon account set to rewst_agent_it"
+
+      - name: Send whoami command (service account)
+        shell: pwsh
+        run: |
+          Start-Sleep -Seconds 10
+          curl --location '${{ vars.IT_SEND_COMMAND_TRIGGER_URL }}' `
+          --form 'device_id="${{ steps.get_device_id.outputs.value }}"' `
+          --form 'commands="(whoami) | Out-File -FilePath C:\RewstTest\rewst_whoami_result.txt -Encoding utf8"'
+
+      - name: Validate whoami output matches service account
+        shell: pwsh
+        run: |
+          Start-Sleep -Seconds 15
+          $result = (Get-Content -Path "C:\RewstTest\rewst_whoami_result.txt" -Raw -ErrorAction SilentlyContinue).Trim()
+          Write-Output "whoami returned: '$result'"
+          if ($result -notmatch "rewst_agent_it") {
+            Write-Error "Expected whoami to contain 'rewst_agent_it', got '$result'"
+            exit 1
+          }
+          Write-Output "PASS: Command executed as service account 'rewst_agent_it'"
+
+      - name: Re-install agent (default system account)
+        shell: pwsh
+        run: |
+          ./dist/rewst_agent_config.win.exe --config-url ${{ vars.IT_CONFIG_URL }} --config-secret ${{ secrets.IT_CONFIG_SECRET }} --org-id ${{ vars.IT_ORG_ID }} --github-token ${{ secrets.GITHUB_TOKEN }} 2>&1 | Tee-Object -FilePath reinstall_output.txt
+          Write-Output "Agent re-installed with default system account"
+
+      - name: Verify service logon account reverted to LocalSystem
+        shell: pwsh
+        run: |
+          $output = (sc.exe qc ${{ steps.install_agent.outputs.service }}) -join "`n"
+          Write-Output $output
+          if ($output -notmatch "LocalSystem") {
+            Write-Error "Expected 'LocalSystem' not found in sc.exe qc output after re-install"
+            exit 1
+          }
+          Write-Output "PASS: Service logon account reverted to LocalSystem"
+
+      - name: Send whoami command (system account)
+        shell: pwsh
+        run: |
+          Start-Sleep -Seconds 10
+          curl --location '${{ vars.IT_SEND_COMMAND_TRIGGER_URL }}' `
+          --form 'device_id="${{ steps.get_device_id.outputs.value }}"' `
+          --form 'commands="(whoami) | Out-File -FilePath C:\RewstTest\rewst_whoami_result2.txt -Encoding utf8"'
+
+      - name: Validate whoami output matches system account
+        shell: pwsh
+        run: |
+          Start-Sleep -Seconds 15
+          $result = (Get-Content -Path "C:\RewstTest\rewst_whoami_result2.txt" -Raw -ErrorAction SilentlyContinue).Trim()
+          Write-Output "whoami returned: '$result'"
+          if ($result -notmatch "nt authority\\system") {
+            Write-Error "Expected whoami to contain 'nt authority\system', got '$result'"
+            exit 1
+          }
+          Write-Output "PASS: Command executed as default system account 'nt authority\system'"
 
       - name: Install integration test binary (old version)
         shell: pwsh
@@ -853,6 +1035,92 @@ jobs:
             exit 1
           fi
           echo "Error handling verified: failing command error was captured"
+
+      - name: Create service account
+        shell: bash
+        run: |
+          NEXT_UID=$(dscl . -list /Users UniqueID | awk '{print $2}' | sort -n | tail -1 | xargs -I{} expr {} + 1)
+          sudo dscl . -create /Users/rewst_agent_it
+          sudo dscl . -create /Users/rewst_agent_it UserShell /bin/false
+          sudo dscl . -create /Users/rewst_agent_it RealName "Rewst IT Test Account"
+          sudo dscl . -create /Users/rewst_agent_it UniqueID "$NEXT_UID"
+          sudo dscl . -create /Users/rewst_agent_it PrimaryGroupID 20
+          sudo dscl . -create /Users/rewst_agent_it NFSHomeDirectory /var/empty
+          echo "Created local service account: rewst_agent_it (UID=$NEXT_UID)"
+
+      - name: Update service with service account credentials
+        shell: bash
+        run: |
+          sudo ./dist/rewst_agent_config.mac-os.bin \
+            --update \
+            --org-id ${{ vars.IT_ORG_ID }} \
+            --service-username rewst_agent_it \
+            --github-token ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Verify UserName key in launchd plist
+        shell: bash
+        run: |
+          plistFile="/Library/LaunchDaemons/${{ steps.install_agent.outputs.service }}.plist"
+          content=$(cat "$plistFile")
+          echo "$content"
+          if ! echo "$content" | grep -qF "<key>UserName</key>"; then
+            echo "ERROR: Expected '<key>UserName</key>' not found in plist"
+            exit 1
+          fi
+          if ! echo "$content" | grep -qF "<string>rewst_agent_it</string>"; then
+            echo "ERROR: Expected '<string>rewst_agent_it</string>' not found in plist"
+            exit 1
+          fi
+          echo "PASS: UserName=rewst_agent_it confirmed in launchd plist"
+
+      - name: Send whoami command (service account)
+        shell: bash
+        run: |
+          sleep 10
+          curl --location '${{ vars.IT_SEND_COMMAND_TRIGGER_URL }}' \
+          --form 'device_id="${{ steps.get_device_id.outputs.value }}"' \
+          --form 'commands="whoami > /tmp/rewst_whoami_result.txt"'
+
+      - name: Validate whoami output matches service account
+        shell: bash
+        run: |
+          sleep 15
+          result=$(cat /tmp/rewst_whoami_result.txt 2>/dev/null | tr -d '[:space:]')
+          echo "whoami returned: '$result'"
+          if [ "$result" != "rewst_agent_it" ]; then
+            echo "ERROR: Expected whoami to return 'rewst_agent_it', got '$result'"
+            exit 1
+          fi
+          echo "PASS: Command executed as service account 'rewst_agent_it'"
+
+      - name: Re-install agent (default system account)
+        shell: bash
+        run: |
+          sudo ./dist/rewst_agent_config.mac-os.bin \
+            --config-url ${{ vars.IT_CONFIG_URL }} \
+            --config-secret ${{ secrets.IT_CONFIG_SECRET }} \
+            --org-id ${{ vars.IT_ORG_ID }} \
+            --github-token ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Send whoami command (system account)
+        shell: bash
+        run: |
+          sleep 10
+          curl --location '${{ vars.IT_SEND_COMMAND_TRIGGER_URL }}' \
+          --form 'device_id="${{ steps.get_device_id.outputs.value }}"' \
+          --form 'commands="whoami > /tmp/rewst_whoami_result2.txt"'
+
+      - name: Validate whoami output matches system account
+        shell: bash
+        run: |
+          sleep 15
+          result=$(cat /tmp/rewst_whoami_result2.txt 2>/dev/null | tr -d '[:space:]')
+          echo "whoami returned: '$result'"
+          if [ "$result" != "root" ]; then
+            echo "ERROR: Expected whoami to return 'root', got '$result'"
+            exit 1
+          fi
+          echo "PASS: Command executed as default system account 'root'"
 
       - name: Install integration test binary (old version)
         shell: bash
