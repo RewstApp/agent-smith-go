@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -324,6 +325,66 @@ func TestMessageQueue_ConcurrencyBoundedByWorkerCount(t *testing.T) {
 	}
 	if peak == 0 {
 		t.Error("no messages were processed")
+	}
+}
+
+// TestWorkerPool_NoLeakAcrossReconnectCycles verifies that closing msgQueue at
+// the end of each connection cycle allows all worker goroutines to exit, so
+// goroutine count stays stable across multiple reconnect cycles.
+func TestWorkerPool_NoLeakAcrossReconnectCycles(t *testing.T) {
+	exec := &countingExecutor{}
+	svc := newTestSvc(exec)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	logger := hclog.NewNullLogger()
+	notifier := &mockNotifierWrapper{}
+	device := agent.Device{}
+
+	baseline := runtime.NumGoroutine()
+
+	const cycles = 5
+	for range cycles {
+		msgQueue := make(chan []byte, messageQueueSize)
+		var wg sync.WaitGroup
+		for range workerCount {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for {
+					select {
+					case payload, ok := <-msgQueue:
+						if !ok {
+							return
+						}
+						svc.processMessage(payload, ctx, device, logger, notifier)
+					case <-ctx.Done():
+						return
+					}
+				}
+			}()
+		}
+
+		// Enqueue a message to exercise the drain path.
+		msgQueue <- validPayload("echo hi")
+
+		// Simulate what Execute does on disconnect: close the queue and wait.
+		close(msgQueue)
+		wg.Wait()
+	}
+
+	// Allow the runtime to collect any transient goroutines.
+	runtime.GC()
+	time.Sleep(10 * time.Millisecond)
+
+	after := runtime.NumGoroutine()
+	const maxDelta = 3
+	if after > baseline+maxDelta {
+		t.Errorf(
+			"goroutine count grew after %d reconnect cycles: baseline=%d after=%d (leaked ~%d)",
+			cycles, baseline, after, after-baseline,
+		)
 	}
 }
 
