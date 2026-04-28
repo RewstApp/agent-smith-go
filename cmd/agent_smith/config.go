@@ -215,6 +215,7 @@ func runConfig(params *configContext) error {
 		OrgId:               params.OrgId,
 		ConfigFilePath:      configFilePath,
 		LogFilePath:         agent.GetLogFilePath(params.OrgId),
+		ScriptsDirectory:    agent.GetScriptsDirectory(params.OrgId),
 		ServiceUsername:     params.ServiceUsername,
 		ServicePassword:     params.ServicePassword,
 	})

@@ -6,6 +6,7 @@ type AgentParams struct {
 	OrgId               string
 	ConfigFilePath      string
 	LogFilePath         string
+	ScriptsDirectory    string
 	ServiceUsername     string
 	ServicePassword     string
 }

@@ -173,6 +173,14 @@ func (s *defaultServiceManager) Create(params AgentParams) (Service, error) {
 		if err := s.chownDir(filepath.Dir(params.ConfigFilePath), params.ServiceUsername); err != nil {
 			return nil, err
 		}
+		if params.ScriptsDirectory != "" {
+			if err := os.MkdirAll(params.ScriptsDirectory, 0o755); err != nil {
+				return nil, err
+			}
+			if err := s.chownDir(params.ScriptsDirectory, params.ServiceUsername); err != nil {
+				return nil, err
+			}
+		}
 	}
 
 	return svc, nil
