@@ -612,7 +612,7 @@ jobs:
       - name: Grant Log on as a service right
         shell: pwsh
         run: |
-          $sidStr = ([System.Security.Principal.NTAccount]".\rewst_agent_it").Translate([System.Security.Principal.SecurityIdentifier]).Value
+          $sidStr = (Get-LocalUser -Name "rewst_agent_it").SID.Value
           $tmpInf = [System.IO.Path]::GetTempFileName() -replace '\.tmp$', '.inf'
           secedit /export /cfg $tmpInf /quiet
           $policy = Get-Content $tmpInf -Raw -Encoding Unicode
