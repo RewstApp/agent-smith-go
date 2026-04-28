@@ -663,6 +663,7 @@ jobs:
 
           try {
             $whoamiResult = whoami
+            New-Item -ItemType Directory -Force -Path \"C:\RewstTest\" | Out-Null
             $whoamiResult | Out-File -FilePath C:\RewstTest\rewst_whoami_result.txt -Encoding utf8
             $PS_Results | Add-Member -MemberType NoteProperty -Name \"output\" -Value $whoamiResult
             $PS_Results | Add-Member -MemberType NoteProperty -Name \"error\" -Value \"\"
@@ -715,6 +716,7 @@ jobs:
 
           try {
             $whoamiResult = whoami
+            New-Item -ItemType Directory -Force -Path \"C:\RewstTest\" | Out-Null
             $whoamiResult | Out-File -FilePath C:\RewstTest\rewst_whoami_result2.txt -Encoding utf8
             $PS_Results | Add-Member -MemberType NoteProperty -Name \"output\" -Value $whoamiResult
             $PS_Results | Add-Member -MemberType NoteProperty -Name \"error\" -Value \"\"
