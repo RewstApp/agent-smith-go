@@ -357,3 +357,26 @@ func TestDefaultServiceManager_Create_WithoutServiceUsername_NoUserDirective(t *
 		t.Errorf("expected config not to contain 'User=', got:\n%s", content)
 	}
 }
+
+func TestDefaultServiceManager_Create_ChownDirError(t *testing.T) {
+	tmpFile := newTempConfigPath(t)
+	mock := &mockSystemCtl{configFilePath: tmpFile}
+	chownErr := errors.New("chown failed")
+	sm := &defaultServiceManager{
+		system: mock,
+		chownDir: func(dir, username string) error {
+			return chownErr
+		},
+	}
+	params := AgentParams{
+		Name:            "my-service",
+		ConfigFilePath:  "/etc/agent.json",
+		ServiceUsername: "rewst",
+	}
+
+	_, err := sm.Create(params)
+
+	if err == nil {
+		t.Error("expected error from chownDir, got nil")
+	}
+}

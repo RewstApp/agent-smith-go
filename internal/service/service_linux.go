@@ -6,11 +6,34 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/RewstApp/agent-smith-go/internal/utils"
 )
+
+func chownR(dir, username string) error {
+	u, err := user.Lookup(username)
+	if err != nil {
+		return fmt.Errorf("user %q not found: %w", username, err)
+	}
+	uid, err := strconv.Atoi(u.Uid)
+	if err != nil {
+		return err
+	}
+	gid, err := strconv.Atoi(u.Gid)
+	if err != nil {
+		return err
+	}
+	return filepath.Walk(dir, func(path string, _ os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		return os.Lchown(path, uid, gid)
+	})
+}
 
 type systemCtl interface {
 	Run(args ...string) error
@@ -65,7 +88,8 @@ func (linuxSvc *linuxService) IsActive() bool {
 }
 
 type defaultServiceManager struct {
-	system systemCtl
+	system   systemCtl
+	chownDir func(dir, username string) error
 }
 
 func (s *defaultServiceManager) Create(params AgentParams) (Service, error) {
@@ -101,6 +125,12 @@ func (s *defaultServiceManager) Create(params AgentParams) (Service, error) {
 		return nil, err
 	}
 
+	if params.ServiceUsername != "" && s.chownDir != nil {
+		if err := s.chownDir(filepath.Dir(params.ConfigFilePath), params.ServiceUsername); err != nil {
+			return nil, err
+		}
+	}
+
 	return &linuxService{
 		name:   params.Name,
 		system: s.system,
@@ -124,6 +154,7 @@ func (s *defaultServiceManager) Open(name string) (Service, error) {
 
 func NewServiceManager() ServiceManager {
 	return &defaultServiceManager{
-		system: &defaultSystemCtl{},
+		system:   &defaultSystemCtl{},
+		chownDir: chownR,
 	}
 }

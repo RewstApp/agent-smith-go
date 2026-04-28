@@ -414,3 +414,26 @@ func TestDefaultServiceManager_Create_WithoutServiceUsername_NoUserNameKey(t *te
 		t.Errorf("expected plist not to contain '<key>UserName</key>', got:\n%s", content)
 	}
 }
+
+func TestDefaultServiceManager_Create_ChownDirError(t *testing.T) {
+	tmpFile := newTempPlistPath(t)
+	mock := &mockLaunchCtl{plistPath: tmpFile}
+	chownErr := errors.New("chown failed")
+	sm := &defaultServiceManager{
+		system: mock,
+		chownDir: func(dir, username string) error {
+			return chownErr
+		},
+	}
+	params := AgentParams{
+		Name:            "my-service",
+		ConfigFilePath:  "/Library/Application Support/rewst/config.json",
+		ServiceUsername: "rewst",
+	}
+
+	_, err := sm.Create(params)
+
+	if err == nil {
+		t.Error("expected error from chownDir, got nil")
+	}
+}
