@@ -6,11 +6,26 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"time"
 
 	"golang.org/x/sys/windows/svc"
 	"golang.org/x/sys/windows/svc/mgr"
 )
+
+func icaclsGrantFullControl(dir, username string) error {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	cmd := exec.Command("icacls", dir, "/grant", fmt.Sprintf("%s:(OI)(CI)F", username), "/T", "/Q")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("icacls: %s", out)
+	}
+	return nil
+}
 
 const pollingInterval = 250 * time.Millisecond
 
@@ -87,7 +102,8 @@ func (f *defaultWindowsServiceManagerFactory) Connect() (windowsServiceManager, 
 }
 
 type defaultServiceManager struct {
-	factory windowsServiceManagerFactory
+	factory     windowsServiceManagerFactory
+	grantAccess func(dir, username string) error
 }
 
 func (s *defaultServiceManager) Create(params AgentParams) (Service, error) {
@@ -111,6 +127,17 @@ func (s *defaultServiceManager) Create(params AgentParams) (Service, error) {
 		"--org-id", params.OrgId, "--config-file", params.ConfigFilePath, "--log-file", params.LogFilePath)
 	if err != nil {
 		return nil, err
+	}
+
+	if params.ServiceUsername != "" && s.grantAccess != nil {
+		if err := s.grantAccess(filepath.Dir(params.ConfigFilePath), params.ServiceUsername); err != nil {
+			return nil, fmt.Errorf("failed to grant access to data directory: %w", err)
+		}
+		if params.ScriptsDirectory != "" {
+			if err := s.grantAccess(params.ScriptsDirectory, params.ServiceUsername); err != nil {
+				return nil, fmt.Errorf("failed to grant access to scripts directory: %w", err)
+			}
+		}
 	}
 
 	return &windowsService{
@@ -137,7 +164,8 @@ func (s *defaultServiceManager) Open(name string) (Service, error) {
 
 func NewServiceManager() ServiceManager {
 	return &defaultServiceManager{
-		factory: &defaultWindowsServiceManagerFactory{},
+		factory:     &defaultWindowsServiceManagerFactory{},
+		grantAccess: icaclsGrantFullControl,
 	}
 }
 

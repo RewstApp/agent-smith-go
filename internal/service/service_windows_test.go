@@ -347,6 +347,27 @@ func TestDefaultServiceManager_Create_WithoutServiceUsername_NoCredentials(t *te
 	}
 }
 
+func TestDefaultServiceManager_Create_GrantAccessError(t *testing.T) {
+	manager := &mockWindowsServiceManager{}
+	factory := &mockWindowsServiceManagerFactory{manager: manager}
+	grantErr := errors.New("icacls failed")
+	sm := &defaultServiceManager{
+		factory: factory,
+		grantAccess: func(dir, username string) error {
+			return grantErr
+		},
+	}
+
+	_, err := sm.Create(AgentParams{
+		ConfigFilePath:  `C:\ProgramData\Rewst\config.json`,
+		ServiceUsername: `.\rewst_agent_it`,
+	})
+
+	if err == nil {
+		t.Error("expected error from grantAccess, got nil")
+	}
+}
+
 func TestDefaultServiceManager_Create_DisconnectsOnSuccess(t *testing.T) {
 	manager := &mockWindowsServiceManager{}
 	factory := &mockWindowsServiceManagerFactory{manager: manager}
