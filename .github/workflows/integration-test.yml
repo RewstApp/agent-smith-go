@@ -663,7 +663,7 @@ jobs:
         shell: pwsh
         run: |
           Start-Sleep -Seconds 15
-          $result = (Get-Content -Path "C:\RewstTest\rewst_whoami_result.txt" -Raw -ErrorAction SilentlyContinue).Trim()
+          $result = ((Get-Content -Path "C:\RewstTest\rewst_whoami_result.txt" -Raw -ErrorAction SilentlyContinue) ?? "").Trim()
           Write-Output "whoami returned: '$result'"
           if ($result -notmatch "rewst_agent_it") {
             Write-Error "Expected whoami to contain 'rewst_agent_it', got '$result'"
@@ -700,7 +700,7 @@ jobs:
         shell: pwsh
         run: |
           Start-Sleep -Seconds 15
-          $result = (Get-Content -Path "C:\RewstTest\rewst_whoami_result2.txt" -Raw -ErrorAction SilentlyContinue).Trim()
+          $result = ((Get-Content -Path "C:\RewstTest\rewst_whoami_result2.txt" -Raw -ErrorAction SilentlyContinue) ?? "").Trim()
           Write-Output "whoami returned: '$result'"
           if ($result -notmatch "rewst_agent_it") {
             Write-Error "Expected whoami to contain 'rewst_agent_it', got '$result'"
