@@ -679,6 +679,10 @@ jobs:
         shell: pwsh
         run: |
           Start-Sleep -Seconds 15
+          $logFile = "C:\ProgramData\RewstRemoteAgent\${{ vars.IT_ORG_ID }}\rewst_agent.log"
+          Write-Output "=== Agent log ==="
+          Get-Content $logFile -ErrorAction SilentlyContinue
+          Write-Output "=== End agent log ==="
           $result = ((Get-Content -Path "C:\RewstTest\rewst_whoami_result.txt" -Raw -ErrorAction SilentlyContinue) ?? "").Trim()
           Write-Output "whoami returned: '$result'"
           if ($result -notmatch "rewst_agent_it") {
@@ -732,6 +736,10 @@ jobs:
         shell: pwsh
         run: |
           Start-Sleep -Seconds 15
+          $logFile = "C:\ProgramData\RewstRemoteAgent\${{ vars.IT_ORG_ID }}\rewst_agent.log"
+          Write-Output "=== Agent log ==="
+          Get-Content $logFile -ErrorAction SilentlyContinue
+          Write-Output "=== End agent log ==="
           $result = ((Get-Content -Path "C:\RewstTest\rewst_whoami_result2.txt" -Raw -ErrorAction SilentlyContinue) ?? "").Trim()
           Write-Output "whoami returned: '$result'"
           if ($result -notmatch "rewst_agent_it") {
