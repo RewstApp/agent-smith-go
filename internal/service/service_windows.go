@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"golang.org/x/sys/windows/svc"
@@ -18,6 +19,12 @@ import (
 func icaclsGrantFullControl(dir, username string) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
+	}
+	// icacls does not resolve .\ on all runners; expand to COMPUTERNAME\
+	if strings.HasPrefix(username, `.\`) {
+		if computerName := os.Getenv("COMPUTERNAME"); computerName != "" {
+			username = computerName + username[1:]
+		}
 	}
 	cmd := exec.Command("icacls", dir, "/grant", fmt.Sprintf("%s:(OI)(CI)F", username), "/T", "/Q")
 	out, err := cmd.CombinedOutput()
