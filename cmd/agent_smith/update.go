@@ -119,10 +119,25 @@ func runUpdate(params *updateContext) {
 		return
 	}
 
+	// Retry the executable write: on Windows the old process holds an exe lock
+	// until it fully exits, which can happen just after the SCM reports Stopped.
 	agentExecutablePath := pathsData.AgentExecutablePath
-	err = params.FS.WriteFile(agentExecutablePath, execFileBytes, utils.DefaultExecutableFileMod)
-	if err != nil {
-		logger.Error("Failed to create agent executable", "error", err)
+	const maxWriteAttempts = 10
+	const writeRetryInterval = 3 * time.Second
+	var writeErr error
+	for attempt := range maxWriteAttempts {
+		writeErr = params.FS.WriteFile(agentExecutablePath, execFileBytes, utils.DefaultExecutableFileMod)
+		if writeErr == nil {
+			break
+		}
+		if attempt < maxWriteAttempts-1 {
+			logger.Info("Agent executable in use, retrying",
+				"attempt", attempt+1, "of", maxWriteAttempts, "error", writeErr)
+			time.Sleep(writeRetryInterval)
+		}
+	}
+	if writeErr != nil {
+		logger.Error("Failed to create agent executable", "error", writeErr)
 		_ = svc.Close()
 		return
 	}
