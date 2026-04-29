@@ -368,6 +368,62 @@ func TestDefaultServiceManager_Create_GrantAccessError(t *testing.T) {
 	}
 }
 
+func TestDefaultServiceManager_Create_GrantAccessError_ProgramDir(t *testing.T) {
+	manager := &mockWindowsServiceManager{}
+	factory := &mockWindowsServiceManagerFactory{manager: manager}
+	callCount := 0
+	sm := &defaultServiceManager{
+		factory: factory,
+		grantAccess: func(dir, username string) error {
+			callCount++
+			if callCount == 2 {
+				return errors.New("icacls program dir failed")
+			}
+			return nil
+		},
+	}
+
+	_, err := sm.Create(AgentParams{
+		ConfigFilePath:      `C:\ProgramData\Rewst\config.json`,
+		AgentExecutablePath: `C:\Program Files\Rewst\agent_smith.exe`,
+		ServiceUsername:     `.\rewst_agent_it`,
+	})
+
+	if err == nil {
+		t.Error("expected error from program dir grantAccess, got nil")
+	}
+	if callCount != 2 {
+		t.Errorf("expected 2 grantAccess calls before failure, got %d", callCount)
+	}
+}
+
+func TestDefaultServiceManager_Create_GrantsAllDirectories(t *testing.T) {
+	manager := &mockWindowsServiceManager{}
+	factory := &mockWindowsServiceManagerFactory{manager: manager}
+	var grantedDirs []string
+	sm := &defaultServiceManager{
+		factory: factory,
+		grantAccess: func(dir, username string) error {
+			grantedDirs = append(grantedDirs, dir)
+			return nil
+		},
+	}
+
+	_, err := sm.Create(AgentParams{
+		ConfigFilePath:      `C:\ProgramData\Rewst\config.json`,
+		AgentExecutablePath: `C:\Program Files\Rewst\agent_smith.exe`,
+		ScriptsDirectory:    `C:\RewstRemoteAgent\scripts\org1`,
+		ServiceUsername:     `.\rewst_agent_it`,
+	})
+
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if len(grantedDirs) != 3 {
+		t.Errorf("expected 3 grantAccess calls, got %d: %v", len(grantedDirs), grantedDirs)
+	}
+}
+
 func TestDefaultServiceManager_Create_DisconnectsOnSuccess(t *testing.T) {
 	manager := &mockWindowsServiceManager{}
 	factory := &mockWindowsServiceManagerFactory{manager: manager}
