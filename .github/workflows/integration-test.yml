@@ -556,7 +556,15 @@ jobs:
         run: |
           $logFile = "C:\ProgramData\RewstRemoteAgent\${{ vars.IT_ORG_ID }}\rewst_agent.log"
           $logContent = Get-Content $logFile -Raw
+          Write-Output "=== Agent log ==="
           Write-Output $logContent
+          Write-Output "=== End agent log ==="
+
+          Write-Output "=== Windows Application Event Log (last 30 entries) ==="
+          Get-WinEvent -LogName Application -MaxEvents 30 -ErrorAction SilentlyContinue |
+            Select-Object TimeCreated, Id, LevelDisplayName, ProviderName, Message |
+            Format-List
+          Write-Output "=== End Windows Application Event Log ==="
 
           $expectedPatterns = @(
             "Command completed",
@@ -918,6 +926,11 @@ jobs:
       - name: Check Windows Event Log for command completed
         shell: pwsh
         run: |
+          $logFile = "C:\ProgramData\RewstRemoteAgent\${{ vars.IT_ORG_ID }}\rewst_agent.log"
+          Write-Output "=== Agent log ==="
+          Get-Content $logFile -ErrorAction SilentlyContinue
+          Write-Output "=== End agent log ==="
+
           $events = Get-WinEvent -LogName Application -FilterXPath "*[System[Provider[@Name='RewstRemoteAgent_${{ vars.IT_ORG_ID }}']]]"
           Write-Output "Found $($events.Count) event(s)"
           $events | ForEach-Object { Write-Output $_.Message }
