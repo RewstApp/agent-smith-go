@@ -560,12 +560,6 @@ jobs:
           Write-Output $logContent
           Write-Output "=== End agent log ==="
 
-          Write-Output "=== Windows Application Event Log (last 30 entries) ==="
-          Get-WinEvent -LogName Application -MaxEvents 30 -ErrorAction SilentlyContinue |
-            Select-Object TimeCreated, Id, LevelDisplayName, ProviderName, Message |
-            Format-List
-          Write-Output "=== End Windows Application Event Log ==="
-
           $expectedPatterns = @(
             "Command completed",
             "Sending postback",
@@ -599,7 +593,6 @@ jobs:
       - name: Check logs for error handling
         shell: pwsh
         run: |
-          Start-Sleep -Seconds 15
           $logFile = "C:\ProgramData\RewstRemoteAgent\${{ vars.IT_ORG_ID }}\rewst_agent.log"
           $logContent = Get-Content $logFile -Raw
           Write-Output $logContent
