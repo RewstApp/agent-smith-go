@@ -124,8 +124,18 @@ func TestNewConfigContext_ServiceCredentials(t *testing.T) {
 
 func TestNewConfigContext_ServiceCredentialsDefaultEmpty(t *testing.T) {
 	result, err := newConfigContext(
-		[]string{"--org-id", "test123", "--config-url", "https://config.url/", "--config-secret", "secret123"},
-		nil, nil, nil, nil,
+		[]string{
+			"--org-id",
+			"test123",
+			"--config-url",
+			"https://config.url/",
+			"--config-secret",
+			"secret123",
+		},
+		nil,
+		nil,
+		nil,
+		nil,
 	)
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)

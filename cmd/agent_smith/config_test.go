@@ -412,10 +412,16 @@ func TestRunConfig_ServiceCredentialsPassedToCreate(t *testing.T) {
 		t.Fatalf("expected no error, got %v", err)
 	}
 	if sm.capturedCreateParams.ServiceUsername != `DOMAIN\svc_rewst` {
-		t.Errorf("expected ServiceUsername to be passed to Create, got %q", sm.capturedCreateParams.ServiceUsername)
+		t.Errorf(
+			"expected ServiceUsername to be passed to Create, got %q",
+			sm.capturedCreateParams.ServiceUsername,
+		)
 	}
 	if sm.capturedCreateParams.ServicePassword != "p@ssw0rd" {
-		t.Errorf("expected ServicePassword to be passed to Create, got %q", sm.capturedCreateParams.ServicePassword)
+		t.Errorf(
+			"expected ServicePassword to be passed to Create, got %q",
+			sm.capturedCreateParams.ServicePassword,
+		)
 	}
 }
 
@@ -435,10 +441,16 @@ func TestRunConfig_NoServiceCredentials_EmptyInCreate(t *testing.T) {
 		t.Fatalf("expected no error, got %v", err)
 	}
 	if sm.capturedCreateParams.ServiceUsername != "" {
-		t.Errorf("expected empty ServiceUsername when not provided, got %q", sm.capturedCreateParams.ServiceUsername)
+		t.Errorf(
+			"expected empty ServiceUsername when not provided, got %q",
+			sm.capturedCreateParams.ServiceUsername,
+		)
 	}
 	if sm.capturedCreateParams.ServicePassword != "" {
-		t.Errorf("expected empty ServicePassword when not provided, got %q", sm.capturedCreateParams.ServicePassword)
+		t.Errorf(
+			"expected empty ServicePassword when not provided, got %q",
+			sm.capturedCreateParams.ServicePassword,
+		)
 	}
 }
 

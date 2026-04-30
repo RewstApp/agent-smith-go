@@ -150,7 +150,11 @@ func (s *defaultServiceManager) Create(params AgentParams) (Service, error) {
 		params.LogFilePath,
 	)
 	if params.ServiceUsername != "" {
-		fmt.Fprintf(&serviceConfig, "<key>UserName</key>\n<string>%s</string>\n", params.ServiceUsername)
+		fmt.Fprintf(
+			&serviceConfig,
+			"<key>UserName</key>\n<string>%s</string>\n",
+			params.ServiceUsername,
+		)
 	}
 	fmt.Fprintf(&serviceConfig, "<key>RunAtLoad</key>\n<false/>\n")
 	fmt.Fprintf(
@@ -170,7 +174,10 @@ func (s *defaultServiceManager) Create(params AgentParams) (Service, error) {
 	}
 
 	if params.ServiceUsername != "" && s.chownDir != nil {
-		if err := s.chownDir(filepath.Dir(params.ConfigFilePath), params.ServiceUsername); err != nil {
+		if err := s.chownDir(
+			filepath.Dir(params.ConfigFilePath),
+			params.ServiceUsername,
+		); err != nil {
 			return nil, err
 		}
 		if params.ScriptsDirectory != "" {

@@ -201,10 +201,16 @@ func TestRunUpdate_ServiceUsername_ReRegistersService(t *testing.T) {
 	runUpdate(params)
 
 	if sm.capturedCreateParams.ServiceUsername != `DOMAIN\svc_rewst` {
-		t.Errorf("expected ServiceUsername to be re-registered, got %q", sm.capturedCreateParams.ServiceUsername)
+		t.Errorf(
+			"expected ServiceUsername to be re-registered, got %q",
+			sm.capturedCreateParams.ServiceUsername,
+		)
 	}
 	if sm.capturedCreateParams.ServicePassword != "p@ssw0rd" {
-		t.Errorf("expected ServicePassword to be re-registered, got %q", sm.capturedCreateParams.ServicePassword)
+		t.Errorf(
+			"expected ServicePassword to be re-registered, got %q",
+			sm.capturedCreateParams.ServicePassword,
+		)
 	}
 }
 
