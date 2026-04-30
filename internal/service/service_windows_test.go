@@ -415,7 +415,6 @@ func TestDefaultServiceManager_Create_GrantsAllDirectories(t *testing.T) {
 		ScriptsDirectory:    `C:\RewstRemoteAgent\scripts\org1`,
 		ServiceUsername:     `.\rewst_agent_it`,
 	})
-
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}

@@ -135,7 +135,11 @@ func runUpdate(params *updateContext) {
 	const writeRetryInterval = 3 * time.Second
 	var writeErr error
 	for attempt := range maxWriteAttempts {
-		writeErr = params.FS.WriteFile(agentExecutablePath, execFileBytes, utils.DefaultExecutableFileMod)
+		writeErr = params.FS.WriteFile(
+			agentExecutablePath,
+			execFileBytes,
+			utils.DefaultExecutableFileMod,
+		)
 		if writeErr == nil {
 			break
 		}
@@ -159,7 +163,13 @@ func runUpdate(params *updateContext) {
 		logger.Info("Re-registering service with new account", "username", params.ServiceUsername)
 
 		if err = svc.Delete(); err != nil {
-			logger.Error("Failed to delete service for re-registration", "service", name, "error", err)
+			logger.Error(
+				"Failed to delete service for re-registration",
+				"service",
+				name,
+				"error",
+				err,
+			)
 			_ = svc.Close()
 			return
 		}

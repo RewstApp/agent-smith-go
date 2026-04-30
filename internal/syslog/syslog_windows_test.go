@@ -250,7 +250,6 @@ func TestNewWithFactory_InstallError_ProceedsToOpen(t *testing.T) {
 	}
 
 	syslogger, err := newWithFactory("test", &bytes.Buffer{}, factory)
-
 	if err != nil {
 		t.Fatalf("expected no error when install fails, got %v", err)
 	}

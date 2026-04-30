@@ -64,8 +64,18 @@ func newConfigContext(
 	fs.BoolVar(&params.NoAutoUpdates, "no-auto-updates", false, "No auto updates")
 	fs.StringVar(&params.GithubToken, "github-token", "", "GitHub token for update checks")
 	fs.IntVar(&params.MqttQos, "mqtt-qos", -1, "MQTT subscription QoS level (0, 1, or 2)")
-	fs.StringVar(&params.ServiceUsername, "service-username", "", "User account the service runs as")
-	fs.StringVar(&params.ServicePassword, "service-password", "", "Password for the service user account (Windows only)")
+	fs.StringVar(
+		&params.ServiceUsername,
+		"service-username",
+		"",
+		"User account the service runs as",
+	)
+	fs.StringVar(
+		&params.ServicePassword,
+		"service-password",
+		"",
+		"Password for the service user account (Windows only)",
+	)
 	fs.SetOutput(bytes.NewBuffer([]byte{}))
 
 	err := fs.Parse(args)

@@ -109,10 +109,10 @@ func (m *mockService) Start() error   { return m.startErr }
 func (m *mockService) Close() error   { return nil }
 
 type mockServiceManager struct {
-	openErr             error
-	openService         service.Service
-	createErr           error
-	createService       service.Service
+	openErr              error
+	openService          service.Service
+	createErr            error
+	createService        service.Service
 	capturedCreateParams service.AgentParams
 }
 
