@@ -1,3 +1,13 @@
+## v1.2.4 (2026-04-30)
+
+### Fix
+
+- [sc-89439] Move defer notifier.Kill() past error check to prevent panic (#63)
+- [sc-89438] Guarantee MQTT client cleanup on all reconnect cycle exit paths (#62)
+- [sc-89435] Buffer lost channel to prevent OnConnectionLost deadlock (#61)
+- [sc-89434] Close msgQueue per reconnect cycle to prevent goroutine leak (#60)
+- [sc-89690] Missing Release Title in Release Workflow (#59)
+
 ## v1.2.3 (2026-04-20)
 
 ### Fix
