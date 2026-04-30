@@ -132,7 +132,9 @@ func (s *defaultServiceManager) Create(params AgentParams) (Service, error) {
 
 	svc, err := svcMgr.CreateService(
 		params.Name, params.AgentExecutablePath, config,
-		"--org-id", params.OrgId, "--config-file", params.ConfigFilePath, "--log-file", params.LogFilePath,
+		"--org-id", params.OrgId,
+		"--config-file", params.ConfigFilePath,
+		"--log-file", params.LogFilePath,
 	)
 	if err != nil {
 		return nil, err
@@ -142,7 +144,10 @@ func (s *defaultServiceManager) Create(params AgentParams) (Service, error) {
 		if err := s.grantAccess(filepath.Dir(params.ConfigFilePath), params.ServiceUsername); err != nil {
 			return nil, fmt.Errorf("failed to grant access to data directory: %w", err)
 		}
-		if err := s.grantAccess(filepath.Dir(params.AgentExecutablePath), params.ServiceUsername); err != nil {
+		if err := s.grantAccess(
+			filepath.Dir(params.AgentExecutablePath),
+			params.ServiceUsername,
+		); err != nil {
 			return nil, fmt.Errorf("failed to grant access to program directory: %w", err)
 		}
 		if params.ScriptsDirectory != "" {

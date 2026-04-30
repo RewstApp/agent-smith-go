@@ -343,7 +343,10 @@ func TestDefaultServiceManager_Create_WithoutServiceUsername_NoCredentials(t *te
 		t.Fatalf("expected no error, got %v", err)
 	}
 	if manager.capturedConfig.ServiceStartName != "" {
-		t.Errorf("expected empty ServiceStartName when not provided, got %q", manager.capturedConfig.ServiceStartName)
+		t.Errorf(
+			"expected empty ServiceStartName when not provided, got %q",
+			manager.capturedConfig.ServiceStartName,
+		)
 	}
 	if manager.capturedConfig.Password != "" {
 		t.Errorf("expected empty Password when not provided, got %q", manager.capturedConfig.Password)
