@@ -51,6 +51,8 @@ func New(name string, out io.Writer) (Syslog, error) {
 	return newWithRunner(name, out, &loggerCommandRunner{}), nil
 }
 
+func EnsureSource(_ string) error { return nil }
+
 func newWithRunner(name string, out io.Writer, runner commandRunner) Syslog {
 	return &linuxSyslog{out: out, source: name, runner: runner}
 }

@@ -9,6 +9,7 @@ import (
 
 	"github.com/RewstApp/agent-smith-go/internal/agent"
 	"github.com/RewstApp/agent-smith-go/internal/service"
+	"github.com/RewstApp/agent-smith-go/internal/syslog"
 	"github.com/RewstApp/agent-smith-go/internal/utils"
 	"github.com/RewstApp/agent-smith-go/internal/version"
 )
@@ -103,6 +104,14 @@ func runUpdate(params *updateContext) {
 	}
 
 	logger.Info("Configuration successfully updated", "path", configFilePath)
+
+	// Pre-register the Windows Event Log source while running as admin so the
+	// service can open it without needing HKLM write access (no-op on Linux/macOS).
+	if params.UseSyslog {
+		if err := syslog.EnsureSource(name); err != nil {
+			logger.Warn("Failed to pre-register event log source", "error", err)
+		}
+	}
 
 	// Copy the agent executable
 	execFilePath, err := params.FS.Executable()
