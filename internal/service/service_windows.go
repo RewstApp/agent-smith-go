@@ -141,7 +141,10 @@ func (s *defaultServiceManager) Create(params AgentParams) (Service, error) {
 	}
 
 	if params.ServiceUsername != "" && s.grantAccess != nil {
-		if err := s.grantAccess(filepath.Dir(params.ConfigFilePath), params.ServiceUsername); err != nil {
+		if err := s.grantAccess(
+			filepath.Dir(params.ConfigFilePath),
+			params.ServiceUsername,
+		); err != nil {
 			return nil, fmt.Errorf("failed to grant access to data directory: %w", err)
 		}
 		if err := s.grantAccess(

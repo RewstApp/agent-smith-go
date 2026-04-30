@@ -349,7 +349,10 @@ func TestDefaultServiceManager_Create_WithoutServiceUsername_NoCredentials(t *te
 		)
 	}
 	if manager.capturedConfig.Password != "" {
-		t.Errorf("expected empty Password when not provided, got %q", manager.capturedConfig.Password)
+		t.Errorf(
+			"expected empty Password when not provided, got %q",
+			manager.capturedConfig.Password,
+		)
 	}
 }
 
