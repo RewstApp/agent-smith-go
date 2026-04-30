@@ -265,7 +265,6 @@ func TestEnsureSourceWithFactory_KeyExists_SkipsInstall(t *testing.T) {
 	factory := &mockEventLogFactory{}
 
 	err := ensureSourceWithFactory("test", factory)
-
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
@@ -280,7 +279,6 @@ func TestEnsureSourceWithFactory_KeyNotExist_Installs(t *testing.T) {
 	}
 
 	err := ensureSourceWithFactory("test", factory)
-
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}

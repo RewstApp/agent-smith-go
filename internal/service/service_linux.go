@@ -105,7 +105,12 @@ func (s *defaultServiceManager) Create(params AgentParams) (Service, error) {
 		params.LogFilePath,
 	)
 	if params.ServiceUsername != "" {
-		fmt.Fprintf(&serviceConfig, "User=%s\nGroup=%s\n", params.ServiceUsername, params.ServiceUsername)
+		fmt.Fprintf(
+			&serviceConfig,
+			"User=%s\nGroup=%s\n",
+			params.ServiceUsername,
+			params.ServiceUsername,
+		)
 	}
 	fmt.Fprintf(&serviceConfig, "\n[Install]\nWantedBy=multi-user.target\n")
 

@@ -130,8 +130,10 @@ func (s *defaultServiceManager) Create(params AgentParams) (Service, error) {
 		config.Password = params.ServicePassword
 	}
 
-	svc, err := svcMgr.CreateService(params.Name, params.AgentExecutablePath, config,
-		"--org-id", params.OrgId, "--config-file", params.ConfigFilePath, "--log-file", params.LogFilePath)
+	svc, err := svcMgr.CreateService(
+		params.Name, params.AgentExecutablePath, config,
+		"--org-id", params.OrgId, "--config-file", params.ConfigFilePath, "--log-file", params.LogFilePath,
+	)
 	if err != nil {
 		return nil, err
 	}

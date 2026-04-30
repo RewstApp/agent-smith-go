@@ -323,7 +323,10 @@ func TestDefaultServiceManager_Create_WithServiceUsername(t *testing.T) {
 		t.Fatalf("expected no error, got %v", err)
 	}
 	if manager.capturedConfig.ServiceStartName != `DOMAIN\svc_rewst` {
-		t.Errorf("expected ServiceStartName 'DOMAIN\\svc_rewst', got %q", manager.capturedConfig.ServiceStartName)
+		t.Errorf(
+			"expected ServiceStartName 'DOMAIN\\svc_rewst', got %q",
+			manager.capturedConfig.ServiceStartName,
+		)
 	}
 	if manager.capturedConfig.Password != "p@ssw0rd" {
 		t.Errorf("expected Password 'p@ssw0rd', got %q", manager.capturedConfig.Password)
