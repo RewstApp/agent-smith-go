@@ -91,9 +91,10 @@ func newWithFactory(name string, out io.Writer, factory eventLogFactory) (Syslog
 		}
 	} else if errors.Is(err, registry.ErrNotExist) ||
 		errors.Is(err, syscall.ERROR_PATH_NOT_FOUND) {
-		if err = factory.Install(name); err != nil {
-			return nil, err
-		}
+		// Best-effort: service accounts without HKLM write access can't install the
+		// source, but RegisterEventSource still works — events appear in the log
+		// without a message DLL. The admin-side commands pre-register via EnsureSource.
+		_ = factory.Install(name)
 	} else {
 		return nil, err
 	}
@@ -104,4 +105,21 @@ func newWithFactory(name string, out io.Writer, factory eventLogFactory) (Syslog
 	}
 
 	return &windowsSyslog{out: out, log: log}, nil
+}
+
+// EnsureSource pre-registers the Windows Event Log source while the process has
+// admin rights so the service can open it without needing HKLM write access.
+func EnsureSource(name string) error {
+	return ensureSourceWithFactory(name, &windowsEventLogFactory{})
+}
+
+func ensureSourceWithFactory(name string, factory eventLogFactory) error {
+	k, err := factory.OpenKey(name)
+	if err == nil {
+		return k.Close()
+	}
+	if errors.Is(err, registry.ErrNotExist) || errors.Is(err, syscall.ERROR_PATH_NOT_FOUND) {
+		return factory.Install(name)
+	}
+	return err
 }

@@ -183,3 +183,84 @@ func TestRunUpdate_StartFails(t *testing.T) {
 
 	runUpdate(params)
 }
+
+// ── service re-registration tests (t.Parallel because they hit serviceExecutableTimeout) ──
+
+func TestRunUpdate_ServiceUsername_ReRegistersService(t *testing.T) {
+	t.Parallel()
+
+	sm := &mockServiceManager{
+		openService:   &mockService{isActive: false},
+		createService: &mockService{},
+	}
+	params := newBaseUpdateParams()
+	params.ServiceUsername = `DOMAIN\svc_rewst`
+	params.ServicePassword = "p@ssw0rd"
+	params.ServiceManager = sm
+
+	runUpdate(params)
+
+	if sm.capturedCreateParams.ServiceUsername != `DOMAIN\svc_rewst` {
+		t.Errorf(
+			"expected ServiceUsername to be re-registered, got %q",
+			sm.capturedCreateParams.ServiceUsername,
+		)
+	}
+	if sm.capturedCreateParams.ServicePassword != "p@ssw0rd" {
+		t.Errorf(
+			"expected ServicePassword to be re-registered, got %q",
+			sm.capturedCreateParams.ServicePassword,
+		)
+	}
+}
+
+func TestRunUpdate_ServiceUsername_DeleteFails(t *testing.T) {
+	params := newBaseUpdateParams()
+	params.ServiceUsername = `DOMAIN\svc_rewst`
+	params.ServiceManager = &mockServiceManager{
+		openService: &mockService{isActive: false, deleteErr: errors.New("delete failed")},
+	}
+
+	runUpdate(params) // returns early before the sleep
+}
+
+func TestRunUpdate_ServiceUsername_CreateFails(t *testing.T) {
+	t.Parallel()
+
+	params := newBaseUpdateParams()
+	params.ServiceUsername = `DOMAIN\svc_rewst`
+	params.ServiceManager = &mockServiceManager{
+		openService: &mockService{isActive: false},
+		createErr:   errors.New("create failed"),
+	}
+
+	runUpdate(params)
+}
+
+func TestRunUpdate_ServiceUsername_StartFails(t *testing.T) {
+	t.Parallel()
+
+	params := newBaseUpdateParams()
+	params.ServiceUsername = `DOMAIN\svc_rewst`
+	params.ServiceManager = &mockServiceManager{
+		openService:   &mockService{isActive: false},
+		createService: &mockService{startErr: errors.New("start failed")},
+	}
+
+	runUpdate(params)
+}
+
+func TestRunUpdate_NoServiceUsername_DoesNotCallCreate(t *testing.T) {
+	sm := &mockServiceManager{
+		openService:   &mockService{isActive: false},
+		createService: &mockService{},
+	}
+	params := newBaseUpdateParams()
+	params.ServiceManager = sm
+
+	runUpdate(params)
+
+	if sm.capturedCreateParams.ServiceUsername != "" || sm.capturedCreateParams.Name != "" {
+		t.Error("expected Create not to be called when ServiceUsername is empty")
+	}
+}

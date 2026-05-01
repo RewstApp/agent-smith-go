@@ -241,19 +241,74 @@ func TestNewWithFactory_OpenKeyUnknownError_ReturnsError(t *testing.T) {
 	}
 }
 
-func TestNewWithFactory_InstallError_ReturnsError(t *testing.T) {
+func TestNewWithFactory_InstallError_ProceedsToOpen(t *testing.T) {
+	logger := &mockEventLogger{}
+	factory := &mockEventLogFactory{
+		openKeyErr: registry.ErrNotExist,
+		installErr: errors.New("access denied"),
+		openResult: logger,
+	}
+
+	syslogger, err := newWithFactory("test", &bytes.Buffer{}, factory)
+	if err != nil {
+		t.Fatalf("expected no error when install fails, got %v", err)
+	}
+	if syslogger == nil {
+		t.Fatal("expected non-nil Syslog even when install fails")
+	}
+	if !factory.installCalled {
+		t.Error("expected Install to be attempted")
+	}
+}
+
+func TestEnsureSourceWithFactory_KeyExists_SkipsInstall(t *testing.T) {
+	factory := &mockEventLogFactory{}
+
+	err := ensureSourceWithFactory("test", factory)
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if factory.installCalled {
+		t.Error("expected Install not to be called when key already exists")
+	}
+}
+
+func TestEnsureSourceWithFactory_KeyNotExist_Installs(t *testing.T) {
+	factory := &mockEventLogFactory{
+		openKeyErr: registry.ErrNotExist,
+	}
+
+	err := ensureSourceWithFactory("test", factory)
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if !factory.installCalled {
+		t.Error("expected Install to be called when key does not exist")
+	}
+}
+
+func TestEnsureSourceWithFactory_InstallError_ReturnsError(t *testing.T) {
 	factory := &mockEventLogFactory{
 		openKeyErr: registry.ErrNotExist,
 		installErr: errors.New("install failed"),
 	}
 
-	_, err := newWithFactory("test", &bytes.Buffer{}, factory)
+	err := ensureSourceWithFactory("test", factory)
 
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
-	if err.Error() != "install failed" {
-		t.Errorf("expected 'install failed', got %q", err.Error())
+}
+
+func TestEnsureSourceWithFactory_OtherKeyError_ReturnsError(t *testing.T) {
+	factory := &mockEventLogFactory{
+		openKeyErr: errors.New("unexpected registry error"),
+	}
+
+	err := ensureSourceWithFactory("test", factory)
+
+	if err == nil {
+		t.Fatal("expected error, got nil")
 	}
 }
 

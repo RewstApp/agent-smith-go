@@ -6,11 +6,34 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/RewstApp/agent-smith-go/internal/utils"
 )
+
+func chownR(dir, username string) error {
+	u, err := user.Lookup(username)
+	if err != nil {
+		return fmt.Errorf("user %q not found: %w", username, err)
+	}
+	uid, err := strconv.Atoi(u.Uid)
+	if err != nil {
+		return err
+	}
+	gid, err := strconv.Atoi(u.Gid)
+	if err != nil {
+		return err
+	}
+	return filepath.Walk(dir, func(path string, _ os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		return os.Lchown(path, uid, gid)
+	})
+}
 
 type systemCtl interface {
 	Run(args ...string) error
@@ -65,7 +88,8 @@ func (linuxSvc *linuxService) IsActive() bool {
 }
 
 type defaultServiceManager struct {
-	system systemCtl
+	system   systemCtl
+	chownDir func(dir, username string) error
 }
 
 func (s *defaultServiceManager) Create(params AgentParams) (Service, error) {
@@ -74,13 +98,21 @@ func (s *defaultServiceManager) Create(params AgentParams) (Service, error) {
 	fmt.Fprintf(&serviceConfig, "[Unit]\nDescription=%s\n\n", params.Name)
 	fmt.Fprintf(
 		&serviceConfig,
-		"[Service]\nExecStart=%s --org-id %s --config-file %s --log-file %s\nRestart=always\n\n",
+		"[Service]\nExecStart=%s --org-id %s --config-file %s --log-file %s\nRestart=always\n",
 		params.AgentExecutablePath,
 		params.OrgId,
 		params.ConfigFilePath,
 		params.LogFilePath,
 	)
-	fmt.Fprintf(&serviceConfig, "[Install]\nWantedBy=multi-user.target\n")
+	if params.ServiceUsername != "" {
+		fmt.Fprintf(
+			&serviceConfig,
+			"User=%s\nGroup=%s\n",
+			params.ServiceUsername,
+			params.ServiceUsername,
+		)
+	}
+	fmt.Fprintf(&serviceConfig, "\n[Install]\nWantedBy=multi-user.target\n")
 
 	serviceConfigFilePath := s.system.ServiceConfigFilePath(params.Name)
 	err := os.WriteFile(serviceConfigFilePath, []byte(serviceConfig.String()), utils.DefaultFileMod)
@@ -96,6 +128,23 @@ func (s *defaultServiceManager) Create(params AgentParams) (Service, error) {
 	err = s.system.Run("enable", params.Name)
 	if err != nil {
 		return nil, err
+	}
+
+	if params.ServiceUsername != "" && s.chownDir != nil {
+		if err := s.chownDir(
+			filepath.Dir(params.ConfigFilePath),
+			params.ServiceUsername,
+		); err != nil {
+			return nil, err
+		}
+		if params.ScriptsDirectory != "" {
+			if err := os.MkdirAll(params.ScriptsDirectory, 0o755); err != nil {
+				return nil, err
+			}
+			if err := s.chownDir(params.ScriptsDirectory, params.ServiceUsername); err != nil {
+				return nil, err
+			}
+		}
 	}
 
 	return &linuxService{
@@ -121,6 +170,7 @@ func (s *defaultServiceManager) Open(name string) (Service, error) {
 
 func NewServiceManager() ServiceManager {
 	return &defaultServiceManager{
-		system: &defaultSystemCtl{},
+		system:   &defaultSystemCtl{},
+		chownDir: chownR,
 	}
 }

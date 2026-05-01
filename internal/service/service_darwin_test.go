@@ -356,3 +356,84 @@ func TestDefaultServiceManager_Open_Error(t *testing.T) {
 		t.Error("expected error, got nil")
 	}
 }
+
+func TestDefaultServiceManager_Create_WithServiceUsername(t *testing.T) {
+	tmpFile := newTempPlistPath(t)
+	mock := &mockLaunchCtl{plistPath: tmpFile}
+	sm := &defaultServiceManager{system: mock}
+	params := AgentParams{
+		Name:                "my-service",
+		AgentExecutablePath: "/usr/bin/agent",
+		OrgId:               "org-abc",
+		ConfigFilePath:      "/etc/agent.json",
+		LogFilePath:         "/var/log/agent.log",
+		ServiceUsername:     "rewst",
+	}
+
+	if _, err := sm.Create(params); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	data, err := os.ReadFile(tmpFile)
+	if err != nil {
+		t.Fatalf("failed to read plist file: %v", err)
+	}
+	content := string(data)
+
+	if !strings.Contains(content, "<key>UserName</key>") {
+		t.Errorf("expected plist to contain '<key>UserName</key>', got:\n%s", content)
+	}
+	if !strings.Contains(content, "<string>rewst</string>") {
+		t.Errorf("expected plist to contain '<string>rewst</string>', got:\n%s", content)
+	}
+}
+
+func TestDefaultServiceManager_Create_WithoutServiceUsername_NoUserNameKey(t *testing.T) {
+	tmpFile := newTempPlistPath(t)
+	mock := &mockLaunchCtl{plistPath: tmpFile}
+	sm := &defaultServiceManager{system: mock}
+	params := AgentParams{
+		Name:                "my-service",
+		AgentExecutablePath: "/usr/bin/agent",
+		OrgId:               "org-abc",
+		ConfigFilePath:      "/etc/agent.json",
+		LogFilePath:         "/var/log/agent.log",
+	}
+
+	if _, err := sm.Create(params); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	data, err := os.ReadFile(tmpFile)
+	if err != nil {
+		t.Fatalf("failed to read plist file: %v", err)
+	}
+	content := string(data)
+
+	if strings.Contains(content, "<key>UserName</key>") {
+		t.Errorf("expected plist not to contain '<key>UserName</key>', got:\n%s", content)
+	}
+}
+
+func TestDefaultServiceManager_Create_ChownDirError(t *testing.T) {
+	tmpFile := newTempPlistPath(t)
+	mock := &mockLaunchCtl{plistPath: tmpFile}
+	chownErr := errors.New("chown failed")
+	sm := &defaultServiceManager{
+		system: mock,
+		chownDir: func(dir, username string) error {
+			return chownErr
+		},
+	}
+	params := AgentParams{
+		Name:            "my-service",
+		ConfigFilePath:  "/Library/Application Support/rewst/config.json",
+		ServiceUsername: "rewst",
+	}
+
+	_, err := sm.Create(params)
+
+	if err == nil {
+		t.Error("expected error from chownDir, got nil")
+	}
+}

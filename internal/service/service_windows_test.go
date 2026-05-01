@@ -64,9 +64,10 @@ func (m *mockWindowsServiceHandle) Query() (svc.Status, error) {
 // mockWindowsServiceManager
 
 type mockWindowsServiceManager struct {
-	createErr    error
-	openErr      error
-	disconnected bool
+	createErr      error
+	openErr        error
+	disconnected   bool
+	capturedConfig mgr.Config
 }
 
 func (m *mockWindowsServiceManager) Disconnect() error {
@@ -79,6 +80,7 @@ func (m *mockWindowsServiceManager) CreateService(
 	c mgr.Config,
 	args ...string,
 ) (*mgr.Service, error) {
+	m.capturedConfig = c
 	return nil, m.createErr
 }
 
@@ -305,6 +307,128 @@ func TestDefaultServiceManager_Create_CreateServiceError(t *testing.T) {
 	}
 	if !manager.disconnected {
 		t.Error("expected Disconnect to be called on error")
+	}
+}
+
+func TestDefaultServiceManager_Create_WithServiceUsername(t *testing.T) {
+	manager := &mockWindowsServiceManager{}
+	factory := &mockWindowsServiceManagerFactory{manager: manager}
+	sm := &defaultServiceManager{factory: factory}
+
+	_, err := sm.Create(AgentParams{
+		ServiceUsername: `DOMAIN\svc_rewst`,
+		ServicePassword: "p@ssw0rd",
+	})
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if manager.capturedConfig.ServiceStartName != `DOMAIN\svc_rewst` {
+		t.Errorf(
+			"expected ServiceStartName 'DOMAIN\\svc_rewst', got %q",
+			manager.capturedConfig.ServiceStartName,
+		)
+	}
+	if manager.capturedConfig.Password != "p@ssw0rd" {
+		t.Errorf("expected Password 'p@ssw0rd', got %q", manager.capturedConfig.Password)
+	}
+}
+
+func TestDefaultServiceManager_Create_WithoutServiceUsername_NoCredentials(t *testing.T) {
+	manager := &mockWindowsServiceManager{}
+	factory := &mockWindowsServiceManagerFactory{manager: manager}
+	sm := &defaultServiceManager{factory: factory}
+
+	_, err := sm.Create(AgentParams{})
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if manager.capturedConfig.ServiceStartName != "" {
+		t.Errorf(
+			"expected empty ServiceStartName when not provided, got %q",
+			manager.capturedConfig.ServiceStartName,
+		)
+	}
+	if manager.capturedConfig.Password != "" {
+		t.Errorf(
+			"expected empty Password when not provided, got %q",
+			manager.capturedConfig.Password,
+		)
+	}
+}
+
+func TestDefaultServiceManager_Create_GrantAccessError(t *testing.T) {
+	manager := &mockWindowsServiceManager{}
+	factory := &mockWindowsServiceManagerFactory{manager: manager}
+	grantErr := errors.New("icacls failed")
+	sm := &defaultServiceManager{
+		factory: factory,
+		grantAccess: func(dir, username string) error {
+			return grantErr
+		},
+	}
+
+	_, err := sm.Create(AgentParams{
+		ConfigFilePath:  `C:\ProgramData\Rewst\config.json`,
+		ServiceUsername: `.\rewst_agent_it`,
+	})
+
+	if err == nil {
+		t.Error("expected error from grantAccess, got nil")
+	}
+}
+
+func TestDefaultServiceManager_Create_GrantAccessError_ProgramDir(t *testing.T) {
+	manager := &mockWindowsServiceManager{}
+	factory := &mockWindowsServiceManagerFactory{manager: manager}
+	callCount := 0
+	sm := &defaultServiceManager{
+		factory: factory,
+		grantAccess: func(dir, username string) error {
+			callCount++
+			if callCount == 2 {
+				return errors.New("icacls program dir failed")
+			}
+			return nil
+		},
+	}
+
+	_, err := sm.Create(AgentParams{
+		ConfigFilePath:      `C:\ProgramData\Rewst\config.json`,
+		AgentExecutablePath: `C:\Program Files\Rewst\agent_smith.exe`,
+		ServiceUsername:     `.\rewst_agent_it`,
+	})
+
+	if err == nil {
+		t.Error("expected error from program dir grantAccess, got nil")
+	}
+	if callCount != 2 {
+		t.Errorf("expected 2 grantAccess calls before failure, got %d", callCount)
+	}
+}
+
+func TestDefaultServiceManager_Create_GrantsAllDirectories(t *testing.T) {
+	manager := &mockWindowsServiceManager{}
+	factory := &mockWindowsServiceManagerFactory{manager: manager}
+	var grantedDirs []string
+	sm := &defaultServiceManager{
+		factory: factory,
+		grantAccess: func(dir, username string) error {
+			grantedDirs = append(grantedDirs, dir)
+			return nil
+		},
+	}
+
+	_, err := sm.Create(AgentParams{
+		ConfigFilePath:      `C:\ProgramData\Rewst\config.json`,
+		AgentExecutablePath: `C:\Program Files\Rewst\agent_smith.exe`,
+		ScriptsDirectory:    `C:\RewstRemoteAgent\scripts\org1`,
+		ServiceUsername:     `.\rewst_agent_it`,
+	})
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if len(grantedDirs) != 3 {
+		t.Errorf("expected 3 grantAccess calls, got %d: %v", len(grantedDirs), grantedDirs)
 	}
 }
 

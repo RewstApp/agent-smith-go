@@ -6,11 +6,34 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/RewstApp/agent-smith-go/internal/utils"
 )
+
+func chownR(dir, username string) error {
+	u, err := user.Lookup(username)
+	if err != nil {
+		return fmt.Errorf("user %q not found: %w", username, err)
+	}
+	uid, err := strconv.Atoi(u.Uid)
+	if err != nil {
+		return err
+	}
+	gid, err := strconv.Atoi(u.Gid)
+	if err != nil {
+		return err
+	}
+	return filepath.Walk(dir, func(path string, _ os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		return os.Lchown(path, uid, gid)
+	})
+}
 
 type launchCtl interface {
 	Run(args ...string) ([]byte, error)
@@ -105,7 +128,8 @@ func (svc *darwinService) IsActive() bool {
 }
 
 type defaultServiceManager struct {
-	system launchCtl
+	system   launchCtl
+	chownDir func(dir, username string) error
 }
 
 func (s *defaultServiceManager) Create(params AgentParams) (Service, error) {
@@ -125,6 +149,13 @@ func (s *defaultServiceManager) Create(params AgentParams) (Service, error) {
 		params.ConfigFilePath,
 		params.LogFilePath,
 	)
+	if params.ServiceUsername != "" {
+		fmt.Fprintf(
+			&serviceConfig,
+			"<key>UserName</key>\n<string>%s</string>\n",
+			params.ServiceUsername,
+		)
+	}
 	fmt.Fprintf(&serviceConfig, "<key>RunAtLoad</key>\n<false/>\n")
 	fmt.Fprintf(
 		&serviceConfig,
@@ -140,6 +171,23 @@ func (s *defaultServiceManager) Create(params AgentParams) (Service, error) {
 	err := os.WriteFile(svc.serviceFilePath(), []byte(serviceConfig.String()), utils.DefaultFileMod)
 	if err != nil {
 		return nil, err
+	}
+
+	if params.ServiceUsername != "" && s.chownDir != nil {
+		if err := s.chownDir(
+			filepath.Dir(params.ConfigFilePath),
+			params.ServiceUsername,
+		); err != nil {
+			return nil, err
+		}
+		if params.ScriptsDirectory != "" {
+			if err := os.MkdirAll(params.ScriptsDirectory, 0o755); err != nil {
+				return nil, err
+			}
+			if err := s.chownDir(params.ScriptsDirectory, params.ServiceUsername); err != nil {
+				return nil, err
+			}
+		}
 	}
 
 	return svc, nil
@@ -159,6 +207,7 @@ func (s *defaultServiceManager) Open(name string) (Service, error) {
 
 func NewServiceManager() ServiceManager {
 	return &defaultServiceManager{
-		system: &defaultLaunchCtl{},
+		system:   &defaultLaunchCtl{},
+		chownDir: chownR,
 	}
 }
