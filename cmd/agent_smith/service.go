@@ -217,8 +217,12 @@ func (svc *serviceContext) Execute(
 // established and the reconnect backoff should be reset.
 //
 // Cleanup is guaranteed on all exit paths: drainWorkers is deferred first, then
-// client.Disconnect is deferred after the client is created (LIFO order means
-// Disconnect runs before drainWorkers).
+// the MQTT teardown (Unsubscribe → Disconnect) is deferred after the client is
+// created (LIFO order means MQTT teardown runs before drainWorkers).
+// Consolidating Unsubscribe and Disconnect in one defer ensures persistent
+// (non-clean) Azure IoT Hub sessions don't retain server-side subscriptions
+// across reconnects, which would re-deliver buffered messages and cause
+// duplicate command execution.
 func (svc *serviceContext) runCycle(
 	ctx context.Context,
 	device agent.Device,
@@ -273,9 +277,23 @@ func (svc *serviceContext) runCycle(
 		lost <- struct{}{}
 	}
 
+	topic := fmt.Sprintf("devices/%s/messages/devicebound/#", device.DeviceId)
+	qos := byte(1)
+	if device.MqttQos != nil {
+		qos = *device.MqttQos
+	}
+
 	disconnectQuiesce := (uint)(mqtt.DefaultDisconnectQuiesce / time.Millisecond)
 	client := mqtt.NewClient(opts)
-	defer client.Disconnect(disconnectQuiesce)
+	subscribed := false
+	defer func() {
+		if subscribed && client.IsConnected() {
+			if token := client.Unsubscribe(topic); token.Wait() && token.Error() != nil {
+				logger.Warn("Failed to unsubscribe", "topic", topic, "error", token.Error())
+			}
+		}
+		client.Disconnect(disconnectQuiesce)
+	}()
 
 	token := client.Connect()
 	if token.Wait() && token.Error() != nil {
@@ -292,11 +310,6 @@ func (svc *serviceContext) runCycle(
 		logger.Info("Device twin reported properties updated", "agent_version", version.Version)
 	}
 
-	topic := fmt.Sprintf("devices/%s/messages/devicebound/#", device.DeviceId)
-	qos := byte(1)
-	if device.MqttQos != nil {
-		qos = *device.MqttQos
-	}
 	token = client.Subscribe(topic, qos, func(client mqtt.Client, msg mqtt.Message) {
 		payload := msg.Payload()
 		select {
@@ -314,6 +327,7 @@ func (svc *serviceContext) runCycle(
 		logger.Error("Failed to subscribe", "error", token.Error())
 		return false, false, 0
 	}
+	subscribed = true
 
 	logger.Info("Subscribed to messages", "topic", topic, "qos", qos)
 	_ = notifier.Notify("AgentStatus:Online") // Best effort notification
