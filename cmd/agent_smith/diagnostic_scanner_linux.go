@@ -17,6 +17,8 @@ func formatServiceName(orgId string) string {
 	return fmt.Sprintf("rewst_remote_agent_%s", orgId)
 }
 
+func fallbackScanAgents(_ string) []agentInfo { return nil }
+
 // queryServiceStatus queries systemd for both existence and active state.
 // Returns (installed, running).
 func queryServiceStatus(name string) (bool, bool) {
