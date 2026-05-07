@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -101,17 +102,17 @@ func (e *baseExecutor) Execute(
 		return errorResultBytes(logger, err)
 	}
 
-	// Defers run LIFO — Close runs before Remove, which is required on Windows
-	// where an open handle prevents the file from being deleted.
+	// Single cleanup: close the handle (Windows blocks Remove on open files), then
+	// remove the file. Runs on every exit path. ErrClosed is expected on the success
+	// path because we close explicitly before exec.
 	defer func() {
-		if err := os.Remove(tempfile.Name()); err != nil {
-			logger.Error("Failed to remove temp file", "file", tempfile.Name(), "error", err)
+		name := tempfile.Name()
+		if err := tempfile.Close(); err != nil && !errors.Is(err, os.ErrClosed) {
+			logger.Error("Failed to close temp file", "file", name, "error", err)
 		}
-	}()
-	defer func() {
-		// Best-effort safety net for error paths. On the success path the explicit
-		// Close below has already run, so this returns "file already closed" — ignore.
-		_ = tempfile.Close()
+		if err := os.Remove(name); err != nil {
+			logger.Error("Failed to remove temp file", "file", name, "error", err)
+		}
 	}()
 
 	if e.WriteUtf8BOM {
@@ -131,7 +132,7 @@ func (e *baseExecutor) Execute(
 	logger.Info("Command saved to", "message_id", message.PostId, "path", tempfile.Name())
 
 	// Close explicitly before exec so the shell can open the script (required on Windows).
-	// The deferred Close above becomes a no-op in this path.
+	// The deferred cleanup will still run Remove; its Close becomes a no-op (ErrClosed).
 	if err := tempfile.Close(); err != nil {
 		logger.Error("Failed to close temp file handle", "error", err)
 		return errorResultBytes(logger, err)
