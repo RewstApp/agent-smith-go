@@ -30,7 +30,9 @@ func queryServiceStatus(name string) (bool, bool) {
 
 	// "launchctl print system/<name>" outputs a plist-style dict; parse the
 	// "state = running" line — consistent with IsActive() in service_darwin.go.
-	out, err := exec.Command("launchctl", "print", fmt.Sprintf("system/%s", name)).CombinedOutput() // #nosec G204
+	// #nosec G204 - launchctl is a fixed system binary; name comes from internal config
+	out, err := exec.Command("launchctl", "print", fmt.Sprintf("system/%s", name)).
+		CombinedOutput()
 	if err != nil {
 		// Plist exists but service is not loaded — installed, stopped
 		return true, false
