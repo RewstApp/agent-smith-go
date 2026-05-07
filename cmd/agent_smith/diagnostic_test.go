@@ -369,7 +369,7 @@ func runDiag(
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	runDiagnosticFull(ctx, params, strings.NewReader(input), dialer, opener, t.TempDir())
+	runDiagnosticFull(ctx, params, strings.NewReader(input), dialer, opener, t.TempDir(), nil)
 }
 
 func TestRunDiagnosticWith_ExitImmediately(t *testing.T) {
@@ -459,6 +459,7 @@ func TestRunDiagnosticWith_AgentSelectionFromScan(t *testing.T) {
 		&mockTLSDialer{},
 		&mockLogFileOpener{},
 		root,
+		nil,
 	)
 }
 

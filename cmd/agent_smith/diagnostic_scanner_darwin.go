@@ -18,6 +18,8 @@ func formatServiceName(orgId string) string {
 	return fmt.Sprintf("io.rewst.remote_agent_%s", orgId)
 }
 
+func fallbackScanAgents(_ string) []agentInfo { return nil }
+
 // queryServiceStatus checks the plist file for installation and launchctl print
 // for running state. Returns (installed, running).
 func queryServiceStatus(name string) (bool, bool) {

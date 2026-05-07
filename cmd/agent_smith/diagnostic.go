@@ -60,6 +60,7 @@ func runDiagnostic(params *diagnosticContext) {
 		&defaultTLSDialer{},
 		&osLogFileOpener{},
 		getAgentDataRoot(),
+		fallbackScanAgents,
 	)
 }
 
@@ -70,13 +71,18 @@ func runDiagnosticFull(
 	dialer tlsDialer,
 	opener logFileOpener,
 	agentRoot string,
+	fallback func(string) []agentInfo,
 ) {
 	reader := bufio.NewReader(input)
 
 	printHeader()
 
-	// Scan for installed agents
+	// Scan for installed agents; fall back to platform-specific discovery
+	// (e.g. Windows SCM) if the data-directory scan returns nothing.
 	agents := scanAgentsFrom(agentRoot)
+	if len(agents) == 0 && fallback != nil {
+		agents = fallback(agentRoot)
+	}
 
 	if len(agents) == 0 && params.OrgId == "" {
 		fmt.Println("\n  No installed agents found.")
