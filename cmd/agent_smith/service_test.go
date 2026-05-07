@@ -630,6 +630,35 @@ func (m *mockMQTTClient) OptionsReader() pahomqtt.ClientOptionsReader {
 	return pahomqtt.NewOptionsReader(pahomqtt.NewClientOptions())
 }
 
+// teardownTrackingClient wraps mockMQTTClient and records the order in which
+// Unsubscribe and Disconnect are called. Used by the sc-89441 regression test
+// to verify Unsubscribe runs before Disconnect on every cycle exit path.
+type teardownTrackingClient struct {
+	mockMQTTClient
+	calls         *[]string
+	subscribeArgs *string
+}
+
+func (m *teardownTrackingClient) Subscribe(
+	topic string,
+	qos byte,
+	cb pahomqtt.MessageHandler,
+) pahomqtt.Token {
+	if m.subscribeArgs != nil {
+		*m.subscribeArgs = topic
+	}
+	return m.mockMQTTClient.Subscribe(topic, qos, cb)
+}
+
+func (m *teardownTrackingClient) Unsubscribe(topics ...string) pahomqtt.Token {
+	*m.calls = append(*m.calls, "unsubscribe:"+strings.Join(topics, ","))
+	return &mockMQTTToken{}
+}
+
+func (m *teardownTrackingClient) Disconnect(_ uint) {
+	*m.calls = append(*m.calls, "disconnect")
+}
+
 // blockingToken is a mock MQTT token whose Wait blocks until release is closed.
 // started is a buffered channel that receives one item when Wait is first called.
 type blockingToken struct {
@@ -1130,5 +1159,139 @@ func TestExecute_ConnectionLostChannelIsBuffered(t *testing.T) {
 	case <-done:
 	case <-time.After(10 * time.Second):
 		t.Fatal("Execute did not exit within timeout")
+	}
+}
+
+// TestExecute_UnsubscribeBeforeDisconnectOnStop is the regression test for
+// sc-89441: the client must call Unsubscribe(topic) before Disconnect on the
+// stop path so persistent (non-clean) Azure IoT Hub sessions don't retain
+// server-side subscriptions and re-deliver buffered messages on reconnect.
+func TestExecute_UnsubscribeBeforeDisconnectOnStop(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.json")
+	logPath := filepath.Join(tmpDir, "test.log")
+
+	device := agent.Device{
+		DeviceId:             "test-device",
+		SharedAccessKey:      "dGVzdC1zaGFyZWQta2V5LXRoYXQtaXMtbG9uZy1lbm91Z2gtZm9yLWJhc2U2NC1kZWNvZGluZw==",
+		AzureIotHubHost:      "test.azure-devices.net",
+		LoggingLevel:         "error",
+		DisableAutoUpdates:   true,
+		DisableAgentPostback: true,
+	}
+	configBytes, _ := json.Marshal(device)
+	if err := os.WriteFile(configPath, configBytes, utils.DefaultFileMod); err != nil {
+		t.Fatalf("failed to write config: %v", err)
+	}
+
+	var calls []string
+	var subscribedTopic string
+	origNewClient := inmqtt.NewClient
+	inmqtt.NewClient = func(_ *pahomqtt.ClientOptions) pahomqtt.Client {
+		return &teardownTrackingClient{
+			calls:         &calls,
+			subscribeArgs: &subscribedTopic,
+		}
+	}
+	defer func() { inmqtt.NewClient = origNewClient }()
+
+	svc := &serviceContext{
+		ConfigFile: configPath,
+		LogFile:    logPath,
+		OrgId:      "test-org",
+		Executor:   &mockExecutor{},
+	}
+
+	stop := make(chan struct{})
+	running := make(chan struct{}, 1)
+	done := make(chan service.ServiceExitCode, 1)
+	go func() { done <- svc.Execute(stop, running) }()
+
+	select {
+	case <-running:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Execute did not signal running within timeout")
+	}
+
+	close(stop)
+
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Execute did not exit within timeout")
+	}
+
+	expectedTopic := "devices/test-device/messages/devicebound/#"
+	expected := []string{"unsubscribe:" + expectedTopic, "disconnect"}
+	if len(calls) != len(expected) || calls[0] != expected[0] || calls[1] != expected[1] {
+		t.Fatalf("expected teardown order %v, got %v", expected, calls)
+	}
+	if subscribedTopic != expectedTopic {
+		t.Errorf("expected Subscribe called with %q, got %q", expectedTopic, subscribedTopic)
+	}
+}
+
+// TestExecute_NoUnsubscribeWhenSubscribeFails verifies that Unsubscribe is not
+// issued when Subscribe never succeeded. Calling Unsubscribe in that case would
+// be a no-op on the broker (no subscription exists) and just produce log noise.
+func TestExecute_NoUnsubscribeWhenSubscribeFails(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.json")
+	logPath := filepath.Join(tmpDir, "test.log")
+
+	device := agent.Device{
+		DeviceId:             "test-device",
+		SharedAccessKey:      "dGVzdC1zaGFyZWQta2V5LXRoYXQtaXMtbG9uZy1lbm91Z2gtZm9yLWJhc2U2NC1kZWNvZGluZw==",
+		AzureIotHubHost:      "test.azure-devices.net",
+		LoggingLevel:         "error",
+		DisableAutoUpdates:   true,
+		DisableAgentPostback: true,
+	}
+	configBytes, _ := json.Marshal(device)
+	if err := os.WriteFile(configPath, configBytes, utils.DefaultFileMod); err != nil {
+		t.Fatalf("failed to write config: %v", err)
+	}
+
+	var calls []string
+	origNewClient := inmqtt.NewClient
+	inmqtt.NewClient = func(_ *pahomqtt.ClientOptions) pahomqtt.Client {
+		return &teardownTrackingClient{
+			mockMQTTClient: mockMQTTClient{subscribeErr: errors.New("broker denied")},
+			calls:          &calls,
+		}
+	}
+	defer func() { inmqtt.NewClient = origNewClient }()
+
+	svc := &serviceContext{
+		ConfigFile: configPath,
+		LogFile:    logPath,
+		OrgId:      "test-org",
+		Executor:   &mockExecutor{},
+	}
+
+	stop := make(chan struct{})
+	running := make(chan struct{}, 1)
+	done := make(chan service.ServiceExitCode, 1)
+	go func() { done <- svc.Execute(stop, running) }()
+
+	select {
+	case <-running:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Execute did not signal running within timeout")
+	}
+
+	close(stop)
+
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Execute did not exit within timeout")
+	}
+
+	for _, c := range calls {
+		if strings.HasPrefix(c, "unsubscribe:") {
+			t.Errorf("Unsubscribe should not be called when Subscribe failed; got calls=%v", calls)
+			break
+		}
 	}
 }
