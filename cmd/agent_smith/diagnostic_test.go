@@ -356,6 +356,8 @@ func TestRunDiagnosticWith_Option5_LiveLogs(t *testing.T) {
 
 func TestRunDiagnosticWith_Option6_AllChecks(t *testing.T) {
 	params := newDiagnosticParams("org-diag-opt6")
+	params.Sys = &mockSystemInfoProvider{hostname: "host", hostPlatform: "linux"}
+	params.Domain = &mockDomainInfoProvider{}
 	runDiag(t, params, "6\n0\n", &mockTLSDialer{result: true}, &mockLogFileOpener{content: "log\n"})
 	_ = os.RemoveAll(agent.GetScriptsDirectory(params.OrgId))
 }
@@ -392,6 +394,8 @@ func TestRunDiagnosticWith_AgentSelectionFromScan(t *testing.T) {
 func TestRunAllChecksWith(t *testing.T) {
 	params := &diagnosticContext{
 		ServiceManager: &mockServiceManager{openService: &mockService{isActive: false}},
+		Sys:            &mockSystemInfoProvider{hostname: "host", hostPlatform: "linux"},
+		Domain:         &mockDomainInfoProvider{},
 	}
 	agents := []agentInfo{{OrgId: "org-1", ServiceName: "svc-1"}}
 	target := agentInfo{
@@ -399,6 +403,85 @@ func TestRunAllChecksWith(t *testing.T) {
 		LogFile: "fake.log",
 		Device:  &agent.Device{AzureIotHubHost: "hub.example.com"},
 	}
-	runAllChecksWith(params, agents, target, &mockTLSDialer{result: true})
+	runAllChecksWith(context.Background(), params, agents, target, &mockTLSDialer{result: true})
 	_ = os.RemoveAll(agent.GetScriptsDirectory(target.OrgId))
+}
+
+// ── runHostInfo ───────────────────────────────────────────────────────────────
+
+func TestRunHostInfo_Success(t *testing.T) {
+	mac := "aa:bb:cc:dd:ee:ff"
+	adDomain := "example.local"
+	entraDomain := "example.onmicrosoft.com"
+	params := &diagnosticContext{
+		Sys: &mockSystemInfoProvider{
+			hostname:         "test-host",
+			hostPlatform:     "linux",
+			cpuModelName:     "Test CPU",
+			totalMemoryBytes: 8 * 1024 * 1024 * 1024,
+			macAddress:       &mac,
+		},
+		Domain: &mockDomainInfoProvider{
+			adDomain:             &adDomain,
+			isAdDomainController: true,
+			isEntraConnectServer: false,
+			entraDomain:          &entraDomain,
+		},
+	}
+	runHostInfo(context.Background(), params, agentInfo{OrgId: "org-1"})
+}
+
+func TestRunHostInfo_NilDomainPointers(t *testing.T) {
+	// Linux/macOS scenario: AD/Entra fields return nil → should display N/A
+	params := &diagnosticContext{
+		Sys: &mockSystemInfoProvider{
+			hostname:         "linux-host",
+			hostPlatform:     "linux",
+			cpuModelName:     "Test CPU",
+			totalMemoryBytes: 4 * 1024 * 1024 * 1024,
+		},
+		Domain: &mockDomainInfoProvider{},
+	}
+	runHostInfo(context.Background(), params, agentInfo{OrgId: "org-1"})
+}
+
+func TestRunHostInfo_DomainProviderErrors(t *testing.T) {
+	// Domain provider errors should be logged (and swallowed) by NewHostInfo,
+	// not aborting the diagnostic output.
+	params := &diagnosticContext{
+		Sys: &mockSystemInfoProvider{
+			hostname:         "host",
+			hostPlatform:     "windows",
+			cpuModelName:     "CPU",
+			totalMemoryBytes: 1024 * 1024 * 1024,
+		},
+		Domain: &mockDomainInfoProvider{
+			adDomainErr:             errors.New("ad lookup failed"),
+			isAdDomainControllerErr: errors.New("dc lookup failed"),
+			isEntraConnectServerErr: errors.New("entra connect failed"),
+			entraDomainErr:          errors.New("entra domain failed"),
+		},
+	}
+	runHostInfo(context.Background(), params, agentInfo{OrgId: "org-1"})
+}
+
+func TestRunHostInfo_SystemProviderError(t *testing.T) {
+	// A system info error (e.g. HostPlatform) should surface as a single
+	// failure line rather than panicking.
+	params := &diagnosticContext{
+		Sys:    &mockSystemInfoProvider{hostPlatformErr: errors.New("platform error")},
+		Domain: &mockDomainInfoProvider{},
+	}
+	runHostInfo(context.Background(), params, agentInfo{OrgId: "org-1"})
+}
+
+func TestRunHostInfo_NilProviders(t *testing.T) {
+	runHostInfo(context.Background(), &diagnosticContext{}, agentInfo{OrgId: "org-1"})
+}
+
+func TestRunDiagnosticWith_Option7_HostInfo(t *testing.T) {
+	params := newDiagnosticParams("org-1")
+	params.Sys = &mockSystemInfoProvider{hostname: "host", hostPlatform: "linux"}
+	params.Domain = &mockDomainInfoProvider{}
+	runDiag(t, params, "7\n0\n", &mockTLSDialer{}, &mockLogFileOpener{})
 }
