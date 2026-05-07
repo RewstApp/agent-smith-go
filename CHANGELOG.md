@@ -1,3 +1,16 @@
+## v1.3.0 (2026-05-07)
+
+### Feat
+
+- [sc-89411] Add host information option to diagnostic mode (#65)
+
+### Fix
+
+- diagnostic mode lists ghost agents and improve agent navigation (#69)
+- [sc-89441] Unsubscribe MQTT topic before Disconnect to prevent duplicate command delivery (#68)
+- [sc-89442] Combine temp file Close and Remove into single deferred cleanup (#67)
+- [sc-89440] Defer temp file Close immediately to prevent handle leak on error paths (#66)
+
 ## v1.2.4 (2026-04-30)
 
 ### Fix
