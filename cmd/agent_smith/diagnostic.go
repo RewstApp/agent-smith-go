@@ -496,7 +496,13 @@ func runHostInfo(ctx context.Context, params *diagnosticContext, target agentInf
 		return
 	}
 
-	info, err := agent.NewHostInfo(ctx, target.OrgId, hclog.NewNullLogger(), params.Sys, params.Domain)
+	info, err := agent.NewHostInfo(
+		ctx,
+		target.OrgId,
+		hclog.NewNullLogger(),
+		params.Sys,
+		params.Domain,
+	)
 	if err != nil {
 		printResult(false, fmt.Sprintf("Failed to gather host information: %v", err))
 		return
