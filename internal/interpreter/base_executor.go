@@ -101,6 +101,19 @@ func (e *baseExecutor) Execute(
 		return errorResultBytes(logger, err)
 	}
 
+	// Defers run LIFO — Close runs before Remove, which is required on Windows
+	// where an open handle prevents the file from being deleted.
+	defer func() {
+		if err := os.Remove(tempfile.Name()); err != nil {
+			logger.Error("Failed to remove temp file", "file", tempfile.Name(), "error", err)
+		}
+	}()
+	defer func() {
+		// Best-effort safety net for error paths. On the success path the explicit
+		// Close below has already run, so this returns "file already closed" — ignore.
+		_ = tempfile.Close()
+	}()
+
 	if e.WriteUtf8BOM {
 		_, err = tempfile.Write(utf8BOM)
 		if err != nil {
@@ -117,20 +130,12 @@ func (e *baseExecutor) Execute(
 
 	logger.Info("Command saved to", "message_id", message.PostId, "path", tempfile.Name())
 
-	// Close the temporary file
-	err = tempfile.Close()
-	if err != nil {
+	// Close explicitly before exec so the shell can open the script (required on Windows).
+	// The deferred Close above becomes a no-op in this path.
+	if err := tempfile.Close(); err != nil {
 		logger.Error("Failed to close temp file handle", "error", err)
 		return errorResultBytes(logger, err)
 	}
-
-	// Remove temp file on both success and failure paths
-	defer func() {
-		err = os.Remove(tempfile.Name())
-		if err != nil {
-			logger.Error("Failed to remove temp file", "file", tempfile.Name(), "error", err)
-		}
-	}()
 
 	var stdoutBuf, stderrBuf bytes.Buffer
 
