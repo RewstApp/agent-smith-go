@@ -31,7 +31,9 @@ func formatServiceName(orgId string) string {
 // (e.g. when PROGRAMDATA was unset during installation or the directory
 // cannot be read in the current process context).
 func fallbackScanAgents(root string) []agentInfo {
-	out, err := exec.Command("sc", "query", "type=", "service", "state=", "all", "bufsize=", "65536").CombinedOutput() // #nosec G204
+	out, err := exec.Command( // #nosec G204
+		"sc", "query", "type=", "service", "state=", "all", "bufsize=", "65536",
+	).CombinedOutput()
 	if err != nil {
 		return nil
 	}
