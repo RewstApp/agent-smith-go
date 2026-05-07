@@ -216,7 +216,9 @@ func selectAgent(reader *bufio.Reader, agents []agentInfo) (agentInfo, bool) {
 	}
 }
 
-var uuidRE = regexp.MustCompile(`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+var uuidRE = regexp.MustCompile(
+	`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`,
+)
 
 func isValidOrgId(s string) bool {
 	return uuidRE.MatchString(s)
