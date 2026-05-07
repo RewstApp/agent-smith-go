@@ -192,44 +192,27 @@ func TestScanAgentsFrom_MultipleOrgs(t *testing.T) {
 	}
 }
 
-// ── runCheckAgents ────────────────────────────────────────────────────────────
+// ── runCheckServiceStatus ─────────────────────────────────────────────────────
 
-func TestRunCheckAgents_Empty(t *testing.T) {
-	params := &diagnosticContext{ServiceManager: &mockServiceManager{}}
-	runCheckAgents(params, nil)
-}
-
-func TestRunCheckAgents_ServiceOpenFails(t *testing.T) {
+func TestRunCheckServiceStatus_ServiceOpenFails(t *testing.T) {
 	params := &diagnosticContext{
 		ServiceManager: &mockServiceManager{openErr: errors.New("not found")},
 	}
-	runCheckAgents(params, []agentInfo{{OrgId: "org-1", ServiceName: "svc-1"}})
+	runCheckServiceStatus(params, agentInfo{OrgId: "org-1", ServiceName: "svc-1"})
 }
 
-func TestRunCheckAgents_RunningService(t *testing.T) {
+func TestRunCheckServiceStatus_RunningService(t *testing.T) {
 	params := &diagnosticContext{
 		ServiceManager: &mockServiceManager{openService: &mockService{isActive: true}},
 	}
-	runCheckAgents(params, []agentInfo{{OrgId: "org-1", ServiceName: "svc-1"}})
+	runCheckServiceStatus(params, agentInfo{OrgId: "org-1", ServiceName: "svc-1"})
 }
 
-func TestRunCheckAgents_StoppedService(t *testing.T) {
+func TestRunCheckServiceStatus_StoppedService(t *testing.T) {
 	params := &diagnosticContext{
 		ServiceManager: &mockServiceManager{openService: &mockService{isActive: false}},
 	}
-	runCheckAgents(params, []agentInfo{{OrgId: "org-1", ServiceName: "svc-1"}})
-}
-
-func TestRunCheckAgents_WithDeviceDetails(t *testing.T) {
-	params := &diagnosticContext{
-		ServiceManager: &mockServiceManager{openService: &mockService{isActive: true}},
-	}
-	device := &agent.Device{
-		DeviceId:        "dev-xyz",
-		AzureIotHubHost: "hub.example.com",
-		RewstEngineHost: "engine.example.com",
-	}
-	runCheckAgents(params, []agentInfo{{OrgId: "org-1", ServiceName: "svc-1", Device: device}})
+	runCheckServiceStatus(params, agentInfo{OrgId: "org-1", ServiceName: "svc-1"})
 }
 
 // ── runConnectivityTestWith ───────────────────────────────────────────────────
@@ -437,7 +420,8 @@ func TestRunDiagnosticWith_InvalidOption(t *testing.T) {
 }
 
 func TestRunDiagnosticWith_AgentSelectionFromScan(t *testing.T) {
-	// Two agents in the temp root → selectAgent is called; "1" picks first, "0" exits
+	// Two agents in the temp root → selectAgent is called; "1" picks first,
+	// "0" goes Back to selection, then "0" exits the selection.
 	root := t.TempDir()
 	for _, orgId := range []string{
 		"43fb08b0-92cf-462a-924d-0b6be7a43a48",
@@ -455,7 +439,7 @@ func TestRunDiagnosticWith_AgentSelectionFromScan(t *testing.T) {
 		&diagnosticContext{
 			ServiceManager: &mockServiceManager{openService: &mockService{isActive: true}},
 		},
-		strings.NewReader("1\n0\n"),
+		strings.NewReader("1\n0\n0\n"),
 		&mockTLSDialer{},
 		&mockLogFileOpener{},
 		root,
@@ -471,13 +455,13 @@ func TestRunAllChecksWith(t *testing.T) {
 		Sys:            &mockSystemInfoProvider{hostname: "host", hostPlatform: "linux"},
 		Domain:         &mockDomainInfoProvider{},
 	}
-	agents := []agentInfo{{OrgId: "org-1", ServiceName: "svc-1"}}
 	target := agentInfo{
-		OrgId:   "org-all",
-		LogFile: "fake.log",
-		Device:  &agent.Device{AzureIotHubHost: "hub.example.com"},
+		OrgId:       "org-all",
+		ServiceName: "svc-all",
+		LogFile:     "fake.log",
+		Device:      &agent.Device{AzureIotHubHost: "hub.example.com"},
 	}
-	runAllChecksWith(context.Background(), params, agents, target, &mockTLSDialer{result: true})
+	runAllChecksWith(context.Background(), params, target, &mockTLSDialer{result: true})
 	_ = os.RemoveAll(agent.GetScriptsDirectory(target.OrgId))
 }
 

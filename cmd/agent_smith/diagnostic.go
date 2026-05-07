@@ -109,43 +109,51 @@ func runDiagnosticFull(
 		}
 	}
 
-	// Select agent to diagnose
-	var target agentInfo
-	if len(agents) == 1 {
-		target = agents[0]
-	} else {
-		selected, ok := selectAgent(reader, agents)
-		if !ok {
-			fmt.Println("\n  Exiting diagnostic mode.")
-			return
-		}
-		target = selected
-	}
+	hasMultiple := len(agents) > 1
 
+selectLoop:
 	for {
-		printMenu()
-		choice := prompt(reader, "  Select an option: ")
+		// Select agent to diagnose
+		var target agentInfo
+		if !hasMultiple {
+			target = agents[0]
+		} else {
+			selected, ok := selectAgent(reader, agents)
+			if !ok {
+				fmt.Println("\n  Exiting diagnostic mode.")
+				return
+			}
+			target = selected
+		}
 
-		switch strings.TrimSpace(choice) {
-		case "1":
-			runCheckAgents(params, agents)
-		case "2":
-			runCommandTest()
-		case "3":
-			runConnectivityTestWith(target, dialer)
-		case "4":
-			runTempDirTest(target)
-		case "5":
-			runLiveLogsWith(ctx, target, opener)
-		case "6":
-			runAllChecksWith(ctx, params, agents, target, dialer)
-		case "7":
-			runHostInfo(ctx, params, target)
-		case "0", "q", "quit", "exit":
-			fmt.Println("\n  Exiting diagnostic mode.")
-			return
-		default:
-			fmt.Println("\n  Invalid option. Please try again.")
+		for {
+			printMenu(target, hasMultiple)
+			choice := prompt(reader, "  Select an option: ")
+
+			switch strings.TrimSpace(choice) {
+			case "1":
+				runCheckServiceStatus(params, target)
+			case "2":
+				runCommandTest()
+			case "3":
+				runConnectivityTestWith(target, dialer)
+			case "4":
+				runTempDirTest(target)
+			case "5":
+				runLiveLogsWith(ctx, target, opener)
+			case "6":
+				runAllChecksWith(ctx, params, target, dialer)
+			case "7":
+				runHostInfo(ctx, params, target)
+			case "0", "q", "quit", "exit":
+				if hasMultiple {
+					continue selectLoop
+				}
+				fmt.Println("\n  Exiting diagnostic mode.")
+				return
+			default:
+				fmt.Println("\n  Invalid option. Please try again.")
+			}
 		}
 	}
 }
@@ -159,20 +167,25 @@ func printHeader() {
 	fmt.Println("  ╚══════════════════════════════════════════════════╝")
 }
 
-func printMenu() {
+func printMenu(target agentInfo, hasMultiple bool) {
+	lastOption := "  │  [0] Exit                                        │"
+	if hasMultiple {
+		lastOption = "  │  [0] Back                                        │"
+	}
 	fmt.Println()
 	fmt.Println("  ┌──────────────────────────────────────────────────┐")
 	fmt.Println("  │  Diagnostic Options                              │")
 	fmt.Println("  ├──────────────────────────────────────────────────┤")
-	fmt.Println("  │  [1] Scan installed agents and check status      │")
+	fmt.Println("  │  [1] Check service status                        │")
 	fmt.Println("  │  [2] Test command execution                      │")
 	fmt.Println("  │  [3] Test MQTT/WebSocket connectivity            │")
 	fmt.Println("  │  [4] Test temp directory write access            │")
 	fmt.Println("  │  [5] View live log data                          │")
 	fmt.Println("  │  [6] Run all checks                              │")
 	fmt.Println("  │  [7] Show host information                       │")
-	fmt.Println("  │  [0] Exit                                        │")
+	fmt.Println(lastOption)
 	fmt.Println("  └──────────────────────────────────────────────────┘")
+	fmt.Printf("  Current agent: %s\n", target.OrgId)
 }
 
 func prompt(reader *bufio.Reader, message string) string {
@@ -185,11 +198,7 @@ func selectAgent(reader *bufio.Reader, agents []agentInfo) (agentInfo, bool) {
 	fmt.Println("\n  Multiple agents found. Select one to diagnose:")
 	fmt.Println()
 	for i, a := range agents {
-		status := "stopped"
-		if a.IsRunning {
-			status = "running"
-		}
-		fmt.Printf("  [%d] %s (%s)\n", i+1, a.OrgId, status)
+		fmt.Printf("  [%d] %s\n", i+1, a.OrgId)
 	}
 	fmt.Printf("  [0] Exit\n")
 	fmt.Println()
@@ -263,45 +272,24 @@ func scanAgentsFrom(root string) []agentInfo {
 	return agents
 }
 
-// ── Check 1: Scan agents and show status ──
+// ── Check 1: Service status for the selected agent ──
 
-func runCheckAgents(params *diagnosticContext, agents []agentInfo) {
-	printSection("Installed Agents")
+func runCheckServiceStatus(params *diagnosticContext, target agentInfo) {
+	printSection("Service Status")
 
-	if len(agents) == 0 {
-		printResult(false, "No installed agents found")
+	svc, err := params.ServiceManager.Open(target.ServiceName)
+	if err != nil {
+		printResult(false, fmt.Sprintf("Service not found (%s)", target.ServiceName))
 		return
 	}
+	running := svc.IsActive()
+	_ = svc.Close()
 
-	for _, a := range agents {
-		// Re-check status
-		svc, err := params.ServiceManager.Open(a.ServiceName)
-		if err != nil {
-			printResult(false, fmt.Sprintf("%s - service not found (%s)", a.OrgId, a.ServiceName))
-			continue
-		}
-		running := svc.IsActive()
-		_ = svc.Close()
-
-		status := "STOPPED"
-		if running {
-			status = "RUNNING"
-		}
-		printResult(running, fmt.Sprintf("%s - %s (%s)", a.OrgId, status, a.ServiceName))
-
-		// Show config details if available
-		if a.Device != nil {
-			fmt.Printf("      Device ID:    %s\n", a.Device.DeviceId)
-			fmt.Printf("      IoT Hub:      %s\n", a.Device.AzureIotHubHost)
-			fmt.Printf("      Engine Host:  %s\n", a.Device.RewstEngineHost)
-			fmt.Printf("      Log Level:    %s\n", a.Device.LoggingLevel)
-			fmt.Printf("      Syslog:       %v\n", a.Device.UseSyslog)
-			fmt.Printf("      Auto-Updates: %v\n", !a.Device.DisableAutoUpdates)
-			if a.Device.MqttQos != nil {
-				fmt.Printf("      MQTT QoS:     %d\n", *a.Device.MqttQos)
-			}
-		}
+	status := "STOPPED"
+	if running {
+		status = "RUNNING"
 	}
+	printResult(running, fmt.Sprintf("%s - %s (%s)", target.OrgId, status, target.ServiceName))
 }
 
 // ── Check 2: Command execution test ──
@@ -501,11 +489,10 @@ func runLiveLogsWith(ctx context.Context, target agentInfo, opener logFileOpener
 func runAllChecksWith(
 	ctx context.Context,
 	params *diagnosticContext,
-	agents []agentInfo,
 	target agentInfo,
 	dialer tlsDialer,
 ) {
-	runCheckAgents(params, agents)
+	runCheckServiceStatus(params, target)
 	runCommandTest()
 	runConnectivityTestWith(target, dialer)
 	runTempDirTest(target)
