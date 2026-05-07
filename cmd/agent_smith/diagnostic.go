@@ -17,6 +17,7 @@ import (
 
 	"github.com/RewstApp/agent-smith-go/internal/agent"
 	"github.com/RewstApp/agent-smith-go/internal/version"
+	"github.com/hashicorp/go-hclog"
 )
 
 // tlsDialer abstracts TLS connectivity checks so tests can inject fakes.
@@ -125,7 +126,9 @@ func runDiagnosticFull(
 		case "5":
 			runLiveLogsWith(ctx, target, opener)
 		case "6":
-			runAllChecksWith(params, agents, target, dialer)
+			runAllChecksWith(ctx, params, agents, target, dialer)
+		case "7":
+			runHostInfo(ctx, params, target)
 		case "0", "q", "quit", "exit":
 			fmt.Println("\n  Exiting diagnostic mode.")
 			return
@@ -155,6 +158,7 @@ func printMenu() {
 	fmt.Println("  │  [4] Test temp directory write access            │")
 	fmt.Println("  │  [5] View live log data                          │")
 	fmt.Println("  │  [6] Run all checks                              │")
+	fmt.Println("  │  [7] Show host information                       │")
 	fmt.Println("  │  [0] Exit                                        │")
 	fmt.Println("  └──────────────────────────────────────────────────┘")
 }
@@ -469,6 +473,7 @@ func runLiveLogsWith(ctx context.Context, target agentInfo, opener logFileOpener
 // ── Check 6: Run all checks ──
 
 func runAllChecksWith(
+	ctx context.Context,
 	params *diagnosticContext,
 	agents []agentInfo,
 	target agentInfo,
@@ -478,6 +483,59 @@ func runAllChecksWith(
 	runCommandTest()
 	runConnectivityTestWith(target, dialer)
 	runTempDirTest(target)
+	runHostInfo(ctx, params, target)
+}
+
+// ── Check 7: Host information ──
+
+func runHostInfo(ctx context.Context, params *diagnosticContext, target agentInfo) {
+	printSection("Host Information")
+
+	if params.Sys == nil || params.Domain == nil {
+		printResult(false, "System or domain provider not available")
+		return
+	}
+
+	info, err := agent.NewHostInfo(
+		ctx,
+		target.OrgId,
+		hclog.NewNullLogger(),
+		params.Sys,
+		params.Domain,
+	)
+	if err != nil {
+		printResult(false, fmt.Sprintf("Failed to gather host information: %v", err))
+		return
+	}
+
+	printResult(true, "Host information collected")
+	fmt.Printf("      Hostname:                 %s\n", strOrNA(info.HostName))
+	fmt.Printf("      MAC Address:              %s\n", ptrOrNA(info.MacAddress))
+	fmt.Printf("      Operating System:         %s\n", strOrNA(info.OperatingSystem))
+	fmt.Printf("      CPU Model:                %s\n", strOrNA(info.CpuModel))
+	fmt.Printf("      RAM (GB):                 %s\n", strOrNA(info.RamGb))
+	fmt.Printf("      Agent Version:            %s\n", strOrNA(info.AgentVersion))
+	fmt.Printf("      Agent Executable Path:    %s\n", strOrNA(info.AgentExecutablePath))
+	fmt.Printf("      Service Executable Path:  %s\n", strOrNA(info.ServiceExecutablePath))
+	fmt.Printf("      AD Domain:                %s\n", ptrOrNA(info.AdDomain))
+	fmt.Printf("      AD Domain Controller:     %v\n", info.IsAdDomainController)
+	fmt.Printf("      Entra Connect Server:     %v\n", info.IsEntraConnectServer)
+	fmt.Printf("      Entra Domain:             %s\n", ptrOrNA(info.EntraDomain))
+	fmt.Printf("      Org ID:                   %s\n", strOrNA(info.OrgId))
+}
+
+func strOrNA(s string) string {
+	if s == "" {
+		return "N/A"
+	}
+	return s
+}
+
+func ptrOrNA(s *string) string {
+	if s == nil || *s == "" {
+		return "N/A"
+	}
+	return *s
 }
 
 // ── Formatting helpers ──
