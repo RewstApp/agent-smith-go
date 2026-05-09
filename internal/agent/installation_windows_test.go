@@ -4,6 +4,7 @@ package agent
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -12,6 +13,45 @@ func setEnvVars(t *testing.T) {
 	t.Setenv("PROGRAMFILES", "C:\\Program Files")
 	t.Setenv("PROGRAMDATA", "C:\\ProgramData")
 	t.Setenv("SYSTEMDRIVE", "C:")
+}
+
+func TestValidateInstallationEnvironment_AllSet(t *testing.T) {
+	setEnvVars(t)
+
+	if err := ValidateInstallationEnvironment(); err != nil {
+		t.Errorf("expected nil error, got %v", err)
+	}
+}
+
+func TestValidateInstallationEnvironment_MissingSingle(t *testing.T) {
+	setEnvVars(t)
+	t.Setenv("PROGRAMFILES", "")
+
+	err := ValidateInstallationEnvironment()
+	if err == nil {
+		t.Fatal("expected error for missing PROGRAMFILES, got nil")
+	}
+	if !strings.Contains(err.Error(), "PROGRAMFILES") {
+		t.Errorf("expected error to identify PROGRAMFILES, got %q", err.Error())
+	}
+}
+
+func TestValidateInstallationEnvironment_MissingMultiple(t *testing.T) {
+	setEnvVars(t)
+	t.Setenv("PROGRAMFILES", "")
+	t.Setenv("SYSTEMDRIVE", "")
+
+	err := ValidateInstallationEnvironment()
+	if err == nil {
+		t.Fatal("expected error for missing variables, got nil")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "PROGRAMFILES") || !strings.Contains(msg, "SYSTEMDRIVE") {
+		t.Errorf("expected error to identify PROGRAMFILES and SYSTEMDRIVE, got %q", msg)
+	}
+	if strings.Contains(msg, "PROGRAMDATA") {
+		t.Errorf("did not expect PROGRAMDATA in error, got %q", msg)
+	}
 }
 
 func TestGetProgramDirectory(t *testing.T) {

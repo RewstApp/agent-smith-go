@@ -6,7 +6,30 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
+
+// ValidateInstallationEnvironment checks that the Windows environment
+// variables used to build installation paths are set. On stripped or
+// misconfigured systems (e.g. Server Core, locked-down GPO, containers)
+// these may be empty, which would otherwise produce malformed paths like
+// `\RewstRemoteAgent\<orgId>` instead of `C:\Program Files\RewstRemoteAgent\<orgId>`.
+func ValidateInstallationEnvironment() error {
+	required := []string{"PROGRAMFILES", "PROGRAMDATA", "SYSTEMDRIVE"}
+	var missing []string
+	for _, name := range required {
+		if os.Getenv(name) == "" {
+			missing = append(missing, name)
+		}
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf(
+			"required Windows environment variable(s) not set: %s",
+			strings.Join(missing, ", "),
+		)
+	}
+	return nil
+}
 
 func GetProgramDirectory(orgId string) string {
 	// Get program files directory
