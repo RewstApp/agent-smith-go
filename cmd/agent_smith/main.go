@@ -35,6 +35,15 @@ func getAllowedConfigLevelsString(separator string) string {
 }
 
 func main() {
+	// Validate platform-specific installation environment before any mode
+	// resolves installation paths. On Windows this surfaces missing
+	// PROGRAMFILES / PROGRAMDATA / SYSTEMDRIVE early instead of producing
+	// malformed paths like `\RewstRemoteAgent\<orgId>`.
+	if err := agent.ValidateInstallationEnvironment(); err != nil {
+		fmt.Fprintf(os.Stderr, "environment error: %v\n", err)
+		os.Exit(1)
+	}
+
 	// Create providers
 	sys := agent.NewSystemInfoProvider()
 	domain := agent.NewDomainInfoProvider()

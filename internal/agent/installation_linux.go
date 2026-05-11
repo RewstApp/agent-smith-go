@@ -8,6 +8,12 @@ import (
 	"path/filepath"
 )
 
+// ValidateInstallationEnvironment is a no-op on Linux; installation paths
+// are derived from fixed locations rather than environment variables.
+func ValidateInstallationEnvironment() error {
+	return nil
+}
+
 func GetProgramDirectory(orgId string) string {
 	// Get program files directory
 	programFilesDir := "/usr/local/bin"
