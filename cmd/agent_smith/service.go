@@ -216,13 +216,20 @@ func (svc *serviceContext) Execute(
 // with exitCode; clearBackoff signals that a successful connection was
 // established and the reconnect backoff should be reset.
 //
-// Cleanup is guaranteed on all exit paths: drainWorkers is deferred first, then
-// the MQTT teardown (Unsubscribe → Disconnect) is deferred after the client is
-// created (LIFO order means MQTT teardown runs before drainWorkers).
-// Consolidating Unsubscribe and Disconnect in one defer ensures persistent
-// (non-clean) Azure IoT Hub sessions don't retain server-side subscriptions
-// across reconnects, which would re-deliver buffered messages and cause
-// duplicate command execution.
+// A fresh cycleCtx is derived from the parent ctx for each invocation so
+// in-flight commands (run via exec.CommandContext) are cancelled when the
+// cycle ends. Commands started in a later cycle bind to that cycle's own
+// context and are unaffected by the previous cycle's cancellation.
+//
+// Cleanup is guaranteed on all exit paths. The deferred teardown runs in LIFO
+// order: MQTT teardown (Unsubscribe → Disconnect) first so no new messages
+// arrive, then cycleCancel to interrupt any hung commands, then close the
+// queue and wait for workers. Cancelling before wg.Wait is required —
+// otherwise a hung command would block the wait indefinitely. Consolidating
+// Unsubscribe and Disconnect in one defer ensures persistent (non-clean)
+// Azure IoT Hub sessions don't retain server-side subscriptions across
+// reconnects, which would re-deliver buffered messages and cause duplicate
+// command execution.
 func (svc *serviceContext) runCycle(
 	ctx context.Context,
 	device agent.Device,
@@ -230,6 +237,8 @@ func (svc *serviceContext) runCycle(
 	notifier plugins.NotifierWrapper,
 	stopped <-chan struct{},
 ) (bool, bool, service.ServiceExitCode) {
+	cycleCtx, cycleCancel := context.WithCancel(ctx)
+
 	msgQueue := make(chan []byte, messageQueueSize)
 	var wg sync.WaitGroup
 	for i := range workerCount {
@@ -249,8 +258,8 @@ func (svc *serviceContext) runCycle(
 						"worker", i,
 						"queue_length", len(msgQueue),
 					)
-					svc.processMessage(payload, ctx, device, logger, notifier)
-				case <-ctx.Done():
+					svc.processMessage(payload, cycleCtx, device, logger, notifier)
+				case <-cycleCtx.Done():
 					logger.Debug("Message worker stopped: context cancelled", "worker", i)
 					return
 				}
@@ -258,6 +267,7 @@ func (svc *serviceContext) runCycle(
 		}()
 	}
 	defer func() {
+		cycleCancel()
 		close(msgQueue)
 		wg.Wait()
 	}()
