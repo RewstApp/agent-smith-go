@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"net/http"
+	"time"
 
 	"github.com/RewstApp/agent-smith-go/internal/agent"
 	"github.com/RewstApp/agent-smith-go/internal/interpreter"
@@ -20,6 +21,13 @@ type serviceContext struct {
 
 	Executor   interpreter.Executor
 	HTTPClient *http.Client
+
+	// PostbackMaxAttempts is the total number of postback attempts (including
+	// the initial try) before giving up. Defaults to postbackMaxAttempts.
+	PostbackMaxAttempts int
+	// PostbackBaseRetryBackoff is the base delay used for exponential backoff
+	// between postback attempts. Defaults to postbackBaseRetryBackoff.
+	PostbackBaseRetryBackoff time.Duration
 }
 
 func newServiceContext(
@@ -57,6 +65,8 @@ func newServiceContext(
 	params.Domain = domain
 	params.Executor = executor
 	params.HTTPClient = &http.Client{Timeout: postbackHTTPTimeout}
+	params.PostbackMaxAttempts = postbackMaxAttempts
+	params.PostbackBaseRetryBackoff = postbackBaseRetryBackoff
 
 	return &params, nil
 }

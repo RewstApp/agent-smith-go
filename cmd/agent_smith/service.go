@@ -25,9 +25,11 @@ import (
 )
 
 const (
-	workerCount         = 10
-	messageQueueSize    = 100
-	postbackHTTPTimeout = 30 * time.Second
+	workerCount              = 10
+	messageQueueSize         = 100
+	postbackHTTPTimeout      = 30 * time.Second
+	postbackMaxAttempts      = 3
+	postbackBaseRetryBackoff = 1 * time.Second
 )
 
 type errorResponse struct {
@@ -390,75 +392,171 @@ func (svc *serviceContext) processMessage(
 		return
 	}
 
-	// Postback the response
+	svc.sendPostbackWithRetry(ctx, &message, device, resultBytes, logger)
+}
+
+// sendPostbackWithRetry posts the command result to the Rewst engine, retrying
+// transient failures (network errors and 5xx responses) with exponential
+// backoff. Non-retryable responses (2xx success, 400 "already fulfilled", and
+// other 4xx errors) terminate the loop immediately. When all attempts fail the
+// final failure is surfaced clearly so the result is not silently dropped.
+func (svc *serviceContext) sendPostbackWithRetry(
+	ctx context.Context,
+	message *interpreter.Message,
+	device agent.Device,
+	resultBytes []byte,
+	logger hclog.Logger,
+) {
+	maxAttempts := svc.PostbackMaxAttempts
+	if maxAttempts < 1 {
+		maxAttempts = postbackMaxAttempts
+	}
+	baseBackoff := svc.PostbackBaseRetryBackoff
+	if baseBackoff <= 0 {
+		baseBackoff = postbackBaseRetryBackoff
+	}
+
+	var lastErr error
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		if attempt > 1 {
+			backoff := baseBackoff * (1 << (attempt - 2))
+			logger.Info(
+				"Retrying postback",
+				"post_id", message.PostId,
+				"attempt", attempt,
+				"max_attempts", maxAttempts,
+				"backoff", backoff,
+			)
+			select {
+			case <-ctx.Done():
+				logger.Error(
+					"Postback aborted before retry: context cancelled",
+					"post_id", message.PostId,
+					"attempts", attempt-1,
+					"error", ctx.Err(),
+				)
+				return
+			case <-time.After(backoff):
+			}
+		}
+
+		done, err := svc.attemptPostback(ctx, message, device, resultBytes, logger, attempt)
+		if done {
+			return
+		}
+		lastErr = err
+	}
+
+	logger.Error(
+		"Postback failed: all retries exhausted, result dropped",
+		"post_id", message.PostId,
+		"attempts", maxAttempts,
+		"last_error", lastErr,
+	)
+}
+
+// attemptPostback performs a single postback attempt. It returns done=true
+// when no further retries should occur (success, "already fulfilled", or a
+// non-retryable 4xx response). When done=false the caller should retry; the
+// returned error describes the most recent failure for the final summary log.
+func (svc *serviceContext) attemptPostback(
+	ctx context.Context,
+	message *interpreter.Message,
+	device agent.Device,
+	resultBytes []byte,
+	logger hclog.Logger,
+	attempt int,
+) (bool, error) {
 	postbackReq, err := message.CreatePostbackRequest(
 		ctx,
 		device,
 		bytes.NewReader(resultBytes),
 	)
 	if err != nil {
-		logger.Error("Failed to create postback request", "error", err)
-		return
+		logger.Error(
+			"Failed to create postback request",
+			"post_id", message.PostId,
+			"attempt", attempt,
+			"error", err,
+		)
+		return true, err
 	}
 
-	logger.Info("Sending postback", "post_id", message.PostId, "url", postbackReq.URL)
+	if attempt == 1 {
+		logger.Info("Sending postback", "post_id", message.PostId, "url", postbackReq.URL)
+	}
+
 	res, err := svc.HTTPClient.Do(postbackReq)
 	if err != nil {
-		logger.Error("Failed to send postback", "error", err)
-		return
+		logger.Error(
+			"Failed to send postback",
+			"post_id", message.PostId,
+			"attempt", attempt,
+			"error", err,
+		)
+		return false, err
 	}
 	defer func() {
-		err = res.Body.Close()
-		if err != nil {
-			logger.Error("Failed to close response", "error", err)
+		if cerr := res.Body.Close(); cerr != nil {
+			logger.Error("Failed to close response", "error", cerr)
 		}
 	}()
 
 	bodyBytes, err := io.ReadAll(res.Body)
 	if err != nil {
-		logger.Error("Failed to read postback response body", "error", err)
-		return
+		logger.Error(
+			"Failed to read postback response body",
+			"post_id", message.PostId,
+			"attempt", attempt,
+			"error", err,
+		)
+		return false, err
 	}
 
 	if res.StatusCode == http.StatusOK {
-		logger.Info("Postback sent", "post_id", message.PostId)
+		logger.Info("Postback sent", "post_id", message.PostId, "attempt", attempt)
 		if len(bodyBytes) > 0 {
 			logger.Info("Received response", "data", string(bodyBytes))
 		}
-		return
+		return true, nil
 	}
 
 	var response errorResponse
-	err = json.Unmarshal(bodyBytes, &response)
-	if err != nil {
-		logger.Error(
-			"Postback failed",
-			"post_id",
-			message.PostId,
-			"status_code",
-			res.StatusCode,
-		)
-		if len(bodyBytes) > 0 {
-			logger.Error("Received error response", "data", string(bodyBytes))
-		}
-		return
-	}
+	parseErr := json.Unmarshal(bodyBytes, &response)
 
-	if res.StatusCode == http.StatusBadRequest &&
+	if parseErr == nil && res.StatusCode == http.StatusBadRequest &&
 		strings.Contains(strings.ToLower(response.Error), "fulfilled") {
 		logger.Info("Postback already sent", "post_id", message.PostId)
-		return
+		return true, nil
+	}
+
+	// 5xx responses (and any other unexpected non-2xx without a parseable body)
+	// are treated as transient. 4xx responses with a parseable error body are
+	// terminal — retrying a malformed request will not help.
+	retryable := res.StatusCode >= 500 || parseErr != nil
+
+	if retryable {
+		logger.Error(
+			"Postback failed (will retry if attempts remain)",
+			"post_id", message.PostId,
+			"attempt", attempt,
+			"status_code", res.StatusCode,
+			"message", response.Error,
+		)
+		if parseErr != nil && len(bodyBytes) > 0 {
+			logger.Error("Received error response", "data", string(bodyBytes))
+		}
+		return false, fmt.Errorf("postback failed: status %d: %s", res.StatusCode, response.Error)
 	}
 
 	logger.Error(
-		"Postback failed",
-		"post_id",
-		message.PostId,
-		"status_code",
-		res.StatusCode,
-		"message",
-		response.Error,
+		"Postback failed (non-retryable)",
+		"post_id", message.PostId,
+		"attempt", attempt,
+		"status_code", res.StatusCode,
+		"message", response.Error,
 	)
+	return true, fmt.Errorf("postback failed: status %d: %s", res.StatusCode, response.Error)
 }
 
 func runService(params *serviceContext) {
