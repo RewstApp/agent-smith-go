@@ -1,0 +1,51 @@
+name: Validate config
+description: Assert config.json contains the required fields and rewst_org_id matches the expected value. Also exposes device_id as an output.
+
+inputs:
+  config_dir:
+    description: "Directory containing the per-org agent config (without org id suffix)"
+    required: true
+  org_id:
+    description: "Expected rewst_org_id"
+    required: true
+
+outputs:
+  device_id:
+    description: "device_id read from config.json"
+    value: ${{ steps.parse.outputs.device_id }}
+
+runs:
+  using: composite
+  steps:
+    - name: Parse and validate config.json
+      id: parse
+      shell: pwsh
+      run: |
+        $configPath = "${{ inputs.config_dir }}/${{ inputs.org_id }}/config.json"
+        if (-not (Test-Path $configPath)) {
+          Write-Error "config.json not found at $configPath"
+          exit 1
+        }
+        $config = Get-Content $configPath -Raw | ConvertFrom-Json
+
+        $required = @("device_id", "rewst_org_id", "rewst_engine_host", "shared_access_key", "azure_iot_hub_host")
+        $failed = $false
+        foreach ($field in $required) {
+          $value = $config.$field
+          if ([string]::IsNullOrWhiteSpace($value)) {
+            Write-Error "Config field '$field' is missing or empty"
+            $failed = $true
+          } else {
+            Write-Output "OK: $field = $value"
+          }
+        }
+
+        if ($config.rewst_org_id -ne "${{ inputs.org_id }}") {
+          Write-Error "rewst_org_id '$($config.rewst_org_id)' does not match expected '${{ inputs.org_id }}'"
+          $failed = $true
+        }
+
+        if ($failed) { exit 1 }
+
+        "device_id=$($config.device_id)" >> $env:GITHUB_OUTPUT
+        Write-Output "All config.json fields validated"

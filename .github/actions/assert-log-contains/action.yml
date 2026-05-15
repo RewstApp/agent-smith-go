@@ -1,0 +1,70 @@
+name: Assert log contains
+description: Assert that a log file contains every supplied pattern (substring match). Optionally sleeps before reading the log.
+
+inputs:
+  log_file:
+    description: "Path to the log file"
+    required: true
+  patterns:
+    description: "Newline-separated list of required substrings"
+    required: true
+  wait_seconds:
+    description: "Seconds to sleep before reading the log"
+    required: false
+    default: "0"
+  subscribed_topic_qos:
+    description: "When 'true', additionally require the matching line to include 'topic=' and 'qos=' tokens (used by the 'Subscribed to messages' check)"
+    required: false
+    default: "false"
+
+runs:
+  using: composite
+  steps:
+    - name: Assert log contains
+      shell: pwsh
+      env:
+        LOG_FILE: ${{ inputs.log_file }}
+        PATTERNS: ${{ inputs.patterns }}
+        WAIT_SECONDS: ${{ inputs.wait_seconds }}
+        SUBSCRIBED: ${{ inputs.subscribed_topic_qos }}
+      run: |
+        if ([int]$env:WAIT_SECONDS -gt 0) {
+          Start-Sleep -Seconds ([int]$env:WAIT_SECONDS)
+        }
+
+        if (-not (Test-Path $env:LOG_FILE)) {
+          Write-Error "Log file not found: $env:LOG_FILE"
+          exit 1
+        }
+        $logContent = Get-Content $env:LOG_FILE -Raw
+        Write-Output $logContent
+
+        $patternList = $env:PATTERNS -split "`r?`n" | Where-Object { $_ -and $_.Trim() }
+        $failed = $false
+        foreach ($pattern in $patternList) {
+          if ($logContent -notmatch [regex]::Escape($pattern)) {
+            Write-Error "Expected log line not found: $pattern"
+            $failed = $true
+          } else {
+            Write-Output "OK: found '$pattern'"
+          }
+        }
+
+        if ($env:SUBSCRIBED -eq "true") {
+          $subscribedLine = ($logContent -split "`r?`n" | Where-Object { $_ -match "Subscribed to messages" } | Select-Object -First 1)
+          if (-not $subscribedLine) {
+            Write-Error "Expected 'Subscribed to messages' not found in logs"
+            $failed = $true
+          } else {
+            foreach ($token in @("topic=", "qos=")) {
+              if ($subscribedLine -notmatch [regex]::Escape($token)) {
+                Write-Error "Expected '$token' not found in 'Subscribed to messages' log line"
+                $failed = $true
+              }
+            }
+            Write-Output "Subscribed messages log: $subscribedLine"
+          }
+        }
+
+        if ($failed) { exit 1 }
+        Write-Output "All expected log patterns found"

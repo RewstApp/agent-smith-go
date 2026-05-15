@@ -1,0 +1,26 @@
+name: Delete log
+description: Delete the agent log file at the supplied path. Uses sudo on Unix.
+
+inputs:
+  log_file:
+    description: "Path to the log file"
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Delete log (Unix)
+      if: runner.os != 'Windows'
+      shell: bash
+      env:
+        LOG_FILE: ${{ inputs.log_file }}
+      run: |
+        sudo rm -f "$LOG_FILE"
+
+    - name: Delete log (Windows)
+      if: runner.os == 'Windows'
+      shell: pwsh
+      env:
+        LOG_FILE: ${{ inputs.log_file }}
+      run: |
+        Remove-Item -Force "$env:LOG_FILE"

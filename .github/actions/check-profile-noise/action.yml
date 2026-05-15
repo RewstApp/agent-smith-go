@@ -1,0 +1,34 @@
+name: Check install output for profile noise
+description: Assert that the injected PowerShell profile noise is NOT present in the captured install output, proving that the agent installer suppresses the PowerShell profile via -NoProfile. Windows-only - a no-op on other runners.
+
+inputs:
+  install_output_path:
+    description: "Path to the file containing the captured install output"
+    required: true
+  noise:
+    description: "Marker injected by the inject-profile-noise action"
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Check install output for profile noise
+      if: runner.os == 'Windows'
+      shell: pwsh
+      env:
+        INSTALL_OUTPUT_PATH: ${{ inputs.install_output_path }}
+        NOISE: ${{ inputs.noise }}
+      run: |
+        if (-not (Test-Path $env:INSTALL_OUTPUT_PATH)) {
+          Write-Error "Install output file not found: $env:INSTALL_OUTPUT_PATH"
+          exit 1
+        }
+        $installOutput = Get-Content $env:INSTALL_OUTPUT_PATH -Raw
+        Write-Output "=== Install output ==="
+        Write-Output $installOutput
+        Write-Output "======================"
+        if ($installOutput -match [regex]::Escape($env:NOISE)) {
+          Write-Error "FAIL: Profile noise '$env:NOISE' found in install output - PowerShell profile output contaminated agent data"
+          exit 1
+        }
+        Write-Output "PASS: Profile noise not found in install output - -NoProfile flag correctly suppresses profile output"

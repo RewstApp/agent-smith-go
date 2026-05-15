@@ -1,0 +1,42 @@
+name: Wait for log line
+description: Poll a log file until it contains the supplied pattern or the attempt budget is exhausted. Does not fail if the pattern never appears - asserting presence is the caller's job.
+
+inputs:
+  log_file:
+    description: "Path to the log file"
+    required: true
+  pattern:
+    description: "Substring to wait for"
+    required: true
+  max_attempts:
+    description: "Maximum number of poll attempts"
+    required: false
+    default: "60"
+  interval_seconds:
+    description: "Seconds between poll attempts"
+    required: false
+    default: "2"
+
+runs:
+  using: composite
+  steps:
+    - name: Wait for log line
+      shell: pwsh
+      env:
+        LOG_FILE: ${{ inputs.log_file }}
+        PATTERN: ${{ inputs.pattern }}
+        MAX_ATTEMPTS: ${{ inputs.max_attempts }}
+        INTERVAL: ${{ inputs.interval_seconds }}
+      run: |
+        $maxAttempts = [int]$env:MAX_ATTEMPTS
+        $interval = [int]$env:INTERVAL
+        Write-Output "Waiting for '$env:PATTERN' in $env:LOG_FILE (up to $maxAttempts attempts, $interval s interval)..."
+        for ($i = 1; $i -le $maxAttempts; $i++) {
+          $logContent = Get-Content $env:LOG_FILE -Raw -ErrorAction SilentlyContinue
+          if ($logContent -and ($logContent -match [regex]::Escape($env:PATTERN))) {
+            Write-Output "Pattern '$env:PATTERN' found after $i attempt(s) (~$($i * $interval)s)"
+            exit 0
+          }
+          Start-Sleep -Seconds $interval
+        }
+        Write-Output "Pattern '$env:PATTERN' did not appear within $maxAttempts attempts; downstream assertions will surface the failure"

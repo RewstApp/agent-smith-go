@@ -1,0 +1,25 @@
+name: Run agent command
+description: Run the agent binary with the supplied arguments. Uses sudo on Unix and runs natively on Windows.
+
+inputs:
+  binary:
+    description: "File name (under ./dist) of the agent binary to invoke"
+    required: true
+  args:
+    description: "Arguments to pass to the agent binary"
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Run agent (Unix)
+      if: runner.os != 'Windows'
+      shell: bash
+      run: |
+        sudo "./dist/${{ inputs.binary }}" ${{ inputs.args }}
+
+    - name: Run agent (Windows)
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        & "./dist/${{ inputs.binary }}" ${{ inputs.args }}

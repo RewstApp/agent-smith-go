@@ -1,0 +1,29 @@
+name: Assert uninstalled
+description: Assert that the supplied list of paths no longer exists. Each line is treated as one path. Pwsh-style environment variables (e.g. $env:TMPDIR) are expanded before checking.
+
+inputs:
+  paths:
+    description: "Newline-separated list of paths that must not exist"
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Assert uninstalled
+      shell: pwsh
+      env:
+        PATHS: ${{ inputs.paths }}
+      run: |
+        $pathList = $env:PATHS -split "`r?`n" | Where-Object { $_ -and $_.Trim() }
+        $failed = $false
+        foreach ($path in $pathList) {
+          $expanded = $ExecutionContext.InvokeCommand.ExpandString($path).Trim()
+          if (Test-Path -Path $expanded) {
+            Write-Error "Path still exists: $expanded"
+            $failed = $true
+          } else {
+            Write-Output "OK: $expanded is gone"
+          }
+        }
+        if ($failed) { exit 1 }
+        Write-Output "All directories have been deleted"
