@@ -1,0 +1,28 @@
+name: Stop service
+description: Stop the agent service via the appropriate platform service manager.
+
+inputs:
+  service:
+    description: "Service name"
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Stop service (Linux)
+      if: runner.os == 'Linux'
+      shell: bash
+      run: |
+        sudo systemctl stop "${{ inputs.service }}"
+
+    - name: Stop service (Windows)
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        sc.exe stop "${{ inputs.service }}"
+
+    - name: Stop service (macOS)
+      if: runner.os == 'macOS'
+      shell: bash
+      run: |
+        sudo launchctl stop "system/${{ inputs.service }}" || true

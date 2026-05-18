@@ -1,0 +1,50 @@
+name: Verify auto update completed
+description: Assert the agent's log shows the auto updater ran and that the agent is no longer running the integration-test version (v0.0.0-it).
+
+inputs:
+  log_file:
+    description: "Path to the agent log file"
+    required: true
+  wait_seconds:
+    description: "Seconds to sleep before reading the log"
+    required: false
+    default: "15"
+  it_version:
+    description: "Version token expected to be absent from the last 'Agent Smith started' line"
+    required: false
+    default: "version=v0.0.0-it"
+
+runs:
+  using: composite
+  steps:
+    - name: Verify auto update completed
+      shell: pwsh
+      env:
+        LOG_FILE: ${{ inputs.log_file }}
+        WAIT_SECONDS: ${{ inputs.wait_seconds }}
+        IT_VERSION: ${{ inputs.it_version }}
+      run: |
+        Start-Sleep -Seconds ([int]$env:WAIT_SECONDS)
+        if (-not (Test-Path $env:LOG_FILE)) {
+          Write-Error "Log file not found: $env:LOG_FILE"
+          exit 1
+        }
+        $logContent = Get-Content $env:LOG_FILE -Raw
+        Write-Output $logContent
+
+        $failed = $false
+        foreach ($pattern in @("Checking for updates", "Updating agent")) {
+          if ($logContent -notmatch [regex]::Escape($pattern)) {
+            Write-Error "Expected auto update log line not found: $pattern"
+            $failed = $true
+          }
+        }
+
+        $lastStartLine = ($logContent -split "`r?`n" | Where-Object { $_ -match "Agent Smith started" } | Select-Object -Last 1)
+        if ($lastStartLine -and ($lastStartLine -match [regex]::Escape($env:IT_VERSION))) {
+          Write-Error "Agent is still running the integration test version after update: $lastStartLine"
+          $failed = $true
+        }
+
+        if ($failed) { exit 1 }
+        Write-Output "Auto updater integration test passed"

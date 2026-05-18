@@ -1,0 +1,27 @@
+name: Send command
+description: Send a command to the agent via the Rewst trigger webhook using curl.
+
+inputs:
+  trigger_url:
+    description: "Rewst trigger URL"
+    required: true
+  device_id:
+    description: "Target device id"
+    required: true
+  commands:
+    description: "Raw value for the curl --form commands=... field. Should already include any surrounding quoting expected by the Rewst engine."
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Send command
+      shell: bash
+      env:
+        TRIGGER_URL: ${{ inputs.trigger_url }}
+        DEVICE_ID: ${{ inputs.device_id }}
+        COMMANDS: ${{ inputs.commands }}
+      run: |
+        curl --location "$TRIGGER_URL" \
+          --form "device_id=\"$DEVICE_ID\"" \
+          --form "commands=$COMMANDS"

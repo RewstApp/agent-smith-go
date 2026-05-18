@@ -1,0 +1,76 @@
+name: Install agent
+description: Download compiled and integration test binaries, install the agent, and tee install output for later assertions.
+
+inputs:
+  os:
+    description: "Matrix OS (ubuntu-latest, windows-latest, macos-latest)"
+    required: true
+  binary:
+    description: "File name of the compiled agent binary (e.g. rewst_agent_config.linux.bin)"
+    required: true
+  it_binary:
+    description: "File name of the integration test agent binary"
+    required: true
+  config_url:
+    description: "Rewst config URL"
+    required: true
+  config_secret:
+    description: "Rewst config secret"
+    required: true
+  org_id:
+    description: "Rewst org id"
+    required: true
+  github_token:
+    description: "GitHub token used by the agent installer"
+    required: true
+
+outputs:
+  install_output_path:
+    description: "Path of the file containing the captured install output"
+    value: ${{ steps.install-unix.outputs.path || steps.install-windows.outputs.path }}
+
+runs:
+  using: composite
+  steps:
+    - name: Download compiled binary
+      uses: actions/download-artifact@v8
+      with:
+        name: ${{ inputs.os }}
+        path: ./dist
+
+    - name: Download integration test binary
+      uses: actions/download-artifact@v8
+      with:
+        name: it-${{ inputs.os }}
+        path: ./dist
+
+    - name: Make binaries executable
+      if: runner.os != 'Windows'
+      shell: bash
+      run: |
+        chmod +x "./dist/${{ inputs.binary }}"
+        chmod +x "./dist/${{ inputs.it_binary }}"
+
+    - name: Install agent (Unix)
+      id: install-unix
+      if: runner.os != 'Windows'
+      shell: bash
+      run: |
+        sudo "./dist/${{ inputs.binary }}" \
+          --config-url "${{ inputs.config_url }}" \
+          --config-secret "${{ inputs.config_secret }}" \
+          --org-id "${{ inputs.org_id }}" \
+          --github-token "${{ inputs.github_token }}" 2>&1 | tee install_output.txt
+        echo "path=install_output.txt" >> "$GITHUB_OUTPUT"
+
+    - name: Install agent (Windows)
+      id: install-windows
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        ./dist/${{ inputs.binary }} `
+          --config-url "${{ inputs.config_url }}" `
+          --config-secret "${{ inputs.config_secret }}" `
+          --org-id "${{ inputs.org_id }}" `
+          --github-token "${{ inputs.github_token }}" 2>&1 | Tee-Object -FilePath install_output.txt
+        "path=install_output.txt" >> $env:GITHUB_OUTPUT

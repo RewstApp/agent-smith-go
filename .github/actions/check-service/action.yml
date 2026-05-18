@@ -1,0 +1,28 @@
+name: Check service
+description: Query the platform service manager to confirm the agent service is registered.
+
+inputs:
+  service:
+    description: "Service name"
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Check service (Linux)
+      if: runner.os == 'Linux'
+      shell: bash
+      run: |
+        systemctl status "${{ inputs.service }}"
+
+    - name: Check service (Windows)
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        sc.exe query "${{ inputs.service }}"
+
+    - name: Check service (macOS)
+      if: runner.os == 'macOS'
+      shell: bash
+      run: |
+        sudo launchctl print "system/${{ inputs.service }}"

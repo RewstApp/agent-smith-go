@@ -1,0 +1,72 @@
+name: Assert syslog contains
+description: Assert that the platform system log (journalctl / Windows Event Log / macOS unified log) contains the supplied pattern for the given service.
+
+inputs:
+  service:
+    description: "Service name used as syslog tag / Event Log provider name"
+    required: true
+  pattern:
+    description: "Substring that must appear in the syslog entries"
+    required: true
+  wait_seconds:
+    description: "Seconds to sleep before reading the syslog"
+    required: false
+    default: "15"
+
+runs:
+  using: composite
+  steps:
+    - name: Assert syslog contains (Linux)
+      if: runner.os == 'Linux'
+      shell: bash
+      env:
+        SERVICE: ${{ inputs.service }}
+        PATTERN: ${{ inputs.pattern }}
+        WAIT_SECONDS: ${{ inputs.wait_seconds }}
+      run: |
+        sleep "$WAIT_SECONDS"
+        entries=$(journalctl -t "$SERVICE" --no-pager 2>/dev/null || sudo grep "$SERVICE" /var/log/syslog 2>/dev/null || sudo grep "$SERVICE" /var/log/messages 2>/dev/null || true)
+        echo "$entries"
+
+        if ! echo "$entries" | grep -qF "$PATTERN"; then
+          echo "ERROR: Expected '$PATTERN' entry not found in syslog"
+          exit 1
+        fi
+        echo "Found '$PATTERN' in syslog"
+
+    - name: Assert syslog contains (Windows)
+      if: runner.os == 'Windows'
+      shell: pwsh
+      env:
+        SERVICE: ${{ inputs.service }}
+        PATTERN: ${{ inputs.pattern }}
+        WAIT_SECONDS: ${{ inputs.wait_seconds }}
+      run: |
+        Start-Sleep -Seconds ([int]$env:WAIT_SECONDS)
+        $events = Get-WinEvent -LogName Application -FilterXPath "*[System[Provider[@Name='$env:SERVICE']]]"
+        Write-Output "Found $($events.Count) event(s)"
+        $events | ForEach-Object { Write-Output $_.Message }
+
+        $matched = $events | Where-Object { $_.Message -match [regex]::Escape($env:PATTERN) }
+        if (-not $matched) {
+          Write-Error "Expected '$env:PATTERN' entry not found in Windows Event Log"
+          exit 1
+        }
+        Write-Output "Found '$env:PATTERN' in Windows Event Log"
+
+    - name: Assert syslog contains (macOS)
+      if: runner.os == 'macOS'
+      shell: bash
+      env:
+        PATTERN: ${{ inputs.pattern }}
+        WAIT_SECONDS: ${{ inputs.wait_seconds }}
+      run: |
+        sleep "$WAIT_SECONDS"
+        entries=$(log show --predicate 'processImagePath contains "logger"' --info --last 5m 2>/dev/null || true)
+        echo "$entries"
+
+        if ! echo "$entries" | grep -qF "$PATTERN"; then
+          echo "ERROR: Expected '$PATTERN' entry not found in syslog"
+          exit 1
+        fi
+        echo "Found '$PATTERN' in syslog"

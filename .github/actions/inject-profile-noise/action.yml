@@ -1,0 +1,22 @@
+name: Inject PowerShell profile noise
+description: Inject a unique marker into the all-users Windows PowerShell profile so a downstream step can verify that -NoProfile is honoured during agent install. Windows-only - a no-op on other runners.
+
+outputs:
+  noise:
+    description: "Unique marker string injected into the profile (empty on non-Windows runners)"
+    value: ${{ steps.inject.outputs.noise }}
+
+runs:
+  using: composite
+  steps:
+    - name: Inject profile noise
+      id: inject
+      if: runner.os == 'Windows'
+      shell: powershell
+      run: |
+        $noise = "PROFILE_NOISE_$(New-Guid)"
+        $profilePath = $PROFILE.AllUsersAllHosts
+        New-Item -ItemType Directory -Force -Path (Split-Path $profilePath) | Out-Null
+        Add-Content -Path $profilePath -Value "Write-Output '$noise'"
+        Write-Output "Profile noise '$noise' injected to: $profilePath"
+        "noise=$noise" >> $env:GITHUB_OUTPUT
