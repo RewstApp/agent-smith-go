@@ -6,6 +6,14 @@ type AgentParams struct {
 	OrgId               string
 	ConfigFilePath      string
 	LogFilePath         string
+	// ServiceUsername, when non-empty, registers the service to run as the
+	// given account instead of the platform default (LocalSystem on Windows,
+	// root on Linux/macOS).
+	ServiceUsername string
+	// ServicePassword is the password for ServiceUsername on Windows. It is
+	// only consulted at service registration time and must never be persisted
+	// to disk. Linux and macOS service managers ignore it.
+	ServicePassword string
 }
 
 type Service interface {

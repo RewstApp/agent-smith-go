@@ -411,6 +411,69 @@ func TestRunConfig_ServiceStartFails(t *testing.T) {
 	}
 }
 
+func TestRunConfig_PassesServiceCredentialsToServiceManager(t *testing.T) {
+	srv := newConfigServer(t, http.StatusOK, validConfigResponseBody("test-org"))
+	defer srv.Close()
+
+	mgr := &mockServiceManager{
+		openErr:       errors.New("no existing service"),
+		createService: &mockService{},
+	}
+
+	params := newBaseConfigParams(srv.URL)
+	params.ServiceManager = mgr
+	params.ServiceUsername = "DOMAIN\\svc_rewst"
+	params.ServicePassword = "p@ss"
+
+	if err := runConfig(params); err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+
+	if len(mgr.createCalls) != 1 {
+		t.Fatalf("expected 1 Create call, got %d", len(mgr.createCalls))
+	}
+	got := mgr.createCalls[0]
+	if got.ServiceUsername != "DOMAIN\\svc_rewst" {
+		t.Errorf(
+			"expected ServiceUsername %q, got %q",
+			"DOMAIN\\svc_rewst",
+			got.ServiceUsername,
+		)
+	}
+	if got.ServicePassword != "p@ss" {
+		t.Errorf("expected ServicePassword %q, got %q", "p@ss", got.ServicePassword)
+	}
+}
+
+func TestRunConfig_PasswordNotPersistedToDisk(t *testing.T) {
+	srv := newConfigServer(t, http.StatusOK, validConfigResponseBody("test-org"))
+	defer srv.Close()
+
+	writtenFiles := map[string][]byte{}
+	params := newBaseConfigParams(srv.URL)
+	params.FS = &mockFileSystem{
+		mkdirAllFunc: func(string) error { return nil },
+		writeFileFunc: func(name string, data []byte, _ os.FileMode) error {
+			writtenFiles[name] = data
+			return nil
+		},
+		readFileFunc:   func(string) ([]byte, error) { return []byte("binary"), nil },
+		executableFunc: func() (string, error) { return "/fake/agent", nil },
+	}
+	params.ServiceUsername = "DOMAIN\\svc_rewst"
+	params.ServicePassword = "super-secret-password"
+
+	if err := runConfig(params); err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+
+	for name, data := range writtenFiles {
+		if strings.Contains(string(data), "super-secret-password") {
+			t.Errorf("password leaked into file %q", name)
+		}
+	}
+}
+
 func TestRunConfig_HTTPTimeout(t *testing.T) {
 	done := make(chan struct{})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

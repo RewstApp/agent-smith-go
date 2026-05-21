@@ -74,13 +74,16 @@ func (s *defaultServiceManager) Create(params AgentParams) (Service, error) {
 	fmt.Fprintf(&serviceConfig, "[Unit]\nDescription=%s\n\n", params.Name)
 	fmt.Fprintf(
 		&serviceConfig,
-		"[Service]\nExecStart=%s --org-id %s --config-file %s --log-file %s\nRestart=always\n\n",
+		"[Service]\nExecStart=%s --org-id %s --config-file %s --log-file %s\nRestart=always\n",
 		params.AgentExecutablePath,
 		params.OrgId,
 		params.ConfigFilePath,
 		params.LogFilePath,
 	)
-	fmt.Fprintf(&serviceConfig, "[Install]\nWantedBy=multi-user.target\n")
+	if params.ServiceUsername != "" {
+		fmt.Fprintf(&serviceConfig, "User=%s\nGroup=%s\n", params.ServiceUsername, params.ServiceUsername)
+	}
+	fmt.Fprintf(&serviceConfig, "\n[Install]\nWantedBy=multi-user.target\n")
 
 	serviceConfigFilePath := s.system.ServiceConfigFilePath(params.Name)
 	err := os.WriteFile(serviceConfigFilePath, []byte(serviceConfig.String()), utils.DefaultFileMod)
