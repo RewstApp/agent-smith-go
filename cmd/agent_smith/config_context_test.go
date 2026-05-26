@@ -76,7 +76,11 @@ func TestNewConfigContext(t *testing.T) {
 		t.Fatalf("expected no error with service credentials, got %v", err)
 	}
 	if resultWithCreds.ServiceUsername != "DOMAIN\\svc_rewst" {
-		t.Errorf("expected ServiceUsername %q, got %q", "DOMAIN\\svc_rewst", resultWithCreds.ServiceUsername)
+		t.Errorf(
+			"expected ServiceUsername %q, got %q",
+			"DOMAIN\\svc_rewst",
+			resultWithCreds.ServiceUsername,
+		)
 	}
 	if resultWithCreds.ServicePassword != "p@ss" {
 		t.Errorf("expected ServicePassword %q, got %q", "p@ss", resultWithCreds.ServicePassword)

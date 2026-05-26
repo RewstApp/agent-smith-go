@@ -132,7 +132,13 @@ func runUpdate(params *updateContext) {
 	// new account takes effect. Otherwise just restart the existing
 	// registration.
 	if params.ServiceUsername != "" {
-		logger.Info("Re-registering service with new account", "service", name, "user", params.ServiceUsername)
+		logger.Info(
+			"Re-registering service with new account",
+			"service",
+			name,
+			"user",
+			params.ServiceUsername,
+		)
 
 		if err := svc.Delete(); err != nil {
 			logger.Error("Failed to delete service", "service", name, "error", err)

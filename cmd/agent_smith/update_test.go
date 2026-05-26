@@ -213,10 +213,18 @@ func TestRunUpdate_WithServiceUsername_RecreatesService(t *testing.T) {
 	}
 	got := mgr.createCalls[0]
 	if got.ServiceUsername != "rewst" {
-		t.Errorf("expected ServiceUsername %q in Create params, got %q", "rewst", got.ServiceUsername)
+		t.Errorf(
+			"expected ServiceUsername %q in Create params, got %q",
+			"rewst",
+			got.ServiceUsername,
+		)
 	}
 	if got.ServicePassword != "p@ss" {
-		t.Errorf("expected ServicePassword %q in Create params, got %q", "p@ss", got.ServicePassword)
+		t.Errorf(
+			"expected ServicePassword %q in Create params, got %q",
+			"p@ss",
+			got.ServicePassword,
+		)
 	}
 }
 
