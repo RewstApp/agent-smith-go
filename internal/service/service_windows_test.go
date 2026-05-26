@@ -67,6 +67,9 @@ type mockWindowsServiceManager struct {
 	createErr    error
 	openErr      error
 	disconnected bool
+
+	lastCreateConfig mgr.Config
+	createCalled     bool
 }
 
 func (m *mockWindowsServiceManager) Disconnect() error {
@@ -79,6 +82,8 @@ func (m *mockWindowsServiceManager) CreateService(
 	c mgr.Config,
 	args ...string,
 ) (*mgr.Service, error) {
+	m.createCalled = true
+	m.lastCreateConfig = c
 	return nil, m.createErr
 }
 
@@ -320,6 +325,57 @@ func TestDefaultServiceManager_Create_DisconnectsOnSuccess(t *testing.T) {
 
 	if !manager.disconnected {
 		t.Error("expected Disconnect to be called after success")
+	}
+}
+
+func TestDefaultServiceManager_Create_DefaultsToLocalSystem(t *testing.T) {
+	manager := &mockWindowsServiceManager{}
+	factory := &mockWindowsServiceManagerFactory{manager: manager}
+	sm := &defaultServiceManager{factory: factory}
+
+	_, err := sm.Create(AgentParams{Name: "test-svc"})
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if !manager.createCalled {
+		t.Fatal("expected CreateService to be called")
+	}
+	if manager.lastCreateConfig.ServiceStartName != "" {
+		t.Errorf(
+			"expected empty ServiceStartName when ServiceUsername unset, got %q",
+			manager.lastCreateConfig.ServiceStartName,
+		)
+	}
+	if manager.lastCreateConfig.Password != "" {
+		t.Errorf(
+			"expected empty Password when ServiceUsername unset, got %q",
+			manager.lastCreateConfig.Password,
+		)
+	}
+}
+
+func TestDefaultServiceManager_Create_AppliesServiceCredentials(t *testing.T) {
+	manager := &mockWindowsServiceManager{}
+	factory := &mockWindowsServiceManagerFactory{manager: manager}
+	sm := &defaultServiceManager{factory: factory}
+
+	_, err := sm.Create(AgentParams{
+		Name:            "test-svc",
+		ServiceUsername: "DOMAIN\\svc_rewst",
+		ServicePassword: "p@ss",
+	})
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if manager.lastCreateConfig.ServiceStartName != "DOMAIN\\svc_rewst" {
+		t.Errorf(
+			"expected ServiceStartName %q, got %q",
+			"DOMAIN\\svc_rewst",
+			manager.lastCreateConfig.ServiceStartName,
+		)
+	}
+	if manager.lastCreateConfig.Password != "p@ss" {
+		t.Errorf("expected Password %q, got %q", "p@ss", manager.lastCreateConfig.Password)
 	}
 }
 

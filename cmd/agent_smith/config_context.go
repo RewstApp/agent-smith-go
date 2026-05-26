@@ -24,6 +24,8 @@ type configContext struct {
 	NoAutoUpdates        bool
 	GithubToken          string
 	MqttQos              int
+	ServiceUsername      string
+	ServicePassword      string
 
 	Sys    agent.SystemInfoProvider
 	Domain agent.DomainInfoProvider
@@ -62,6 +64,18 @@ func newConfigContext(
 	fs.BoolVar(&params.NoAutoUpdates, "no-auto-updates", false, "No auto updates")
 	fs.StringVar(&params.GithubToken, "github-token", "", "GitHub token for update checks")
 	fs.IntVar(&params.MqttQos, "mqtt-qos", -1, "MQTT subscription QoS level (0, 1, or 2)")
+	fs.StringVar(
+		&params.ServiceUsername,
+		"service-username",
+		"",
+		"User account the service should run as (e.g. DOMAIN\\svc_rewst on Windows, rewst on Linux/macOS)",
+	)
+	fs.StringVar(
+		&params.ServicePassword,
+		"service-password",
+		"",
+		"Password for --service-username (Windows only; not persisted to disk)",
+	)
 	fs.SetOutput(bytes.NewBuffer([]byte{}))
 
 	err := fs.Parse(args)
@@ -87,6 +101,10 @@ func newConfigContext(
 
 	if params.MqttQos != -1 && (params.MqttQos < 0 || params.MqttQos > 2) {
 		return nil, fmt.Errorf("invalid mqtt-qos: must be 0, 1, or 2")
+	}
+
+	if params.ServicePassword != "" && params.ServiceUsername == "" {
+		return nil, fmt.Errorf("service-password requires service-username")
 	}
 
 	params.Sys = sys

@@ -316,6 +316,45 @@ func TestDefaultServiceManager_Create_PlistContent(t *testing.T) {
 	}
 }
 
+func TestDefaultServiceManager_Create_PlistOmitsUserNameByDefault(t *testing.T) {
+	tmpFile := newTempPlistPath(t)
+	mock := &mockLaunchCtl{plistPath: tmpFile}
+	sm := &defaultServiceManager{system: mock}
+
+	if _, err := sm.Create(AgentParams{Name: "my-service"}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	data, err := os.ReadFile(tmpFile)
+	if err != nil {
+		t.Fatalf("failed to read plist file: %v", err)
+	}
+	if strings.Contains(string(data), "<key>UserName</key>") {
+		t.Errorf("expected no UserName key when ServiceUsername unset, got:\n%s", data)
+	}
+}
+
+func TestDefaultServiceManager_Create_PlistIncludesUserName(t *testing.T) {
+	tmpFile := newTempPlistPath(t)
+	mock := &mockLaunchCtl{plistPath: tmpFile}
+	sm := &defaultServiceManager{system: mock}
+
+	if _, err := sm.Create(AgentParams{Name: "my-service", ServiceUsername: "rewst"}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	data, err := os.ReadFile(tmpFile)
+	if err != nil {
+		t.Fatalf("failed to read plist file: %v", err)
+	}
+	content := string(data)
+	for _, check := range []string{"<key>UserName</key>", "<string>rewst</string>"} {
+		if !strings.Contains(content, check) {
+			t.Errorf("expected plist to contain %q, got:\n%s", check, content)
+		}
+	}
+}
+
 func TestDefaultServiceManager_Create_WriteFileError(t *testing.T) {
 	mock := &mockLaunchCtl{plistPath: "/nonexistent/dir/file.plist"}
 	sm := &defaultServiceManager{system: mock}

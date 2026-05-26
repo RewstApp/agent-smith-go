@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/RewstApp/agent-smith-go/internal/agent"
+	"github.com/RewstApp/agent-smith-go/internal/service"
 	"github.com/RewstApp/agent-smith-go/internal/utils"
 	"github.com/RewstApp/agent-smith-go/internal/version"
 )
@@ -26,8 +27,10 @@ func runUpdate(params *updateContext) {
 		return
 	}
 	defer func() {
-		err = svc.Close()
-		if err != nil {
+		if svc == nil {
+			return
+		}
+		if err := svc.Close(); err != nil {
 			logger.Error("Failed to close service handle", "error", err)
 		}
 	}()
@@ -124,6 +127,47 @@ func runUpdate(params *updateContext) {
 	}
 
 	logger.Info("Agent installed to", "path", agentExecutablePath)
+
+	// If service credentials were provided, re-register the service so the
+	// new account takes effect. Otherwise just restart the existing
+	// registration.
+	if params.ServiceUsername != "" {
+		logger.Info(
+			"Re-registering service with new account",
+			"service",
+			name,
+			"user",
+			params.ServiceUsername,
+		)
+
+		if err := svc.Delete(); err != nil {
+			logger.Error("Failed to delete service", "service", name, "error", err)
+			return
+		}
+		if err := svc.Close(); err != nil {
+			logger.Error("Failed to close service handle", "error", err)
+		}
+		svc = nil
+
+		logger.Info("Waiting for service executable to stop")
+		time.Sleep(serviceExecutableTimeout)
+
+		newSvc, err := params.ServiceManager.Create(service.AgentParams{
+			Name:                name,
+			AgentExecutablePath: agentExecutablePath,
+			OrgId:               params.OrgId,
+			ConfigFilePath:      configFilePath,
+			LogFilePath:         agent.GetLogFilePath(params.OrgId),
+			ServiceUsername:     params.ServiceUsername,
+			ServicePassword:     params.ServicePassword,
+		})
+		if err != nil {
+			logger.Error("Failed to create service", "service", name, "error", err)
+			return
+		}
+		svc = newSvc
+		logger.Info("Service re-registered", "service", name)
+	}
 
 	// Starting the service
 	logger.Info("Starting service", "service", name)

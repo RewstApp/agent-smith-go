@@ -55,6 +55,37 @@ func TestNewConfigContext(t *testing.T) {
 		t.Errorf("expected MqttQos 2, got %v", resultWithQos.MqttQos)
 	}
 
+	if result.ServiceUsername != "" {
+		t.Errorf("expected empty ServiceUsername by default, got %q", result.ServiceUsername)
+	}
+	if result.ServicePassword != "" {
+		t.Errorf("expected empty ServicePassword by default, got %q", result.ServicePassword)
+	}
+
+	resultWithCreds, err := newConfigContext(
+		[]string{
+			"--org-id", orgId,
+			"--config-url", configUrl,
+			"--config-secret", configSecret,
+			"--service-username", "DOMAIN\\svc_rewst",
+			"--service-password", "p@ss",
+		},
+		nil, nil, nil, nil,
+	)
+	if err != nil {
+		t.Fatalf("expected no error with service credentials, got %v", err)
+	}
+	if resultWithCreds.ServiceUsername != "DOMAIN\\svc_rewst" {
+		t.Errorf(
+			"expected ServiceUsername %q, got %q",
+			"DOMAIN\\svc_rewst",
+			resultWithCreds.ServiceUsername,
+		)
+	}
+	if resultWithCreds.ServicePassword != "p@ss" {
+		t.Errorf("expected ServicePassword %q, got %q", "p@ss", resultWithCreds.ServicePassword)
+	}
+
 	errorTests := []struct {
 		args    []string
 		message string
@@ -88,6 +119,19 @@ func TestNewConfigContext(t *testing.T) {
 				"3",
 			},
 			"invalid mqtt-qos",
+		},
+		{
+			[]string{
+				"--org-id",
+				orgId,
+				"--config-url",
+				configUrl,
+				"--config-secret",
+				configSecret,
+				"--service-password",
+				"p@ss",
+			},
+			"service-password requires service-username",
 		},
 	}
 

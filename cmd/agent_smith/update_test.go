@@ -183,3 +183,68 @@ func TestRunUpdate_StartFails(t *testing.T) {
 
 	runUpdate(params)
 }
+
+func TestRunUpdate_NoServiceUsername_DoesNotRecreate(t *testing.T) {
+	params := newBaseUpdateParams()
+	mgr := &mockServiceManager{openService: &mockService{isActive: false}}
+	params.ServiceManager = mgr
+
+	runUpdate(params)
+
+	if len(mgr.createCalls) != 0 {
+		t.Errorf("expected no Create calls without ServiceUsername, got %d", len(mgr.createCalls))
+	}
+}
+
+func TestRunUpdate_WithServiceUsername_RecreatesService(t *testing.T) {
+	params := newBaseUpdateParams()
+	params.ServiceUsername = "rewst"
+	params.ServicePassword = "p@ss"
+	mgr := &mockServiceManager{
+		openService:   &mockService{isActive: false},
+		createService: &mockService{},
+	}
+	params.ServiceManager = mgr
+
+	runUpdate(params)
+
+	if len(mgr.createCalls) != 1 {
+		t.Fatalf("expected 1 Create call when ServiceUsername set, got %d", len(mgr.createCalls))
+	}
+	got := mgr.createCalls[0]
+	if got.ServiceUsername != "rewst" {
+		t.Errorf(
+			"expected ServiceUsername %q in Create params, got %q",
+			"rewst",
+			got.ServiceUsername,
+		)
+	}
+	if got.ServicePassword != "p@ss" {
+		t.Errorf(
+			"expected ServicePassword %q in Create params, got %q",
+			"p@ss",
+			got.ServicePassword,
+		)
+	}
+}
+
+func TestRunUpdate_WithServiceUsername_DeleteFails(t *testing.T) {
+	params := newBaseUpdateParams()
+	params.ServiceUsername = "rewst"
+	params.ServiceManager = &mockServiceManager{
+		openService: &mockService{isActive: false, deleteErr: errors.New("delete failed")},
+	}
+
+	runUpdate(params)
+}
+
+func TestRunUpdate_WithServiceUsername_CreateFails(t *testing.T) {
+	params := newBaseUpdateParams()
+	params.ServiceUsername = "rewst"
+	params.ServiceManager = &mockServiceManager{
+		openService: &mockService{isActive: false},
+		createErr:   errors.New("create failed"),
+	}
+
+	runUpdate(params)
+}

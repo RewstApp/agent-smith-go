@@ -113,6 +113,8 @@ type mockServiceManager struct {
 	openService   service.Service
 	createErr     error
 	createService service.Service
+
+	createCalls []service.AgentParams
 }
 
 func (m *mockServiceManager) Open(name string) (service.Service, error) {
@@ -120,5 +122,6 @@ func (m *mockServiceManager) Open(name string) (service.Service, error) {
 }
 
 func (m *mockServiceManager) Create(params service.AgentParams) (service.Service, error) {
+	m.createCalls = append(m.createCalls, params)
 	return m.createService, m.createErr
 }

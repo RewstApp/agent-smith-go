@@ -229,6 +229,45 @@ func TestDefaultServiceManager_Create_ServiceConfigContent(t *testing.T) {
 	}
 }
 
+func TestDefaultServiceManager_Create_ServiceConfigOmitsUserByDefault(t *testing.T) {
+	tmpFile := newTempConfigPath(t)
+	mock := &mockSystemCtl{configFilePath: tmpFile}
+	sm := &defaultServiceManager{system: mock}
+
+	if _, err := sm.Create(AgentParams{Name: "my-service"}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	data, err := os.ReadFile(tmpFile)
+	if err != nil {
+		t.Fatalf("failed to read config file: %v", err)
+	}
+	if strings.Contains(string(data), "User=") {
+		t.Errorf("expected no User= directive when ServiceUsername unset, got:\n%s", data)
+	}
+}
+
+func TestDefaultServiceManager_Create_ServiceConfigIncludesUser(t *testing.T) {
+	tmpFile := newTempConfigPath(t)
+	mock := &mockSystemCtl{configFilePath: tmpFile}
+	sm := &defaultServiceManager{system: mock}
+
+	if _, err := sm.Create(AgentParams{Name: "my-service", ServiceUsername: "rewst"}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	data, err := os.ReadFile(tmpFile)
+	if err != nil {
+		t.Fatalf("failed to read config file: %v", err)
+	}
+	content := string(data)
+	for _, check := range []string{"User=rewst", "Group=rewst"} {
+		if !strings.Contains(content, check) {
+			t.Errorf("expected config to contain %q, got:\n%s", check, content)
+		}
+	}
+}
+
 func TestDefaultServiceManager_Create_WriteFileError(t *testing.T) {
 	mock := &mockSystemCtl{configFilePath: "/nonexistent/dir/file.service"}
 	sm := &defaultServiceManager{system: mock}
