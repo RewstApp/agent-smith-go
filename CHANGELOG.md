@@ -1,3 +1,15 @@
+## v1.4.0 (2026-05-27)
+
+### Feat
+
+- [sc-89424] Allow config and update mode to run service as a specified user account (#74)
+
+### Fix
+
+- [sc-89445] Retry failed postbacks with exponential backoff so results aren't silently dropped (#72)
+- [sc-89444] Derive per-cycle context so in-flight commands cancel on disconnect (#71)
+- validate Windows installation env vars at startup (#70)
+
 ## v1.3.0 (2026-05-07)
 
 ### Feat
