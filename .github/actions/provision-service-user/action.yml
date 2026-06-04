@@ -96,8 +96,10 @@ runs:
         }
 
         # Grant the "Log on as a service" right (SeServiceLogonRight) via secedit.
+        # Read the SID straight from the local account; the ".\" SCM prefix is not
+        # resolvable via NTAccount.Translate().
         $account = ".\$($env:SVC_USER)"
-        $sid = (New-Object System.Security.Principal.NTAccount($account)).Translate([System.Security.Principal.SecurityIdentifier]).Value
+        $sid = (Get-LocalUser -Name $env:SVC_USER).SID.Value
 
         $tmp = Join-Path $env:RUNNER_TEMP "secpol"
         New-Item -ItemType Directory -Force -Path $tmp | Out-Null
