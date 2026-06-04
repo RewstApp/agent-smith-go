@@ -1,0 +1,107 @@
+name: Provision service user
+description: Create a dedicated local/system account the agent service can run as, per platform. On Windows the account is granted the "Log on as a service" right.
+
+inputs:
+  username:
+    description: "Bare account name to provision (e.g. rewst-it-svc)"
+    required: true
+  password:
+    description: "Password for the account (Windows only; sourced from a secret)"
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Provision user (Linux)
+      if: runner.os == 'Linux'
+      shell: bash
+      env:
+        SVC_USER: ${{ inputs.username }}
+      run: |
+        set -euo pipefail
+        if id "$SVC_USER" >/dev/null 2>&1; then
+          echo "User $SVC_USER already exists; reusing"
+        else
+          sudo useradd --system --no-create-home --shell /usr/sbin/nologin "$SVC_USER"
+          echo "Created system user $SVC_USER"
+        fi
+
+    - name: Provision user (macOS)
+      if: runner.os == 'macOS'
+      shell: bash
+      env:
+        SVC_USER: ${{ inputs.username }}
+      run: |
+        set -euo pipefail
+        if dscl . -read "/Users/$SVC_USER" >/dev/null 2>&1; then
+          echo "User $SVC_USER already exists; reusing"
+        else
+          # Pick a UniqueID that is free and in the system range (< 500).
+          uid=499
+          while dscl . -search /Users UniqueID "$uid" 2>/dev/null | grep -q .; do
+            uid=$((uid - 1))
+          done
+          sudo dscl . -create "/Users/$SVC_USER"
+          sudo dscl . -create "/Users/$SVC_USER" UserShell /usr/bin/false
+          sudo dscl . -create "/Users/$SVC_USER" RealName "Rewst Integration Test Service"
+          sudo dscl . -create "/Users/$SVC_USER" UniqueID "$uid"
+          sudo dscl . -create "/Users/$SVC_USER" PrimaryGroupID 20
+          echo "Created local user $SVC_USER with UniqueID $uid"
+        fi
+
+    - name: Provision user (Windows)
+      if: runner.os == 'Windows'
+      shell: pwsh
+      env:
+        SVC_USER: ${{ inputs.username }}
+        SVC_PASSWORD: ${{ inputs.password }}
+      run: |
+        $ErrorActionPreference = "Stop"
+
+        if (-not $env:SVC_PASSWORD) {
+          Write-Error "A password is required to provision the Windows service account"
+          exit 1
+        }
+
+        $securePassword = ConvertTo-SecureString $env:SVC_PASSWORD -AsPlainText -Force
+
+        if (Get-LocalUser -Name $env:SVC_USER -ErrorAction SilentlyContinue) {
+          Write-Output "User $env:SVC_USER already exists; resetting password"
+          Set-LocalUser -Name $env:SVC_USER -Password $securePassword
+        } else {
+          New-LocalUser -Name $env:SVC_USER -Password $securePassword `
+            -FullName "Rewst Integration Test Service" `
+            -Description "Service account for integration tests" `
+            -PasswordNeverExpires -AccountNeverExpires | Out-Null
+          Write-Output "Created local user $env:SVC_USER"
+        }
+
+        # Grant the "Log on as a service" right (SeServiceLogonRight) via secedit.
+        $account = ".\$($env:SVC_USER)"
+        $sid = (New-Object System.Security.Principal.NTAccount($account)).Translate([System.Security.Principal.SecurityIdentifier]).Value
+
+        $tmp = Join-Path $env:RUNNER_TEMP "secpol"
+        New-Item -ItemType Directory -Force -Path $tmp | Out-Null
+        $infPath = Join-Path $tmp "secpol.inf"
+        $dbPath = Join-Path $tmp "secpol.sdb"
+
+        secedit /export /cfg $infPath /areas USER_RIGHTS | Out-Null
+
+        $content = Get-Content $infPath
+        $line = $content | Where-Object { $_ -match "^SeServiceLogonRight" }
+        if ($line) {
+          if ($line -notmatch [regex]::Escape($sid)) {
+            $content = $content -replace "^SeServiceLogonRight.*", "$line,*$sid"
+          } else {
+            Write-Output "SID already holds SeServiceLogonRight"
+          }
+        } else {
+          $content = $content -replace "(\[Privilege Rights\])", "`$1`r`nSeServiceLogonRight = *$sid"
+        }
+        # secedit expects the INF as Unicode (UTF-16LE).
+        Set-Content -Path $infPath -Value $content -Encoding Unicode
+
+        secedit /import /db $dbPath /cfg $infPath /areas USER_RIGHTS | Out-Null
+        secedit /configure /db $dbPath /areas USER_RIGHTS | Out-Null
+        Write-Output "Granted 'Log on as a service' to $account"

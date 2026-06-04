@@ -1,0 +1,46 @@
+name: Assert config secret absent
+description: Assert the service password was not persisted to config.json on disk. No-op when no secret is supplied.
+
+inputs:
+  config_dir:
+    description: "Directory containing the per-org agent config (without org id suffix)"
+    required: true
+  org_id:
+    description: "Org id used as the config subdirectory"
+    required: true
+  secret:
+    description: "Secret value that must not appear in config.json (e.g. the service password)"
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Assert secret absent from config.json
+      shell: pwsh
+      env:
+        CONFIG_DIR: ${{ inputs.config_dir }}
+        ORG_ID: ${{ inputs.org_id }}
+        SECRET: ${{ inputs.secret }}
+      run: |
+        $ErrorActionPreference = "Stop"
+
+        if ([string]::IsNullOrEmpty($env:SECRET)) {
+          Write-Output "No secret supplied; skipping config.json secret check"
+          exit 0
+        }
+
+        $configPath = Join-Path $env:CONFIG_DIR (Join-Path $env:ORG_ID "config.json")
+        if (-not (Test-Path $configPath)) {
+          Write-Error "config.json not found at $configPath"
+          exit 1
+        }
+
+        $content = Get-Content $configPath -Raw
+        if ($content.Contains($env:SECRET)) {
+          # Avoid echoing the secret itself.
+          Write-Output "::error::Service password was persisted to config.json at $configPath"
+          exit 1
+        }
+
+        Write-Output "Confirmed service password is absent from config.json"

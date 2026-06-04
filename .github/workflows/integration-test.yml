@@ -119,6 +119,9 @@ jobs:
               success_patterns = "Command completed`nSending postback`nPostback sent"
               no_auto_updates_extra = ''
               uninstall_paths = "/etc/rewst_remote_agent/$orgId`n/usr/local/bin/rewst_remote_agent/$orgId`n/tmp/rewst_remote_agent/scripts/$orgId"
+              service_user = 'rewst-it-svc'
+              service_username_arg = 'rewst-it-svc'
+              service_identity = 'rewst-it-svc'
             },
             [ordered]@{
               os = 'windows-latest'
@@ -132,6 +135,9 @@ jobs:
               success_patterns = "Command completed`nSending postback`nPostback already sent"
               no_auto_updates_extra = '--disable-agent-postback'
               uninstall_paths = "C:\ProgramData\RewstRemoteAgent\$orgId`nC:\Program Files\RewstRemoteAgent\$orgId`nC:\RewstRemoteAgent\scripts\$orgId"
+              service_user = 'rewst-it-svc'
+              service_username_arg = '.\rewst-it-svc'
+              service_identity = '.\rewst-it-svc'
             },
             [ordered]@{
               os = 'macos-latest'
@@ -145,6 +151,9 @@ jobs:
               success_patterns = "Command completed`nSending postback`nPostback sent"
               no_auto_updates_extra = ''
               uninstall_paths = "/Library/Application Support/rewst_remote_agent/$orgId`n/usr/local/bin/rewst_remote_agent/$orgId`n`$env:TMPDIR/rewst_remote_agent/scripts/$orgId"
+              service_user = 'rewst-it-svc'
+              service_username_arg = 'rewst-it-svc'
+              service_identity = 'rewst-it-svc'
             }
           )
 
@@ -352,3 +361,115 @@ jobs:
         uses: ./.github/actions/assert-uninstalled
         with:
           paths: ${{ matrix.uninstall_paths }}
+
+  test-service-user:
+    permissions:
+      contents: read
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    needs: [build, build-integration-test, set-matrix]
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.set-matrix.outputs.matrix) }}
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Provision service account
+        uses: ./.github/actions/provision-service-user
+        with:
+          username: ${{ matrix.service_user }}
+          password: ${{ secrets.IT_SERVICE_PASSWORD }}
+
+      - name: Install agent as service account
+        uses: ./.github/actions/install-agent
+        with:
+          os: ${{ matrix.os }}
+          binary: ${{ matrix.binary }}
+          it_binary: ${{ matrix.it_binary }}
+          config_url: ${{ vars.IT_CONFIG_URL }}
+          config_secret: ${{ secrets.IT_CONFIG_SECRET }}
+          org_id: ${{ vars.IT_ORG_ID }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          service_username: ${{ matrix.service_username_arg }}
+          service_password: ${{ matrix.os == 'windows-latest' && secrets.IT_SERVICE_PASSWORD || '' }}
+
+      - name: Assert service runs as account (config flow)
+        uses: ./.github/actions/assert-service-identity
+        with:
+          service: ${{ matrix.service }}
+          expected_identity: ${{ matrix.service_identity }}
+
+      - name: Validate config and get device id
+        uses: ./.github/actions/validate-config
+        with:
+          config_dir: ${{ matrix.config_dir }}
+          org_id: ${{ vars.IT_ORG_ID }}
+
+      - name: Assert password absent from config (config flow)
+        uses: ./.github/actions/assert-config-secret-absent
+        with:
+          config_dir: ${{ matrix.config_dir }}
+          org_id: ${{ vars.IT_ORG_ID }}
+          secret: ${{ matrix.os == 'windows-latest' && secrets.IT_SERVICE_PASSWORD || '' }}
+
+      - name: Re-register service via update flow (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        env:
+          ORG_ID: ${{ vars.IT_ORG_ID }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SERVICE_USERNAME: ${{ matrix.service_username_arg }}
+        run: |
+          sudo "./dist/${{ matrix.binary }}" \
+            --update \
+            --org-id "$ORG_ID" \
+            --github-token "$GH_TOKEN" \
+            --service-username "$SERVICE_USERNAME"
+
+      - name: Re-register service via update flow (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          ORG_ID: ${{ vars.IT_ORG_ID }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SERVICE_USERNAME: ${{ matrix.service_username_arg }}
+          SERVICE_PASSWORD: ${{ secrets.IT_SERVICE_PASSWORD }}
+        run: |
+          & "./dist/${{ matrix.binary }}" `
+            --update `
+            --org-id $env:ORG_ID `
+            --github-token $env:GH_TOKEN `
+            --service-username $env:SERVICE_USERNAME `
+            --service-password $env:SERVICE_PASSWORD
+
+      - name: Assert service runs as account (update flow)
+        uses: ./.github/actions/assert-service-identity
+        with:
+          service: ${{ matrix.service }}
+          expected_identity: ${{ matrix.service_identity }}
+
+      - name: Assert password absent from config (update flow)
+        uses: ./.github/actions/assert-config-secret-absent
+        with:
+          config_dir: ${{ matrix.config_dir }}
+          org_id: ${{ vars.IT_ORG_ID }}
+          secret: ${{ matrix.os == 'windows-latest' && secrets.IT_SERVICE_PASSWORD || '' }}
+
+      - name: Uninstall agent
+        uses: ./.github/actions/run-agent
+        with:
+          binary: ${{ matrix.binary }}
+          args: --uninstall --org-id ${{ vars.IT_ORG_ID }}
+
+      - name: Check deleted directories
+        uses: ./.github/actions/assert-uninstalled
+        with:
+          paths: ${{ matrix.uninstall_paths }}
+
+      - name: Remove service account
+        if: always()
+        uses: ./.github/actions/remove-service-user
+        with:
+          username: ${{ matrix.service_user }}

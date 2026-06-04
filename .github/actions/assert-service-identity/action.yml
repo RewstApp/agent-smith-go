@@ -1,0 +1,82 @@
+name: Assert service identity
+description: Assert the registered agent service runs under the expected account, querying the platform service manager. Fails (red) when the service runs under the platform default account instead of the requested one.
+
+inputs:
+  service:
+    description: "Service name"
+    required: true
+  expected_identity:
+    description: "Account the service is expected to run as (e.g. rewst-it-svc on Linux/macOS, .\\rewst-it-svc on Windows)"
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Assert identity (Linux)
+      if: runner.os == 'Linux'
+      shell: bash
+      env:
+        SERVICE: ${{ inputs.service }}
+        EXPECTED: ${{ inputs.expected_identity }}
+      run: |
+        set -euo pipefail
+        actual="$(systemctl show "$SERVICE" -p User --value)"
+        echo "systemctl reports User=$actual (expected $EXPECTED)"
+        if [ "$actual" != "$EXPECTED" ]; then
+          echo "::error::Service $SERVICE runs as '${actual:-<default/root>}', expected '$EXPECTED'"
+          exit 1
+        fi
+        echo "Service identity matches expected account"
+
+    - name: Assert identity (Windows)
+      if: runner.os == 'Windows'
+      shell: pwsh
+      env:
+        SERVICE: ${{ inputs.service }}
+        EXPECTED: ${{ inputs.expected_identity }}
+      run: |
+        $ErrorActionPreference = "Stop"
+        $svc = Get-CimInstance Win32_Service -Filter "Name='$($env:SERVICE)'"
+        if (-not $svc) {
+          Write-Error "Service $($env:SERVICE) not found"
+          exit 1
+        }
+        $actual = $svc.StartName
+        Write-Output "Win32_Service StartName=$actual (expected $($env:EXPECTED))"
+
+        # Compare on the leaf account name so a machine/domain prefix (e.g.
+        # MACHINE\rewst-it-svc vs .\rewst-it-svc) still matches, while the
+        # platform default (LocalSystem) correctly fails.
+        $actualLeaf = ($actual -split '\\')[-1]
+        $expectedLeaf = ($env:EXPECTED -split '\\')[-1]
+        if ($actualLeaf -ne $expectedLeaf) {
+          Write-Output "::error::Service $($env:SERVICE) runs as '$actual', expected '$($env:EXPECTED)'"
+          exit 1
+        }
+        Write-Output "Service identity matches expected account"
+
+    - name: Assert identity (macOS)
+      if: runner.os == 'macOS'
+      shell: bash
+      env:
+        SERVICE: ${{ inputs.service }}
+        EXPECTED: ${{ inputs.expected_identity }}
+      run: |
+        set -euo pipefail
+        out="$(sudo launchctl print "system/$SERVICE" 2>/dev/null || true)"
+        echo "$out"
+
+        # Prefer the authoritative plist UserName key; launchctl output is shown above for the logs.
+        plist="/Library/LaunchDaemons/$SERVICE.plist"
+        actual="$(/usr/libexec/PlistBuddy -c 'Print :UserName' "$plist" 2>/dev/null || true)"
+        echo "Plist UserName=${actual:-<default/root>} (expected $EXPECTED)"
+
+        if echo "$out" | grep -qiE "username[[:space:]]*=[[:space:]]*\"?$EXPECTED\"?"; then
+          echo "launchctl reports the expected UserName"
+        elif [ "$actual" = "$EXPECTED" ]; then
+          echo "plist confirms the expected UserName"
+        else
+          echo "::error::Service $SERVICE runs as '${actual:-<default/root>}', expected '$EXPECTED'"
+          exit 1
+        fi
+        echo "Service identity matches expected account"

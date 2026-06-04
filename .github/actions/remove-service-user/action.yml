@@ -1,0 +1,49 @@
+name: Remove service user
+description: Tear down the dedicated service account provisioned for the test, per platform. Safe to run regardless of job outcome.
+
+inputs:
+  username:
+    description: "Bare account name to remove (e.g. rewst-it-svc)"
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Remove user (Linux)
+      if: runner.os == 'Linux'
+      shell: bash
+      env:
+        SVC_USER: ${{ inputs.username }}
+      run: |
+        if id "$SVC_USER" >/dev/null 2>&1; then
+          sudo userdel "$SVC_USER" || true
+          echo "Removed user $SVC_USER"
+        else
+          echo "User $SVC_USER not present; nothing to remove"
+        fi
+
+    - name: Remove user (macOS)
+      if: runner.os == 'macOS'
+      shell: bash
+      env:
+        SVC_USER: ${{ inputs.username }}
+      run: |
+        if dscl . -read "/Users/$SVC_USER" >/dev/null 2>&1; then
+          sudo dscl . -delete "/Users/$SVC_USER" || true
+          echo "Removed user $SVC_USER"
+        else
+          echo "User $SVC_USER not present; nothing to remove"
+        fi
+
+    - name: Remove user (Windows)
+      if: runner.os == 'Windows'
+      shell: pwsh
+      env:
+        SVC_USER: ${{ inputs.username }}
+      run: |
+        if (Get-LocalUser -Name $env:SVC_USER -ErrorAction SilentlyContinue) {
+          Remove-LocalUser -Name $env:SVC_USER
+          Write-Output "Removed user $env:SVC_USER"
+        } else {
+          Write-Output "User $env:SVC_USER not present; nothing to remove"
+        }
