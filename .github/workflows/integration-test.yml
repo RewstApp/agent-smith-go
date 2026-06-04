@@ -377,10 +377,10 @@ jobs:
         uses: actions/checkout@v5
 
       - name: Provision service account
+        id: provision
         uses: ./.github/actions/provision-service-user
         with:
           username: ${{ matrix.service_user }}
-          password: ${{ secrets.IT_SERVICE_PASSWORD }}
 
       - name: Install agent as service account
         uses: ./.github/actions/install-agent
@@ -393,7 +393,7 @@ jobs:
           org_id: ${{ vars.IT_ORG_ID }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
           service_username: ${{ matrix.service_username_arg }}
-          service_password: ${{ matrix.os == 'windows-latest' && secrets.IT_SERVICE_PASSWORD || '' }}
+          service_password: ${{ steps.provision.outputs.password }}
 
       - name: Assert service runs as account (config flow)
         uses: ./.github/actions/assert-service-identity
@@ -412,7 +412,7 @@ jobs:
         with:
           config_dir: ${{ matrix.config_dir }}
           org_id: ${{ vars.IT_ORG_ID }}
-          secret: ${{ matrix.os == 'windows-latest' && secrets.IT_SERVICE_PASSWORD || '' }}
+          secret: ${{ steps.provision.outputs.password }}
 
       - name: Re-register service via update flow (Unix)
         if: runner.os != 'Windows'
@@ -435,7 +435,7 @@ jobs:
           ORG_ID: ${{ vars.IT_ORG_ID }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SERVICE_USERNAME: ${{ matrix.service_username_arg }}
-          SERVICE_PASSWORD: ${{ secrets.IT_SERVICE_PASSWORD }}
+          SERVICE_PASSWORD: ${{ steps.provision.outputs.password }}
         run: |
           & "./dist/${{ matrix.binary }}" `
             --update `
@@ -455,7 +455,7 @@ jobs:
         with:
           config_dir: ${{ matrix.config_dir }}
           org_id: ${{ vars.IT_ORG_ID }}
-          secret: ${{ matrix.os == 'windows-latest' && secrets.IT_SERVICE_PASSWORD || '' }}
+          secret: ${{ steps.provision.outputs.password }}
 
       - name: Uninstall agent
         uses: ./.github/actions/run-agent

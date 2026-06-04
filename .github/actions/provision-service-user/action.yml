@@ -5,10 +5,11 @@ inputs:
   username:
     description: "Bare account name to provision (e.g. rewst-it-svc)"
     required: true
+
+outputs:
   password:
-    description: "Password for the account (Windows only; sourced from a secret)"
-    required: false
-    default: ""
+    description: "Randomly generated account password (Windows only; masked in logs). Empty on Linux/macOS."
+    value: ${{ steps.windows.outputs.password }}
 
 runs:
   using: composite
@@ -51,20 +52,37 @@ runs:
         fi
 
     - name: Provision user (Windows)
+      id: windows
       if: runner.os == 'Windows'
       shell: pwsh
       env:
         SVC_USER: ${{ inputs.username }}
-        SVC_PASSWORD: ${{ inputs.password }}
       run: |
         $ErrorActionPreference = "Stop"
 
-        if (-not $env:SVC_PASSWORD) {
-          Write-Error "A password is required to provision the Windows service account"
-          exit 1
+        # Generate a random, complexity-compliant password (upper, lower, digit,
+        # special) and mask it so it never appears in the logs. It is exposed as a
+        # step output so the install/update steps can register the service under
+        # the same credentials, and is never persisted to a secret or to disk.
+        $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+        function Get-RandChar([string]$set) {
+          $bytes = New-Object 'System.Byte[]' 1
+          $rng.GetBytes($bytes)
+          return $set[$bytes[0] % $set.Length]
         }
+        $upper = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'
+        $lower = 'abcdefghijklmnopqrstuvwxyz'
+        $digit = '0123456789'
+        $special = '!@#%^*-_=+'
+        $all = $upper + $lower + $digit + $special
+        $chars = @((Get-RandChar $upper), (Get-RandChar $lower), (Get-RandChar $digit), (Get-RandChar $special))
+        for ($i = 0; $i -lt 20; $i++) { $chars += (Get-RandChar $all) }
+        $password = -join ($chars | Sort-Object { Get-Random })
 
-        $securePassword = ConvertTo-SecureString $env:SVC_PASSWORD -AsPlainText -Force
+        Write-Output "::add-mask::$password"
+        "password=$password" >> $env:GITHUB_OUTPUT
+
+        $securePassword = ConvertTo-SecureString $password -AsPlainText -Force
 
         if (Get-LocalUser -Name $env:SVC_USER -ErrorAction SilentlyContinue) {
           Write-Output "User $env:SVC_USER already exists; resetting password"
