@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -54,7 +55,7 @@ func TestCheck_Success(t *testing.T) {
 	device := newTestDevice()
 	updater := NewUpdater(logger, device, server.URL, "", nil)
 
-	result, err := updater.Check()
+	result, err := updater.Check(context.Background())
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
@@ -73,7 +74,7 @@ func TestCheck_HttpError(t *testing.T) {
 	device := newTestDevice()
 	updater := NewUpdater(logger, device, "http://invalid.invalid.invalid", "", nil)
 
-	_, err := updater.Check()
+	_, err := updater.Check(context.Background())
 
 	if err == nil {
 		t.Fatal("expected error, got nil")
@@ -90,7 +91,7 @@ func TestCheck_NonOkStatus(t *testing.T) {
 	device := newTestDevice()
 	updater := NewUpdater(logger, device, server.URL, "", nil)
 
-	_, err := updater.Check()
+	_, err := updater.Check(context.Background())
 
 	if err == nil {
 		t.Fatal("expected error for non-OK status")
@@ -111,7 +112,7 @@ func TestCheck_InvalidJson(t *testing.T) {
 	device := newTestDevice()
 	updater := NewUpdater(logger, device, server.URL, "", nil)
 
-	_, err := updater.Check()
+	_, err := updater.Check(context.Background())
 
 	if err == nil {
 		t.Fatal("expected error for invalid JSON")
@@ -226,7 +227,7 @@ func TestDownload_Success(t *testing.T) {
 	device := newTestDevice()
 	updater := NewUpdater(logger, device, "", "", nil)
 
-	path, err := updater.Download(Asset{Url: server.URL})
+	path, err := updater.Download(context.Background(), Asset{Url: server.URL})
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
@@ -253,7 +254,7 @@ func TestDownload_HttpError(t *testing.T) {
 	device := newTestDevice()
 	updater := NewUpdater(logger, device, "", "", nil)
 
-	_, err := updater.Download(Asset{Url: "http://invalid.invalid.invalid"})
+	_, err := updater.Download(context.Background(), Asset{Url: "http://invalid.invalid.invalid"})
 
 	if err == nil {
 		t.Fatal("expected error, got nil")
@@ -276,7 +277,7 @@ func TestDownload_ChmodFailure(t *testing.T) {
 		return fmt.Errorf("chmod not supported on this filesystem")
 	}
 
-	path, err := u.Download(Asset{Url: server.URL})
+	path, err := u.Download(context.Background(), Asset{Url: server.URL})
 
 	if err == nil {
 		t.Fatal("expected error from chmod failure, got nil")
@@ -310,7 +311,7 @@ func TestDownload_NonOkStatus(t *testing.T) {
 	device := newTestDevice()
 	updater := NewUpdater(logger, device, "", "", nil)
 
-	_, err := updater.Download(Asset{Url: server.URL})
+	_, err := updater.Download(context.Background(), Asset{Url: server.URL})
 
 	if err == nil {
 		t.Fatal("expected error for non-OK status")
@@ -320,7 +321,7 @@ func TestDownload_NonOkStatus(t *testing.T) {
 // mockUpdater implements Updater for testing AutoUpdateRunner
 type mockUpdater struct {
 	runErr     error
-	runFn      func() error
+	runFn      func(ctx context.Context) error
 	runCount   int
 	checkFn    func() (Release, error)
 	updateFn   func(string) error
@@ -328,15 +329,15 @@ type mockUpdater struct {
 	downloadFn func(Asset) (string, error)
 }
 
-func (m *mockUpdater) Run() error {
+func (m *mockUpdater) Run(ctx context.Context) error {
 	m.runCount++
 	if m.runFn != nil {
-		return m.runFn()
+		return m.runFn(ctx)
 	}
 	return m.runErr
 }
 
-func (m *mockUpdater) Check() (Release, error) {
+func (m *mockUpdater) Check(ctx context.Context) (Release, error) {
 	if m.checkFn != nil {
 		return m.checkFn()
 	}
@@ -357,7 +358,7 @@ func (m *mockUpdater) SelectAsset(release Release) (Asset, error) {
 	return Asset{}, nil
 }
 
-func (m *mockUpdater) Download(asset Asset) (string, error) {
+func (m *mockUpdater) Download(ctx context.Context, asset Asset) (string, error) {
 	if m.downloadFn != nil {
 		return m.downloadFn(asset)
 	}
@@ -505,7 +506,7 @@ func TestAutoUpdateRunner_RetrySucceedsAfterFailures(t *testing.T) {
 	logger := hclog.NewNullLogger()
 	failsBeforeSuccess := 2
 	mock := &mockUpdater{}
-	mock.runFn = func() error {
+	mock.runFn = func(ctx context.Context) error {
 		if mock.runCount <= failsBeforeSuccess {
 			return fmt.Errorf("temporary failure")
 		}
@@ -599,7 +600,7 @@ func TestRun_FullUpdateFlow(t *testing.T) {
 	device := newTestDevice()
 	updater := NewUpdater(logger, device, releaseServer.URL, "", runCmd)
 
-	err := updater.Run()
+	err := updater.Run(context.Background())
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
@@ -639,7 +640,7 @@ func TestRun_SelectAssetError(t *testing.T) {
 	device := newTestDevice()
 	updater := NewUpdater(logger, device, server.URL, "", nil)
 
-	err := updater.Run()
+	err := updater.Run(context.Background())
 
 	if err == nil {
 		t.Fatal("expected error for no matching asset")
@@ -667,7 +668,7 @@ func TestRun_DownloadError(t *testing.T) {
 	device := newTestDevice()
 	updater := NewUpdater(logger, device, releaseServer.URL, "", nil)
 
-	err := updater.Run()
+	err := updater.Run(context.Background())
 
 	if err == nil {
 		t.Fatal("expected error for download failure")
@@ -705,7 +706,7 @@ func TestRun_UpdateCommandError(t *testing.T) {
 	device := newTestDevice()
 	updater := NewUpdater(logger, device, releaseServer.URL, "", runCmd)
 
-	err := updater.Run()
+	err := updater.Run(context.Background())
 
 	if err == nil {
 		t.Fatal("expected error for command failure")
@@ -726,7 +727,7 @@ func TestRun_CheckError(t *testing.T) {
 	device := newTestDevice()
 	updater := NewUpdater(logger, device, server.URL, "", nil)
 
-	err := updater.Run()
+	err := updater.Run(context.Background())
 
 	if err == nil {
 		t.Fatal("expected error for check failure")
@@ -750,7 +751,7 @@ func TestRun_NoUpdateAvailable(t *testing.T) {
 	device := newTestDevice()
 	updater := NewUpdater(logger, device, server.URL, "", nil)
 
-	err := updater.Run()
+	err := updater.Run(context.Background())
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
@@ -772,7 +773,7 @@ func TestCheck_Timeout(t *testing.T) {
 	u := NewUpdater(logger, device, server.URL, "", nil).(*defaultUpdater)
 	u.checkClient = &http.Client{Timeout: 50 * time.Millisecond}
 
-	_, err := u.Check()
+	_, err := u.Check(context.Background())
 
 	if err == nil {
 		t.Fatal("expected timeout error, got nil")
@@ -795,9 +796,125 @@ func TestDownload_Timeout(t *testing.T) {
 	u := NewUpdater(logger, device, "", "", nil).(*defaultUpdater)
 	u.downloadClient = &http.Client{Timeout: 50 * time.Millisecond}
 
-	_, err := u.Download(Asset{Url: server.URL})
+	_, err := u.Download(context.Background(), Asset{Url: server.URL})
 
 	if err == nil {
 		t.Fatal("expected timeout error, got nil")
+	}
+}
+
+// TestCheck_ContextCancelled verifies that cancelling the context aborts an
+// in-flight update check promptly rather than waiting for the client Timeout.
+func TestCheck_ContextCancelled(t *testing.T) {
+	done := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-done:
+		case <-r.Context().Done():
+		}
+	}))
+	defer server.Close()
+	defer close(done) // unblocks handler before server.Close() drains connections
+
+	logger := hclog.NewNullLogger()
+	device := newTestDevice()
+	// Retain the production check timeout as the upper bound; cancellation must
+	// abort well before it elapses.
+	u := NewUpdater(logger, device, server.URL, "", nil).(*defaultUpdater)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		cancel()
+	}()
+
+	start := time.Now()
+	_, err := u.Check(ctx)
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("expected error from cancelled context, got nil")
+	}
+	if elapsed >= 2*time.Second {
+		t.Errorf("expected cancellation to abort within 2s, took %v", elapsed)
+	}
+}
+
+// TestDownload_ContextCancelled verifies that cancelling the context aborts an
+// in-flight download promptly rather than waiting for the client Timeout.
+func TestDownload_ContextCancelled(t *testing.T) {
+	done := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-done:
+		case <-r.Context().Done():
+		}
+	}))
+	defer server.Close()
+	defer close(done) // unblocks handler before server.Close() drains connections
+
+	logger := hclog.NewNullLogger()
+	device := newTestDevice()
+	u := NewUpdater(logger, device, "", "", nil).(*defaultUpdater)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		cancel()
+	}()
+
+	start := time.Now()
+	_, err := u.Download(ctx, Asset{Url: server.URL})
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("expected error from cancelled context, got nil")
+	}
+	if elapsed >= 2*time.Second {
+		t.Errorf("expected cancellation to abort within 2s, took %v", elapsed)
+	}
+}
+
+// TestAutoUpdateRunner_StopCancelsInFlightRun verifies that Stop cancels the
+// context handed to an in-flight Run, so a stop/restart issued during an update
+// download is honored promptly instead of blocking on the client Timeout.
+func TestAutoUpdateRunner_StopCancelsInFlightRun(t *testing.T) {
+	logger := hclog.NewNullLogger()
+
+	runStarted := make(chan struct{})
+	mock := &mockUpdater{}
+	mock.runFn = func(ctx context.Context) error {
+		close(runStarted)
+		<-ctx.Done() // block until the runner cancels us
+		return ctx.Err()
+	}
+
+	runner := NewAutoUpdateRunner(logger, mock, time.Millisecond, 3, time.Millisecond)
+
+	done := make(chan struct{})
+	go func() {
+		runner.Start()
+		close(done)
+	}()
+
+	// Wait until Run is in flight, then stop and confirm it unblocks promptly.
+	<-runStarted
+
+	stopReturned := make(chan struct{})
+	go func() {
+		runner.Stop()
+		close(stopReturned)
+	}()
+
+	select {
+	case <-stopReturned:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Stop did not cancel in-flight Run within 2s")
+	}
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("runner did not stop in time")
 	}
 }
