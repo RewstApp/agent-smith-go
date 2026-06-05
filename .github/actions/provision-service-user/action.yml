@@ -1,0 +1,127 @@
+name: Provision service user
+description: Create a dedicated local/system account the agent service can run as, per platform. On Windows the account is granted the "Log on as a service" right.
+
+inputs:
+  username:
+    description: "Bare account name to provision (e.g. rewst-it-svc)"
+    required: true
+
+outputs:
+  password:
+    description: "Randomly generated account password (Windows only; masked in logs). Empty on Linux/macOS."
+    value: ${{ steps.windows.outputs.password }}
+
+runs:
+  using: composite
+  steps:
+    - name: Provision user (Linux)
+      if: runner.os == 'Linux'
+      shell: bash
+      env:
+        SVC_USER: ${{ inputs.username }}
+      run: |
+        set -euo pipefail
+        if id "$SVC_USER" >/dev/null 2>&1; then
+          echo "User $SVC_USER already exists; reusing"
+        else
+          sudo useradd --system --no-create-home --shell /usr/sbin/nologin "$SVC_USER"
+          echo "Created system user $SVC_USER"
+        fi
+
+    - name: Provision user (macOS)
+      if: runner.os == 'macOS'
+      shell: bash
+      env:
+        SVC_USER: ${{ inputs.username }}
+      run: |
+        set -euo pipefail
+        if dscl . -read "/Users/$SVC_USER" >/dev/null 2>&1; then
+          echo "User $SVC_USER already exists; reusing"
+        else
+          # Pick a UniqueID that is free and in the system range (< 500).
+          uid=499
+          while dscl . -search /Users UniqueID "$uid" 2>/dev/null | grep -q .; do
+            uid=$((uid - 1))
+          done
+          sudo dscl . -create "/Users/$SVC_USER"
+          sudo dscl . -create "/Users/$SVC_USER" UserShell /usr/bin/false
+          sudo dscl . -create "/Users/$SVC_USER" RealName "Rewst Integration Test Service"
+          sudo dscl . -create "/Users/$SVC_USER" UniqueID "$uid"
+          sudo dscl . -create "/Users/$SVC_USER" PrimaryGroupID 20
+          echo "Created local user $SVC_USER with UniqueID $uid"
+        fi
+
+    - name: Provision user (Windows)
+      id: windows
+      if: runner.os == 'Windows'
+      shell: pwsh
+      env:
+        SVC_USER: ${{ inputs.username }}
+      run: |
+        $ErrorActionPreference = "Stop"
+
+        # Generate a random, complexity-compliant password (upper, lower, digit,
+        # special) and mask it so it never appears in the logs. It is exposed as a
+        # step output so the install/update steps can register the service under
+        # the same credentials, and is never persisted to a secret or to disk.
+        $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+        function Get-RandChar([string]$set) {
+          $bytes = New-Object 'System.Byte[]' 1
+          $rng.GetBytes($bytes)
+          return $set[$bytes[0] % $set.Length]
+        }
+        $upper = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'
+        $lower = 'abcdefghijklmnopqrstuvwxyz'
+        $digit = '0123456789'
+        $special = '!@#%^*-_=+'
+        $all = $upper + $lower + $digit + $special
+        $chars = @((Get-RandChar $upper), (Get-RandChar $lower), (Get-RandChar $digit), (Get-RandChar $special))
+        for ($i = 0; $i -lt 20; $i++) { $chars += (Get-RandChar $all) }
+        $password = -join ($chars | Sort-Object { Get-Random })
+
+        Write-Output "::add-mask::$password"
+        "password=$password" >> $env:GITHUB_OUTPUT
+
+        $securePassword = ConvertTo-SecureString $password -AsPlainText -Force
+
+        if (Get-LocalUser -Name $env:SVC_USER -ErrorAction SilentlyContinue) {
+          Write-Output "User $env:SVC_USER already exists; resetting password"
+          Set-LocalUser -Name $env:SVC_USER -Password $securePassword
+        } else {
+          New-LocalUser -Name $env:SVC_USER -Password $securePassword `
+            -FullName "Rewst Integration Test Service" `
+            -Description "Service account for integration tests" `
+            -PasswordNeverExpires -AccountNeverExpires | Out-Null
+          Write-Output "Created local user $env:SVC_USER"
+        }
+
+        # Grant the "Log on as a service" right (SeServiceLogonRight) via secedit.
+        # Read the SID straight from the local account; the ".\" SCM prefix is not
+        # resolvable via NTAccount.Translate().
+        $account = ".\$($env:SVC_USER)"
+        $sid = (Get-LocalUser -Name $env:SVC_USER).SID.Value
+
+        $tmp = Join-Path $env:RUNNER_TEMP "secpol"
+        New-Item -ItemType Directory -Force -Path $tmp | Out-Null
+        $infPath = Join-Path $tmp "secpol.inf"
+        $dbPath = Join-Path $tmp "secpol.sdb"
+
+        secedit /export /cfg $infPath /areas USER_RIGHTS | Out-Null
+
+        $content = Get-Content $infPath
+        $line = $content | Where-Object { $_ -match "^SeServiceLogonRight" }
+        if ($line) {
+          if ($line -notmatch [regex]::Escape($sid)) {
+            $content = $content -replace "^SeServiceLogonRight.*", "$line,*$sid"
+          } else {
+            Write-Output "SID already holds SeServiceLogonRight"
+          }
+        } else {
+          $content = $content -replace "(\[Privilege Rights\])", "`$1`r`nSeServiceLogonRight = *$sid"
+        }
+        # secedit expects the INF as Unicode (UTF-16LE).
+        Set-Content -Path $infPath -Value $content -Encoding Unicode
+
+        secedit /import /db $dbPath /cfg $infPath /areas USER_RIGHTS | Out-Null
+        secedit /configure /db $dbPath /areas USER_RIGHTS | Out-Null
+        Write-Output "Granted 'Log on as a service' to $account"

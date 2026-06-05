@@ -23,6 +23,14 @@ inputs:
   github_token:
     description: "GitHub token used by the agent installer"
     required: true
+  service_username:
+    description: "Optional account the service should run as (passed via --service-username)"
+    required: false
+    default: ""
+  service_password:
+    description: "Optional password for --service-username (Windows only; sourced from a secret)"
+    required: false
+    default: ""
 
 outputs:
   install_output_path:
@@ -55,22 +63,36 @@ runs:
       id: install-unix
       if: runner.os != 'Windows'
       shell: bash
+      env:
+        SERVICE_USERNAME: ${{ inputs.service_username }}
       run: |
+        extra_args=()
+        if [ -n "$SERVICE_USERNAME" ]; then
+          extra_args+=(--service-username "$SERVICE_USERNAME")
+        fi
         sudo "./dist/${{ inputs.binary }}" \
           --config-url "${{ inputs.config_url }}" \
           --config-secret "${{ inputs.config_secret }}" \
           --org-id "${{ inputs.org_id }}" \
-          --github-token "${{ inputs.github_token }}" 2>&1 | tee install_output.txt
+          --github-token "${{ inputs.github_token }}" \
+          "${extra_args[@]}" 2>&1 | tee install_output.txt
         echo "path=install_output.txt" >> "$GITHUB_OUTPUT"
 
     - name: Install agent (Windows)
       id: install-windows
       if: runner.os == 'Windows'
       shell: pwsh
+      env:
+        SERVICE_USERNAME: ${{ inputs.service_username }}
+        SERVICE_PASSWORD: ${{ inputs.service_password }}
       run: |
+        $extra = @()
+        if ($env:SERVICE_USERNAME) { $extra += @("--service-username", $env:SERVICE_USERNAME) }
+        if ($env:SERVICE_PASSWORD) { $extra += @("--service-password", $env:SERVICE_PASSWORD) }
         ./dist/${{ inputs.binary }} `
           --config-url "${{ inputs.config_url }}" `
           --config-secret "${{ inputs.config_secret }}" `
           --org-id "${{ inputs.org_id }}" `
-          --github-token "${{ inputs.github_token }}" 2>&1 | Tee-Object -FilePath install_output.txt
+          --github-token "${{ inputs.github_token }}" `
+          @extra 2>&1 | Tee-Object -FilePath install_output.txt
         "path=install_output.txt" >> $env:GITHUB_OUTPUT
