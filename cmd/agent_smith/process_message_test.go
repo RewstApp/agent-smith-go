@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -437,3 +438,87 @@ func (t *failingThenPassTransport) RoundTrip(req *http.Request) (*http.Response,
 type simulatedNetError struct{ msg string }
 
 func (e *simulatedNetError) Error() string { return e.msg }
+
+const receivedMessagePrefix = "AgentReceivedMessage:"
+
+// TestBuildReceivedMessageNotification_SmallPayloadVerbatim verifies that a
+// payload at or below the threshold is embedded verbatim, preserving the
+// existing notification format for normal-sized messages.
+func TestBuildReceivedMessageNotification_SmallPayloadVerbatim(t *testing.T) {
+	payload := []byte(`{"commands":"echo hi"}`)
+
+	got := buildReceivedMessageNotification(payload)
+
+	want := receivedMessagePrefix + string(payload)
+	if got != want {
+		t.Errorf("expected verbatim notification %q, got %q", want, got)
+	}
+}
+
+// TestBuildReceivedMessageNotification_BoundaryVerbatim verifies that a payload
+// exactly at the threshold is still sent verbatim (the boundary is inclusive).
+func TestBuildReceivedMessageNotification_BoundaryVerbatim(t *testing.T) {
+	payload := []byte(strings.Repeat("a", maxNotificationPayloadBytes))
+
+	got := buildReceivedMessageNotification(payload)
+
+	want := receivedMessagePrefix + string(payload)
+	if got != want {
+		t.Errorf("expected payload at threshold to be sent verbatim")
+	}
+	if strings.Contains(got, "truncated") {
+		t.Errorf("payload at threshold must not be summarised, got %q", got)
+	}
+}
+
+// TestBuildReceivedMessageNotification_LargePayloadBounded verifies that the
+// notification size stays bounded for arbitrarily large payloads: the full
+// payload is never embedded, and the result reports the true byte length plus a
+// truncated prefix.
+func TestBuildReceivedMessageNotification_LargePayloadBounded(t *testing.T) {
+	// A payload well beyond the threshold (8 MiB) — the kind of multi-MB
+	// workflow body that previously inflated agent memory.
+	const payloadSize = 8 << 20
+	payload := []byte(strings.Repeat("x", payloadSize))
+
+	got := buildReceivedMessageNotification(payload)
+
+	// The notification must be bounded by the prefix + summary text + the
+	// truncated payload window, regardless of how large the payload is.
+	maxLen := len(receivedMessagePrefix) + 64 + maxNotificationPayloadBytes
+	if len(got) > maxLen {
+		t.Errorf("notification length %d exceeds bound %d", len(got), maxLen)
+	}
+	// It must never embed the full payload.
+	if len(got) >= payloadSize {
+		t.Errorf("notification embeds full payload: len=%d, payload=%d", len(got), payloadSize)
+	}
+	if !strings.HasPrefix(got, receivedMessagePrefix) {
+		t.Errorf("notification missing prefix: %q", got[:len(receivedMessagePrefix)])
+	}
+	// The true byte length must be reported so consumers can detect truncation.
+	if !strings.Contains(got, "8388608") {
+		t.Errorf("expected total byte length in summary, got %q", got[:128])
+	}
+}
+
+// TestBuildReceivedMessageNotification_BoundedAcrossSizes asserts the bound
+// holds for a range of payload sizes straddling the threshold.
+func TestBuildReceivedMessageNotification_BoundedAcrossSizes(t *testing.T) {
+	maxLen := len(receivedMessagePrefix) + 64 + maxNotificationPayloadBytes
+
+	for _, size := range []int{0, 1, maxNotificationPayloadBytes - 1, maxNotificationPayloadBytes, maxNotificationPayloadBytes + 1, 1 << 20} {
+		payload := []byte(strings.Repeat("z", size))
+		got := buildReceivedMessageNotification(payload)
+
+		if size <= maxNotificationPayloadBytes {
+			if got != receivedMessagePrefix+string(payload) {
+				t.Errorf("size %d: expected verbatim notification", size)
+			}
+			continue
+		}
+		if len(got) > maxLen {
+			t.Errorf("size %d: notification length %d exceeds bound %d", size, len(got), maxLen)
+		}
+	}
+}

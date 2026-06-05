@@ -30,6 +30,14 @@ const (
 	postbackHTTPTimeout      = 30 * time.Second
 	postbackMaxAttempts      = 3
 	postbackBaseRetryBackoff = 1 * time.Second
+
+	// maxNotificationPayloadBytes bounds how many bytes of a received message
+	// payload are embedded in the AgentReceivedMessage notification forwarded to
+	// plugins. Payloads at or below this size are sent verbatim (preserving the
+	// existing behaviour for normal-sized messages); larger payloads are
+	// summarised so a single oversized workflow message cannot inflate agent
+	// memory or overflow the plugin RPC pipe.
+	maxNotificationPayloadBytes = 4096
 )
 
 type errorResponse struct {
@@ -356,6 +364,28 @@ func (svc *serviceContext) runCycle(
 	}
 }
 
+// buildReceivedMessageNotification builds the bounded "AgentReceivedMessage"
+// notification string forwarded to plugins for a received payload. Payloads at
+// or below maxNotificationPayloadBytes are embedded verbatim. Larger payloads
+// are summarised as their total byte length plus a truncated prefix, so the
+// resulting notification stays a fixed maximum size regardless of payload size —
+// avoiding extra full-payload copies and the risk of overflowing the plugin RPC
+// pipe.
+func buildReceivedMessageNotification(payload []byte) string {
+	const prefix = "AgentReceivedMessage:"
+
+	if len(payload) <= maxNotificationPayloadBytes {
+		return prefix + string(payload)
+	}
+
+	return fmt.Sprintf(
+		"%s[truncated %d bytes] %s",
+		prefix,
+		len(payload),
+		payload[:maxNotificationPayloadBytes],
+	)
+}
+
 func (svc *serviceContext) processMessage(
 	payload []byte,
 	ctx context.Context,
@@ -371,7 +401,7 @@ func (svc *serviceContext) processMessage(
 	}
 
 	_ = notifier.Notify(
-		"AgentReceivedMessage:" + string(payload),
+		buildReceivedMessageNotification(payload),
 	) // Best effort notification
 
 	// Execute the message
