@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -25,11 +26,11 @@ type Release struct {
 }
 
 type Updater interface {
-	Check() (Release, error)
+	Check(ctx context.Context) (Release, error)
 	Update(updaterExecutablePath string) error
 	SelectAsset(release Release) (Asset, error)
-	Download(asset Asset) (string, error)
-	Run() error
+	Download(ctx context.Context, asset Asset) (string, error)
+	Run(ctx context.Context) error
 }
 
 // updateIntervalStr is overridable via -ldflags for integration testing.
@@ -121,14 +122,14 @@ func NewUpdater(
 	}
 }
 
-func (u *defaultUpdater) Check() (Release, error) {
+func (u *defaultUpdater) Check(ctx context.Context) (Release, error) {
 	release := Release{}
 	u.logger.Info("Checking for updates")
 	if u.githubToken != "" {
 		u.logger.Info("GitHub token provided for update check")
 	}
 
-	req, err := http.NewRequest(http.MethodGet, u.latestReleaseUrl, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.latestReleaseUrl, nil)
 	if err != nil {
 		return release, err
 	}
@@ -193,8 +194,8 @@ func (u *defaultUpdater) Update(updaterExecutablePath string) error {
 	return u.runCommand(updaterExecutablePath, args)
 }
 
-func (u *defaultUpdater) Download(asset Asset) (string, error) {
-	req, err := http.NewRequest(http.MethodGet, asset.Url, nil)
+func (u *defaultUpdater) Download(ctx context.Context, asset Asset) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, asset.Url, nil)
 	if err != nil {
 		return "", err
 	}
@@ -247,8 +248,8 @@ func (u *defaultUpdater) Download(asset Asset) (string, error) {
 	return file.Name(), nil
 }
 
-func (u *defaultUpdater) Run() error {
-	latestRelease, err := u.Check()
+func (u *defaultUpdater) Run(ctx context.Context) error {
+	latestRelease, err := u.Check(ctx)
 	if err != nil {
 		return err
 	}
@@ -267,7 +268,7 @@ func (u *defaultUpdater) Run() error {
 		return err
 	}
 
-	executablePath, err := u.Download(applicableAsset)
+	executablePath, err := u.Download(ctx, applicableAsset)
 	if err != nil {
 		return err
 	}
@@ -281,6 +282,8 @@ type AutoUpdateRunner struct {
 	interval    time.Duration
 	maxRetries  int
 	baseBackoff time.Duration
+	ctx         context.Context
+	cancel      context.CancelFunc
 	stop        chan struct{}
 	done        chan struct{}
 }
@@ -292,12 +295,15 @@ func NewAutoUpdateRunner(
 	maxRetries int,
 	baseBackoff time.Duration,
 ) *AutoUpdateRunner {
+	ctx, cancel := context.WithCancel(context.Background())
 	return &AutoUpdateRunner{
 		logger:      logger,
 		updater:     updater,
 		interval:    interval,
 		maxRetries:  maxRetries,
 		baseBackoff: baseBackoff,
+		ctx:         ctx,
+		cancel:      cancel,
 		stop:        make(chan struct{}),
 		done:        make(chan struct{}),
 	}
@@ -318,7 +324,7 @@ func (r *AutoUpdateRunner) Start() {
 				r.logger.Info("Auto updater stopped")
 				return
 			case <-timer.C:
-				if err := r.updater.Run(); err != nil {
+				if err := r.updater.Run(r.ctx); err != nil {
 					r.logger.Error("Update failed, starting retry backoff", "error", err)
 					if r.retryWithBackoff() {
 						return
@@ -331,6 +337,10 @@ func (r *AutoUpdateRunner) Start() {
 }
 
 func (r *AutoUpdateRunner) Stop() {
+	// Cancel the context first so any in-flight update check or download HTTP
+	// request is aborted promptly instead of blocking on the client Timeout,
+	// then signal the run loop to exit and wait for it to finish.
+	r.cancel()
 	close(r.stop)
 	<-r.done
 }
@@ -346,7 +356,7 @@ func (r *AutoUpdateRunner) retryWithBackoff() bool {
 		case <-time.After(backoff):
 		}
 
-		if err := r.updater.Run(); err != nil {
+		if err := r.updater.Run(r.ctx); err != nil {
 			r.logger.Error("Retry failed", "attempt", attempt+1, "error", err)
 			continue
 		}
