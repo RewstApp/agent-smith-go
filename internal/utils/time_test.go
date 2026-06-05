@@ -45,6 +45,23 @@ func TestReconnectTimeoutGenerator(t *testing.T) {
 	}
 }
 
+// TestDefaultMqttConnectTimeoutFitsBackoff records the chosen connect timeout
+// and its rationale: a single connect attempt must never outlive the shortest
+// reconnect backoff slot, otherwise a connect attempt could still be blocking
+// when the next reconnect would already be due. The shortest slot is the first
+// one: base doubled to 2 * InitialReconnectInterval, minus up to 25% jitter,
+// i.e. 1.5 * InitialReconnectInterval.
+func TestDefaultMqttConnectTimeoutFitsBackoff(t *testing.T) {
+	shortestSlot := time.Duration(float64(2*InitialReconnectInterval) * (1 - 0.25))
+	if DefaultMqttConnectTimeout > shortestSlot {
+		t.Errorf(
+			"DefaultMqttConnectTimeout (%v) must not exceed the shortest backoff slot (%v)",
+			DefaultMqttConnectTimeout,
+			shortestSlot,
+		)
+	}
+}
+
 func TestReconnectTimeoutGeneratorJitterDiffers(t *testing.T) {
 	// Two independent generators must produce different sequences
 	g1 := ReconnectTimeoutGenerator{}

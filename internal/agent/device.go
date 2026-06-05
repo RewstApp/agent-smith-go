@@ -1,6 +1,10 @@
 package agent
 
-import "github.com/RewstApp/agent-smith-go/internal/utils"
+import (
+	"time"
+
+	"github.com/RewstApp/agent-smith-go/internal/utils"
+)
 
 type Device struct {
 	DeviceId             string             `json:"device_id"`
@@ -16,6 +20,20 @@ type Device struct {
 	DisableAutoUpdates   bool               `json:"disable_auto_updates"`
 	GithubToken          string             `json:"github_token,omitempty"`
 	MqttQos              *byte              `json:"mqtt_qos,omitempty"`
+	// MqttConnectTimeoutSeconds optionally overrides the per-attempt MQTT
+	// connect timeout. When unset (or non-positive) the agent falls back to
+	// utils.DefaultMqttConnectTimeout. Useful for endpoints with slow TLS
+	// handshakes that need more than the default.
+	MqttConnectTimeoutSeconds *int `json:"mqtt_connect_timeout_seconds,omitempty"`
+}
+
+// MqttConnectTimeout returns the per-attempt MQTT connect timeout, honoring the
+// per-device override when set and falling back to the documented default.
+func (d Device) MqttConnectTimeout() time.Duration {
+	if d.MqttConnectTimeoutSeconds != nil && *d.MqttConnectTimeoutSeconds > 0 {
+		return time.Duration(*d.MqttConnectTimeoutSeconds) * time.Second
+	}
+	return utils.DefaultMqttConnectTimeout
 }
 
 type Plugin struct {

@@ -19,14 +19,30 @@ var NewClient = mqtt.NewClient
 const DefaultDisconnectQuiesce time.Duration = 250 * time.Millisecond
 
 func NewClientOptions(device agent.Device) (*mqtt.ClientOptions, error) {
+	var (
+		opts *mqtt.ClientOptions
+		err  error
+	)
+
 	switch device.Broker {
 	default:
-		return newAzureIotHubClientOptions(azureIotHubDevice{
+		opts, err = newAzureIotHubClientOptions(azureIotHubDevice{
 			DeviceId:        device.DeviceId,
 			Host:            device.AzureIotHubHost,
 			SharedAccessKey: device.SharedAccessKey,
 		})
 	}
+
+	if err != nil {
+		return nil, err
+	}
+
+	// Explicitly own the connect timeout instead of relying on paho's implicit
+	// 30s default, so reconnect timing stays predictable across paho upgrades.
+	// See utils.DefaultMqttConnectTimeout for the value and rationale.
+	opts.SetConnectTimeout(device.MqttConnectTimeout())
+
+	return opts, nil
 }
 
 type ReportedProperties struct {

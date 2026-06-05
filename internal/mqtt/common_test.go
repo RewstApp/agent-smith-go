@@ -2,8 +2,10 @@ package mqtt
 
 import (
 	"testing"
+	"time"
 
 	"github.com/RewstApp/agent-smith-go/internal/agent"
+	"github.com/RewstApp/agent-smith-go/internal/utils"
 )
 
 func TestNewClientOptions_DefaultAzureIotHub(t *testing.T) {
@@ -35,5 +37,38 @@ func TestNewClientOptions_DefaultAzureIotHub(t *testing.T) {
 
 	if len(opts.Servers) == 0 {
 		t.Error("expected at least one mqtt broker to be configured")
+	}
+
+	// ConnectTimeout must be explicitly owned by us, not paho's implicit 30s
+	// default, and default to the documented value.
+	if opts.ConnectTimeout != utils.DefaultMqttConnectTimeout {
+		t.Errorf(
+			"expected ConnectTimeout to default to %v, got %v",
+			utils.DefaultMqttConnectTimeout,
+			opts.ConnectTimeout,
+		)
+	}
+}
+
+func TestNewClientOptions_ConnectTimeoutOverride(t *testing.T) {
+	override := 12
+	device := agent.Device{
+		DeviceId:                  "test-device",
+		AzureIotHubHost:           "myhub.azure-devices.net",
+		SharedAccessKey:           "c2VjcmV0a2V5",
+		Broker:                    "",
+		MqttConnectTimeoutSeconds: &override,
+	}
+
+	opts, err := NewClientOptions(device)
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+
+	if opts.ConnectTimeout != 12*time.Second {
+		t.Errorf(
+			"expected ConnectTimeout to honor per-device override (12s), got %v",
+			opts.ConnectTimeout,
+		)
 	}
 }
