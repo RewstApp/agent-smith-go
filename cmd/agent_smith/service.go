@@ -167,18 +167,20 @@ func (svc *serviceContext) Execute(
 		logger.Info("Plugins loaded", "plugins", plugins)
 	}
 
-	// Create a channel for stopped signal
+	// Create a channel for stopped signal. It is closed (never sent to) when a
+	// stop is requested so that closing can never block the monitor goroutine.
+	// A closed channel makes every select on <-stopped return immediately and
+	// permanently, decoupling teardown timing from the reconnect backoff
+	// schedule: a stop arriving while no runCycle is draining stopped (e.g.
+	// during the time.After reconnect wait) is still honored at once.
 	stopped := make(chan struct{})
 
 	// Monitor the request for the stopped signal
 	go func() {
-		for {
-			select {
-			case <-stop:
-				stopped <- struct{}{}
-			case <-ctx.Done():
-				return
-			}
+		select {
+		case <-stop:
+			close(stopped)
+		case <-ctx.Done():
 		}
 	}()
 

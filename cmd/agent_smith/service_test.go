@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -691,6 +692,127 @@ type blockingPublishClient struct {
 
 func (m *blockingPublishClient) Publish(_ string, _ byte, _ bool, _ interface{}) pahomqtt.Token {
 	return m.publishToken
+}
+
+// connectSignalClient embeds mockMQTTClient and always fails Connect, sending a
+// signal on connectCalled each time Connect is invoked. It is used to drive
+// Execute into the reconnect backoff loop deterministically.
+type connectSignalClient struct {
+	mockMQTTClient
+	connectCalled chan struct{}
+}
+
+func (m *connectSignalClient) Connect() pahomqtt.Token {
+	select {
+	case m.connectCalled <- struct{}{}:
+	default:
+	}
+	return &mockMQTTToken{err: errors.New("connection refused")}
+}
+
+// TestExecute_StopHonoredPromptlyDuringReconnectBackoff is the regression test
+// for sc-96142: a stop issued while Execute is waiting on the reconnect backoff
+// must return promptly (well within the backoff interval), and the stop-signal
+// monitor goroutine must never get stuck. Connect always fails, so after the
+// first cycle Execute enters a ~1.5-2.5s backoff wait; closing stop during that
+// wait must return Execute in well under a second.
+func TestExecute_StopHonoredPromptlyDuringReconnectBackoff(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.json")
+	logPath := filepath.Join(tmpDir, "test.log")
+
+	device := agent.Device{
+		DeviceId:             "test-device",
+		SharedAccessKey:      "dGVzdC1zaGFyZWQta2V5LXRoYXQtaXMtbG9uZy1lbm91Z2gtZm9yLWJhc2U2NC1kZWNvZGluZw==",
+		AzureIotHubHost:      "test.azure-devices.net",
+		LoggingLevel:         "error",
+		DisableAutoUpdates:   true,
+		DisableAgentPostback: true,
+	}
+	configBytes, _ := json.Marshal(device)
+	if err := os.WriteFile(configPath, configBytes, utils.DefaultFileMod); err != nil {
+		t.Fatalf("failed to write config: %v", err)
+	}
+
+	connectCalled := make(chan struct{}, 10)
+	origNewClient := inmqtt.NewClient
+	inmqtt.NewClient = func(_ *pahomqtt.ClientOptions) pahomqtt.Client {
+		return &connectSignalClient{connectCalled: connectCalled}
+	}
+	defer func() { inmqtt.NewClient = origNewClient }()
+
+	svc := &serviceContext{
+		ConfigFile: configPath,
+		LogFile:    logPath,
+		OrgId:      "test-org",
+		Executor:   &mockExecutor{},
+	}
+
+	stop := make(chan struct{})
+	running := make(chan struct{}, 1)
+	done := make(chan service.ServiceExitCode, 1)
+
+	baselineGoroutines := runtime.NumGoroutine()
+	go func() { done <- svc.Execute(stop, running) }()
+
+	select {
+	case <-running:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Execute did not signal running within timeout")
+	}
+
+	// Wait for the first connect attempt to fail; Execute then computes the
+	// next backoff and enters the reconnect-wait select.
+	select {
+	case <-connectCalled:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Execute did not attempt to connect within timeout")
+	}
+
+	// Give Execute a moment to settle into the backoff wait. This is shorter
+	// than the minimum backoff (1.5 * InitialReconnectInterval) so the stop is
+	// genuinely issued mid-backoff, not after it has elapsed.
+	time.Sleep(150 * time.Millisecond)
+
+	start := time.Now()
+	close(stop)
+
+	select {
+	case code := <-done:
+		elapsed := time.Since(start)
+		if elapsed > time.Second {
+			t.Fatalf(
+				"stop during reconnect backoff not honored promptly: returned after %v",
+				elapsed,
+			)
+		}
+		if code != 0 {
+			t.Errorf("expected exit code 0 on stop, got %d", code)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Execute did not exit after stop during reconnect backoff")
+	}
+
+	// The stop-signal monitor goroutine must not be left blocked on a send into
+	// stopped after Execute returns. Poll until the goroutine count settles back
+	// to the pre-Execute baseline; a persistently higher count indicates a
+	// leaked/stuck monitor goroutine (the original sc-96142 failure mode).
+	leaked := true
+	for i := 0; i < 50; i++ {
+		if runtime.NumGoroutine() <= baselineGoroutines {
+			leaked = false
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if leaked {
+		t.Fatalf(
+			"goroutine count did not settle after stop (baseline=%d, current=%d): "+
+				"monitor goroutine may be stuck on a blocked send",
+			baselineGoroutines,
+			runtime.NumGoroutine(),
+		)
+	}
 }
 
 // TestExecute_SubscribeFailure verifies that when MQTT subscription fails,
