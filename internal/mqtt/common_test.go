@@ -66,6 +66,9 @@ func TestNewClientOptions_ConnectTimeoutOverride(t *testing.T) {
 	}
 
 	if opts.ConnectTimeout != 12*time.Second {
-		t.Errorf("expected ConnectTimeout to honor per-device override (12s), got %v", opts.ConnectTimeout)
+		t.Errorf(
+			"expected ConnectTimeout to honor per-device override (12s), got %v",
+			opts.ConnectTimeout,
+		)
 	}
 }
