@@ -1,3 +1,12 @@
+## v1.4.1 (2026-06-09)
+
+### Fix
+
+- [sc-96141] Bound AgentReceivedMessage notification payload size (#79)
+- [sc-96143] Propagate context to updater HTTP requests so shutdown cancels in-flight check/download (#78)
+- [sc-96142] Prevent stop signal from blocking the monitor goroutine (#77)
+- [sc-96140] Set explicit MQTT ConnectTimeout instead of relying on paho default (#76)
+
 ## v1.4.0 (2026-05-27)
 
 ### Feat
