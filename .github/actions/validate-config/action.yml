@@ -13,6 +13,9 @@ outputs:
   device_id:
     description: "device_id read from config.json"
     value: ${{ steps.parse.outputs.device_id }}
+  azure_iot_hub_host:
+    description: "azure_iot_hub_host read from config.json (the MQTT broker host)"
+    value: ${{ steps.parse.outputs.azure_iot_hub_host }}
 
 runs:
   using: composite
@@ -48,4 +51,5 @@ runs:
         if ($failed) { exit 1 }
 
         "device_id=$($config.device_id)" >> $env:GITHUB_OUTPUT
+        "azure_iot_hub_host=$($config.azure_iot_hub_host)" >> $env:GITHUB_OUTPUT
         Write-Output "All config.json fields validated"
