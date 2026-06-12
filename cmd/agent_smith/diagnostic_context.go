@@ -1,9 +1,9 @@
 package main
 
 import (
-	"bytes"
 	"flag"
 	"fmt"
+	"io"
 
 	"github.com/RewstApp/agent-smith-go/internal/agent"
 	"github.com/RewstApp/agent-smith-go/internal/service"
@@ -21,6 +21,17 @@ type diagnosticContext struct {
 	FS             utils.FileSystem
 }
 
+// newDiagnosticFlagSet builds the flag set for diagnostic mode, binding flags
+// to the provided params. It is shared between argument parsing and usage
+// rendering so that the per-flag descriptions stay in a single place.
+func newDiagnosticFlagSet(params *diagnosticContext) *flag.FlagSet {
+	fs := flag.NewFlagSet("diagnostic", flag.ContinueOnError)
+	fs.StringVar(&params.OrgId, "org-id", "", "Organization ID")
+	fs.BoolVar(&params.Diagnostic, "diagnostic", false, "Run diagnostic mode")
+	fs.SetOutput(io.Discard)
+	return fs
+}
+
 func newDiagnosticContext(
 	args []string,
 	sys agent.SystemInfoProvider,
@@ -30,10 +41,7 @@ func newDiagnosticContext(
 ) (*diagnosticContext, error) {
 	var params diagnosticContext
 
-	fs := flag.NewFlagSet("diagnostic", flag.ContinueOnError)
-	fs.StringVar(&params.OrgId, "org-id", "", "Organization ID")
-	fs.BoolVar(&params.Diagnostic, "diagnostic", false, "Run diagnostic mode")
-	fs.SetOutput(bytes.NewBuffer([]byte{}))
+	fs := newDiagnosticFlagSet(&params)
 
 	err := fs.Parse(args)
 	if err != nil {

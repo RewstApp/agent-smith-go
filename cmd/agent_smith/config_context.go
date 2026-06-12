@@ -1,9 +1,9 @@
 package main
 
 import (
-	"bytes"
 	"flag"
 	"fmt"
+	"io"
 	"net/http"
 	"time"
 
@@ -35,15 +35,10 @@ type configContext struct {
 	HTTPClient     *http.Client
 }
 
-func newConfigContext(
-	args []string,
-	sys agent.SystemInfoProvider,
-	domain agent.DomainInfoProvider,
-	fsys utils.FileSystem,
-	svcMgr service.ServiceManager,
-) (*configContext, error) {
-	var params configContext
-
+// newConfigFlagSet builds the flag set for config mode, binding flags to the
+// provided params. It is shared between argument parsing and usage rendering so
+// that the per-flag descriptions stay in a single place.
+func newConfigFlagSet(params *configContext) *flag.FlagSet {
 	fs := flag.NewFlagSet("config", flag.ContinueOnError)
 	fs.StringVar(&params.OrgId, "org-id", "", "Organization ID")
 	fs.StringVar(&params.ConfigUrl, "config-url", "", "Configuration URL")
@@ -76,7 +71,20 @@ func newConfigContext(
 		"",
 		"Password for --service-username (Windows only; not persisted to disk)",
 	)
-	fs.SetOutput(bytes.NewBuffer([]byte{}))
+	fs.SetOutput(io.Discard)
+	return fs
+}
+
+func newConfigContext(
+	args []string,
+	sys agent.SystemInfoProvider,
+	domain agent.DomainInfoProvider,
+	fsys utils.FileSystem,
+	svcMgr service.ServiceManager,
+) (*configContext, error) {
+	var params configContext
+
+	fs := newConfigFlagSet(&params)
 
 	err := fs.Parse(args)
 	if err != nil {
