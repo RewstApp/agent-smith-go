@@ -351,6 +351,116 @@ jobs:
           service: ${{ matrix.service }}
           pattern: Command completed
 
+      # ---- MQTT reconnection scenario ----
+      # Force a transient broker outage and verify the agent tears down, backs
+      # off, resubscribes, and resumes command delivery exactly once. Counts are
+      # captured up front and compared as deltas because the log already contains
+      # "Subscribed to messages"/"Command completed" lines from earlier cycles
+      # (the service has restarted several times by now and the log is not reset
+      # while the service holds it open).
+      - name: Capture reconnect baseline counts
+        id: reconnect_baseline
+        shell: pwsh
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+        run: |
+          $content = Get-Content $env:LOG_FILE -Raw
+          $subscribed = ([regex]::Matches($content, [regex]::Escape("Subscribed to messages"))).Count
+          $completed  = ([regex]::Matches($content, [regex]::Escape("Command completed"))).Count
+          "subscribed=$subscribed" >> $env:GITHUB_OUTPUT
+          "completed=$completed"   >> $env:GITHUB_OUTPUT
+          Write-Output "Baseline counts -> subscribed=$subscribed completed=$completed"
+
+      - name: Disrupt broker connection
+        uses: ./.github/actions/disrupt-connection
+        with:
+          mode: block
+          host: ${{ steps.config.outputs.azure_iot_hub_host }}
+
+      - name: Wait for connection lost detection
+        uses: ./.github/actions/wait-for-log-line
+        with:
+          log_file: ${{ matrix.log_file }}
+          pattern: Connection lost
+          max_attempts: "60"
+          interval_seconds: "2"
+
+      - name: Assert connection lost and reconnect/backoff activity
+        uses: ./.github/actions/assert-log-contains
+        with:
+          log_file: ${{ matrix.log_file }}
+          patterns: |
+            Connection lost
+            Reconnecting in
+            Reconnecting...
+          wait_seconds: "10"
+
+      - name: Restore broker connection
+        if: always()
+        uses: ./.github/actions/disrupt-connection
+        with:
+          mode: restore
+          host: ${{ steps.config.outputs.azure_iot_hub_host }}
+
+      - name: Wait for fresh subscription after reconnect
+        shell: pwsh
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+          BASELINE: ${{ steps.reconnect_baseline.outputs.subscribed }}
+        run: |
+          $baseline = [int]$env:BASELINE
+          for ($i = 1; $i -le 60; $i++) {
+            $content = Get-Content $env:LOG_FILE -Raw -ErrorAction SilentlyContinue
+            $count = if ($content) { ([regex]::Matches($content, [regex]::Escape("Subscribed to messages"))).Count } else { 0 }
+            if ($count -gt $baseline) {
+              Write-Output "Agent resubscribed after reconnect (count $count > baseline $baseline) after ~$($i * 2)s"
+              exit 0
+            }
+            Start-Sleep -Seconds 2
+          }
+          Write-Error "Agent did not resubscribe after reconnect (subscribed count stayed at $baseline)"
+          exit 1
+
+      - name: Send command after reconnect
+        uses: ./.github/actions/send-command
+        with:
+          trigger_url: ${{ vars.IT_SEND_COMMAND_TRIGGER_URL }}
+          device_id: ${{ steps.config.outputs.device_id }}
+          commands: ${{ matrix.success_commands }}
+
+      - name: Assert command executed exactly once after reconnect
+        shell: pwsh
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+          BASELINE: ${{ steps.reconnect_baseline.outputs.completed }}
+        run: |
+          $baseline = [int]$env:BASELINE
+          $observed = $baseline
+          # Wait for the post-reconnect command to complete.
+          for ($i = 1; $i -le 30; $i++) {
+            Start-Sleep -Seconds 2
+            $content = Get-Content $env:LOG_FILE -Raw -ErrorAction SilentlyContinue
+            $observed = if ($content) { ([regex]::Matches($content, [regex]::Escape("Command completed"))).Count } else { 0 }
+            if ($observed -gt $baseline) { break }
+          }
+          if (($observed - $baseline) -lt 1) {
+            Write-Error "Post-reconnect command never completed (count stayed at $baseline)"
+            exit 1
+          }
+          # Allow a brief window for any duplicate delivery to surface, then
+          # require the delta to be exactly one - guarding against re-delivery of
+          # the buffered message on a non-clean reconnected session.
+          Start-Sleep -Seconds 10
+          $content = Get-Content $env:LOG_FILE -Raw
+          $final = ([regex]::Matches($content, [regex]::Escape("Command completed"))).Count
+          $delta = $final - $baseline
+          Write-Output "Post-reconnect 'Command completed' delta: $delta (baseline $baseline, final $final)"
+          if ($delta -ne 1) {
+            Write-Error "Expected exactly one post-reconnect 'Command completed', got $delta (duplicate delivery?)"
+            exit 1
+          }
+          Write-Output "Confirmed exactly one post-reconnect command execution"
+
       - name: Uninstall agent
         uses: ./.github/actions/run-agent
         with:

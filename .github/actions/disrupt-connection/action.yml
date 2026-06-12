@@ -1,0 +1,118 @@
+name: Disrupt connection
+description: >
+  Simulate a transient Azure IoT Hub broker outage by blocking (mode=block) and
+  later restoring (mode=restore) the agent's outbound MQTT egress to the broker
+  host on its TLS port (8883). The agent reaches the broker only on this port, so
+  cutting it severs the live connection and forces the reconnect/teardown path.
+  Restore is idempotent and tolerant of a missing rule, so an always() cleanup
+  step can run it even if the block never applied - guaranteeing a runner is
+  never left firewalled. Gated per platform: iptables on Linux, pf on macOS,
+  Windows Firewall on Windows.
+
+inputs:
+  mode:
+    description: "block to sever broker egress, restore to remove the rule"
+    required: true
+  host:
+    description: "Azure IoT Hub host to disrupt (read from the validated agent config)"
+    required: true
+  port:
+    description: "Broker TCP port to block (MQTT over TLS)"
+    required: false
+    default: "8883"
+
+runs:
+  using: composite
+  steps:
+    - name: Block egress (Linux)
+      if: inputs.mode == 'block' && runner.os == 'Linux'
+      shell: bash
+      env:
+        HOST: ${{ inputs.host }}
+        PORT: ${{ inputs.port }}
+      run: |
+        set -euo pipefail
+        echo "Blocking egress to $HOST:$PORT"
+        # iptables resolves $HOST at rule-add time and installs a DROP rule per
+        # resolved address; the comment tag lets restore find and remove them.
+        sudo iptables -A OUTPUT -p tcp -d "$HOST" --dport "$PORT" \
+          -m comment --comment "rewst-it-disrupt" -j DROP
+        sudo iptables -L OUTPUT -n --line-numbers | grep "rewst-it-disrupt" || true
+
+    - name: Restore egress (Linux)
+      if: inputs.mode == 'restore' && runner.os == 'Linux'
+      shell: bash
+      run: |
+        echo "Restoring egress (removing rewst-it-disrupt rules)"
+        # Delete every tagged OUTPUT rule. Line numbers shift after each delete,
+        # so re-query the chain on each pass until none remain.
+        while true; do
+          line=$(sudo iptables -L OUTPUT --line-numbers -n | awk '/rewst-it-disrupt/{print $1; exit}')
+          if [ -z "$line" ]; then break; fi
+          sudo iptables -D OUTPUT "$line"
+        done
+        sudo iptables -L OUTPUT -n || true
+
+    - name: Block egress (macOS)
+      if: inputs.mode == 'block' && runner.os == 'macOS'
+      shell: bash
+      env:
+        HOST: ${{ inputs.host }}
+        PORT: ${{ inputs.port }}
+      run: |
+        set -euo pipefail
+        echo "Blocking egress to $HOST:$PORT"
+        # pf is disabled by default on the runner, so enabling it with a ruleset
+        # that only drops broker egress leaves all other traffic passing. pf has
+        # no state for the already-established connection, so the rule applies to
+        # it immediately.
+        printf 'block drop out quick proto tcp to %s port %s\n' "$HOST" "$PORT" \
+          | sudo pfctl -ef - 2>&1 || true
+        sudo pfctl -sr 2>/dev/null || true
+
+    - name: Restore egress (macOS)
+      if: inputs.mode == 'restore' && runner.os == 'macOS'
+      shell: bash
+      run: |
+        echo "Restoring egress (flushing pf rules and disabling pf)"
+        sudo pfctl -F all 2>/dev/null || true
+        sudo pfctl -d 2>/dev/null || true
+
+    - name: Block egress (Windows)
+      if: inputs.mode == 'block' && runner.os == 'Windows'
+      shell: pwsh
+      env:
+        HOST: ${{ inputs.host }}
+        PORT: ${{ inputs.port }}
+      run: |
+        Write-Output "Blocking egress to $($env:HOST):$($env:PORT)"
+        $addrs = @()
+        try {
+          $addrs = [System.Net.Dns]::GetHostAddresses($env:HOST) |
+            Where-Object { $_.AddressFamily -eq 'InterNetwork' } |
+            ForEach-Object { $_.IPAddressToString } |
+            Select-Object -Unique
+        } catch {
+          Write-Output "DNS resolution failed for $($env:HOST): $_"
+        }
+        $params = @{
+          DisplayName = 'rewst-it-disrupt'
+          Direction   = 'Outbound'
+          Action      = 'Block'
+          Protocol    = 'TCP'
+          RemotePort  = $env:PORT
+        }
+        if ($addrs.Count -gt 0) {
+          Write-Output "Resolved $($env:HOST) -> $($addrs -join ', ')"
+          $params.RemoteAddress = $addrs
+        } else {
+          Write-Output "No addresses resolved; blocking port $($env:PORT) to all remote hosts"
+        }
+        New-NetFirewallRule @params | Out-Null
+
+    - name: Restore egress (Windows)
+      if: inputs.mode == 'restore' && runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        Write-Output "Restoring egress (removing rewst-it-disrupt rule)"
+        Remove-NetFirewallRule -DisplayName 'rewst-it-disrupt' -ErrorAction SilentlyContinue
