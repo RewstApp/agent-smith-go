@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"fmt"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -129,15 +130,21 @@ func TestReportUsageHelp(t *testing.T) {
 				"Config mode:",
 				"Service mode:",
 				"Update mode:",
-				"-config-url",
-				"-config-file",
-				"-mqtt-qos",
-				"-logging-level",
+				"--config-url",
+				"--config-file",
+				"--mqtt-qos",
+				"--logging-level",
 				"Organization ID",
 			} {
 				if !strings.Contains(out, want) {
 					t.Errorf("expected help output to contain %q, got:\n%s", want, out)
 				}
+			}
+
+			// Flag headers must use the double-dash form to match how flags are
+			// invoked; no header should start with a single dash.
+			if singleDashHeader := regexp.MustCompile(`(?m)^  -[a-z]`); singleDashHeader.MatchString(out) {
+				t.Errorf("expected flag headers to use --, found single-dash header in:\n%s", out)
 			}
 
 			if stderr.Len() != 0 {

@@ -1,11 +1,28 @@
 package main
 
 import (
+	"bytes"
 	"flag"
 	"fmt"
 	"io"
+	"regexp"
 	"strings"
 )
+
+// flagHeaderPrefix matches the single-dash flag header that flag.PrintDefaults
+// emits at the start of each flag line (two spaces followed by one dash). The
+// agent documents flags with a double dash everywhere else, so the rendered
+// flag list is rewritten to match (e.g. "-diagnostic" -> "--diagnostic").
+var flagHeaderPrefix = regexp.MustCompile(`(?m)^  -`)
+
+// printFlagDefaults renders a flag set's per-flag descriptions using the
+// double-dash form so the help output matches how the flags are invoked.
+func printFlagDefaults(w io.Writer, fs *flag.FlagSet) {
+	var buf bytes.Buffer
+	fs.SetOutput(&buf)
+	fs.PrintDefaults()
+	w.Write(flagHeaderPrefix.ReplaceAll(buf.Bytes(), []byte("  --")))
+}
 
 // operationalMode describes a single command-line mode for the purposes of
 // argument detection and usage rendering. The modes are listed in the same
@@ -120,9 +137,7 @@ func detectMode(args []string) (operationalMode, bool) {
 // single mode.
 func printModeUsage(w io.Writer, mode operationalMode) {
 	fmt.Fprintf(w, "Usage (%s mode):\n  rewst_agent_config %s\n\nFlags:\n", mode.name, mode.summary)
-	fs := mode.flagSet()
-	fs.SetOutput(w)
-	fs.PrintDefaults()
+	printFlagDefaults(w, mode.flagSet())
 }
 
 // printFullUsage writes the one-line summary followed by per-flag descriptions
@@ -138,9 +153,7 @@ func printFullUsage(w io.Writer) {
 
 	for _, mode := range modes {
 		fmt.Fprintf(w, "\n%s mode:\n", capitalize(mode.name))
-		fs := mode.flagSet()
-		fs.SetOutput(w)
-		fs.PrintDefaults()
+		printFlagDefaults(w, mode.flagSet())
 	}
 }
 
