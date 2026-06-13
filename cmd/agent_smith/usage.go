@@ -140,16 +140,15 @@ func printModeUsage(w io.Writer, mode operationalMode) {
 	printFlagDefaults(w, mode.flagSet())
 }
 
-// printFullUsage writes the one-line summary followed by per-flag descriptions
-// for every mode.
+// printFullUsage writes the multi-line invocation summary followed by per-flag
+// descriptions for every mode.
 func printFullUsage(w io.Writer) {
 	modes := operationalModes()
 
-	summaries := make([]string, 0, len(modes))
+	fmt.Fprintln(w, "Usage:")
 	for _, mode := range modes {
-		summaries = append(summaries, mode.summary)
+		fmt.Fprintf(w, "  rewst_agent_config %s\n", mode.summary)
 	}
-	fmt.Fprintf(w, "Usage: rewst_agent_config {%s}\n", strings.Join(summaries, " | "))
 
 	for _, mode := range modes {
 		fmt.Fprintf(w, "\n%s mode:\n", capitalize(mode.name))
