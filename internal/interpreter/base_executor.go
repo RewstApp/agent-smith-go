@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 
 	"github.com/RewstApp/agent-smith-go/internal/agent"
 	"github.com/RewstApp/agent-smith-go/internal/utils"
@@ -27,6 +28,55 @@ type baseExecutor struct {
 	BuildExecuteCommandArgs  BuildExecuteCommandArgsFunc
 	BuildExecuteFileArgs     BuildExecuteFileArgsFunc
 	FS                       utils.FileSystem
+
+	// Diagnostic values (shell version and the service account reported by
+	// whoami) are static for the lifetime of an agent process: the shell binary
+	// and the account it runs as do not change between commands. They are
+	// therefore computed at most once via diagOnce and reused on every
+	// subsequent command instead of spawning two extra subprocesses per
+	// command. diagOnce makes the computation safe under the concurrent worker
+	// pool, and the cached fields are only read after Do returns (so the
+	// once-guaranteed happens-before relationship protects them from races).
+	diagOnce      sync.Once
+	cachedVersion string
+	cachedWhoami  string
+}
+
+// diagnostics returns the shell version and current-user strings used for debug
+// logging, computing them via two subprocesses the first time it is called and
+// returning the memoized values thereafter. It is only invoked when debug
+// logging is enabled, so info-level operation never spawns these subprocesses.
+func (e *baseExecutor) diagnostics(ctx context.Context, logger hclog.Logger) (string, string) {
+	e.diagOnce.Do(func() {
+		// #nosec G204
+		versionCmd := exec.CommandContext(
+			ctx,
+			e.Shell,
+			e.BuildExecuteCommandArgs(e.ShellVersionCheckCommand)...)
+		versionOutputBytes, err := versionCmd.CombinedOutput()
+		versionOutput := string(versionOutputBytes)
+		if err != nil {
+			logger.Error(
+				"Shell version check failed",
+				"error",
+				err,
+				"combined_output",
+				versionOutput,
+			)
+		}
+		e.cachedVersion = strings.TrimSpace(versionOutput)
+
+		// #nosec G204
+		whoamiCmd := exec.CommandContext(ctx, e.Shell, e.BuildExecuteCommandArgs("whoami")...)
+		whoamiOutputBytes, err := whoamiCmd.CombinedOutput()
+		whoamiOutput := string(whoamiOutputBytes)
+		if err != nil {
+			logger.Error("Whoami check failed", "error", err, "combined_output", whoamiOutput)
+		}
+		e.cachedWhoami = whoamiOutput
+	})
+
+	return e.cachedVersion, e.cachedWhoami
 }
 
 // SECURITY: Agent Smith is a command execution agent. The shell executable is configured
@@ -53,41 +103,15 @@ func (e *baseExecutor) Execute(
 		return errorResultBytes(logger, err)
 	}
 
-	// Run the command in the system using powershell
+	// Log diagnostics in debug mode. The shell version and whoami values are
+	// computed once per agent process and reused; only the per-command output
+	// (the commands themselves) varies between calls.
 	if logger.IsDebug() {
-		// #nosec G204
-		cmd := exec.CommandContext(
-			ctx,
-			e.Shell,
-			e.BuildExecuteCommandArgs(e.ShellVersionCheckCommand)...)
-		combinedOutputBytes, err := cmd.CombinedOutput()
-		combinedOutput := string(combinedOutputBytes)
-		if err != nil {
-			logger.Error(
-				"Shell version check failed",
-				"error",
-				err,
-				"combined_output",
-				combinedOutput,
-			)
-		}
-
-		version := strings.TrimSpace(combinedOutput)
+		version, user := e.diagnostics(ctx, logger)
 
 		logger.Debug("Shell version", "shell", e.Shell, "version", version)
 		logger.Debug("Commands to execute", "commands", commands)
-	}
-
-	if logger.IsDebug() {
-		// #nosec G204
-		cmd := exec.CommandContext(ctx, e.Shell, e.BuildExecuteCommandArgs("whoami")...)
-		combinedOutputBytes, err := cmd.CombinedOutput()
-		combinedOutput := string(combinedOutputBytes)
-		if err != nil {
-			logger.Error("Whoami check failed", "error", err, "combined_output", combinedOutput)
-		}
-
-		logger.Debug("Whoami", "user", combinedOutput)
+		logger.Debug("Whoami", "user", user)
 	}
 
 	// Save commands to temporary file
