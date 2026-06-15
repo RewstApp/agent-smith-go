@@ -19,7 +19,7 @@ func errorResultBytes(logger hclog.Logger, err error) []byte {
 	r := &errorResult{
 		Error: err.Error(),
 	}
-	b, marshalErr := json.MarshalIndent(r, "", "  ")
+	b, marshalErr := json.Marshal(r)
 	if marshalErr != nil {
 		logger.Error("Failed to marshal error result", "error", marshalErr)
 		return []byte(`{"error":"failed to marshal error result"}`)
@@ -32,7 +32,7 @@ func resultBytes(logger hclog.Logger, err string, out string) []byte {
 		Error:  err,
 		Output: out,
 	}
-	b, marshalErr := json.MarshalIndent(r, "", "  ")
+	b, marshalErr := json.Marshal(r)
 	if marshalErr != nil {
 		logger.Error("Failed to marshal result", "error", marshalErr)
 		return []byte(`{"error":"failed to marshal result","output":""}`)

@@ -1,12 +1,22 @@
 package interpreter
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"testing"
 
 	"github.com/hashicorp/go-hclog"
 )
+
+// assertCompactJSON fails if the bytes contain indentation whitespace
+// (newlines or tabs), ensuring postbacks are serialized compactly.
+func assertCompactJSON(t *testing.T, b []byte) {
+	t.Helper()
+	if bytes.ContainsAny(b, "\n\t") {
+		t.Errorf("expected compact JSON without indentation, got %s", b)
+	}
+}
 
 func TestErrorResultBytes(t *testing.T) {
 	logger := hclog.NewNullLogger()
@@ -16,6 +26,8 @@ func TestErrorResultBytes(t *testing.T) {
 	if b == nil {
 		t.Fatal("expected non-nil bytes")
 	}
+
+	assertCompactJSON(t, b)
 
 	var out errorResult
 	if err = json.Unmarshal(b, &out); err != nil {
@@ -34,6 +46,8 @@ func TestResultBytes(t *testing.T) {
 	if b == nil {
 		t.Fatal("expected non-nil bytes")
 	}
+
+	assertCompactJSON(t, b)
 
 	var out result
 	err := json.Unmarshal(b, &out)
