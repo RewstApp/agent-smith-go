@@ -108,6 +108,9 @@ func TestBaseExecutor_Diagnostics_ConcurrentCachedOnce(t *testing.T) {
 	wg.Wait()
 
 	if runs := countSubprocessRuns(t, counterFile); runs != 1 {
-		t.Errorf("expected version-check subprocess to run once under concurrency, ran %d times", runs)
+		t.Errorf(
+			"expected version-check subprocess to run once under concurrency, ran %d times",
+			runs,
+		)
 	}
 }
