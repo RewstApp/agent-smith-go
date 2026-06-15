@@ -1,3 +1,11 @@
+## v1.4.2 (2026-06-15)
+
+### Fix
+
+- [sc-97776] Use compact JSON for command result postbacks (#83)
+- [sc-97774] Cache shell version and whoami diagnostics per process (#82)
+- [sc-97777] Show specific validation errors and add --help for CLI usage (#81)
+
 ## v1.4.1 (2026-06-09)
 
 ### Fix
