@@ -143,7 +143,8 @@ func TestReportUsageHelp(t *testing.T) {
 
 			// Flag headers must use the double-dash form to match how flags are
 			// invoked; no header should start with a single dash.
-			if singleDashHeader := regexp.MustCompile(`(?m)^  -[a-z]`); singleDashHeader.MatchString(out) {
+			singleDashHeader := regexp.MustCompile(`(?m)^  -[a-z]`)
+			if singleDashHeader.MatchString(out) {
 				t.Errorf("expected flag headers to use --, found single-dash header in:\n%s", out)
 			}
 
@@ -190,14 +191,32 @@ func TestReportUsageModeErrors(t *testing.T) {
 			wantErr: "missing config-secret",
 		},
 		{
-			name:    "config invalid mqtt-qos",
-			args:    []string{"--org-id", "x", "--config-url", "https://x", "--config-secret", "s", "--mqtt-qos", "5"},
+			name: "config invalid mqtt-qos",
+			args: []string{
+				"--org-id",
+				"x",
+				"--config-url",
+				"https://x",
+				"--config-secret",
+				"s",
+				"--mqtt-qos",
+				"5",
+			},
 			mode:    "config",
 			wantErr: "invalid mqtt-qos: must be 0, 1, or 2",
 		},
 		{
-			name:    "config invalid logging-level",
-			args:    []string{"--org-id", "x", "--config-url", "https://x", "--config-secret", "s", "--logging-level", "bogus"},
+			name: "config invalid logging-level",
+			args: []string{
+				"--org-id",
+				"x",
+				"--config-url",
+				"https://x",
+				"--config-secret",
+				"s",
+				"--logging-level",
+				"bogus",
+			},
 			mode:    "config",
 			wantErr: "invalid logging-level",
 		},

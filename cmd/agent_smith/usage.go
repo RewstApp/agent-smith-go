@@ -15,13 +15,13 @@ import (
 // flag list is rewritten to match (e.g. "-diagnostic" -> "--diagnostic").
 var flagHeaderPrefix = regexp.MustCompile(`(?m)^  -`)
 
-// printFlagDefaults renders a flag set's per-flag descriptions using the
+// renderFlagDefaults returns a flag set's per-flag descriptions using the
 // double-dash form so the help output matches how the flags are invoked.
-func printFlagDefaults(w io.Writer, fs *flag.FlagSet) {
+func renderFlagDefaults(fs *flag.FlagSet) string {
 	var buf bytes.Buffer
 	fs.SetOutput(&buf)
 	fs.PrintDefaults()
-	w.Write(flagHeaderPrefix.ReplaceAll(buf.Bytes(), []byte("  --")))
+	return string(flagHeaderPrefix.ReplaceAll(buf.Bytes(), []byte("  --")))
 }
 
 // operationalMode describes a single command-line mode for the purposes of
@@ -133,27 +133,40 @@ func detectMode(args []string) (operationalMode, bool) {
 	return operationalMode{}, false
 }
 
-// printModeUsage writes the invocation summary and per-flag descriptions for a
+// modeUsage returns the invocation summary and per-flag descriptions for a
 // single mode.
-func printModeUsage(w io.Writer, mode operationalMode) {
-	fmt.Fprintf(w, "Usage (%s mode):\n  rewst_agent_config %s\n\nFlags:\n", mode.name, mode.summary)
-	printFlagDefaults(w, mode.flagSet())
+func modeUsage(mode operationalMode) string {
+	var b strings.Builder
+	b.WriteString("Usage (")
+	b.WriteString(mode.name)
+	b.WriteString(" mode):\n  rewst_agent_config ")
+	b.WriteString(mode.summary)
+	b.WriteString("\n\nFlags:\n")
+	b.WriteString(renderFlagDefaults(mode.flagSet()))
+	return b.String()
 }
 
-// printFullUsage writes the multi-line invocation summary followed by per-flag
+// fullUsage returns the multi-line invocation summary followed by per-flag
 // descriptions for every mode.
-func printFullUsage(w io.Writer) {
+func fullUsage() string {
 	modes := operationalModes()
 
-	fmt.Fprintln(w, "Usage:")
+	var b strings.Builder
+	b.WriteString("Usage:\n")
 	for _, mode := range modes {
-		fmt.Fprintf(w, "  rewst_agent_config %s\n", mode.summary)
+		b.WriteString("  rewst_agent_config ")
+		b.WriteString(mode.summary)
+		b.WriteString("\n")
 	}
 
 	for _, mode := range modes {
-		fmt.Fprintf(w, "\n%s mode:\n", capitalize(mode.name))
-		printFlagDefaults(w, mode.flagSet())
+		b.WriteString("\n")
+		b.WriteString(capitalize(mode.name))
+		b.WriteString(" mode:\n")
+		b.WriteString(renderFlagDefaults(mode.flagSet()))
 	}
+
+	return b.String()
 }
 
 // capitalize upper-cases the first letter of a mode name for section headings.
@@ -176,19 +189,22 @@ func capitalize(s string) string {
 // modeErrs maps each mode name to the error its context constructor returned.
 func reportUsage(args []string, modeErrs map[string]error, stdout, stderr io.Writer) int {
 	if hasHelpFlag(args) {
-		printFullUsage(stdout)
+		_, _ = io.WriteString(stdout, fullUsage())
 		return 0
 	}
 
 	if mode, ok := detectMode(args); ok {
+		var b strings.Builder
 		if err := modeErrs[mode.name]; err != nil {
-			fmt.Fprintf(stderr, "error: %v\n\n", err)
+			b.WriteString("error: ")
+			b.WriteString(err.Error())
+			b.WriteString("\n\n")
 		}
-		printModeUsage(stderr, mode)
+		b.WriteString(modeUsage(mode))
+		_, _ = io.WriteString(stderr, b.String())
 		return 1
 	}
 
-	printFullUsage(stderr)
-	fmt.Fprintln(stderr, "\nRun with --help for detailed usage.")
+	_, _ = io.WriteString(stderr, fullUsage()+"\nRun with --help for detailed usage.\n")
 	return 1
 }
