@@ -1,9 +1,9 @@
 package main
 
 import (
-	"bytes"
 	"flag"
 	"fmt"
+	"io"
 	"net/http"
 	"time"
 
@@ -30,6 +30,18 @@ type serviceContext struct {
 	PostbackBaseRetryBackoff time.Duration
 }
 
+// newServiceFlagSet builds the flag set for service mode, binding flags to the
+// provided params. It is shared between argument parsing and usage rendering so
+// that the per-flag descriptions stay in a single place.
+func newServiceFlagSet(params *serviceContext) *flag.FlagSet {
+	fs := flag.NewFlagSet("service", flag.ContinueOnError)
+	fs.StringVar(&params.OrgId, "org-id", "", "Organization ID")
+	fs.StringVar(&params.ConfigFile, "config-file", "", "Configuration File")
+	fs.StringVar(&params.LogFile, "log-file", "", "Log file")
+	fs.SetOutput(io.Discard)
+	return fs
+}
+
 func newServiceContext(
 	args []string,
 	sys agent.SystemInfoProvider,
@@ -38,11 +50,7 @@ func newServiceContext(
 ) (*serviceContext, error) {
 	var params serviceContext
 
-	fs := flag.NewFlagSet("config", flag.ContinueOnError)
-	fs.StringVar(&params.OrgId, "org-id", "", "Organization ID")
-	fs.StringVar(&params.ConfigFile, "config-file", "", "Configuration File")
-	fs.StringVar(&params.LogFile, "log-file", "", "Log file")
-	fs.SetOutput(bytes.NewBuffer([]byte{}))
+	fs := newServiceFlagSet(&params)
 
 	err := fs.Parse(args)
 	if err != nil {

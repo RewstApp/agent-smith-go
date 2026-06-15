@@ -51,7 +51,14 @@ func main() {
 	fs := utils.NewFileSystem()
 	svcMgr := service.NewServiceManager()
 
+	// Attempt each operational mode in dispatch order. The first whose context
+	// constructor succeeds wins. Each mode's validation error is retained so a
+	// failed invocation can surface the specific reason for the mode the
+	// operator most likely intended (see reportUsage).
+	modeErrs := map[string]error{}
+
 	diagnosticCtx, err := newDiagnosticContext(os.Args[1:], sys, domain, svcMgr, fs)
+	modeErrs["diagnostic"] = err
 	if err == nil {
 		// Run diagnostic routine
 		runDiagnostic(diagnosticCtx)
@@ -59,6 +66,7 @@ func main() {
 	}
 
 	uninstallContext, err := newUninstallContext(os.Args[1:], svcMgr, fs)
+	modeErrs["uninstall"] = err
 	if err == nil {
 		// Run uninstall routine
 		runUninstall(uninstallContext)
@@ -66,6 +74,7 @@ func main() {
 	}
 
 	configContext, err := newConfigContext(os.Args[1:], sys, domain, fs, svcMgr)
+	modeErrs["config"] = err
 	if err == nil {
 		// Run config routine
 		if err := runConfig(configContext); err != nil {
@@ -76,6 +85,7 @@ func main() {
 	}
 
 	serviceContext, err := newServiceContext(os.Args[1:], sys, domain, executor)
+	modeErrs["service"] = err
 	if err == nil {
 		// Run service routine
 		runService(serviceContext)
@@ -83,28 +93,14 @@ func main() {
 	}
 
 	updateContext, err := newUpdateContext(os.Args[1:], sys, domain, svcMgr, fs)
+	modeErrs["update"] = err
 	if err == nil {
 		// Run update routine
 		runUpdate(updateContext)
 		return
 	}
 
-	// Show usage
-	loggingLevelsList := getAllowedConfigLevelsString("|")
-	configFlagsList := fmt.Sprintf(
-		"[--logging-level %s] [--syslog] [--disable-agent-postback] [--no-auto-updates] [--mqtt-qos 0|1|2] [--service-username <USER>] [--service-password <PASS>]",
-		loggingLevelsList,
-	)
-	usages := []string{
-		"--diagnostic",
-		"--uninstall",
-		fmt.Sprintf(
-			"--config-url <CONFIG URL> --config-secret <CONFIG SECRET> %s",
-			configFlagsList,
-		),
-		"--config-file <CONFIG FILE> --log-file <LOG FILE>",
-		fmt.Sprintf("--update %s", configFlagsList),
-	}
-	fmt.Printf("Usage: --org-id <ORG_ID> {%s}\n", strings.Join(usages, " | "))
-	os.Exit(1)
+	// No mode matched: surface help, the relevant mode's validation error, or
+	// the full multi-mode usage as appropriate.
+	os.Exit(reportUsage(os.Args[1:], modeErrs, os.Stdout, os.Stderr))
 }

@@ -1,9 +1,9 @@
 package main
 
 import (
-	"bytes"
 	"flag"
 	"fmt"
+	"io"
 
 	"github.com/RewstApp/agent-smith-go/internal/agent"
 	"github.com/RewstApp/agent-smith-go/internal/service"
@@ -29,16 +29,11 @@ type updateContext struct {
 	FS             utils.FileSystem
 }
 
-func newUpdateContext(
-	args []string,
-	sys agent.SystemInfoProvider,
-	domain agent.DomainInfoProvider,
-	svcMgr service.ServiceManager,
-	fsys utils.FileSystem,
-) (*updateContext, error) {
-	var params updateContext
-
-	fs := flag.NewFlagSet("config", flag.ContinueOnError)
+// newUpdateFlagSet builds the flag set for update mode, binding flags to the
+// provided params. It is shared between argument parsing and usage rendering so
+// that the per-flag descriptions stay in a single place.
+func newUpdateFlagSet(params *updateContext) *flag.FlagSet {
+	fs := flag.NewFlagSet("update", flag.ContinueOnError)
 	fs.StringVar(&params.OrgId, "org-id", "", "Organization ID")
 	fs.BoolVar(&params.Update, "update", false, "Update the agent")
 	fs.StringVar(
@@ -69,7 +64,20 @@ func newUpdateContext(
 		"",
 		"Password for --service-username (Windows only; not persisted to disk)",
 	)
-	fs.SetOutput(bytes.NewBuffer([]byte{}))
+	fs.SetOutput(io.Discard)
+	return fs
+}
+
+func newUpdateContext(
+	args []string,
+	sys agent.SystemInfoProvider,
+	domain agent.DomainInfoProvider,
+	svcMgr service.ServiceManager,
+	fsys utils.FileSystem,
+) (*updateContext, error) {
+	var params updateContext
+
+	fs := newUpdateFlagSet(&params)
 
 	err := fs.Parse(args)
 	if err != nil {

@@ -1,9 +1,9 @@
 package main
 
 import (
-	"bytes"
 	"flag"
 	"fmt"
+	"io"
 
 	"github.com/RewstApp/agent-smith-go/internal/service"
 	"github.com/RewstApp/agent-smith-go/internal/utils"
@@ -17,6 +17,17 @@ type uninstallContext struct {
 	FS             utils.FileSystem
 }
 
+// newUninstallFlagSet builds the flag set for uninstall mode, binding flags to
+// the provided params. It is shared between argument parsing and usage
+// rendering so that the per-flag descriptions stay in a single place.
+func newUninstallFlagSet(params *uninstallContext) *flag.FlagSet {
+	fs := flag.NewFlagSet("uninstall", flag.ContinueOnError)
+	fs.StringVar(&params.OrgId, "org-id", "", "Organization ID")
+	fs.BoolVar(&params.Uninstall, "uninstall", false, "Uninstall the agent")
+	fs.SetOutput(io.Discard)
+	return fs
+}
+
 func newUninstallContext(
 	args []string,
 	svcMgr service.ServiceManager,
@@ -24,10 +35,7 @@ func newUninstallContext(
 ) (*uninstallContext, error) {
 	var params uninstallContext
 
-	fs := flag.NewFlagSet("uninstall", flag.ContinueOnError)
-	fs.StringVar(&params.OrgId, "org-id", "", "Organization ID")
-	fs.BoolVar(&params.Uninstall, "uninstall", false, "Uninstall the agent")
-	fs.SetOutput(bytes.NewBuffer([]byte{}))
+	fs := newUninstallFlagSet(&params)
 
 	err := fs.Parse(args)
 	if err != nil {
