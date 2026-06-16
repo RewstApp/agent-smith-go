@@ -8,6 +8,8 @@ import (
 	"math"
 	"time"
 
+	"github.com/RewstApp/agent-smith-go/internal/utils"
+	"github.com/hashicorp/go-hclog"
 	"golang.org/x/sys/windows/svc"
 	"golang.org/x/sys/windows/svc/mgr"
 )
@@ -169,7 +171,7 @@ func (host *windowsRunner) Execute(
 	// Make go routines for the channels
 	ctxStop, cancelStop := context.WithCancel(context.Background())
 	defer cancelStop()
-	go func() {
+	utils.SafeGo(hclog.Default(), func() {
 		for {
 			select {
 			case change := <-request:
@@ -183,11 +185,11 @@ func (host *windowsRunner) Execute(
 				return
 			}
 		}
-	}()
+	}, "scope", "request_monitor")
 
 	ctxRunning, cancelRunning := context.WithCancel(context.Background())
 	defer cancelRunning()
-	go func() {
+	utils.SafeGo(hclog.Default(), func() {
 		select {
 		case <-running:
 			response <- svc.Status{State: svc.Running, Accepts: svc.AcceptStop | svc.AcceptShutdown}
@@ -195,7 +197,7 @@ func (host *windowsRunner) Execute(
 			// Stop this routine
 			return
 		}
-	}()
+	}, "scope", "running_monitor")
 
 	// Execute the runner
 	host.exitCode = int(host.runner.Execute(stop, running))

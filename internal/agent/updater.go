@@ -9,6 +9,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/RewstApp/agent-smith-go/internal/utils"
 	"github.com/RewstApp/agent-smith-go/internal/version"
 	"github.com/hashicorp/go-hclog"
 )
@@ -324,7 +325,7 @@ func (r *AutoUpdateRunner) Start() {
 				r.logger.Info("Auto updater stopped")
 				return
 			case <-timer.C:
-				if err := r.updater.Run(r.ctx); err != nil {
+				if err := r.runUpdate(); err != nil {
 					r.logger.Error("Update failed, starting retry backoff", "error", err)
 					if r.retryWithBackoff() {
 						return
@@ -334,6 +335,21 @@ func (r *AutoUpdateRunner) Start() {
 			}
 		}
 	}()
+}
+
+// runUpdate invokes the updater's Run with panic recovery so a fault on the
+// update path (malformed release JSON, a library or RPC panic, an unexpected
+// nil) is recovered and logged with a stack trace instead of crashing the
+// agent. A recovered panic is surfaced as an error so the normal failure path
+// (retry backoff, then resume on schedule) continues unchanged.
+func (r *AutoUpdateRunner) runUpdate() (err error) {
+	defer func() {
+		if rec := recover(); rec != nil {
+			err = utils.LogRecoveredPanic(r.logger, rec, "scope", "auto_update_tick")
+		}
+	}()
+
+	return r.updater.Run(r.ctx)
 }
 
 func (r *AutoUpdateRunner) Stop() {
@@ -356,7 +372,7 @@ func (r *AutoUpdateRunner) retryWithBackoff() bool {
 		case <-time.After(backoff):
 		}
 
-		if err := r.updater.Run(r.ctx); err != nil {
+		if err := r.runUpdate(); err != nil {
 			r.logger.Error("Retry failed", "attempt", attempt+1, "error", err)
 			continue
 		}

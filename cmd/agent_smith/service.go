@@ -184,13 +184,13 @@ func (svc *serviceContext) Execute(
 	stopped := make(chan struct{})
 
 	// Monitor the request for the stopped signal
-	go func() {
+	utils.SafeGo(logger, func() {
 		select {
 		case <-stop:
 			close(stopped)
 		case <-ctx.Done():
 		}
-	}()
+	}, "scope", "stop_monitor")
 
 	running <- struct{}{}
 	_ = notifier.Notify("AgentStarted") // Best effort notification
@@ -270,7 +270,7 @@ func (svc *serviceContext) runCycle(
 						"worker", i,
 						"queue_length", len(msgQueue),
 					)
-					svc.processMessage(payload, cycleCtx, device, logger, notifier)
+					svc.processMessageGuarded(i, payload, cycleCtx, device, logger, notifier)
 				case <-cycleCtx.Done():
 					logger.Debug("Message worker stopped: context cancelled", "worker", i)
 					return
@@ -384,6 +384,26 @@ func buildReceivedMessageNotification(payload []byte) string {
 		len(payload),
 		payload[:maxNotificationPayloadBytes],
 	)
+}
+
+// processMessageGuarded runs processMessage with per-message panic recovery.
+// Because the payload is untrusted (received over MQTT), a malformed message,
+// an unexpected nil, a plugin RPC fault, or any library panic on this path must
+// not crash the process. Recovering per-message — rather than per-worker-loop —
+// contains the fault to the single offending message and keeps the worker alive
+// to process the next item, so the pool stays at full strength. The recovered
+// value and a stack trace are logged at Error level (with the worker id) to aid
+// diagnosis. Normal error returns from processMessage are unaffected.
+func (svc *serviceContext) processMessageGuarded(
+	workerId int,
+	payload []byte,
+	ctx context.Context,
+	device agent.Device,
+	logger hclog.Logger,
+	notifier plugins.NotifierWrapper,
+) {
+	defer utils.Recover(logger, "worker", workerId, "scope", "processMessage")
+	svc.processMessage(payload, ctx, device, logger, notifier)
 }
 
 func (svc *serviceContext) processMessage(
