@@ -54,7 +54,14 @@ func TestProcessMessageGuarded_RecoversAndLogs(t *testing.T) {
 
 	// Must not panic — if recovery were missing, this call would crash the test
 	// process (and the agent in production).
-	svc.processMessageGuarded(7, validPayload("echo boom"), context.Background(), device, logger, notifier)
+	svc.processMessageGuarded(
+		7,
+		validPayload("echo boom"),
+		context.Background(),
+		device,
+		logger,
+		notifier,
+	)
 
 	output := buf.String()
 	if !strings.Contains(output, "Recovered from panic") {
