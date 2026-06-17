@@ -7,6 +7,9 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+
+	"github.com/RewstApp/agent-smith-go/internal/utils"
+	"github.com/hashicorp/go-hclog"
 )
 
 func Run(runner Runner) (int, error) {
@@ -19,24 +22,24 @@ func Run(runner Runner) (int, error) {
 	ctxStop, cancelStop := context.WithCancel(context.Background())
 	defer cancelStop()
 
-	go func() {
+	utils.SafeGo(hclog.Default(), func() {
 		select {
 		case <-signalReceived:
 			stop <- struct{}{}
 		case <-ctxStop.Done():
 		}
-	}()
+	}, "scope", "signal_monitor")
 
 	running := make(chan struct{})
 	ctxRunning, cancelRunning := context.WithCancel(context.Background())
 	defer cancelRunning()
 
-	go func() {
+	utils.SafeGo(hclog.Default(), func() {
 		select {
 		case <-running:
 		case <-ctxRunning.Done():
 		}
-	}()
+	}, "scope", "running_monitor")
 
 	// Execute the runner
 	exitCode := runner.Execute(stop, running)
