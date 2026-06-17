@@ -25,8 +25,12 @@ import (
 )
 
 const (
-	workerCount              = 10
-	messageQueueSize         = 100
+	// workerCount and messageQueueSize are the defaults applied when the device
+	// config does not override them via worker_count / message_queue_size. The
+	// effective values are resolved per cycle from the device config; see
+	// agent.Device.ResolvedWorkerCount / ResolvedMessageQueueSize.
+	workerCount              = agent.DefaultWorkerCount
+	messageQueueSize         = agent.DefaultMessageQueueSize
 	postbackHTTPTimeout      = 30 * time.Second
 	postbackMaxAttempts      = 3
 	postbackBaseRetryBackoff = 1 * time.Second
@@ -251,9 +255,21 @@ func (svc *serviceContext) runCycle(
 ) (bool, bool, service.ServiceExitCode) {
 	cycleCtx, cycleCancel := context.WithCancel(ctx)
 
-	msgQueue := make(chan []byte, messageQueueSize)
+	resolvedWorkerCount := device.ResolvedWorkerCount()
+	resolvedQueueSize := device.ResolvedMessageQueueSize()
+
+	msgQueue := make(chan []byte, resolvedQueueSize)
+
+	// draining is closed at the very start of teardown (its defer is registered
+	// last, so it runs first) to release the subscribe callback if it is blocked
+	// applying back-pressure on a full queue. Releasing the callback before the
+	// MQTT Unsubscribe/Disconnect is what keeps teardown deadlock-free: paho
+	// dispatches messages on a single ordered goroutine, so a permanently
+	// blocked callback would also stall the UNSUBACK/disconnect handling.
+	draining := make(chan struct{})
+
 	var wg sync.WaitGroup
-	for i := range workerCount {
+	for i := range resolvedWorkerCount {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -332,17 +348,14 @@ func (svc *serviceContext) runCycle(
 		logger.Info("Device twin reported properties updated", "agent_version", version.Version)
 	}
 
+	// Closed first during teardown (registered after the MQTT teardown defer so
+	// it runs before it under LIFO) to unblock a back-pressured callback.
+	defer close(draining)
+
+	// enqueueMessage applies back-pressure instead of dropping; see its doc for
+	// the delivery guarantee and the single (loudly surfaced) teardown drop path.
 	token = client.Subscribe(topic, qos, func(client mqtt.Client, msg mqtt.Message) {
-		payload := msg.Payload()
-		select {
-		case msgQueue <- payload:
-		default:
-			logger.Warn(
-				"Message dropped: queue full",
-				"queue_size",
-				messageQueueSize,
-			)
-		}
+		svc.enqueueMessage(msg.Payload(), msgQueue, draining, resolvedQueueSize, logger, notifier)
 	})
 
 	if token.Wait() && token.Error() != nil {
@@ -384,6 +397,48 @@ func buildReceivedMessageNotification(payload []byte) string {
 		len(payload),
 		payload[:maxNotificationPayloadBytes],
 	)
+}
+
+// enqueueMessage hands a received payload to the worker queue, applying
+// back-pressure rather than dropping. paho dispatches messages on a single
+// ordered goroutine and sends the QoS-1 PUBACK only after the subscribe callback
+// (and thus this function) returns, so blocking here stops the broker from
+// considering the message delivered: when the queue is full the call waits until
+// a worker frees a slot, and if the agent stays saturated paho's inbound buffer
+// fills so the broker holds and later redelivers messages instead of the agent
+// silently discarding them.
+//
+// The single drop path is a payload arriving while the cycle is tearing down
+// (draining closed). The connection is going away regardless, so at QoS >= 1 the
+// broker redelivers on the next connection; the drop is therefore surfaced
+// loudly — an Error log, a cumulative counter, and a best-effort plugin
+// notification — rather than buried in a single Warn. draining is selected as a
+// bounded escape so teardown can never deadlock on a full queue.
+//
+// Returns true when the payload was enqueued, false when it was dropped.
+func (svc *serviceContext) enqueueMessage(
+	payload []byte,
+	msgQueue chan<- []byte,
+	draining <-chan struct{},
+	queueSize int,
+	logger hclog.Logger,
+	notifier plugins.NotifierWrapper,
+) bool {
+	select {
+	case msgQueue <- payload:
+		return true
+	case <-draining:
+		dropped := svc.droppedMessages.Add(1)
+		logger.Error(
+			"Message dropped: received during shutdown, broker will redeliver at QoS>=1",
+			"queue_size", queueSize,
+			"dropped_total", dropped,
+		)
+		_ = notifier.Notify(
+			fmt.Sprintf("AgentMessageDropped:shutdown (dropped_total=%d)", dropped),
+		) // Best effort notification
+		return false
+	}
 }
 
 // processMessageGuarded runs processMessage with per-message panic recovery.

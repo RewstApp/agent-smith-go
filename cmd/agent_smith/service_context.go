@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sync/atomic"
 	"time"
 
 	"github.com/RewstApp/agent-smith-go/internal/agent"
@@ -28,6 +29,13 @@ type serviceContext struct {
 	// PostbackBaseRetryBackoff is the base delay used for exponential backoff
 	// between postback attempts. Defaults to postbackBaseRetryBackoff.
 	PostbackBaseRetryBackoff time.Duration
+
+	// droppedMessages counts inbound messages the agent could not accept and had
+	// to discard. Under normal operation the subscribe callback applies
+	// back-pressure instead of dropping, so this only increments when a payload
+	// arrives during teardown (see runCycle). It is a cumulative, process-wide
+	// counter exposed for observability beyond the per-drop error log.
+	droppedMessages atomic.Int64
 }
 
 // newServiceFlagSet builds the flag set for service mode, binding flags to the

@@ -170,6 +170,46 @@ This will stop the service, remove configuration files, and clean up system serv
 4. Returns results back to the Rewst platform
 5. Supports system information collection and custom plugins
 
+### Message Delivery Guarantee
+
+Incoming messages are handed to a buffered queue drained by a pool of
+command-execution workers. When that queue fills (a burst of commands, or
+execution slow enough to keep every worker busy), the subscribe callback
+**applies back-pressure instead of dropping the message**: it blocks until a
+worker frees a slot. Because the agent subscribes at QoS 1 (at-least-once) by
+default and the MQTT client only acknowledges a message after the callback
+returns, a saturated agent stops acknowledging — so the broker holds and later
+redelivers the command rather than the agent silently discarding it. This trades
+a small amount of in-broker buffering for no silent command loss.
+
+The only case where a message is discarded is when it arrives while a connection
+cycle is tearing down (service stop or reconnect). The connection is going away
+regardless, so at QoS ≥ 1 the broker redelivers on the next connection. These
+drops are surfaced loudly — an `Error` log line, a cumulative dropped-message
+counter, and a best-effort `AgentMessageDropped` plugin notification — rather
+than a single warning, so they are observable in monitoring.
+
+#### Tuning queue capacity and concurrency
+
+Two optional fields in the device configuration file let high-volume deployments
+tune the queue without code changes:
+
+| Config key | Default | Description |
+|------------|---------|-------------|
+| `worker_count` | `10` | Number of concurrent command-execution workers draining the queue. |
+| `message_queue_size` | `100` | Capacity of the buffered inbound message queue before back-pressure begins. |
+
+Both fall back to their defaults when omitted or set to a non-positive value.
+Raising `message_queue_size` absorbs larger bursts before back-pressure begins;
+raising `worker_count` widens execution parallelism. Example snippet:
+
+```json
+{
+  "worker_count": 25,
+  "message_queue_size": 500
+}
+```
+
 ## Build
 Required tools and packages:
 

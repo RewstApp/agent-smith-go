@@ -25,6 +25,47 @@ type Device struct {
 	// utils.DefaultMqttConnectTimeout. Useful for endpoints with slow TLS
 	// handshakes that need more than the default.
 	MqttConnectTimeoutSeconds *int `json:"mqtt_connect_timeout_seconds,omitempty"`
+	// WorkerCount optionally overrides how many concurrent command-execution
+	// workers drain the inbound message queue. When unset (or non-positive) the
+	// agent falls back to DefaultWorkerCount. Deployments that expect a high
+	// volume of concurrent commands can raise this to widen execution
+	// parallelism.
+	WorkerCount *int `json:"worker_count,omitempty"`
+	// MessageQueueSize optionally overrides the capacity of the buffered queue
+	// that holds received messages waiting for a worker. When unset (or
+	// non-positive) the agent falls back to DefaultMessageQueueSize. A larger
+	// queue absorbs bigger bursts before the agent starts applying back-pressure
+	// to the broker.
+	MessageQueueSize *int `json:"message_queue_size,omitempty"`
+}
+
+const (
+	// DefaultWorkerCount is the number of concurrent command-execution workers
+	// used when WorkerCount is not configured.
+	DefaultWorkerCount = 10
+	// DefaultMessageQueueSize is the buffered inbound message queue capacity used
+	// when MessageQueueSize is not configured.
+	DefaultMessageQueueSize = 100
+)
+
+// ResolvedWorkerCount returns the number of command-execution workers to start,
+// honoring the per-device override when set to a positive value and falling back
+// to DefaultWorkerCount otherwise.
+func (d Device) ResolvedWorkerCount() int {
+	if d.WorkerCount != nil && *d.WorkerCount > 0 {
+		return *d.WorkerCount
+	}
+	return DefaultWorkerCount
+}
+
+// ResolvedMessageQueueSize returns the inbound message queue capacity, honoring
+// the per-device override when set to a positive value and falling back to
+// DefaultMessageQueueSize otherwise.
+func (d Device) ResolvedMessageQueueSize() int {
+	if d.MessageQueueSize != nil && *d.MessageQueueSize > 0 {
+		return *d.MessageQueueSize
+	}
+	return DefaultMessageQueueSize
 }
 
 // MqttConnectTimeout returns the per-attempt MQTT connect timeout, honoring the
