@@ -37,6 +37,16 @@ type Device struct {
 	// queue absorbs bigger bursts before the agent starts applying back-pressure
 	// to the broker.
 	MessageQueueSize *int `json:"message_queue_size,omitempty"`
+	// PostbackMaxAttempts optionally overrides the total number of postback
+	// attempts (including the initial try) before a command result is spooled to
+	// disk for later delivery. When unset (or non-positive) the agent falls back
+	// to DefaultPostbackMaxAttempts. Raising it widens the in-line retry window
+	// for transient engine outages.
+	PostbackMaxAttempts *int `json:"postback_max_attempts,omitempty"`
+	// PostbackBaseRetryBackoffSeconds optionally overrides the base delay used for
+	// exponential backoff between postback attempts, in seconds. When unset (or
+	// non-positive) the agent falls back to DefaultPostbackBaseRetryBackoff.
+	PostbackBaseRetryBackoffSeconds *int `json:"postback_base_retry_backoff_seconds,omitempty"`
 }
 
 const (
@@ -46,6 +56,13 @@ const (
 	// DefaultMessageQueueSize is the buffered inbound message queue capacity used
 	// when MessageQueueSize is not configured.
 	DefaultMessageQueueSize = 100
+	// DefaultPostbackMaxAttempts is the total number of postback attempts used
+	// when PostbackMaxAttempts is not configured.
+	DefaultPostbackMaxAttempts = 3
+	// DefaultPostbackBaseRetryBackoff is the base exponential-backoff delay used
+	// between postback attempts when PostbackBaseRetryBackoffSeconds is not
+	// configured.
+	DefaultPostbackBaseRetryBackoff = 1 * time.Second
 )
 
 // ResolvedWorkerCount returns the number of command-execution workers to start,
@@ -66,6 +83,26 @@ func (d Device) ResolvedMessageQueueSize() int {
 		return *d.MessageQueueSize
 	}
 	return DefaultMessageQueueSize
+}
+
+// ResolvedPostbackMaxAttempts returns the total number of postback attempts,
+// honoring the per-device override when set to a positive value and falling back
+// to DefaultPostbackMaxAttempts otherwise.
+func (d Device) ResolvedPostbackMaxAttempts() int {
+	if d.PostbackMaxAttempts != nil && *d.PostbackMaxAttempts > 0 {
+		return *d.PostbackMaxAttempts
+	}
+	return DefaultPostbackMaxAttempts
+}
+
+// ResolvedPostbackBaseRetryBackoff returns the base exponential-backoff delay
+// between postback attempts, honoring the per-device override when set to a
+// positive value and falling back to DefaultPostbackBaseRetryBackoff otherwise.
+func (d Device) ResolvedPostbackBaseRetryBackoff() time.Duration {
+	if d.PostbackBaseRetryBackoffSeconds != nil && *d.PostbackBaseRetryBackoffSeconds > 0 {
+		return time.Duration(*d.PostbackBaseRetryBackoffSeconds) * time.Second
+	}
+	return DefaultPostbackBaseRetryBackoff
 }
 
 // MqttConnectTimeout returns the per-attempt MQTT connect timeout, honoring the

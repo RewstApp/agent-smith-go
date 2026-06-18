@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -32,8 +33,8 @@ const (
 	workerCount              = agent.DefaultWorkerCount
 	messageQueueSize         = agent.DefaultMessageQueueSize
 	postbackHTTPTimeout      = 30 * time.Second
-	postbackMaxAttempts      = 3
-	postbackBaseRetryBackoff = 1 * time.Second
+	postbackMaxAttempts      = agent.DefaultPostbackMaxAttempts
+	postbackBaseRetryBackoff = agent.DefaultPostbackBaseRetryBackoff
 
 	// maxNotificationPayloadBytes bounds how many bytes of a received message
 	// payload are embedded in the AgentReceivedMessage notification forwarded to
@@ -127,6 +128,22 @@ func (svc *serviceContext) Execute(
 
 		logger = utils.ConfigureLogger("agent_smith", sysLogger, device.LoggingLevel)
 	}
+
+	// Resolve the postback retry budget from the device config, falling back to
+	// the documented defaults when unset. Existing deployments that omit these
+	// keys keep the previous behaviour.
+	svc.PostbackMaxAttempts = device.ResolvedPostbackMaxAttempts()
+	svc.PostbackBaseRetryBackoff = device.ResolvedPostbackBaseRetryBackoff()
+
+	// Create the durable postback spool so results that exhaust their in-line
+	// retry budget are persisted and re-attempted on a later cycle instead of
+	// being dropped.
+	svc.spool = newPostbackSpool(
+		filepath.Join(agent.GetDataDirectory(svc.OrgId), "postback_spool"),
+		defaultSpoolMaxEntries,
+		defaultSpoolMaxAge,
+		logger,
+	)
 
 	if !device.DisableAutoUpdates {
 		updater := agent.NewUpdater(
@@ -367,6 +384,13 @@ func (svc *serviceContext) runCycle(
 	logger.Info("Subscribed to messages", "topic", topic, "qos", qos)
 	_ = notifier.Notify("AgentStatus:Online") // Best effort notification
 
+	// Now that connectivity is restored, re-attempt any postbacks that were
+	// spooled to disk when the engine was previously unreachable. Run it on a
+	// cycle-scoped goroutine so it cannot block the connection loop or teardown.
+	utils.SafeGo(logger, func() {
+		svc.flushPostbackSpool(cycleCtx, device, logger)
+	}, "scope", "postback_spool_flush")
+
 	select {
 	case <-stopped:
 		_ = notifier.Notify("AgentStatus:Stopped") // Best effort notification
@@ -499,20 +523,23 @@ func (svc *serviceContext) processMessage(
 		return
 	}
 
-	svc.sendPostbackWithRetry(ctx, &message, device, resultBytes, logger)
+	svc.sendPostbackWithRetry(ctx, &message, device, resultBytes, logger, notifier)
 }
 
 // sendPostbackWithRetry posts the command result to the Rewst engine, retrying
 // transient failures (network errors and 5xx responses) with exponential
 // backoff. Non-retryable responses (2xx success, 400 "already fulfilled", and
-// other 4xx errors) terminate the loop immediately. When all attempts fail the
-// final failure is surfaced clearly so the result is not silently dropped.
+// other 4xx errors) terminate the loop immediately. When all in-line attempts
+// fail the result is not silently dropped: the failure is surfaced via a
+// best-effort AgentPostbackFailed plugin notification and the result is spooled
+// to disk for re-attempt on a later cycle.
 func (svc *serviceContext) sendPostbackWithRetry(
 	ctx context.Context,
 	message *interpreter.Message,
 	device agent.Device,
 	resultBytes []byte,
 	logger hclog.Logger,
+	notifier plugins.NotifierWrapper,
 ) {
 	maxAttempts := svc.PostbackMaxAttempts
 	if maxAttempts < 1 {
@@ -554,12 +581,62 @@ func (svc *serviceContext) sendPostbackWithRetry(
 		lastErr = err
 	}
 
+	// All in-line attempts failed. Surface the failure beyond the log and, when a
+	// spool is configured, persist the result for re-attempt on a later cycle so
+	// a transient engine outage does not silently lose it.
 	logger.Error(
-		"Postback failed: all retries exhausted, result dropped",
+		"Postback failed: all in-line retries exhausted",
 		"post_id", message.PostId,
 		"attempts", maxAttempts,
 		"last_error", lastErr,
 	)
+	_ = notifier.Notify(
+		fmt.Sprintf("AgentPostbackFailed:%s", message.PostId),
+	) // Best effort notification
+
+	if svc.spool == nil {
+		logger.Error("Postback result dropped: no spool configured", "post_id", message.PostId)
+		return
+	}
+
+	if err := svc.spool.enqueue(spoolEntry{
+		PostId:    message.PostId,
+		Result:    resultBytes,
+		CreatedAt: time.Now(),
+	}); err != nil {
+		logger.Error(
+			"Postback result dropped: failed to spool for later delivery",
+			"post_id", message.PostId,
+			"error", err,
+		)
+		return
+	}
+
+	logger.Warn(
+		"Postback result spooled for later delivery",
+		"post_id", message.PostId,
+	)
+}
+
+// flushPostbackSpool re-attempts delivery of any command results whose in-line
+// postback previously exhausted its retry budget and was spooled to disk. Each
+// entry is given a single attempt: a success or permanent (4xx) rejection
+// removes it from the spool, while a transient failure leaves it (and the rest)
+// for a later cycle. It is bound to the cycle context so it neither blocks the
+// connection loop nor delays teardown — cycle cancellation aborts any in-flight
+// request and stops the flush between entries.
+func (svc *serviceContext) flushPostbackSpool(
+	ctx context.Context,
+	device agent.Device,
+	logger hclog.Logger,
+) {
+	if svc.spool == nil {
+		return
+	}
+	svc.spool.flush(ctx, func(entry spoolEntry) (bool, error) {
+		msg := &interpreter.Message{PostId: entry.PostId}
+		return svc.attemptPostback(ctx, msg, device, entry.Result, logger, 1)
+	})
 }
 
 // attemptPostback performs a single postback attempt. It returns done=true

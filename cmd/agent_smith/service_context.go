@@ -30,6 +30,13 @@ type serviceContext struct {
 	// between postback attempts. Defaults to postbackBaseRetryBackoff.
 	PostbackBaseRetryBackoff time.Duration
 
+	// spool is the bounded on-disk fallback for command results whose postback
+	// exhausted its in-line retry budget. It survives transient engine outages so
+	// results are re-attempted on a later cycle rather than dropped. It may be nil
+	// (e.g. in unit tests that exercise postback logic in isolation), in which
+	// case exhausted results are surfaced via log and plugin notification only.
+	spool *postbackSpool
+
 	// droppedMessages counts inbound messages the agent could not accept and had
 	// to discard. Under normal operation the subscribe callback applies
 	// back-pressure instead of dropping, so this only increments when a payload
