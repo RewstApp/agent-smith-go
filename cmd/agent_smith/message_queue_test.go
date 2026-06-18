@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -20,6 +21,28 @@ type mockNotifierWrapper struct{}
 func (m *mockNotifierWrapper) Kill()               {}
 func (m *mockNotifierWrapper) Plugins() []string   { return nil }
 func (m *mockNotifierWrapper) Notify(string) error { return nil }
+
+// recordingNotifierWrapper records every notification message it receives so
+// tests can assert that drops are surfaced to plugins.
+type recordingNotifierWrapper struct {
+	mu       sync.Mutex
+	messages []string
+}
+
+func (m *recordingNotifierWrapper) Kill()             {}
+func (m *recordingNotifierWrapper) Plugins() []string { return nil }
+func (m *recordingNotifierWrapper) Notify(msg string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.messages = append(m.messages, msg)
+	return nil
+}
+
+func (m *recordingNotifierWrapper) all() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]string(nil), m.messages...)
+}
 
 // countingExecutor counts Execute calls and optionally blocks until released.
 type countingExecutor struct {
@@ -119,77 +142,166 @@ func TestMessageQueue_WorkersProcessAllMessages(t *testing.T) {
 	}
 }
 
-// TestMessageQueue_QueueFullDropsMessage verifies that when the queue is full
-// the callback drops the message rather than blocking.
-func TestMessageQueue_QueueFullDropsMessage(t *testing.T) {
-	// workerBlocked is incremented each time a worker enters Execute.
-	workerEntered := make(chan struct{}, workerCount)
-	block := make(chan struct{})
-
-	exec := &blockingConcurrencyExecutor{
-		block:   block,
-		onEnter: func() { workerEntered <- struct{}{} },
-		onExit:  func() {},
-	}
-	svc := newTestSvc(exec)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
+// TestEnqueueMessage_EnqueuesWhenSlotAvailable verifies the normal path: a
+// payload is placed on the queue and reported as enqueued (not dropped).
+func TestEnqueueMessage_EnqueuesWhenSlotAvailable(t *testing.T) {
+	svc := newTestSvc(&countingExecutor{})
 	logger := hclog.NewNullLogger()
-	notifier := &mockNotifierWrapper{}
-	device := agent.Device{}
+	notifier := &recordingNotifierWrapper{}
 
-	msgQueue := make(chan []byte, messageQueueSize)
+	msgQueue := make(chan []byte, 1)
+	draining := make(chan struct{})
 
-	// Start workers.
-	for range workerCount {
-		go func() {
-			for {
-				select {
-				case payload, ok := <-msgQueue:
-					if !ok {
-						return
-					}
-					svc.processMessage(payload, ctx, device, logger, notifier)
-				case <-ctx.Done():
-					return
-				}
-			}
-		}()
+	payload := validPayload("echo hi")
+	if ok := svc.enqueueMessage(payload, msgQueue, draining, 1, logger, notifier); !ok {
+		t.Fatal("expected enqueueMessage to report success when a slot is free")
 	}
 
-	// Send exactly workerCount messages and wait until every worker is blocked
-	// inside Execute — at that point no worker can drain the queue further.
-	for range workerCount {
-		msgQueue <- validPayload("echo block")
-	}
-	for range workerCount {
-		select {
-		case <-workerEntered:
-		case <-time.After(2 * time.Second):
-			t.Fatal("workers did not enter Execute in time")
-		}
-	}
-
-	// Now fill the queue to its full capacity.
-	for range messageQueueSize {
-		msgQueue <- validPayload("echo fill")
-	}
-
-	// Queue is full. This select must take the default (drop) branch.
-	dropped := false
 	select {
-	case msgQueue <- validPayload("echo overflow"):
+	case got := <-msgQueue:
+		if string(got) != string(payload) {
+			t.Errorf("queued payload mismatch: got %q want %q", got, payload)
+		}
 	default:
-		dropped = true
+		t.Fatal("expected payload to be on the queue")
 	}
 
-	if !dropped {
-		t.Error("expected message to be dropped when queue is full, but it was enqueued")
+	if n := svc.droppedMessages.Load(); n != 0 {
+		t.Errorf("expected 0 drops, got %d", n)
+	}
+	if msgs := notifier.all(); len(msgs) != 0 {
+		t.Errorf("expected no notifications on success, got %v", msgs)
+	}
+}
+
+// TestEnqueueMessage_BackPressureBlocksThenSucceeds verifies that when the queue
+// is full enqueueMessage applies back-pressure (blocks) rather than dropping,
+// and succeeds once a worker frees a slot. This is the core anti-data-loss
+// behavior: a full queue must not silently discard the command.
+func TestEnqueueMessage_BackPressureBlocksThenSucceeds(t *testing.T) {
+	svc := newTestSvc(&countingExecutor{})
+	logger := hclog.NewNullLogger()
+	notifier := &recordingNotifierWrapper{}
+
+	msgQueue := make(chan []byte, 1)
+	draining := make(chan struct{})
+
+	// Pre-fill the queue so the next enqueue must wait.
+	msgQueue <- validPayload("echo first")
+
+	done := make(chan bool, 1)
+	go func() {
+		done <- svc.enqueueMessage(validPayload("echo second"), msgQueue, draining, 1, logger, notifier)
+	}()
+
+	// The enqueue must not complete while the queue stays full.
+	select {
+	case <-done:
+		t.Fatal("enqueueMessage returned while queue was full; it should block (back-pressure)")
+	case <-time.After(100 * time.Millisecond):
 	}
 
-	close(block) // unblock workers so goroutines can exit
+	// Free a slot; the blocked enqueue should now succeed.
+	<-msgQueue
+	select {
+	case ok := <-done:
+		if !ok {
+			t.Error("expected enqueueMessage to report success after a slot freed")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("enqueueMessage did not complete after a slot freed")
+	}
+
+	if n := svc.droppedMessages.Load(); n != 0 {
+		t.Errorf("expected 0 drops under back-pressure, got %d", n)
+	}
+	if msgs := notifier.all(); len(msgs) != 0 {
+		t.Errorf("expected no drop notifications under back-pressure, got %v", msgs)
+	}
+}
+
+// TestEnqueueMessage_DropsLoudlyOnDrain verifies that a payload arriving while
+// the cycle is tearing down (draining closed) on a full queue is dropped, and
+// that the drop is surfaced loudly: the cumulative counter increments and a
+// best-effort plugin notification is emitted. This is the bounded escape that
+// keeps teardown from deadlocking on a full queue.
+func TestEnqueueMessage_DropsLoudlyOnDrain(t *testing.T) {
+	svc := newTestSvc(&countingExecutor{})
+	logger := hclog.NewNullLogger()
+	notifier := &recordingNotifierWrapper{}
+
+	msgQueue := make(chan []byte, 1)
+	draining := make(chan struct{})
+
+	// Fill the queue and signal teardown so the only available branch is drain.
+	msgQueue <- validPayload("echo full")
+	close(draining)
+
+	ok := svc.enqueueMessage(
+		validPayload("echo overflow"),
+		msgQueue,
+		draining,
+		1,
+		logger,
+		notifier,
+	)
+	if ok {
+		t.Fatal("expected enqueueMessage to drop when full and draining")
+	}
+
+	if n := svc.droppedMessages.Load(); n != 1 {
+		t.Errorf("expected dropped counter to be 1, got %d", n)
+	}
+
+	msgs := notifier.all()
+	if len(msgs) != 1 {
+		t.Fatalf("expected exactly one drop notification, got %v", msgs)
+	}
+	if !strings.HasPrefix(msgs[0], "AgentMessageDropped:") {
+		t.Errorf("unexpected notification message: %q", msgs[0])
+	}
+}
+
+// TestEnqueueMessage_DrainUnblocksBackPressure verifies that closing draining
+// releases a callback already blocked on a full queue, so teardown can proceed
+// without deadlock even when no worker frees a slot.
+func TestEnqueueMessage_DrainUnblocksBackPressure(t *testing.T) {
+	svc := newTestSvc(&countingExecutor{})
+	logger := hclog.NewNullLogger()
+	notifier := &recordingNotifierWrapper{}
+
+	msgQueue := make(chan []byte, 1)
+	draining := make(chan struct{})
+
+	// Fill the queue so the enqueue blocks.
+	msgQueue <- validPayload("echo full")
+
+	done := make(chan bool, 1)
+	go func() {
+		done <- svc.enqueueMessage(validPayload("echo blocked"), msgQueue, draining, 1, logger, notifier)
+	}()
+
+	// Confirm it is blocked.
+	select {
+	case <-done:
+		t.Fatal("enqueueMessage returned before draining; expected it to block")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	// Teardown: closing draining must release the blocked enqueue as a drop.
+	close(draining)
+	select {
+	case ok := <-done:
+		if ok {
+			t.Error("expected blocked enqueue to be reported as dropped after draining closed")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("blocked enqueueMessage was not released by draining (deadlock risk)")
+	}
+
+	if n := svc.droppedMessages.Load(); n != 1 {
+		t.Errorf("expected dropped counter to be 1, got %d", n)
+	}
 }
 
 // TestMessageQueue_WorkersCancelOnContextDone verifies that all workers exit
