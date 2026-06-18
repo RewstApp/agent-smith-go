@@ -237,7 +237,15 @@ func TestEnqueueMessage_DropsLoudlyOnDrain(t *testing.T) {
 	msgQueue <- validPayload("echo full")
 	close(draining)
 
-	if ok := svc.enqueueMessage(validPayload("echo overflow"), msgQueue, draining, 1, logger, notifier); ok {
+	ok := svc.enqueueMessage(
+		validPayload("echo overflow"),
+		msgQueue,
+		draining,
+		1,
+		logger,
+		notifier,
+	)
+	if ok {
 		t.Fatal("expected enqueueMessage to drop when full and draining")
 	}
 
