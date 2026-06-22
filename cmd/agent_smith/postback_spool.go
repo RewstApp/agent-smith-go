@@ -64,7 +64,12 @@ type postbackSpool struct {
 	droppedTotal atomic.Int64
 }
 
-func newPostbackSpool(dir string, maxEntries int, maxAge time.Duration, logger hclog.Logger) *postbackSpool {
+func newPostbackSpool(
+	dir string,
+	maxEntries int,
+	maxAge time.Duration,
+	logger hclog.Logger,
+) *postbackSpool {
 	if maxEntries <= 0 {
 		maxEntries = defaultSpoolMaxEntries
 	}

@@ -227,7 +227,13 @@ func TestProcessMessage_PostbackExhaustionSpoolsAndNotifies(t *testing.T) {
 	notifier := &recordingNotifierWrapper{}
 	device := deviceWithEngine(srv.Listener.Addr().String())
 
-	svc.processMessage(postbackPayload("echo hi", "id:exhaust-spool"), ctx, device, logger, notifier)
+	svc.processMessage(
+		postbackPayload("echo hi", "id:exhaust-spool"),
+		ctx,
+		device,
+		logger,
+		notifier,
+	)
 
 	// The failure must be surfaced beyond the log.
 	var notified bool

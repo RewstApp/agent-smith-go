@@ -39,7 +39,9 @@ func TestSpool_EnqueueFlushRoundTrip(t *testing.T) {
 	s := newTestSpool(t, 10, time.Hour)
 
 	for _, id := range []string{"a", "b", "c"} {
-		if err := s.enqueue(spoolEntry{PostId: id, Result: []byte(id), CreatedAt: time.Now()}); err != nil {
+		if err := s.enqueue(
+			spoolEntry{PostId: id, Result: []byte(id), CreatedAt: time.Now()},
+		); err != nil {
 			t.Fatalf("enqueue %s: %v", id, err)
 		}
 	}
@@ -71,7 +73,9 @@ func TestSpool_FlushStopsOnTransientFailure(t *testing.T) {
 	s := newTestSpool(t, 10, time.Hour)
 
 	for _, id := range []string{"a", "b", "c"} {
-		if err := s.enqueue(spoolEntry{PostId: id, Result: []byte(id), CreatedAt: time.Now()}); err != nil {
+		if err := s.enqueue(
+			spoolEntry{PostId: id, Result: []byte(id), CreatedAt: time.Now()},
+		); err != nil {
 			t.Fatalf("enqueue %s: %v", id, err)
 		}
 	}
@@ -96,7 +100,9 @@ func TestSpool_CapacityBound(t *testing.T) {
 	s := newTestSpool(t, 3, time.Hour)
 
 	for _, id := range []string{"a", "b", "c", "d", "e"} {
-		if err := s.enqueue(spoolEntry{PostId: id, Result: []byte(id), CreatedAt: time.Now()}); err != nil {
+		if err := s.enqueue(
+			spoolEntry{PostId: id, Result: []byte(id), CreatedAt: time.Now()},
+		); err != nil {
 			t.Fatalf("enqueue %s: %v", id, err)
 		}
 		// Distinct timestamps keep filename ordering deterministic.
@@ -121,7 +127,12 @@ func TestSpool_CapacityBound(t *testing.T) {
 	}
 	for i := range want {
 		if delivered[i] != want[i] {
-			t.Errorf("expected newest entries retained; at %d got %q want %q", i, delivered[i], want[i])
+			t.Errorf(
+				"expected newest entries retained; at %d got %q want %q",
+				i,
+				delivered[i],
+				want[i],
+			)
 		}
 	}
 }
@@ -131,7 +142,9 @@ func TestSpool_CapacityBound(t *testing.T) {
 func TestSpool_AgeBoundOnFlush(t *testing.T) {
 	s := newTestSpool(t, 10, 10*time.Millisecond)
 
-	if err := s.enqueue(spoolEntry{PostId: "old", Result: []byte("x"), CreatedAt: time.Now()}); err != nil {
+	if err := s.enqueue(
+		spoolEntry{PostId: "old", Result: []byte("x"), CreatedAt: time.Now()},
+	); err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
 	time.Sleep(30 * time.Millisecond)
@@ -155,11 +168,15 @@ func TestSpool_AgeBoundOnFlush(t *testing.T) {
 func TestSpool_AgeBoundOnEnqueue(t *testing.T) {
 	s := newTestSpool(t, 10, 10*time.Millisecond)
 
-	if err := s.enqueue(spoolEntry{PostId: "old", Result: []byte("x"), CreatedAt: time.Now()}); err != nil {
+	if err := s.enqueue(
+		spoolEntry{PostId: "old", Result: []byte("x"), CreatedAt: time.Now()},
+	); err != nil {
 		t.Fatalf("enqueue old: %v", err)
 	}
 	time.Sleep(30 * time.Millisecond)
-	if err := s.enqueue(spoolEntry{PostId: "new", Result: []byte("y"), CreatedAt: time.Now()}); err != nil {
+	if err := s.enqueue(
+		spoolEntry{PostId: "new", Result: []byte("y"), CreatedAt: time.Now()},
+	); err != nil {
 		t.Fatalf("enqueue new: %v", err)
 	}
 
@@ -208,7 +225,9 @@ func TestSpool_CorruptEntryDropped(t *testing.T) {
 // flush before any delivery, so teardown is never delayed.
 func TestSpool_FlushContextCancelled(t *testing.T) {
 	s := newTestSpool(t, 10, time.Hour)
-	if err := s.enqueue(spoolEntry{PostId: "a", Result: []byte("a"), CreatedAt: time.Now()}); err != nil {
+	if err := s.enqueue(
+		spoolEntry{PostId: "a", Result: []byte("a"), CreatedAt: time.Now()},
+	); err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
 
@@ -246,7 +265,9 @@ func TestSpool_FlushEmptyNoop(t *testing.T) {
 func TestSpool_ResultPreserved(t *testing.T) {
 	s := newTestSpool(t, 10, time.Hour)
 	payload := []byte(`{"status":"ok","data":[1,2,3]}`)
-	if err := s.enqueue(spoolEntry{PostId: "id:1", Result: payload, CreatedAt: time.Now()}); err != nil {
+	if err := s.enqueue(
+		spoolEntry{PostId: "id:1", Result: payload, CreatedAt: time.Now()},
+	); err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
 
