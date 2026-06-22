@@ -210,6 +210,40 @@ raising `worker_count` widens execution parallelism. Example snippet:
 }
 ```
 
+### Command Result Delivery
+
+After a command runs, the agent posts its result back to the Rewst engine with
+retry and exponential backoff. If every in-line attempt fails (network error or
+`5xx` across the whole retry budget), the result is **not dropped**:
+
+- The failure is surfaced beyond the log with a best-effort `AgentPostbackFailed:<post_id>`
+  plugin notification so monitoring can observe it.
+- The result is written to a **bounded on-disk spool** (under the agent's data
+  directory) and re-attempted on the next successful connection cycle. A
+  transient engine outage therefore recovers automatically once connectivity
+  returns, instead of losing the result.
+
+The spool is bounded by count and age (the oldest/expired entries are evicted)
+so it cannot grow without limit, and the flush is bound to the connection cycle
+so it never blocks shutdown.
+
+The in-line retry budget is tunable per deployment:
+
+| Config key | Default | Description |
+|------------|---------|-------------|
+| `postback_max_attempts` | `3` | Total postback attempts (including the first try) before the result is spooled. |
+| `postback_base_retry_backoff_seconds` | `1` | Base delay for exponential backoff between attempts (`base * 2^(n-2)`). |
+
+Both fall back to their defaults when omitted or set to a non-positive value, so
+existing configurations are unaffected. Example snippet:
+
+```json
+{
+  "postback_max_attempts": 6,
+  "postback_base_retry_backoff_seconds": 2
+}
+```
+
 ## Build
 Required tools and packages:
 

@@ -205,6 +205,119 @@ func TestProcessMessage_PostbackFulfilled(t *testing.T) {
 	svc.processMessage(postbackPayload("echo hi", "id:fulfilled"), ctx, device, logger, notifier)
 }
 
+// TestProcessMessage_PostbackExhaustionSpoolsAndNotifies verifies that when the
+// in-line retry budget is exhausted the result is (a) surfaced via an
+// AgentPostbackFailed plugin notification carrying the post_id and (b) persisted
+// to the on-disk spool for later delivery rather than dropped.
+func TestProcessMessage_PostbackExhaustionSpoolsAndNotifies(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = w.Write([]byte(`{"error":"down"}`))
+	}))
+	defer srv.Close()
+
+	exec := &mockExecutor{result: []byte(`{"ok":true}`)}
+	svc := newProcessMessageSvc(exec, &http.Client{
+		Transport: &schemeRewriteTransport{scheme: "http"},
+	})
+	svc.spool = newPostbackSpool(t.TempDir(), 10, time.Hour, hclog.NewNullLogger())
+
+	ctx := context.Background()
+	logger := hclog.NewNullLogger()
+	notifier := &recordingNotifierWrapper{}
+	device := deviceWithEngine(srv.Listener.Addr().String())
+
+	svc.processMessage(
+		postbackPayload("echo hi", "id:exhaust-spool"),
+		ctx,
+		device,
+		logger,
+		notifier,
+	)
+
+	// The failure must be surfaced beyond the log.
+	var notified bool
+	for _, m := range notifier.all() {
+		if m == "AgentPostbackFailed:id:exhaust-spool" {
+			notified = true
+		}
+	}
+	if !notified {
+		t.Errorf("expected AgentPostbackFailed notification, got %v", notifier.all())
+	}
+
+	// The result must be persisted, not dropped.
+	if n := countSpoolFiles(t, svc.spool.dir); n != 1 {
+		t.Errorf("expected exhausted result spooled, got %d files", n)
+	}
+}
+
+// TestFlushPostbackSpool_DeliversSpooledResult verifies that a spooled result is
+// re-delivered (and removed) once the engine is reachable again.
+func TestFlushPostbackSpool_DeliversSpooledResult(t *testing.T) {
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	exec := &mockExecutor{result: []byte(`{}`)}
+	svc := newProcessMessageSvc(exec, &http.Client{
+		Transport: &schemeRewriteTransport{scheme: "http"},
+	})
+	svc.spool = newPostbackSpool(t.TempDir(), 10, time.Hour, hclog.NewNullLogger())
+
+	if err := svc.spool.enqueue(spoolEntry{
+		PostId:    "id:recover",
+		Result:    []byte(`{}`),
+		CreatedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+
+	device := deviceWithEngine(srv.Listener.Addr().String())
+	svc.flushPostbackSpool(context.Background(), device, hclog.NewNullLogger())
+
+	if got := calls.Load(); got != 1 {
+		t.Errorf("expected exactly one re-delivery, got %d", got)
+	}
+	if n := countSpoolFiles(t, svc.spool.dir); n != 0 {
+		t.Errorf("expected spool emptied after delivery, %d remain", n)
+	}
+}
+
+// TestFlushPostbackSpool_RetainsOnEngineDown verifies that a spooled result is
+// kept (not lost) when the engine is still unreachable during a flush.
+func TestFlushPostbackSpool_RetainsOnEngineDown(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"error":"still down"}`))
+	}))
+	defer srv.Close()
+
+	exec := &mockExecutor{result: []byte(`{}`)}
+	svc := newProcessMessageSvc(exec, &http.Client{
+		Transport: &schemeRewriteTransport{scheme: "http"},
+	})
+	svc.spool = newPostbackSpool(t.TempDir(), 10, time.Hour, hclog.NewNullLogger())
+
+	if err := svc.spool.enqueue(spoolEntry{
+		PostId:    "id:still-down",
+		Result:    []byte(`{}`),
+		CreatedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+
+	device := deviceWithEngine(srv.Listener.Addr().String())
+	svc.flushPostbackSpool(context.Background(), device, hclog.NewNullLogger())
+
+	if n := countSpoolFiles(t, svc.spool.dir); n != 1 {
+		t.Errorf("expected spooled result retained while engine down, %d remain", n)
+	}
+}
+
 // schemeRewriteTransport rewrites the request scheme before forwarding,
 // allowing tests to hit plain-HTTP servers when processMessage builds https URLs.
 type schemeRewriteTransport struct {
