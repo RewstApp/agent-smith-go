@@ -1,3 +1,11 @@
+## v1.4.3 (2026-06-22)
+
+### Fix
+
+- [sc-97780] Spool exhausted postbacks to disk instead of dropping (#86)
+- [sc-97779] Apply back-pressure so saturated queue stops dropping commands (#85)
+- [sc-97778] Add panic recovery to long-lived agent goroutines (#84)
+
 ## v1.4.2 (2026-06-15)
 
 ### Fix
