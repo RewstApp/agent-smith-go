@@ -36,13 +36,13 @@ jobs:
         uses: actions/cache@v5
         with:
           path: ./dist
-          key: build-${{ matrix.os }}-go1.24.0-${{ hashFiles('**/*.go', 'go.sum', 'go.mod') }}
+          key: build-${{ matrix.os }}-go1.25.0-${{ hashFiles('**/*.go', 'go.sum', 'go.mod') }}
 
       - name: Setup go
         if: ${{ !inputs.cache || steps.cache-build.outputs.cache-hit != 'true' }}
         uses: actions/setup-go@v6
         with:
-          go-version: "1.24.0"
+          go-version: "1.25.0"
           cache: true
 
       - name: Setup python

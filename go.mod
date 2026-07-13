@@ -1,8 +1,8 @@
 module github.com/RewstApp/agent-smith-go
 
-go 1.24.0
+go 1.25.0
 
-require golang.org/x/text v0.32.0
+require golang.org/x/text v0.37.0
 
 require (
 	github.com/eclipse/paho.mqtt.golang v1.5.1
@@ -10,7 +10,7 @@ require (
 	github.com/hashicorp/go-hclog v1.6.3
 	github.com/hashicorp/go-plugin v1.6.3
 	github.com/shirou/gopsutil/v4 v4.25.1
-	golang.org/x/sys v0.39.0
+	golang.org/x/sys v0.45.0
 )
 
 require (
@@ -28,8 +28,8 @@ require (
 	github.com/tklauser/go-sysconf v0.3.14 // indirect
 	github.com/tklauser/numcpus v0.9.0 // indirect
 	github.com/yusufpapurcu/wmi v1.2.4 // indirect
-	golang.org/x/net v0.48.0 // indirect
-	golang.org/x/sync v0.19.0 // indirect
+	golang.org/x/net v0.55.0 // indirect
+	golang.org/x/sync v0.20.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20251202230838-ff82c1b0f217 // indirect
 	google.golang.org/grpc v1.79.3 // indirect
 	google.golang.org/protobuf v1.36.10 // indirect
