@@ -109,7 +109,7 @@ func TestLoadConfig_MqttQos(t *testing.T) {
 		{name: "qos_absent_defaults_to_1", mqttQos: nil, expectError: false},
 		{name: "qos_0_accepted", mqttQos: qos(0), expectError: false},
 		{name: "qos_1_accepted", mqttQos: qos(1), expectError: false},
-		{name: "qos_2_accepted", mqttQos: qos(2), expectError: false},
+		{name: "qos_2_rejected", mqttQos: qos(2), expectError: true},
 		{name: "qos_3_rejected", mqttQos: qos(3), expectError: true},
 	}
 
@@ -1120,9 +1120,9 @@ func TestExecute_SubscribedMessagesLogIncludesQoS(t *testing.T) {
 			expectedQoS: "qos=0",
 		},
 		{
-			name:        "explicit_qos_2",
-			mqttQos:     func() *byte { b := byte(2); return &b }(),
-			expectedQoS: "qos=2",
+			name:        "explicit_qos_1",
+			mqttQos:     func() *byte { b := byte(1); return &b }(),
+			expectedQoS: "qos=1",
 		},
 	}
 

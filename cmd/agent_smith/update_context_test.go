@@ -75,7 +75,7 @@ func TestNewUpdateContext(t *testing.T) {
 			"invalid logging-level",
 		},
 		{
-			[]string{"--org-id", orgId, "--update", "--mqtt-qos", "3"},
+			[]string{"--org-id", orgId, "--update", "--mqtt-qos", "2"},
 			"invalid mqtt-qos",
 		},
 		{

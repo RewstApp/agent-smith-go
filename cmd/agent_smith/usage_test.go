@@ -203,7 +203,7 @@ func TestReportUsageModeErrors(t *testing.T) {
 				"5",
 			},
 			mode:    "config",
-			wantErr: "invalid mqtt-qos: must be 0, 1, or 2",
+			wantErr: "invalid mqtt-qos: must be 0 or 1",
 		},
 		{
 			name: "config invalid logging-level",
@@ -230,7 +230,7 @@ func TestReportUsageModeErrors(t *testing.T) {
 			name:    "update invalid mqtt-qos",
 			args:    []string{"--org-id", "x", "--update", "--mqtt-qos", "5"},
 			mode:    "update",
-			wantErr: "invalid mqtt-qos: must be 0, 1, or 2",
+			wantErr: "invalid mqtt-qos: must be 0 or 1",
 		},
 		{
 			name:    "update missing org-id",

@@ -58,7 +58,7 @@ func newConfigFlagSet(params *configContext) *flag.FlagSet {
 	)
 	fs.BoolVar(&params.NoAutoUpdates, "no-auto-updates", false, "No auto updates")
 	fs.StringVar(&params.GithubToken, "github-token", "", "GitHub token for update checks")
-	fs.IntVar(&params.MqttQos, "mqtt-qos", -1, "MQTT subscription QoS level (0, 1, or 2)")
+	fs.IntVar(&params.MqttQos, "mqtt-qos", -1, "MQTT subscription QoS level (0 or 1)")
 	fs.StringVar(
 		&params.ServiceUsername,
 		"service-username",
@@ -107,8 +107,8 @@ func newConfigContext(
 		return nil, fmt.Errorf("invalid logging-level")
 	}
 
-	if params.MqttQos != -1 && (params.MqttQos < 0 || params.MqttQos > 2) {
-		return nil, fmt.Errorf("invalid mqtt-qos: must be 0, 1, or 2")
+	if params.MqttQos != -1 && (params.MqttQos < 0 || params.MqttQos > 1) {
+		return nil, fmt.Errorf("invalid mqtt-qos: must be 0 or 1")
 	}
 
 	if params.ServicePassword != "" && params.ServiceUsername == "" {
