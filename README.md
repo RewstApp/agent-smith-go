@@ -40,7 +40,7 @@ rewst_agent_config.win.exe --org-id YOUR_ORG_ID --config-url CONFIG_URL --config
 - `--syslog`: Write logs to system log instead of file (Linux/macOS)
 - `--disable-agent-postback`: Disable agent postback
 - `--no-auto-updates`: Disable auto updates
-- `--mqtt-qos`: MQTT subscription QoS level (`0` = at-most-once, `1` = at-least-once, `2` = exactly-once). Defaults to `1` when omitted.
+- `--mqtt-qos`: MQTT subscription QoS level (`0` = at-most-once, `1` = at-least-once). Defaults to `1` when omitted. Azure IoT Hub does not support QoS 2.
 
 Example with optional parameters:
 ```bash

@@ -64,8 +64,8 @@ func (svc *serviceContext) loadConfig() (agent.Device, error) {
 		return device, err
 	}
 
-	if device.MqttQos != nil && *device.MqttQos > 2 {
-		return device, fmt.Errorf("mqtt_qos must be 0, 1, or 2; got %d", *device.MqttQos)
+	if device.MqttQos != nil && *device.MqttQos > 1 {
+		return device, fmt.Errorf("mqtt_qos must be 0 or 1; got %d", *device.MqttQos)
 	}
 
 	return device, nil

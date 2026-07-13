@@ -47,12 +47,12 @@ func TestNewConfigContext(t *testing.T) {
 			"--org-id", orgId,
 			"--config-url", configUrl,
 			"--config-secret", configSecret,
-			"--mqtt-qos", "2",
+			"--mqtt-qos", "1",
 		},
 		nil, nil, nil, nil,
 	)
-	if resultWithQos.MqttQos != 2 {
-		t.Errorf("expected MqttQos 2, got %v", resultWithQos.MqttQos)
+	if resultWithQos.MqttQos != 1 {
+		t.Errorf("expected MqttQos 1, got %v", resultWithQos.MqttQos)
 	}
 
 	if result.ServiceUsername != "" {
@@ -116,7 +116,7 @@ func TestNewConfigContext(t *testing.T) {
 				"--config-secret",
 				configSecret,
 				"--mqtt-qos",
-				"3",
+				"2",
 			},
 			"invalid mqtt-qos",
 		},
