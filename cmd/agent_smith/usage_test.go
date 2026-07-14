@@ -133,6 +133,11 @@ func TestReportUsageHelp(t *testing.T) {
 				"--config-url",
 				"--config-file",
 				"--mqtt-qos",
+				"--mqtt-connect-timeout-seconds",
+				"--worker-count",
+				"--message-queue-size",
+				"--postback-max-attempts",
+				"--postback-base-retry-backoff-seconds",
 				"--logging-level",
 				"Organization ID",
 			} {
