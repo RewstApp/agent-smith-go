@@ -45,7 +45,7 @@ type operationalMode struct {
 // historical one-line usage string so existing behavior is preserved.
 func operationalModes() []operationalMode {
 	configFlagsList := fmt.Sprintf(
-		"[--logging-level %s] [--syslog] [--disable-agent-postback] [--no-auto-updates] [--mqtt-qos 0|1] [--service-username <USER>] [--service-password <PASS>]",
+		"[--logging-level %s] [--syslog] [--disable-agent-postback] [--no-auto-updates] [--mqtt-qos 0|1] [--mqtt-connect-timeout-seconds <N>] [--worker-count <N>] [--message-queue-size <N>] [--postback-max-attempts <N>] [--postback-base-retry-backoff-seconds <N>] [--service-username <USER>] [--service-password <PASS>]",
 		getAllowedConfigLevelsString("|"),
 	)
 

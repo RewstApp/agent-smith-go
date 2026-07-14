@@ -21,6 +21,7 @@ type updateContext struct {
 	MqttQos              int
 	ServiceUsername      string
 	ServicePassword      string
+	Tuning               tuningFlags
 
 	Sys    agent.SystemInfoProvider
 	Domain agent.DomainInfoProvider
@@ -52,6 +53,7 @@ func newUpdateFlagSet(params *updateContext) *flag.FlagSet {
 	fs.BoolVar(&params.NoAutoUpdates, "no-auto-updates", false, "No auto updates")
 	fs.StringVar(&params.GithubToken, "github-token", "", "GitHub token for update checks")
 	fs.IntVar(&params.MqttQos, "mqtt-qos", -1, "MQTT subscription QoS level (0 or 1)")
+	bindTuningFlags(fs, &params.Tuning)
 	fs.StringVar(
 		&params.ServiceUsername,
 		"service-username",
@@ -84,6 +86,8 @@ func newUpdateContext(
 		return nil, err
 	}
 
+	params.Tuning.captureProvided(fs)
+
 	if params.OrgId == "" {
 		return nil, fmt.Errorf("missing org-id")
 	}
@@ -98,6 +102,10 @@ func newUpdateContext(
 
 	if params.MqttQos != -1 && (params.MqttQos < 0 || params.MqttQos > 1) {
 		return nil, fmt.Errorf("invalid mqtt-qos: must be 0 or 1")
+	}
+
+	if err := params.Tuning.validate(); err != nil {
+		return nil, err
 	}
 
 	if params.ServicePassword != "" && params.ServiceUsername == "" {

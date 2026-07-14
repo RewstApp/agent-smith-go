@@ -474,6 +474,111 @@ func TestRunConfig_PasswordNotPersistedToDisk(t *testing.T) {
 	}
 }
 
+// findWrittenConfig returns the bytes written to the config file (identified by
+// its JSON device_id field) among all files captured by a writeFileFunc mock.
+func findWrittenConfig(t *testing.T, writes map[string][]byte) agent.Device {
+	t.Helper()
+	for _, data := range writes {
+		var device agent.Device
+		if err := json.Unmarshal(data, &device); err == nil && device.DeviceId != "" {
+			return device
+		}
+	}
+	t.Fatalf("no config file was written")
+	return agent.Device{}
+}
+
+func TestRunConfig_AppliesTuningFlags(t *testing.T) {
+	srv := newConfigServer(t, http.StatusOK, validConfigResponseBody("test-org"))
+	defer srv.Close()
+
+	writtenFiles := map[string][]byte{}
+	params := newBaseConfigParams(srv.URL)
+	params.FS = &mockFileSystem{
+		mkdirAllFunc: func(string) error { return nil },
+		writeFileFunc: func(name string, data []byte, _ os.FileMode) error {
+			writtenFiles[name] = data
+			return nil
+		},
+		readFileFunc:   func(string) ([]byte, error) { return []byte("binary"), nil },
+		executableFunc: func() (string, error) { return "/fake/agent", nil },
+	}
+	params.Tuning = tuningFlags{
+		MqttConnectTimeoutSeconds:       45,
+		WorkerCount:                     20,
+		MessageQueueSize:                250,
+		PostbackMaxAttempts:             5,
+		PostbackBaseRetryBackoffSeconds: 2,
+	}
+
+	if err := runConfig(params); err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+
+	device := findWrittenConfig(t, writtenFiles)
+	if device.MqttConnectTimeoutSeconds == nil || *device.MqttConnectTimeoutSeconds != 45 {
+		t.Errorf("expected MqttConnectTimeoutSeconds 45, got %v", device.MqttConnectTimeoutSeconds)
+	}
+	if device.WorkerCount == nil || *device.WorkerCount != 20 {
+		t.Errorf("expected WorkerCount 20, got %v", device.WorkerCount)
+	}
+	if device.MessageQueueSize == nil || *device.MessageQueueSize != 250 {
+		t.Errorf("expected MessageQueueSize 250, got %v", device.MessageQueueSize)
+	}
+	if device.PostbackMaxAttempts == nil || *device.PostbackMaxAttempts != 5 {
+		t.Errorf("expected PostbackMaxAttempts 5, got %v", device.PostbackMaxAttempts)
+	}
+	if device.PostbackBaseRetryBackoffSeconds == nil ||
+		*device.PostbackBaseRetryBackoffSeconds != 2 {
+		t.Errorf(
+			"expected PostbackBaseRetryBackoffSeconds 2, got %v",
+			device.PostbackBaseRetryBackoffSeconds,
+		)
+	}
+}
+
+func TestRunConfig_OmittedTuningFlagsFallBackToDefault(t *testing.T) {
+	srv := newConfigServer(t, http.StatusOK, validConfigResponseBody("test-org"))
+	defer srv.Close()
+
+	writtenFiles := map[string][]byte{}
+	params := newBaseConfigParams(srv.URL)
+	params.FS = &mockFileSystem{
+		mkdirAllFunc: func(string) error { return nil },
+		writeFileFunc: func(name string, data []byte, _ os.FileMode) error {
+			writtenFiles[name] = data
+			return nil
+		},
+		readFileFunc:   func(string) ([]byte, error) { return []byte("binary"), nil },
+		executableFunc: func() (string, error) { return "/fake/agent", nil },
+	}
+	// Mirror the sentinel defaults a real invocation would carry.
+	params.Tuning = tuningFlags{
+		MqttConnectTimeoutSeconds:       tuningFlagUnset,
+		WorkerCount:                     tuningFlagUnset,
+		MessageQueueSize:                tuningFlagUnset,
+		PostbackMaxAttempts:             tuningFlagUnset,
+		PostbackBaseRetryBackoffSeconds: tuningFlagUnset,
+	}
+
+	if err := runConfig(params); err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+
+	device := findWrittenConfig(t, writtenFiles)
+	if device.MqttConnectTimeoutSeconds != nil ||
+		device.WorkerCount != nil ||
+		device.MessageQueueSize != nil ||
+		device.PostbackMaxAttempts != nil ||
+		device.PostbackBaseRetryBackoffSeconds != nil {
+		t.Errorf("expected omitted tuning flags to stay nil, got %+v", device)
+	}
+	// Resolved accessors must still return the documented defaults.
+	if device.ResolvedWorkerCount() != agent.DefaultWorkerCount {
+		t.Errorf("expected default worker count, got %d", device.ResolvedWorkerCount())
+	}
+}
+
 func TestRunConfig_HTTPTimeout(t *testing.T) {
 	done := make(chan struct{})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -91,6 +91,27 @@ func runUpdate(params *updateContext) {
 		device.MqttQos = nil
 	}
 
+	// Overwrite each tuning field only when the operator provided the flag. An
+	// omitted flag leaves whatever was already in the config file unchanged so
+	// existing overrides are never silently reset to the default.
+	if params.Tuning.MqttConnectTimeoutSeconds != tuningFlagUnset {
+		device.MqttConnectTimeoutSeconds = tuningPtr(params.Tuning.MqttConnectTimeoutSeconds)
+	}
+	if params.Tuning.WorkerCount != tuningFlagUnset {
+		device.WorkerCount = tuningPtr(params.Tuning.WorkerCount)
+	}
+	if params.Tuning.MessageQueueSize != tuningFlagUnset {
+		device.MessageQueueSize = tuningPtr(params.Tuning.MessageQueueSize)
+	}
+	if params.Tuning.PostbackMaxAttempts != tuningFlagUnset {
+		device.PostbackMaxAttempts = tuningPtr(params.Tuning.PostbackMaxAttempts)
+	}
+	if params.Tuning.PostbackBaseRetryBackoffSeconds != tuningFlagUnset {
+		device.PostbackBaseRetryBackoffSeconds = tuningPtr(
+			params.Tuning.PostbackBaseRetryBackoffSeconds,
+		)
+	}
+
 	// Save the updated configuration file
 	configBytes, err := json.MarshalIndent(device, "", "  ")
 	if err != nil {
