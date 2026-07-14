@@ -107,7 +107,9 @@ func runUpdate(params *updateContext) {
 		device.PostbackMaxAttempts = tuningPtr(params.Tuning.PostbackMaxAttempts)
 	}
 	if params.Tuning.PostbackBaseRetryBackoffSeconds != tuningFlagUnset {
-		device.PostbackBaseRetryBackoffSeconds = tuningPtr(params.Tuning.PostbackBaseRetryBackoffSeconds)
+		device.PostbackBaseRetryBackoffSeconds = tuningPtr(
+			params.Tuning.PostbackBaseRetryBackoffSeconds,
+		)
 	}
 
 	// Save the updated configuration file

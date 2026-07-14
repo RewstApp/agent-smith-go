@@ -528,7 +528,8 @@ func TestRunConfig_AppliesTuningFlags(t *testing.T) {
 	if device.PostbackMaxAttempts == nil || *device.PostbackMaxAttempts != 5 {
 		t.Errorf("expected PostbackMaxAttempts 5, got %v", device.PostbackMaxAttempts)
 	}
-	if device.PostbackBaseRetryBackoffSeconds == nil || *device.PostbackBaseRetryBackoffSeconds != 2 {
+	if device.PostbackBaseRetryBackoffSeconds == nil ||
+		*device.PostbackBaseRetryBackoffSeconds != 2 {
 		t.Errorf(
 			"expected PostbackBaseRetryBackoffSeconds 2, got %v",
 			device.PostbackBaseRetryBackoffSeconds,

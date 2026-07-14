@@ -88,7 +88,10 @@ func TestNewUpdateContext(t *testing.T) {
 		t.Fatalf("expected no error with tuning flags, got %v", err)
 	}
 	if resultWithTuning.Tuning.MqttConnectTimeoutSeconds != 45 {
-		t.Errorf("expected MqttConnectTimeoutSeconds 45, got %v", resultWithTuning.Tuning.MqttConnectTimeoutSeconds)
+		t.Errorf(
+			"expected MqttConnectTimeoutSeconds 45, got %v",
+			resultWithTuning.Tuning.MqttConnectTimeoutSeconds,
+		)
 	}
 	if resultWithTuning.Tuning.WorkerCount != 20 {
 		t.Errorf("expected WorkerCount 20, got %v", resultWithTuning.Tuning.WorkerCount)
@@ -97,10 +100,16 @@ func TestNewUpdateContext(t *testing.T) {
 		t.Errorf("expected MessageQueueSize 250, got %v", resultWithTuning.Tuning.MessageQueueSize)
 	}
 	if resultWithTuning.Tuning.PostbackMaxAttempts != 5 {
-		t.Errorf("expected PostbackMaxAttempts 5, got %v", resultWithTuning.Tuning.PostbackMaxAttempts)
+		t.Errorf(
+			"expected PostbackMaxAttempts 5, got %v",
+			resultWithTuning.Tuning.PostbackMaxAttempts,
+		)
 	}
 	if resultWithTuning.Tuning.PostbackBaseRetryBackoffSeconds != 2 {
-		t.Errorf("expected PostbackBaseRetryBackoffSeconds 2, got %v", resultWithTuning.Tuning.PostbackBaseRetryBackoffSeconds)
+		t.Errorf(
+			"expected PostbackBaseRetryBackoffSeconds 2, got %v",
+			resultWithTuning.Tuning.PostbackBaseRetryBackoffSeconds,
+		)
 	}
 
 	errorTests := []struct {

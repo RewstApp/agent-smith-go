@@ -128,7 +128,8 @@ func TestRunUpdate_AppliesProvidedTuningFlags(t *testing.T) {
 	if written.PostbackMaxAttempts == nil || *written.PostbackMaxAttempts != 5 {
 		t.Errorf("expected PostbackMaxAttempts 5, got %v", written.PostbackMaxAttempts)
 	}
-	if written.PostbackBaseRetryBackoffSeconds == nil || *written.PostbackBaseRetryBackoffSeconds != 2 {
+	if written.PostbackBaseRetryBackoffSeconds == nil ||
+		*written.PostbackBaseRetryBackoffSeconds != 2 {
 		t.Errorf(
 			"expected PostbackBaseRetryBackoffSeconds 2, got %v",
 			written.PostbackBaseRetryBackoffSeconds,
@@ -155,7 +156,10 @@ func TestRunUpdate_OmittedTuningFlagsPreserveExistingValues(t *testing.T) {
 		t.Errorf("expected WorkerCount overwritten to 15, got %v", written.WorkerCount)
 	}
 	if written.MqttConnectTimeoutSeconds == nil || *written.MqttConnectTimeoutSeconds != 30 {
-		t.Errorf("expected MqttConnectTimeoutSeconds preserved at 30, got %v", written.MqttConnectTimeoutSeconds)
+		t.Errorf(
+			"expected MqttConnectTimeoutSeconds preserved at 30, got %v",
+			written.MqttConnectTimeoutSeconds,
+		)
 	}
 	if written.MessageQueueSize == nil || *written.MessageQueueSize != 128 {
 		t.Errorf("expected MessageQueueSize preserved at 128, got %v", written.MessageQueueSize)
@@ -163,7 +167,8 @@ func TestRunUpdate_OmittedTuningFlagsPreserveExistingValues(t *testing.T) {
 	if written.PostbackMaxAttempts == nil || *written.PostbackMaxAttempts != 4 {
 		t.Errorf("expected PostbackMaxAttempts preserved at 4, got %v", written.PostbackMaxAttempts)
 	}
-	if written.PostbackBaseRetryBackoffSeconds == nil || *written.PostbackBaseRetryBackoffSeconds != 3 {
+	if written.PostbackBaseRetryBackoffSeconds == nil ||
+		*written.PostbackBaseRetryBackoffSeconds != 3 {
 		t.Errorf(
 			"expected PostbackBaseRetryBackoffSeconds preserved at 3, got %v",
 			written.PostbackBaseRetryBackoffSeconds,

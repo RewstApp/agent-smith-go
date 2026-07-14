@@ -120,11 +120,15 @@ func runConfig(params *configContext) error {
 	// Apply the optional tuning overrides. Each field is set only when the
 	// operator provided the flag, otherwise it stays nil so the agent falls
 	// back to its documented default.
-	response.Configuration.MqttConnectTimeoutSeconds = tuningPtr(params.Tuning.MqttConnectTimeoutSeconds)
+	response.Configuration.MqttConnectTimeoutSeconds = tuningPtr(
+		params.Tuning.MqttConnectTimeoutSeconds,
+	)
 	response.Configuration.WorkerCount = tuningPtr(params.Tuning.WorkerCount)
 	response.Configuration.MessageQueueSize = tuningPtr(params.Tuning.MessageQueueSize)
 	response.Configuration.PostbackMaxAttempts = tuningPtr(params.Tuning.PostbackMaxAttempts)
-	response.Configuration.PostbackBaseRetryBackoffSeconds = tuningPtr(params.Tuning.PostbackBaseRetryBackoffSeconds)
+	response.Configuration.PostbackBaseRetryBackoffSeconds = tuningPtr(
+		params.Tuning.PostbackBaseRetryBackoffSeconds,
+	)
 
 	// Create the data directory
 	dataDir := agent.GetDataDirectory(params.OrgId)
