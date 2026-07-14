@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/RewstApp/agent-smith-go/internal/agent"
+	"github.com/RewstApp/agent-smith-go/internal/utils"
 	mqtt "github.com/eclipse/paho.mqtt.golang"
 )
 
@@ -41,6 +42,13 @@ func NewClientOptions(device agent.Device) (*mqtt.ClientOptions, error) {
 	// 30s default, so reconnect timing stays predictable across paho upgrades.
 	// See utils.DefaultMqttConnectTimeout for the value and rationale.
 	opts.SetConnectTimeout(device.MqttConnectTimeout())
+
+	// Explicitly configure keepalive/ping behavior rather than relying on paho's
+	// implicit defaults, so a marginal connection is detected and the reconnect
+	// loop is triggered within a bounded, predictable time. See
+	// utils.DefaultMqttKeepAlive / utils.DefaultMqttPingTimeout for the rationale.
+	opts.SetKeepAlive(utils.DefaultMqttKeepAlive)
+	opts.SetPingTimeout(utils.DefaultMqttPingTimeout)
 
 	return opts, nil
 }

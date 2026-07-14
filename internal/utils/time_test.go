@@ -45,19 +45,40 @@ func TestReconnectTimeoutGenerator(t *testing.T) {
 	}
 }
 
-// TestDefaultMqttConnectTimeoutFitsBackoff records the chosen connect timeout
-// and its rationale: a single connect attempt must never outlive the shortest
-// reconnect backoff slot, otherwise a connect attempt could still be blocking
-// when the next reconnect would already be due. The shortest slot is the first
-// one: base doubled to 2 * InitialReconnectInterval, minus up to 25% jitter,
-// i.e. 1.5 * InitialReconnectInterval.
-func TestDefaultMqttConnectTimeoutFitsBackoff(t *testing.T) {
+// TestDefaultMqttConnectTimeoutIsDecoupledFromBackoff records the intentionally
+// decoupled relationship between the connect timeout and the reconnect backoff
+// schedule.
+//
+// An earlier design capped DefaultMqttConnectTimeout at the shortest reconnect
+// backoff slot (1.5 * InitialReconnectInterval, ~1s) so a connect attempt could
+// never outlive the next backoff slot. That cap made the agent unable to
+// connect on slow/high-latency links where the TLS handshake alone exceeds a
+// second. The two values now serve independent purposes — the backoff governs
+// the wait *between* attempts, the connect timeout governs how long a single
+// attempt may run — so the connect timeout is sized to accommodate a slow
+// handshake and is deliberately larger than the shortest backoff slot. This
+// test asserts that decoupling holds (and would fail if the old cap were
+// reintroduced), and pins the default to a value comfortably above a
+// slow-handshake threshold.
+func TestDefaultMqttConnectTimeoutIsDecoupledFromBackoff(t *testing.T) {
 	shortestSlot := time.Duration(float64(2*InitialReconnectInterval) * (1 - 0.25))
-	if DefaultMqttConnectTimeout > shortestSlot {
+	if DefaultMqttConnectTimeout <= shortestSlot {
 		t.Errorf(
-			"DefaultMqttConnectTimeout (%v) must not exceed the shortest backoff slot (%v)",
+			"DefaultMqttConnectTimeout (%v) is expected to be decoupled from and larger "+
+				"than the shortest backoff slot (%v) so slow handshakes can complete",
 			DefaultMqttConnectTimeout,
 			shortestSlot,
+		)
+	}
+
+	// Guard against a regression that silently lowers the default back toward
+	// the old ~1s cap: it must comfortably accommodate a slow TLS handshake.
+	const minAcceptable = 10 * time.Second
+	if DefaultMqttConnectTimeout < minAcceptable {
+		t.Errorf(
+			"DefaultMqttConnectTimeout (%v) must be at least %v to accommodate slow handshakes",
+			DefaultMqttConnectTimeout,
+			minAcceptable,
 		)
 	}
 }
