@@ -48,6 +48,24 @@ func TestNewClientOptions_DefaultAzureIotHub(t *testing.T) {
 			opts.ConnectTimeout,
 		)
 	}
+
+	// Keepalive/ping must be configured explicitly (not paho's implicit default)
+	// so a marginal connection is detected in a bounded, predictable time.
+	if opts.KeepAlive != int64(utils.DefaultMqttKeepAlive.Seconds()) {
+		t.Errorf(
+			"expected KeepAlive to default to %v seconds, got %v",
+			int64(utils.DefaultMqttKeepAlive.Seconds()),
+			opts.KeepAlive,
+		)
+	}
+
+	if opts.PingTimeout != utils.DefaultMqttPingTimeout {
+		t.Errorf(
+			"expected PingTimeout to default to %v, got %v",
+			utils.DefaultMqttPingTimeout,
+			opts.PingTimeout,
+		)
+	}
 }
 
 func TestNewClientOptions_ConnectTimeoutOverride(t *testing.T) {
