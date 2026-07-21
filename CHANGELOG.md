@@ -1,3 +1,15 @@
+## v1.5.0 (2026-07-21)
+
+### Feat
+
+- [sc-102474] Expose MQTT/worker/postback tuning parameters as flags (#89)
+
+### Fix
+
+- [sc-102476] Decouple MQTT connect timeout from backoff and tune keepalive (#90)
+- [sc-102596] Upgrade vulnerable golang.org/x/net to v0.55.0 (#88)
+- [sc-102471] Remove unsupported MQTT QoS 2 for Azure IoT Hub (#87)
+
 ## v1.4.3 (2026-06-22)
 
 ### Fix
