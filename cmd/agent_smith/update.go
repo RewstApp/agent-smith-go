@@ -111,6 +111,9 @@ func runUpdate(params *updateContext) {
 			params.Tuning.PostbackBaseRetryBackoffSeconds,
 		)
 	}
+	if params.Tuning.CommandTimeoutSeconds != tuningFlagUnset {
+		device.CommandTimeoutSeconds = tuningPtr(params.Tuning.CommandTimeoutSeconds)
+	}
 
 	// Save the updated configuration file
 	configBytes, err := json.MarshalIndent(device, "", "  ")

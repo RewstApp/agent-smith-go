@@ -61,7 +61,10 @@ func TestRunUpdate_Success(t *testing.T) {
 
 // deviceWithTuningJSON returns valid device JSON that already carries tuning
 // overrides, simulating a config file written by a previous invocation.
-func deviceWithTuningJSON(orgId string, timeout, workers, queue, attempts, backoff int) []byte {
+func deviceWithTuningJSON(
+	orgId string,
+	timeout, workers, queue, attempts, backoff, cmdTimeout int,
+) []byte {
 	b, _ := json.Marshal(agent.Device{
 		DeviceId:                        "device-123",
 		RewstOrgId:                      orgId,
@@ -73,6 +76,7 @@ func deviceWithTuningJSON(orgId string, timeout, workers, queue, attempts, backo
 		MessageQueueSize:                &queue,
 		PostbackMaxAttempts:             &attempts,
 		PostbackBaseRetryBackoffSeconds: &backoff,
+		CommandTimeoutSeconds:           &cmdTimeout,
 	})
 	return b
 }
@@ -105,13 +109,14 @@ func captureUpdateFS(configJSON []byte, written *agent.Device) *mockFileSystem {
 func TestRunUpdate_AppliesProvidedTuningFlags(t *testing.T) {
 	var written agent.Device
 	params := newBaseUpdateParams()
-	params.FS = captureUpdateFS(deviceWithTuningJSON("test-org", 10, 1, 10, 1, 1), &written)
+	params.FS = captureUpdateFS(deviceWithTuningJSON("test-org", 10, 1, 10, 1, 1, 1), &written)
 	params.Tuning = tuningFlags{
 		MqttConnectTimeoutSeconds:       45,
 		WorkerCount:                     20,
 		MessageQueueSize:                250,
 		PostbackMaxAttempts:             5,
 		PostbackBaseRetryBackoffSeconds: 2,
+		CommandTimeoutSeconds:           120,
 	}
 
 	runUpdate(params)
@@ -135,12 +140,15 @@ func TestRunUpdate_AppliesProvidedTuningFlags(t *testing.T) {
 			written.PostbackBaseRetryBackoffSeconds,
 		)
 	}
+	if written.CommandTimeoutSeconds == nil || *written.CommandTimeoutSeconds != 120 {
+		t.Errorf("expected CommandTimeoutSeconds 120, got %v", written.CommandTimeoutSeconds)
+	}
 }
 
 func TestRunUpdate_OmittedTuningFlagsPreserveExistingValues(t *testing.T) {
 	var written agent.Device
 	params := newBaseUpdateParams()
-	params.FS = captureUpdateFS(deviceWithTuningJSON("test-org", 30, 8, 128, 4, 3), &written)
+	params.FS = captureUpdateFS(deviceWithTuningJSON("test-org", 30, 8, 128, 4, 3, 90), &written)
 	// Only overwrite one field; the others must be preserved as-is.
 	params.Tuning = tuningFlags{
 		MqttConnectTimeoutSeconds:       tuningFlagUnset,
@@ -148,6 +156,7 @@ func TestRunUpdate_OmittedTuningFlagsPreserveExistingValues(t *testing.T) {
 		MessageQueueSize:                tuningFlagUnset,
 		PostbackMaxAttempts:             tuningFlagUnset,
 		PostbackBaseRetryBackoffSeconds: tuningFlagUnset,
+		CommandTimeoutSeconds:           tuningFlagUnset,
 	}
 
 	runUpdate(params)
@@ -172,6 +181,12 @@ func TestRunUpdate_OmittedTuningFlagsPreserveExistingValues(t *testing.T) {
 		t.Errorf(
 			"expected PostbackBaseRetryBackoffSeconds preserved at 3, got %v",
 			written.PostbackBaseRetryBackoffSeconds,
+		)
+	}
+	if written.CommandTimeoutSeconds == nil || *written.CommandTimeoutSeconds != 90 {
+		t.Errorf(
+			"expected CommandTimeoutSeconds preserved at 90, got %v",
+			written.CommandTimeoutSeconds,
 		)
 	}
 }

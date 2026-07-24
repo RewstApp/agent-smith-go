@@ -138,6 +138,7 @@ func TestReportUsageHelp(t *testing.T) {
 				"--message-queue-size",
 				"--postback-max-attempts",
 				"--postback-base-retry-backoff-seconds",
+				"--command-timeout-seconds",
 				"--logging-level",
 				"Organization ID",
 			} {

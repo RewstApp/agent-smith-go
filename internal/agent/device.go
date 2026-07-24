@@ -47,6 +47,14 @@ type Device struct {
 	// exponential backoff between postback attempts, in seconds. When unset (or
 	// non-positive) the agent falls back to DefaultPostbackBaseRetryBackoff.
 	PostbackBaseRetryBackoffSeconds *int `json:"postback_base_retry_backoff_seconds,omitempty"`
+	// CommandTimeoutSeconds optionally bounds how long a single received command
+	// is allowed to run before it is killed. When unset (or non-positive) command
+	// execution is unbounded, preserving the historical behavior. Setting a
+	// positive value protects the worker pool from a hung or interactive script
+	// (infinite loop, blocked on stdin, stuck network call) permanently consuming
+	// a worker: the command is cancelled once the deadline elapses even if the
+	// MQTT connection stays up.
+	CommandTimeoutSeconds *int `json:"command_timeout_seconds,omitempty"`
 }
 
 const (
@@ -103,6 +111,17 @@ func (d Device) ResolvedPostbackBaseRetryBackoff() time.Duration {
 		return time.Duration(*d.PostbackBaseRetryBackoffSeconds) * time.Second
 	}
 	return DefaultPostbackBaseRetryBackoff
+}
+
+// ResolvedCommandTimeout returns the per-command execution timeout and whether
+// one is configured. It reports ok=false when CommandTimeoutSeconds is unset or
+// non-positive, in which case command execution is unbounded (historical
+// behavior); otherwise it returns the configured duration with ok=true.
+func (d Device) ResolvedCommandTimeout() (time.Duration, bool) {
+	if d.CommandTimeoutSeconds != nil && *d.CommandTimeoutSeconds > 0 {
+		return time.Duration(*d.CommandTimeoutSeconds) * time.Second, true
+	}
+	return 0, false
 }
 
 // MqttConnectTimeout returns the per-attempt MQTT connect timeout, honoring the

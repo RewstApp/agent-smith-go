@@ -116,6 +116,7 @@ jobs:
               service = "rewst_remote_agent_$orgId"
               success_commands = '"echo \"hello world\""'
               failure_commands = '"exit 1"'
+              timeout_commands = '"sleep 30"'
               success_patterns = "Command completed`nSending postback`nPostback sent"
               no_auto_updates_extra = ''
               uninstall_paths = "/etc/rewst_remote_agent/$orgId`n/usr/local/bin/rewst_remote_agent/$orgId`n/tmp/rewst_remote_agent/scripts/$orgId"
@@ -132,6 +133,7 @@ jobs:
               service = "RewstRemoteAgent_$orgId"
               success_commands = $winSuccess
               failure_commands = $winFailure
+              timeout_commands = '"Start-Sleep -Seconds 30"'
               success_patterns = "Command completed`nSending postback`nPostback already sent"
               no_auto_updates_extra = '--disable-agent-postback'
               uninstall_paths = "C:\ProgramData\RewstRemoteAgent\$orgId`nC:\Program Files\RewstRemoteAgent\$orgId`nC:\RewstRemoteAgent\scripts\$orgId"
@@ -148,6 +150,7 @@ jobs:
               service = "io.rewst.remote_agent_$orgId"
               success_commands = '"echo \"hello world\""'
               failure_commands = '"exit 1"'
+              timeout_commands = '"sleep 30"'
               success_patterns = "Command completed`nSending postback`nPostback sent"
               no_auto_updates_extra = ''
               uninstall_paths = "/Library/Application Support/rewst_remote_agent/$orgId`n/usr/local/bin/rewst_remote_agent/$orgId`n`$env:TMPDIR/rewst_remote_agent/scripts/$orgId"
@@ -460,6 +463,91 @@ jobs:
             exit 1
           }
           Write-Output "Confirmed exactly one post-reconnect command execution"
+
+      # ---- Per-command execution timeout scenario (sc-103835) ----
+      # Configure a short per-command timeout, dispatch a script that sleeps well
+      # beyond it, and confirm the agent kills the command (logging a timeout) and
+      # that a subsequent ordinary command still completes - i.e. the worker pool
+      # recovered instead of staying wedged. Counts are compared as deltas because
+      # the log already carries lines from earlier cycles.
+      - name: Enable short command timeout
+        uses: ./.github/actions/run-agent
+        with:
+          binary: ${{ matrix.binary }}
+          args: --update --org-id ${{ vars.IT_ORG_ID }} --command-timeout-seconds 5 --github-token ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Wait for fresh subscription after timeout update
+        uses: ./.github/actions/wait-for-log-line
+        with:
+          log_file: ${{ matrix.log_file }}
+          pattern: Subscribed to messages
+          max_attempts: "60"
+          interval_seconds: "2"
+
+      - name: Capture command-timeout baseline counts
+        id: timeout_baseline
+        shell: pwsh
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+        run: |
+          $content = Get-Content $env:LOG_FILE -Raw -ErrorAction SilentlyContinue
+          $timedOut  = if ($content) { ([regex]::Matches($content, [regex]::Escape("Command timed out"))).Count } else { 0 }
+          $completed = if ($content) { ([regex]::Matches($content, [regex]::Escape("Command completed"))).Count } else { 0 }
+          "timed_out=$timedOut" >> $env:GITHUB_OUTPUT
+          "completed=$completed" >> $env:GITHUB_OUTPUT
+          Write-Output "Baseline counts -> timed_out=$timedOut completed=$completed"
+
+      - name: Send hanging command
+        uses: ./.github/actions/send-command
+        with:
+          trigger_url: ${{ vars.IT_SEND_COMMAND_TRIGGER_URL }}
+          device_id: ${{ steps.config.outputs.device_id }}
+          commands: ${{ matrix.timeout_commands }}
+
+      - name: Assert hanging command was killed by the timeout
+        shell: pwsh
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+          BASELINE: ${{ steps.timeout_baseline.outputs.timed_out }}
+        run: |
+          $baseline = [int]$env:BASELINE
+          for ($i = 1; $i -le 30; $i++) {
+            Start-Sleep -Seconds 2
+            $content = Get-Content $env:LOG_FILE -Raw -ErrorAction SilentlyContinue
+            $count = if ($content) { ([regex]::Matches($content, [regex]::Escape("Command timed out"))).Count } else { 0 }
+            if ($count -gt $baseline) {
+              Write-Output "Command timed out as expected (count $count > baseline $baseline) after ~$($i * 2)s"
+              exit 0
+            }
+          }
+          Write-Error "Hanging command was not killed by the per-command timeout (count stayed at $baseline)"
+          exit 1
+
+      - name: Send command after timeout
+        uses: ./.github/actions/send-command
+        with:
+          trigger_url: ${{ vars.IT_SEND_COMMAND_TRIGGER_URL }}
+          device_id: ${{ steps.config.outputs.device_id }}
+          commands: ${{ matrix.success_commands }}
+
+      - name: Assert worker pool recovered after timeout
+        shell: pwsh
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+          BASELINE: ${{ steps.timeout_baseline.outputs.completed }}
+        run: |
+          $baseline = [int]$env:BASELINE
+          for ($i = 1; $i -le 30; $i++) {
+            Start-Sleep -Seconds 2
+            $content = Get-Content $env:LOG_FILE -Raw -ErrorAction SilentlyContinue
+            $count = if ($content) { ([regex]::Matches($content, [regex]::Escape("Command completed"))).Count } else { 0 }
+            if ($count -gt $baseline) {
+              Write-Output "Worker pool recovered; a later command completed (count $count > baseline $baseline)"
+              exit 0
+            }
+          }
+          Write-Error "Worker pool did not process a command after the timeout (count stayed at $baseline)"
+          exit 1
 
       - name: Uninstall agent
         uses: ./.github/actions/run-agent

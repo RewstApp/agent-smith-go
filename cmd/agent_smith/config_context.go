@@ -29,6 +29,7 @@ type tuningFlags struct {
 	MessageQueueSize                int
 	PostbackMaxAttempts             int
 	PostbackBaseRetryBackoffSeconds int
+	CommandTimeoutSeconds           int
 	// provided records which tuning flag names the operator explicitly set. It is
 	// populated from flag.FlagSet.Visit after parsing so validation can flag an
 	// explicitly-provided non-positive value (e.g. --worker-count -1) even when it
@@ -44,6 +45,7 @@ var tuningFlagNames = []string{
 	"message-queue-size",
 	"postback-max-attempts",
 	"postback-base-retry-backoff-seconds",
+	"command-timeout-seconds",
 }
 
 // captureProvided records which tuning flags were explicitly set on fs so that
@@ -95,6 +97,12 @@ func bindTuningFlags(fs *flag.FlagSet, t *tuningFlags) {
 		tuningFlagUnset,
 		"Base exponential-backoff delay between postback attempts in seconds (positive integer)",
 	)
+	fs.IntVar(
+		&t.CommandTimeoutSeconds,
+		"command-timeout-seconds",
+		tuningFlagUnset,
+		"Per-command execution timeout in seconds; unset means unbounded (positive integer)",
+	)
 }
 
 // validate rejects any tuning flag that was explicitly provided with a
@@ -110,6 +118,7 @@ func (t tuningFlags) validate() error {
 		{"message-queue-size", t.MessageQueueSize},
 		{"postback-max-attempts", t.PostbackMaxAttempts},
 		{"postback-base-retry-backoff-seconds", t.PostbackBaseRetryBackoffSeconds},
+		{"command-timeout-seconds", t.CommandTimeoutSeconds},
 	}
 	for _, c := range checks {
 		if t.provided[c.name] && c.value <= 0 {
