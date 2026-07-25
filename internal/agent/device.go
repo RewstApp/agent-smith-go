@@ -71,6 +71,17 @@ const (
 	// between postback attempts when PostbackBaseRetryBackoffSeconds is not
 	// configured.
 	DefaultPostbackBaseRetryBackoff = 1 * time.Second
+	// DefaultPostbackMaxRetryBackoff caps the exponential-backoff delay between
+	// postback attempts regardless of how high PostbackMaxAttempts is raised. The
+	// in-line schedule doubles the base delay on every retry (base * 2^n); without
+	// a ceiling a moderately large postback_max_attempts produces multi-hour or
+	// multi-day sleeps that pin a worker, and a large value overflows the shift
+	// into a negative time.Duration that makes time.After fire immediately and the
+	// retry loop busy-spin. This mirrors maxTimeout in the reconnect backoff
+	// generator (see internal/utils/time.go): the per-slot wait is bounded so the
+	// total retry window still widens with more attempts, but no single sleep can
+	// overflow, hang a worker for days, or collapse into a tight loop.
+	DefaultPostbackMaxRetryBackoff = 64 * time.Second
 )
 
 // ResolvedWorkerCount returns the number of command-execution workers to start,

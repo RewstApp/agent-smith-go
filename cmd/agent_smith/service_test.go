@@ -1417,3 +1417,84 @@ func TestExecute_NoUnsubscribeWhenSubscribeFails(t *testing.T) {
 		}
 	}
 }
+
+// TestPostbackRetryBackoff_DefaultScheduleUnchanged verifies that the default
+// configuration (base 1s) still yields the historical ~1s / ~2s schedule for the
+// first two retries. Jitter is bounded to ±25%, so each slot is asserted within
+// that band of the exponential base rather than exactly.
+func TestPostbackRetryBackoff_DefaultScheduleUnchanged(t *testing.T) {
+	base := agent.DefaultPostbackBaseRetryBackoff
+	maxBackoff := agent.DefaultPostbackMaxRetryBackoff
+
+	cases := []struct {
+		attempt  int
+		expected time.Duration // exponential base before jitter
+	}{
+		{attempt: 2, expected: 1 * time.Second},
+		{attempt: 3, expected: 2 * time.Second},
+	}
+
+	for _, c := range cases {
+		// Sample repeatedly so jitter variance is exercised.
+		for i := 0; i < 1000; i++ {
+			got := postbackRetryBackoff(base, maxBackoff, c.attempt)
+			low := time.Duration(float64(c.expected) * 0.75)
+			high := time.Duration(float64(c.expected) * 1.25)
+			if got < low || got > high {
+				t.Fatalf("attempt %d: backoff %v outside expected jittered band [%v, %v]",
+					c.attempt, got, low, high)
+			}
+		}
+	}
+}
+
+// TestPostbackRetryBackoff_LargeAttemptsStayPositiveAndCapped is the core
+// regression for the uncapped/overflowing backoff: for very large attempt
+// numbers (well past the point where base * (1 << (attempt-2)) overflows int64
+// nanoseconds into a negative duration) the computed backoff must remain
+// strictly positive and never exceed the configured cap.
+func TestPostbackRetryBackoff_LargeAttemptsStayPositiveAndCapped(t *testing.T) {
+	base := 1 * time.Second
+	maxBackoff := agent.DefaultPostbackMaxRetryBackoff
+
+	// attempt-2 == 33 already overflows the old 1<<(attempt-2) nanosecond shift;
+	// go well beyond it, including absurd operator values.
+	for _, attempt := range []int{20, 35, 40, 64, 100, 1000, 1 << 20} {
+		for i := 0; i < 200; i++ {
+			got := postbackRetryBackoff(base, maxBackoff, attempt)
+			if got <= 0 {
+				t.Fatalf("attempt %d: backoff must be strictly positive, got %v", attempt, got)
+			}
+			if got > maxBackoff {
+				t.Fatalf("attempt %d: backoff %v exceeds cap %v", attempt, got, maxBackoff)
+			}
+		}
+	}
+}
+
+// TestPostbackRetryBackoff_BaseAboveCapClamped verifies that an operator setting
+// a base delay larger than the cap still produces a bounded, positive slot.
+func TestPostbackRetryBackoff_BaseAboveCapClamped(t *testing.T) {
+	maxBackoff := agent.DefaultPostbackMaxRetryBackoff
+	base := maxBackoff * 10
+
+	for _, attempt := range []int{2, 3, 50} {
+		got := postbackRetryBackoff(base, maxBackoff, attempt)
+		if got <= 0 || got > maxBackoff {
+			t.Fatalf("attempt %d: expected 0 < backoff <= %v, got %v", attempt, maxBackoff, got)
+		}
+	}
+}
+
+// TestPostbackRetryBackoff_NonPositiveInputsFallBackToDefaults verifies the
+// guards that keep a misconfigured base/cap from producing a zero or negative
+// slot.
+func TestPostbackRetryBackoff_NonPositiveInputsFallBackToDefaults(t *testing.T) {
+	got := postbackRetryBackoff(0, 0, 5)
+	if got <= 0 {
+		t.Fatalf("expected positive backoff with defaulted inputs, got %v", got)
+	}
+	if got > postbackMaxRetryBackoff {
+		t.Fatalf("expected backoff within defaulted cap %v, got %v", postbackMaxRetryBackoff, got)
+	}
+}

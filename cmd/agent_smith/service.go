@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -35,6 +36,7 @@ const (
 	postbackHTTPTimeout      = 30 * time.Second
 	postbackMaxAttempts      = agent.DefaultPostbackMaxAttempts
 	postbackBaseRetryBackoff = agent.DefaultPostbackBaseRetryBackoff
+	postbackMaxRetryBackoff  = agent.DefaultPostbackMaxRetryBackoff
 
 	// maxNotificationPayloadBytes bounds how many bytes of a received message
 	// payload are embedded in the AgentReceivedMessage notification forwarded to
@@ -526,6 +528,60 @@ func (svc *serviceContext) processMessage(
 	svc.sendPostbackWithRetry(ctx, &message, device, resultBytes, logger, notifier)
 }
 
+// postbackRetryBackoff computes the delay to wait before the given postback
+// retry attempt. attempt is 1-based and counts the initial try, so the first
+// backoff is paid before attempt 2; the uncapped schedule is base * 2^(attempt-2).
+//
+// The doubling is performed by iterated multiplication with an early exit at
+// maxBackoff rather than the naive base * (1 << (attempt-2)) shift. That shift
+// grows without bound and, for a large operator-configured postback_max_attempts,
+// overflows int64 nanoseconds into a negative time.Duration — time.After then
+// fires immediately and the retry loop busy-spins. Clamping to maxBackoff before
+// any overflow can occur keeps every slot strictly positive and bounded, so
+// raising the attempt count widens the total retry window without ever producing
+// a negative, zero, or multi-day sleep.
+//
+// Up to ±25% jitter is applied — mirroring the reconnect backoff generator (see
+// internal/utils/time.go) — to avoid synchronized retry storms across many
+// agents, and the result is clamped again so it never exceeds maxBackoff and
+// always stays strictly positive.
+func postbackRetryBackoff(base, maxBackoff time.Duration, attempt int) time.Duration {
+	if base <= 0 {
+		base = postbackBaseRetryBackoff
+	}
+	if maxBackoff <= 0 {
+		maxBackoff = postbackMaxRetryBackoff
+	}
+	if base > maxBackoff {
+		base = maxBackoff
+	}
+
+	backoff := base
+	for i := 0; i < attempt-2; i++ {
+		// Stop before doubling would reach or overflow the cap. Because backoff
+		// never exceeds maxBackoff (a small, sane duration), base * 2^n can never
+		// overflow int64 nanoseconds into a negative value.
+		if backoff >= maxBackoff/2 {
+			backoff = maxBackoff
+			break
+		}
+		backoff *= 2
+	}
+	if backoff > maxBackoff {
+		backoff = maxBackoff
+	}
+
+	jitter := time.Duration(float64(backoff) * 0.25 * (2*rand.Float64() - 1))
+	backoff += jitter
+	if backoff > maxBackoff {
+		backoff = maxBackoff
+	}
+	if backoff <= 0 {
+		backoff = base
+	}
+	return backoff
+}
+
 // sendPostbackWithRetry posts the command result to the Rewst engine, retrying
 // transient failures (network errors and 5xx responses) with exponential
 // backoff. Non-retryable responses (2xx success, 400 "already fulfilled", and
@@ -553,7 +609,7 @@ func (svc *serviceContext) sendPostbackWithRetry(
 	var lastErr error
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		if attempt > 1 {
-			backoff := baseBackoff * (1 << (attempt - 2))
+			backoff := postbackRetryBackoff(baseBackoff, postbackMaxRetryBackoff, attempt)
 			logger.Info(
 				"Retrying postback",
 				"post_id", message.PostId,
