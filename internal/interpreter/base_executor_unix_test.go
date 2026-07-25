@@ -5,11 +5,13 @@ package interpreter
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/RewstApp/agent-smith-go/internal/agent"
 	"github.com/RewstApp/agent-smith-go/internal/utils"
@@ -70,6 +72,113 @@ func TestBaseExecutor_Diagnostics_CachedAcrossCommands(t *testing.T) {
 	}
 	if got := strings.Count(logs, "[debug] whoami"); got != commandCount {
 		t.Errorf("expected %d whoami log lines, got %d", commandCount, got)
+	}
+}
+
+// newBashExecutor returns a bash-backed executor that runs the user script file
+// directly, mirroring the production Bash executor without the plugin wiring.
+func newBashExecutor() *baseExecutor {
+	return &baseExecutor{
+		Shell:                    "bash",
+		ShellVersionCheckCommand: "echo 1.0",
+		WriteUtf8BOM:             false,
+		BuildExecuteCommandArgs:  func(command string) []string { return []string{"-c", command} },
+		BuildExecuteFileArgs:     func(path string) []string { return []string{path} },
+		FS:                       utils.NewFileSystem(),
+	}
+}
+
+func TestBaseExecutor_CommandTimeout_KillsHungScript(t *testing.T) {
+	executor := newBashExecutor()
+
+	var buf bytes.Buffer
+	logger := hclog.New(&hclog.LoggerOptions{Output: &buf, Level: hclog.Error})
+	timeout := 1
+	device := agent.Device{RewstOrgId: "test-org-timeout", CommandTimeoutSeconds: &timeout}
+
+	// A script that would otherwise block a worker indefinitely.
+	msg := Message{PostId: "test:timeout", Commands: encodeCommand("sleep 30")}
+
+	start := time.Now()
+	done := make(chan []byte, 1)
+	go func() {
+		done <- executor.Execute(context.Background(), &msg, device, logger, nil, nil)
+	}()
+
+	var resultJSON []byte
+	select {
+	case resultJSON = <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Execute did not return; command was not killed by timeout")
+	}
+
+	elapsed := time.Since(start)
+	if elapsed > 5*time.Second {
+		t.Errorf("command took %v to be killed; expected roughly the 1s timeout", elapsed)
+	}
+
+	var r result
+	if err := json.Unmarshal(resultJSON, &r); err != nil {
+		t.Fatalf("failed to unmarshal result: %v", err)
+	}
+	if !r.TimedOut {
+		t.Errorf("expected timed_out=true, got result %s", resultJSON)
+	}
+	if !strings.Contains(r.Error, "timed out") {
+		t.Errorf("expected error to mention timeout, got %q", r.Error)
+	}
+
+	// The timeout must be logged at Error level with the post_id for diagnosis.
+	logs := buf.String()
+	if !strings.Contains(logs, "Command timed out") {
+		t.Errorf("expected an Error-level timeout log, got %q", logs)
+	}
+	if !strings.Contains(logs, "test:timeout") {
+		t.Errorf("expected the timeout log to include the post_id, got %q", logs)
+	}
+}
+
+func TestBaseExecutor_CommandTimeout_FastCommandUnaffected(t *testing.T) {
+	executor := newBashExecutor()
+
+	logger := hclog.New(&hclog.LoggerOptions{Output: &bytes.Buffer{}, Level: hclog.Error})
+	timeout := 30
+	device := agent.Device{RewstOrgId: "test-org-fast", CommandTimeoutSeconds: &timeout}
+
+	msg := Message{PostId: "test:fast", Commands: encodeCommand("echo hello")}
+	resultJSON := executor.Execute(context.Background(), &msg, device, logger, nil, nil)
+
+	var r result
+	if err := json.Unmarshal(resultJSON, &r); err != nil {
+		t.Fatalf("failed to unmarshal result: %v", err)
+	}
+	if r.TimedOut {
+		t.Errorf("fast command should not be flagged as timed out: %s", resultJSON)
+	}
+	if !strings.Contains(r.Output, "hello") {
+		t.Errorf("expected command output to contain 'hello', got %q", r.Output)
+	}
+}
+
+func TestBaseExecutor_CommandTimeout_UnboundedByDefault(t *testing.T) {
+	executor := newBashExecutor()
+
+	logger := hclog.New(&hclog.LoggerOptions{Output: &bytes.Buffer{}, Level: hclog.Error})
+	// No CommandTimeoutSeconds set: execution is unbounded (historical behavior).
+	device := agent.Device{RewstOrgId: "test-org-unbounded"}
+
+	msg := Message{PostId: "test:unbounded", Commands: encodeCommand("sleep 1; echo done")}
+	resultJSON := executor.Execute(context.Background(), &msg, device, logger, nil, nil)
+
+	var r result
+	if err := json.Unmarshal(resultJSON, &r); err != nil {
+		t.Fatalf("failed to unmarshal result: %v", err)
+	}
+	if r.TimedOut {
+		t.Errorf("command should not be timed out when no timeout is configured: %s", resultJSON)
+	}
+	if !strings.Contains(r.Output, "done") {
+		t.Errorf("expected command output to contain 'done', got %q", r.Output)
 	}
 }
 

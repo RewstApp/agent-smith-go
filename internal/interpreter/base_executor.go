@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/RewstApp/agent-smith-go/internal/agent"
 	"github.com/RewstApp/agent-smith-go/internal/utils"
@@ -20,6 +21,12 @@ import (
 )
 
 var utf8BOM = []byte{0xEF, 0xBB, 0xBF}
+
+// commandWaitDelay bounds how long cmd.Wait blocks on the output pipes after the
+// command's context is cancelled and the process (group) is killed. It is a
+// backstop for a child that briefly holds the inherited stdout/stderr pipe open;
+// once it elapses the runtime force-closes the pipes so the worker is released.
+const commandWaitDelay = 10 * time.Second
 
 type baseExecutor struct {
 	Shell                    string
@@ -164,15 +171,64 @@ func (e *baseExecutor) Execute(
 
 	var stdoutBuf, stderrBuf bytes.Buffer
 
+	// Bound the command to the configured per-command timeout when one is set, so
+	// a hung or interactive script (infinite loop, blocked on stdin, stuck network
+	// call) is killed after the deadline instead of permanently occupying its
+	// worker. When no timeout is configured, execCtx is the unmodified per-cycle
+	// ctx and the command remains unbounded (historical behavior).
+	execCtx := ctx
+	if timeout, ok := device.ResolvedCommandTimeout(); ok {
+		var cancel context.CancelFunc
+		execCtx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
+
 	// #nosec G204
-	cmd := exec.CommandContext(ctx, e.Shell, e.BuildExecuteFileArgs(tempfile.Name())...)
+	cmd := exec.CommandContext(execCtx, e.Shell, e.BuildExecuteFileArgs(tempfile.Name())...)
 	cmd.Stdout = &stdoutBuf
 	cmd.Stderr = &stderrBuf
 	cmd.Env = os.Environ()
 	cmd.Env = append(cmd.Env, fmt.Sprintf("AGENT_SMITH_VERSION=%s", version.Version[1:]))
 
+	// Kill the whole process group on cancellation (see configureProcessGroup) so
+	// a shell that spawned children is fully torn down, and bound how long Run may
+	// block on output pipes afterward. Because stdout/stderr are in-memory buffers
+	// (not *os.File), the runtime copies them through a pipe a killed child can
+	// still hold open; WaitDelay guarantees Run returns and the worker is released
+	// even then. This only takes effect when the context is cancelled, so commands
+	// that finish on their own are unaffected.
+	configureProcessGroup(cmd)
+	cmd.WaitDelay = commandWaitDelay
+
 	err = cmd.Run()
 	if err != nil {
+		// Distinguish a command killed by the per-command timeout from a normal
+		// non-zero exit. execCtx exceeding its deadline while the parent ctx is
+		// still live means the timeout fired (not a service stop / reconnect,
+		// which cancels the parent ctx instead).
+		if errors.Is(execCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil {
+			timeout, _ := device.ResolvedCommandTimeout()
+			logger.Error(
+				"Command timed out",
+				"message_id",
+				message.PostId,
+				"timeout",
+				timeout,
+			)
+			logger.Debug(
+				"Command timed out with outputs",
+				"error",
+				stderrBuf.String(),
+				"info",
+				stdoutBuf.String(),
+			)
+			errMsg := fmt.Sprintf("command timed out after %s", timeout)
+			if stderrBuf.Len() > 0 {
+				errMsg = fmt.Sprintf("%s: %s", errMsg, stderrBuf.String())
+			}
+			return timeoutResultBytes(logger, errMsg, stdoutBuf.String())
+		}
+
 		logger.Error("Command failed", "error", err)
 		logger.Debug(
 			"Command completed with outputs",

@@ -129,6 +129,7 @@ func runConfig(params *configContext) error {
 	response.Configuration.PostbackBaseRetryBackoffSeconds = tuningPtr(
 		params.Tuning.PostbackBaseRetryBackoffSeconds,
 	)
+	response.Configuration.CommandTimeoutSeconds = tuningPtr(params.Tuning.CommandTimeoutSeconds)
 
 	// Create the data directory
 	dataDir := agent.GetDataDirectory(params.OrgId)

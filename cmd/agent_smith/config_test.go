@@ -509,6 +509,7 @@ func TestRunConfig_AppliesTuningFlags(t *testing.T) {
 		MessageQueueSize:                250,
 		PostbackMaxAttempts:             5,
 		PostbackBaseRetryBackoffSeconds: 2,
+		CommandTimeoutSeconds:           120,
 	}
 
 	if err := runConfig(params); err != nil {
@@ -535,6 +536,9 @@ func TestRunConfig_AppliesTuningFlags(t *testing.T) {
 			device.PostbackBaseRetryBackoffSeconds,
 		)
 	}
+	if device.CommandTimeoutSeconds == nil || *device.CommandTimeoutSeconds != 120 {
+		t.Errorf("expected CommandTimeoutSeconds 120, got %v", device.CommandTimeoutSeconds)
+	}
 }
 
 func TestRunConfig_OmittedTuningFlagsFallBackToDefault(t *testing.T) {
@@ -559,6 +563,7 @@ func TestRunConfig_OmittedTuningFlagsFallBackToDefault(t *testing.T) {
 		MessageQueueSize:                tuningFlagUnset,
 		PostbackMaxAttempts:             tuningFlagUnset,
 		PostbackBaseRetryBackoffSeconds: tuningFlagUnset,
+		CommandTimeoutSeconds:           tuningFlagUnset,
 	}
 
 	if err := runConfig(params); err != nil {
@@ -570,7 +575,8 @@ func TestRunConfig_OmittedTuningFlagsFallBackToDefault(t *testing.T) {
 		device.WorkerCount != nil ||
 		device.MessageQueueSize != nil ||
 		device.PostbackMaxAttempts != nil ||
-		device.PostbackBaseRetryBackoffSeconds != nil {
+		device.PostbackBaseRetryBackoffSeconds != nil ||
+		device.CommandTimeoutSeconds != nil {
 		t.Errorf("expected omitted tuning flags to stay nil, got %+v", device)
 	}
 	// Resolved accessors must still return the documented defaults.

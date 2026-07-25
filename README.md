@@ -210,6 +210,34 @@ raising `worker_count` widens execution parallelism. Example snippet:
 }
 ```
 
+#### Bounding per-command execution time
+
+By default a received command runs with no execution deadline: it is only
+cancelled when the MQTT connection drops or the service stops. A script that
+hangs (infinite loop, blocked on a prompt/`stdin`, stuck network call) therefore
+occupies its worker indefinitely, and once as many hung commands accumulate as
+there are workers the whole pool is exhausted and no further commands run until
+the agent reconnects.
+
+Set `command_timeout_seconds` to bound how long any single command may run:
+
+| Config key | Default | Description |
+|------------|---------|-------------|
+| `command_timeout_seconds` | *(unset — unbounded)* | Maximum seconds a single command may run before it is killed and its worker released. |
+
+When set to a positive value, each command runs under a derived context with
+that deadline; if it is exceeded the command's process group is killed, the
+worker is freed, and the result posted back is flagged with `"timed_out": true`
+(distinct from a normal non-zero exit) while the event is logged at `Error`
+level with the `post_id`. When omitted or set to a non-positive value, execution
+stays unbounded, preserving the historical behavior. Example snippet:
+
+```json
+{
+  "command_timeout_seconds": 300
+}
+```
+
 ### Command Result Delivery
 
 After a command runs, the agent posts its result back to the Rewst engine with

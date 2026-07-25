@@ -91,7 +91,8 @@ func TestNewConfigContext(t *testing.T) {
 		result.Tuning.WorkerCount != tuningFlagUnset ||
 		result.Tuning.MessageQueueSize != tuningFlagUnset ||
 		result.Tuning.PostbackMaxAttempts != tuningFlagUnset ||
-		result.Tuning.PostbackBaseRetryBackoffSeconds != tuningFlagUnset {
+		result.Tuning.PostbackBaseRetryBackoffSeconds != tuningFlagUnset ||
+		result.Tuning.CommandTimeoutSeconds != tuningFlagUnset {
 		t.Errorf("expected tuning flags to default to unset, got %+v", result.Tuning)
 	}
 
@@ -106,6 +107,7 @@ func TestNewConfigContext(t *testing.T) {
 			"--message-queue-size", "250",
 			"--postback-max-attempts", "5",
 			"--postback-base-retry-backoff-seconds", "2",
+			"--command-timeout-seconds", "120",
 		},
 		nil, nil, nil, nil,
 	)
@@ -134,6 +136,12 @@ func TestNewConfigContext(t *testing.T) {
 		t.Errorf(
 			"expected PostbackBaseRetryBackoffSeconds 2, got %v",
 			resultWithTuning.Tuning.PostbackBaseRetryBackoffSeconds,
+		)
+	}
+	if resultWithTuning.Tuning.CommandTimeoutSeconds != 120 {
+		t.Errorf(
+			"expected CommandTimeoutSeconds 120, got %v",
+			resultWithTuning.Tuning.CommandTimeoutSeconds,
 		)
 	}
 
@@ -228,6 +236,15 @@ func TestNewConfigContext(t *testing.T) {
 				"--postback-base-retry-backoff-seconds", "-5",
 			},
 			"invalid postback-base-retry-backoff-seconds: must be a positive integer",
+		},
+		{
+			[]string{
+				"--org-id", orgId,
+				"--config-url", configUrl,
+				"--config-secret", configSecret,
+				"--command-timeout-seconds", "0",
+			},
+			"invalid command-timeout-seconds: must be a positive integer",
 		},
 	}
 
