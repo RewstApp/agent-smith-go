@@ -31,6 +31,7 @@ func NewClientOptions(device agent.Device) (*mqtt.ClientOptions, error) {
 			DeviceId:        device.DeviceId,
 			Host:            device.AzureIotHubHost,
 			SharedAccessKey: device.SharedAccessKey,
+			TokenLifetime:   device.SasTokenLifetime(),
 		})
 	}
 

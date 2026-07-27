@@ -278,6 +278,33 @@ existing configurations are unaffected. Example snippet:
 }
 ```
 
+### Staying Connected (SAS token renewal)
+
+The agent authenticates to Azure IoT Hub with a short-lived SAS token, and the
+hub forcibly disconnects a client the instant its token expires. To avoid a
+forced disconnect on a fixed cadence, the agent mints a long-lived token and
+proactively reconnects with a fresh one a safety margin **before** expiry. The
+old connection is therefore never torn down by an expired token: the reconnect
+is a routine, `Info`-level **`Renewing SAS token before expiry`** log line rather
+than an `Error`-level `Connection lost`. An `Error` `Connection lost` now
+reflects a genuine fault (network drop, broker-side disconnect), and reconnect
+behavior for those real losses is unchanged.
+
+| Config key | Default | Description |
+|------------|---------|-------------|
+| `sas_token_lifetime_hours` | `24` | Lifetime (in hours) of the Azure IoT Hub SAS token minted for each connection. |
+
+The renewal margin is 10% of the lifetime, floored at 1 minute and capped at 15
+minutes, so the token is used for almost its entire lifetime yet always refreshed
+ahead of expiry. Falls back to the default when omitted or set to a non-positive
+value. Example snippet:
+
+```json
+{
+  "sas_token_lifetime_hours": 12
+}
+```
+
 ## Build
 Required tools and packages:
 

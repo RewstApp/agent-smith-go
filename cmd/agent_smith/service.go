@@ -393,12 +393,34 @@ func (svc *serviceContext) runCycle(
 		svc.flushPostbackSpool(cycleCtx, device, logger)
 	}, "scope", "postback_spool_flush")
 
+	// Proactively renew the SAS token before Azure IoT Hub expires it. The token
+	// minted for this connection is valid for device.SasTokenLifetime(); Azure
+	// tears down the MQTT connection the instant it expires, which would surface
+	// as an Error-level "Connection lost" (indistinguishable from a real fault)
+	// and a forced reconnect on a fixed cadence. Instead we end this cycle
+	// gracefully a safety margin ahead of expiry so the next cycle mints a fresh
+	// token — keeping the connection effectively continuous and reserving the
+	// "Connection lost" log for genuine faults. Like the lost-connection path it
+	// clears the reconnect backoff so the fresh cycle starts promptly.
+	tokenLifetime := device.SasTokenLifetime()
+	renewAfter := tokenLifetime - utils.SasTokenRenewMargin(tokenLifetime)
+	renewTimer := time.NewTimer(renewAfter)
+	defer renewTimer.Stop()
+
 	select {
 	case <-stopped:
 		_ = notifier.Notify("AgentStatus:Stopped") // Best effort notification
 		return true, true, 0
 	case <-lost:
 		_ = notifier.Notify("AgentStatus:Offline") // Best effort notification
+		return false, true, 0
+	case <-renewTimer.C:
+		logger.Info(
+			"Renewing SAS token before expiry",
+			"token_lifetime", tokenLifetime,
+			"renew_after", renewAfter,
+		)
+		_ = notifier.Notify("AgentStatus:Reconnecting") // Best effort notification
 		return false, true, 0
 	}
 }

@@ -83,6 +83,47 @@ func TestDefaultMqttConnectTimeoutIsDecoupledFromBackoff(t *testing.T) {
 	}
 }
 
+// TestSasTokenRenewMargin asserts the renew margin is always a positive
+// duration strictly less than the token lifetime, so the derived renew-after
+// delay (lifetime - margin) is positive and the agent reconnects ahead of
+// expiry across the full range of configurable lifetimes.
+func TestSasTokenRenewMargin(t *testing.T) {
+	tests := []struct {
+		name     string
+		lifetime time.Duration
+		expect   time.Duration
+	}{
+		// 10% of lifetime when that sits between the floor and cap.
+		{"one hour uses 10 percent", time.Hour, 6 * time.Minute},
+		// 10% of 24h is 2.4h, capped at 15m.
+		{"one day capped at max", 24 * time.Hour, 15 * time.Minute},
+		// 10% of 5m is 30s, floored at 1m.
+		{"short lifetime floored", 5 * time.Minute, time.Minute},
+		// Lifetime below the floor falls back to half the lifetime so
+		// renew-after stays positive.
+		{"tiny lifetime uses half", 30 * time.Second, 15 * time.Second},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := SasTokenRenewMargin(tt.lifetime)
+			if got != tt.expect {
+				t.Errorf("SasTokenRenewMargin(%v) = %v, want %v", tt.lifetime, got, tt.expect)
+			}
+			if got <= 0 {
+				t.Errorf("SasTokenRenewMargin(%v) must be positive, got %v", tt.lifetime, got)
+			}
+			if got >= tt.lifetime {
+				t.Errorf(
+					"SasTokenRenewMargin(%v) = %v must be < lifetime so renew-after stays positive",
+					tt.lifetime,
+					got,
+				)
+			}
+		})
+	}
+}
+
 func TestReconnectTimeoutGeneratorJitterDiffers(t *testing.T) {
 	// Two independent generators must produce different sequences
 	g1 := ReconnectTimeoutGenerator{}

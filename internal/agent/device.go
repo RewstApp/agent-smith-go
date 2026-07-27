@@ -55,6 +55,14 @@ type Device struct {
 	// a worker: the command is cancelled once the deadline elapses even if the
 	// MQTT connection stays up.
 	CommandTimeoutSeconds *int `json:"command_timeout_seconds,omitempty"`
+	// SasTokenLifetimeHours optionally overrides the lifetime of the Azure IoT
+	// Hub SAS token minted for each MQTT connection, in hours. When unset (or
+	// non-positive) the agent falls back to utils.DefaultSasTokenLifetime. Azure
+	// IoT Hub disconnects a client when its SAS token expires; the agent
+	// proactively reconnects with a fresh token a safety margin ahead of that
+	// deadline (see utils.SasTokenRenewMargin), so a longer lifetime means less
+	// frequent — but always graceful — reconnects.
+	SasTokenLifetimeHours *int `json:"sas_token_lifetime_hours,omitempty"`
 }
 
 const (
@@ -142,6 +150,16 @@ func (d Device) MqttConnectTimeout() time.Duration {
 		return time.Duration(*d.MqttConnectTimeoutSeconds) * time.Second
 	}
 	return utils.DefaultMqttConnectTimeout
+}
+
+// SasTokenLifetime returns the lifetime of the Azure IoT Hub SAS token minted
+// for each MQTT connection, honoring the per-device override when set to a
+// positive value and falling back to utils.DefaultSasTokenLifetime otherwise.
+func (d Device) SasTokenLifetime() time.Duration {
+	if d.SasTokenLifetimeHours != nil && *d.SasTokenLifetimeHours > 0 {
+		return time.Duration(*d.SasTokenLifetimeHours) * time.Hour
+	}
+	return utils.DefaultSasTokenLifetime
 }
 
 type Plugin struct {

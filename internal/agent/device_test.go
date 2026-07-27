@@ -3,6 +3,8 @@ package agent
 import (
 	"testing"
 	"time"
+
+	"github.com/RewstApp/agent-smith-go/internal/utils"
 )
 
 func intPtr(v int) *int { return &v }
@@ -95,6 +97,28 @@ func TestResolvedPostbackMaxAttempts(t *testing.T) {
 			d := Device{PostbackMaxAttempts: tt.value}
 			if got := d.ResolvedPostbackMaxAttempts(); got != tt.expect {
 				t.Errorf("ResolvedPostbackMaxAttempts() = %d, want %d", got, tt.expect)
+			}
+		})
+	}
+}
+
+func TestSasTokenLifetime(t *testing.T) {
+	tests := []struct {
+		name   string
+		value  *int
+		expect time.Duration
+	}{
+		{"unset falls back to default", nil, utils.DefaultSasTokenLifetime},
+		{"zero falls back to default", intPtr(0), utils.DefaultSasTokenLifetime},
+		{"negative falls back to default", intPtr(-6), utils.DefaultSasTokenLifetime},
+		{"positive override honored", intPtr(12), 12 * time.Hour},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			d := Device{SasTokenLifetimeHours: tt.value}
+			if got := d.SasTokenLifetime(); got != tt.expect {
+				t.Errorf("SasTokenLifetime() = %v, want %v", got, tt.expect)
 			}
 		})
 	}

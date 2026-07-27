@@ -30,6 +30,7 @@ type tuningFlags struct {
 	PostbackMaxAttempts             int
 	PostbackBaseRetryBackoffSeconds int
 	CommandTimeoutSeconds           int
+	SasTokenLifetimeHours           int
 	// provided records which tuning flag names the operator explicitly set. It is
 	// populated from flag.FlagSet.Visit after parsing so validation can flag an
 	// explicitly-provided non-positive value (e.g. --worker-count -1) even when it
@@ -46,6 +47,7 @@ var tuningFlagNames = []string{
 	"postback-max-attempts",
 	"postback-base-retry-backoff-seconds",
 	"command-timeout-seconds",
+	"sas-token-lifetime-hours",
 }
 
 // captureProvided records which tuning flags were explicitly set on fs so that
@@ -103,6 +105,12 @@ func bindTuningFlags(fs *flag.FlagSet, t *tuningFlags) {
 		tuningFlagUnset,
 		"Per-command execution timeout in seconds; unset means unbounded (positive integer)",
 	)
+	fs.IntVar(
+		&t.SasTokenLifetimeHours,
+		"sas-token-lifetime-hours",
+		tuningFlagUnset,
+		"Azure IoT Hub SAS token lifetime in hours (positive integer)",
+	)
 }
 
 // validate rejects any tuning flag that was explicitly provided with a
@@ -119,6 +127,7 @@ func (t tuningFlags) validate() error {
 		{"postback-max-attempts", t.PostbackMaxAttempts},
 		{"postback-base-retry-backoff-seconds", t.PostbackBaseRetryBackoffSeconds},
 		{"command-timeout-seconds", t.CommandTimeoutSeconds},
+		{"sas-token-lifetime-hours", t.SasTokenLifetimeHours},
 	}
 	for _, c := range checks {
 		if t.provided[c.name] && c.value <= 0 {

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/RewstApp/agent-smith-go/internal/utils"
 	mqtt "github.com/eclipse/paho.mqtt.golang"
 )
 
@@ -15,6 +16,9 @@ type azureIotHubDevice struct {
 	DeviceId        string
 	Host            string
 	SharedAccessKey string
+	// TokenLifetime is how long the minted SAS token is valid. When zero the
+	// documented default (utils.DefaultSasTokenLifetime) is used.
+	TokenLifetime time.Duration
 }
 
 // generateSASToken generates a SAS token for Azure IoT Hub
@@ -47,9 +51,15 @@ func generateSASToken(resourceURI, key string, duration time.Duration) (string, 
 }
 
 func newAzureIotHubClientOptions(device azureIotHubDevice) (*mqtt.ClientOptions, error) {
-	// Generate SAS token
+	// Generate SAS token. Fall back to the documented default lifetime when the
+	// caller left it unset so the token is never minted with a zero (already
+	// expired) expiry.
+	lifetime := device.TokenLifetime
+	if lifetime <= 0 {
+		lifetime = utils.DefaultSasTokenLifetime
+	}
 	resourceURI := fmt.Sprintf("%s/devices/%s", device.Host, device.DeviceId)
-	sasToken, err := generateSASToken(resourceURI, device.SharedAccessKey, time.Hour)
+	sasToken, err := generateSASToken(resourceURI, device.SharedAccessKey, lifetime)
 	if err != nil {
 		return nil, err
 	}
