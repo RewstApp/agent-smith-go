@@ -262,6 +262,12 @@ The in-line retry budget is tunable per deployment:
 | `postback_max_attempts` | `3` | Total postback attempts (including the first try) before the result is spooled. |
 | `postback_base_retry_backoff_seconds` | `1` | Base delay for exponential backoff between attempts (`base * 2^(n-2)`). |
 
+The per-attempt backoff is capped at **64s** (with up to ±25% jitter) regardless
+of how high `postback_max_attempts` is raised, mirroring the reconnect backoff.
+This keeps a wide retry window from overflowing into a busy-loop or blocking a
+worker for days, so raising `postback_max_attempts` only ever adds more bounded
+retry slots.
+
 Both fall back to their defaults when omitted or set to a non-positive value, so
 existing configurations are unaffected. Example snippet:
 
