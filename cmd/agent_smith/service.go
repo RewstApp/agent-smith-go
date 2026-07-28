@@ -86,6 +86,17 @@ func (svc *serviceContext) loadLog() (*os.File, error) {
 	return logFile, nil
 }
 
+// scriptsOrgId returns the org id whose scripts directory the executor writes
+// command script files to. The executor derives that path from the device
+// config's org id, so the startup sweep must use the same value; svc.OrgId (from
+// the command line) is only a fallback for a config that omits it.
+func (svc *serviceContext) scriptsOrgId(device agent.Device) string {
+	if device.RewstOrgId != "" {
+		return device.RewstOrgId
+	}
+	return svc.OrgId
+}
+
 func (svc *serviceContext) Name() string {
 	return agent.GetServiceName(svc.OrgId)
 }
@@ -217,6 +228,21 @@ func (svc *serviceContext) Execute(
 
 	running <- struct{}{}
 	_ = notifier.Notify("AgentStarted") // Best effort notification
+
+	// Reclaim script files left behind by previous runs that were killed before
+	// their deferred cleanup could run (force-stop, host power loss, OOM kill).
+	// Nothing else ever removes them, so without this sweep they accumulate for
+	// the lifetime of the installation. It runs after the service has reported
+	// itself running so a slow or crowded scripts directory can never delay
+	// startup, and it is best effort by construction — failures are logged inside.
+	// The org id is taken from the device config rather than the command line so
+	// the swept directory is exactly the one the executor writes to.
+	interpreter.SweepStaleScripts(
+		agent.GetScriptsDirectory(svc.scriptsOrgId(device)),
+		interpreter.DefaultStaleScriptAge,
+		logger,
+	)
+
 	rg := utils.ReconnectTimeoutGenerator{}
 
 	for {

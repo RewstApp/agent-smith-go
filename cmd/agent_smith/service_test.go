@@ -1498,3 +1498,104 @@ func TestPostbackRetryBackoff_NonPositiveInputsFallBackToDefaults(t *testing.T) 
 		t.Fatalf("expected backoff within defaulted cap %v, got %v", postbackMaxRetryBackoff, got)
 	}
 }
+
+// TestExecute_SweepsStaleScriptFilesOnStartup verifies the sc-103967 startup
+// sweep: script files orphaned by a previous run that was killed before its
+// deferred cleanup could run are reclaimed when the service starts, while files
+// that are recent (a command may still be executing) or not created by the agent
+// are left alone.
+func TestExecute_SweepsStaleScriptFilesOnStartup(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.json")
+	logPath := filepath.Join(tmpDir, "test.log")
+
+	orgId := "test-org-sweep"
+	device := agent.Device{
+		DeviceId:             "test-device",
+		SharedAccessKey:      "dGVzdC1zaGFyZWQta2V5LXRoYXQtaXMtbG9uZy1lbm91Z2gtZm9yLWJhc2U2NC1kZWNvZGluZw==",
+		AzureIotHubHost:      "test.azure-devices.net",
+		RewstOrgId:           orgId,
+		LoggingLevel:         "info",
+		DisableAutoUpdates:   true,
+		DisableAgentPostback: true,
+	}
+	configBytes, _ := json.Marshal(device)
+	if err := os.WriteFile(configPath, configBytes, utils.DefaultFileMod); err != nil {
+		t.Fatalf("failed to write config: %v", err)
+	}
+
+	scriptsDir := agent.GetScriptsDirectory(orgId)
+	if err := os.MkdirAll(scriptsDir, utils.DefaultDirMod); err != nil {
+		t.Fatalf("failed to create scripts dir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(scriptsDir) })
+
+	write := func(name string, age time.Duration) string {
+		path := filepath.Join(scriptsDir, name)
+		if err := os.WriteFile(path, []byte("echo hello"), utils.DefaultFileMod); err != nil {
+			t.Fatalf("failed to write %s: %v", name, err)
+		}
+		modTime := time.Now().Add(-age)
+		if err := os.Chtimes(path, modTime, modTime); err != nil {
+			t.Fatalf("failed to set mtime on %s: %v", name, err)
+		}
+		return path
+	}
+
+	stale := write("exec-123456789.ps1", 48*time.Hour)
+	recent := write("exec-987654321.ps1", time.Minute)
+	foreign := write("operator-script.ps1", 48*time.Hour)
+
+	origNewClient := inmqtt.NewClient
+	inmqtt.NewClient = func(o *pahomqtt.ClientOptions) pahomqtt.Client {
+		return &mockMQTTClient{}
+	}
+	defer func() { inmqtt.NewClient = origNewClient }()
+
+	svc := &serviceContext{
+		ConfigFile: configPath,
+		LogFile:    logPath,
+		OrgId:      orgId,
+		Executor:   &mockExecutor{},
+	}
+
+	stop := make(chan struct{})
+	running := make(chan struct{}, 1)
+
+	done := make(chan service.ServiceExitCode, 1)
+	go func() {
+		done <- svc.Execute(stop, running)
+	}()
+
+	select {
+	case <-running:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Execute did not signal running within timeout")
+	}
+
+	close(stop)
+
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Execute did not exit within timeout")
+	}
+
+	if _, err := os.Stat(stale); !os.IsNotExist(err) {
+		t.Errorf("expected the stale script file to be swept, stat err = %v", err)
+	}
+	if _, err := os.Stat(recent); err != nil {
+		t.Errorf("expected the recent script file to survive: %v", err)
+	}
+	if _, err := os.Stat(foreign); err != nil {
+		t.Errorf("expected a file the agent did not create to survive: %v", err)
+	}
+
+	logBytes, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("failed to read log: %v", err)
+	}
+	if !strings.Contains(string(logBytes), "Swept stale script files") {
+		t.Errorf("expected the sweep to be logged, log was:\n%s", logBytes)
+	}
+}
