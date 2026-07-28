@@ -144,7 +144,12 @@ func TestSasTokenLifetimeOverride(t *testing.T) {
 	for _, bad := range []string{"not-a-duration", "0s", "-5s"} {
 		sasTokenLifetimeOverrideStr = bad
 		if got := d.SasTokenLifetime(); got != 12*time.Hour {
-			t.Errorf("with invalid override %q, SasTokenLifetime() = %v, want %v", bad, got, 12*time.Hour)
+			t.Errorf(
+				"with invalid override %q, SasTokenLifetime() = %v, want %v",
+				bad,
+				got,
+				12*time.Hour,
+			)
 		}
 	}
 
