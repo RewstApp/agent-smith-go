@@ -152,10 +152,28 @@ func (d Device) MqttConnectTimeout() time.Duration {
 	return utils.DefaultMqttConnectTimeout
 }
 
+// sasTokenLifetimeOverrideStr is overridable via -ldflags for integration
+// testing. When set to a valid, positive Go duration it forces the SAS token
+// lifetime — and therefore the proactive-renewal cadence (see
+// utils.SasTokenRenewMargin) — to a short, seconds-scale value so the renewal
+// path can be exercised in seconds instead of the production hours. It is empty
+// in production builds and, when set, takes precedence over the config-driven
+// sas_token_lifetime_hours.
+// Example: -ldflags "-X github.com/RewstApp/agent-smith-go/internal/agent.sasTokenLifetimeOverrideStr=90s"
+var sasTokenLifetimeOverrideStr = ""
+
 // SasTokenLifetime returns the lifetime of the Azure IoT Hub SAS token minted
-// for each MQTT connection, honoring the per-device override when set to a
-// positive value and falling back to utils.DefaultSasTokenLifetime otherwise.
+// for each MQTT connection. An ldflags-injected override (integration builds
+// only) wins when set; otherwise it honors the per-device
+// sas_token_lifetime_hours when set to a positive value and falls back to
+// utils.DefaultSasTokenLifetime.
 func (d Device) SasTokenLifetime() time.Duration {
+	if sasTokenLifetimeOverrideStr != "" {
+		if lifetime, err := time.ParseDuration(sasTokenLifetimeOverrideStr); err == nil &&
+			lifetime > 0 {
+			return lifetime
+		}
+	}
 	if d.SasTokenLifetimeHours != nil && *d.SasTokenLifetimeHours > 0 {
 		return time.Duration(*d.SasTokenLifetimeHours) * time.Hour
 	}

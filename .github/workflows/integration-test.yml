@@ -549,6 +549,120 @@ jobs:
           Write-Error "Worker pool did not process a command after the timeout (count stayed at $baseline)"
           exit 1
 
+      # ---- SAS token proactive renewal scenario (sc-103969) ----
+      # The integration test binary is built with a short SAS token lifetime
+      # (sasTokenLifetimeOverrideStr=90s), so the agent must proactively
+      # reconnect with a freshly minted token a safety margin BEFORE the token
+      # expires rather than being forcibly disconnected by the broker on expiry.
+      # Install the IT binary with auto-updates disabled so it stays the running
+      # service (otherwise the 30s auto-updater would swap it for the real
+      # release before renewal fires), then confirm: the renewal fires (distinct
+      # Info log), the agent re-subscribes with the fresh token, and it is
+      # graceful - no Error "Connection lost" is produced. Deltas are compared
+      # because earlier cycles already left "Subscribed to messages"/"Connection
+      # lost" lines in the log.
+      - name: Install IT binary with short SAS token lifetime
+        uses: ./.github/actions/run-agent
+        with:
+          binary: ${{ matrix.it_binary }}
+          args: --update --org-id ${{ vars.IT_ORG_ID }} --no-auto-updates ${{ matrix.no_auto_updates_extra }} --github-token ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Wait for fresh subscription after SAS lifetime update
+        uses: ./.github/actions/wait-for-log-line
+        with:
+          log_file: ${{ matrix.log_file }}
+          pattern: Subscribed to messages
+          max_attempts: "60"
+          interval_seconds: "2"
+
+      - name: Capture SAS renewal baseline counts
+        id: sas_renewal_baseline
+        shell: pwsh
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+        run: |
+          $content = Get-Content $env:LOG_FILE -Raw -ErrorAction SilentlyContinue
+          $renewed    = if ($content) { ([regex]::Matches($content, [regex]::Escape("Renewing SAS token before expiry"))).Count } else { 0 }
+          $subscribed = if ($content) { ([regex]::Matches($content, [regex]::Escape("Subscribed to messages"))).Count } else { 0 }
+          $lost       = if ($content) { ([regex]::Matches($content, [regex]::Escape("Connection lost"))).Count } else { 0 }
+          $completed  = if ($content) { ([regex]::Matches($content, [regex]::Escape("Command completed"))).Count } else { 0 }
+          "renewed=$renewed"       >> $env:GITHUB_OUTPUT
+          "subscribed=$subscribed" >> $env:GITHUB_OUTPUT
+          "lost=$lost"             >> $env:GITHUB_OUTPUT
+          "completed=$completed"   >> $env:GITHUB_OUTPUT
+          Write-Output "Baseline counts -> renewed=$renewed subscribed=$subscribed lost=$lost completed=$completed"
+
+      - name: Wait for proactive SAS token renewal
+        uses: ./.github/actions/wait-for-log-line
+        with:
+          log_file: ${{ matrix.log_file }}
+          pattern: Renewing SAS token before expiry
+          max_attempts: "60"
+          interval_seconds: "2"
+
+      - name: Assert SAS token renewed and agent resubscribed with fresh token
+        shell: pwsh
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+          RENEWED_BASELINE: ${{ steps.sas_renewal_baseline.outputs.renewed }}
+          SUBSCRIBED_BASELINE: ${{ steps.sas_renewal_baseline.outputs.subscribed }}
+        run: |
+          $renewedBaseline = [int]$env:RENEWED_BASELINE
+          $subscribedBaseline = [int]$env:SUBSCRIBED_BASELINE
+          for ($i = 1; $i -le 60; $i++) {
+            $content = Get-Content $env:LOG_FILE -Raw -ErrorAction SilentlyContinue
+            $renewed    = if ($content) { ([regex]::Matches($content, [regex]::Escape("Renewing SAS token before expiry"))).Count } else { 0 }
+            $subscribed = if ($content) { ([regex]::Matches($content, [regex]::Escape("Subscribed to messages"))).Count } else { 0 }
+            if (($renewed -gt $renewedBaseline) -and ($subscribed -gt $subscribedBaseline)) {
+              Write-Output "SAS token renewed (count $renewed > baseline $renewedBaseline) and agent resubscribed (count $subscribed > baseline $subscribedBaseline) after ~$($i * 2)s"
+              exit 0
+            }
+            Start-Sleep -Seconds 2
+          }
+          Write-Error "Proactive SAS renewal did not fire and resubscribe (renewed stayed <= $renewedBaseline or subscribed stayed <= $subscribedBaseline)"
+          exit 1
+
+      - name: Assert SAS renewal was graceful (no forced disconnect)
+        shell: pwsh
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+          LOST_BASELINE: ${{ steps.sas_renewal_baseline.outputs.lost }}
+        run: |
+          $baseline = [int]$env:LOST_BASELINE
+          $content = Get-Content $env:LOG_FILE -Raw
+          $lost = ([regex]::Matches($content, [regex]::Escape("Connection lost"))).Count
+          if ($lost -gt $baseline) {
+            Write-Error "SAS renewal was not graceful: 'Connection lost' count rose from $baseline to $lost (token expired before renewal fired?)"
+            exit 1
+          }
+          Write-Output "Confirmed graceful renewal: no new 'Connection lost' (count stayed at $baseline)"
+
+      - name: Send command after SAS renewal
+        uses: ./.github/actions/send-command
+        with:
+          trigger_url: ${{ vars.IT_SEND_COMMAND_TRIGGER_URL }}
+          device_id: ${{ steps.config.outputs.device_id }}
+          commands: ${{ matrix.success_commands }}
+
+      - name: Assert command delivery continues after SAS renewal
+        shell: pwsh
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+          BASELINE: ${{ steps.sas_renewal_baseline.outputs.completed }}
+        run: |
+          $baseline = [int]$env:BASELINE
+          for ($i = 1; $i -le 30; $i++) {
+            Start-Sleep -Seconds 2
+            $content = Get-Content $env:LOG_FILE -Raw -ErrorAction SilentlyContinue
+            $count = if ($content) { ([regex]::Matches($content, [regex]::Escape("Command completed"))).Count } else { 0 }
+            if ($count -gt $baseline) {
+              Write-Output "Command delivery continues after renewal (count $count > baseline $baseline)"
+              exit 0
+            }
+          }
+          Write-Error "No command completed after SAS renewal (count stayed at $baseline)"
+          exit 1
+
       - name: Uninstall agent
         uses: ./.github/actions/run-agent
         with:
