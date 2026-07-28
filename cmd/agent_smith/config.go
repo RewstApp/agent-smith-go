@@ -130,6 +130,7 @@ func runConfig(params *configContext) error {
 		params.Tuning.PostbackBaseRetryBackoffSeconds,
 	)
 	response.Configuration.CommandTimeoutSeconds = tuningPtr(params.Tuning.CommandTimeoutSeconds)
+	response.Configuration.SasTokenLifetimeHours = tuningPtr(params.Tuning.SasTokenLifetimeHours)
 
 	// Create the data directory
 	dataDir := agent.GetDataDirectory(params.OrgId)

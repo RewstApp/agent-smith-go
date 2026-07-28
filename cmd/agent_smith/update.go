@@ -114,6 +114,9 @@ func runUpdate(params *updateContext) {
 	if params.Tuning.CommandTimeoutSeconds != tuningFlagUnset {
 		device.CommandTimeoutSeconds = tuningPtr(params.Tuning.CommandTimeoutSeconds)
 	}
+	if params.Tuning.SasTokenLifetimeHours != tuningFlagUnset {
+		device.SasTokenLifetimeHours = tuningPtr(params.Tuning.SasTokenLifetimeHours)
+	}
 
 	// Save the updated configuration file
 	configBytes, err := json.MarshalIndent(device, "", "  ")

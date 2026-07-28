@@ -3,6 +3,8 @@ package agent
 import (
 	"testing"
 	"time"
+
+	"github.com/RewstApp/agent-smith-go/internal/utils"
 )
 
 func intPtr(v int) *int { return &v }
@@ -97,6 +99,64 @@ func TestResolvedPostbackMaxAttempts(t *testing.T) {
 				t.Errorf("ResolvedPostbackMaxAttempts() = %d, want %d", got, tt.expect)
 			}
 		})
+	}
+}
+
+func TestSasTokenLifetime(t *testing.T) {
+	tests := []struct {
+		name   string
+		value  *int
+		expect time.Duration
+	}{
+		{"unset falls back to default", nil, utils.DefaultSasTokenLifetime},
+		{"zero falls back to default", intPtr(0), utils.DefaultSasTokenLifetime},
+		{"negative falls back to default", intPtr(-6), utils.DefaultSasTokenLifetime},
+		{"positive override honored", intPtr(12), 12 * time.Hour},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			d := Device{SasTokenLifetimeHours: tt.value}
+			if got := d.SasTokenLifetime(); got != tt.expect {
+				t.Errorf("SasTokenLifetime() = %v, want %v", got, tt.expect)
+			}
+		})
+	}
+}
+
+// TestSasTokenLifetimeOverride verifies the ldflags-injected override (used only
+// by the integration test binary) forces a short lifetime and takes precedence
+// over the config-driven sas_token_lifetime_hours, while an empty or invalid
+// override leaves normal resolution intact.
+func TestSasTokenLifetimeOverride(t *testing.T) {
+	orig := sasTokenLifetimeOverrideStr
+	t.Cleanup(func() { sasTokenLifetimeOverrideStr = orig })
+
+	// A valid override wins even over an explicit per-device lifetime.
+	sasTokenLifetimeOverrideStr = "90s"
+	d := Device{SasTokenLifetimeHours: intPtr(12)}
+	if got := d.SasTokenLifetime(); got != 90*time.Second {
+		t.Errorf("with override set, SasTokenLifetime() = %v, want %v", got, 90*time.Second)
+	}
+
+	// An invalid or non-positive override is ignored, falling back to normal
+	// resolution (here the per-device value).
+	for _, bad := range []string{"not-a-duration", "0s", "-5s"} {
+		sasTokenLifetimeOverrideStr = bad
+		if got := d.SasTokenLifetime(); got != 12*time.Hour {
+			t.Errorf(
+				"with invalid override %q, SasTokenLifetime() = %v, want %v",
+				bad,
+				got,
+				12*time.Hour,
+			)
+		}
+	}
+
+	// An empty override (production build) uses normal resolution.
+	sasTokenLifetimeOverrideStr = ""
+	if got := d.SasTokenLifetime(); got != 12*time.Hour {
+		t.Errorf("with empty override, SasTokenLifetime() = %v, want %v", got, 12*time.Hour)
 	}
 }
 

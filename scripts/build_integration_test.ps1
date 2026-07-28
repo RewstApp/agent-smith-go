@@ -4,6 +4,9 @@
 # Builds a special integration test binary with:
 # - version overridden to 0.0.0-it (older than any real release, forces auto-update)
 # - updateIntervalStr overridden to 30s (triggers update check quickly)
+# - sasTokenLifetimeOverrideStr overridden to 90s (proactive SAS token renewal
+#   fires ~30s in - lifetime minus the ~60s renew margin - so the renewal path
+#   can be exercised in seconds not hours)
 
 $env:GOARCH = "amd64"
 
@@ -11,7 +14,8 @@ $versionFlag = "-X github.com/RewstApp/agent-smith-go/internal/version.Version=v
 $intervalFlag = "-X github.com/RewstApp/agent-smith-go/internal/agent.updateIntervalStr=30s"
 $baseBackoffFlag = "-X github.com/RewstApp/agent-smith-go/internal/agent.baseBackoffStr=10s"
 $maxRetriesFlag = "-X github.com/RewstApp/agent-smith-go/internal/agent.maxRetriesStr=6"
-$ldflags = "-w -s $versionFlag $intervalFlag $baseBackoffFlag $maxRetriesFlag"
+$sasTokenLifetimeFlag = "-X github.com/RewstApp/agent-smith-go/internal/agent.sasTokenLifetimeOverrideStr=90s"
+$ldflags = "-w -s $versionFlag $intervalFlag $baseBackoffFlag $maxRetriesFlag $sasTokenLifetimeFlag"
 
 if ($IsWindows) {
     $buildOutput = "./dist/rewst_agent_config.win.it.exe"

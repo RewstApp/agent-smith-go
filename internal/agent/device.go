@@ -55,6 +55,14 @@ type Device struct {
 	// a worker: the command is cancelled once the deadline elapses even if the
 	// MQTT connection stays up.
 	CommandTimeoutSeconds *int `json:"command_timeout_seconds,omitempty"`
+	// SasTokenLifetimeHours optionally overrides the lifetime of the Azure IoT
+	// Hub SAS token minted for each MQTT connection, in hours. When unset (or
+	// non-positive) the agent falls back to utils.DefaultSasTokenLifetime. Azure
+	// IoT Hub disconnects a client when its SAS token expires; the agent
+	// proactively reconnects with a fresh token a safety margin ahead of that
+	// deadline (see utils.SasTokenRenewMargin), so a longer lifetime means less
+	// frequent — but always graceful — reconnects.
+	SasTokenLifetimeHours *int `json:"sas_token_lifetime_hours,omitempty"`
 }
 
 const (
@@ -142,6 +150,34 @@ func (d Device) MqttConnectTimeout() time.Duration {
 		return time.Duration(*d.MqttConnectTimeoutSeconds) * time.Second
 	}
 	return utils.DefaultMqttConnectTimeout
+}
+
+// sasTokenLifetimeOverrideStr is overridable via -ldflags for integration
+// testing. When set to a valid, positive Go duration it forces the SAS token
+// lifetime — and therefore the proactive-renewal cadence (see
+// utils.SasTokenRenewMargin) — to a short, seconds-scale value so the renewal
+// path can be exercised in seconds instead of the production hours. It is empty
+// in production builds and, when set, takes precedence over the config-driven
+// sas_token_lifetime_hours.
+// Example: -ldflags "-X github.com/RewstApp/agent-smith-go/internal/agent.sasTokenLifetimeOverrideStr=90s"
+var sasTokenLifetimeOverrideStr = ""
+
+// SasTokenLifetime returns the lifetime of the Azure IoT Hub SAS token minted
+// for each MQTT connection. An ldflags-injected override (integration builds
+// only) wins when set; otherwise it honors the per-device
+// sas_token_lifetime_hours when set to a positive value and falls back to
+// utils.DefaultSasTokenLifetime.
+func (d Device) SasTokenLifetime() time.Duration {
+	if sasTokenLifetimeOverrideStr != "" {
+		if lifetime, err := time.ParseDuration(sasTokenLifetimeOverrideStr); err == nil &&
+			lifetime > 0 {
+			return lifetime
+		}
+	}
+	if d.SasTokenLifetimeHours != nil && *d.SasTokenLifetimeHours > 0 {
+		return time.Duration(*d.SasTokenLifetimeHours) * time.Hour
+	}
+	return utils.DefaultSasTokenLifetime
 }
 
 type Plugin struct {
