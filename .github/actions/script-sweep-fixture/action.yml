@@ -1,0 +1,60 @@
+name: Script sweep fixture
+description: >
+  Seed (mode=seed) or verify (mode=assert) the script-file fixture for the
+  startup stale script sweep scenario. See fixture.ps1 for what the fixture
+  contains and asserts. The scripts directory belongs to the service account
+  (root / SYSTEM) and on macOS lives under root's own temp directory, so the
+  shared implementation runs elevated: under sudo on Unix, natively on the
+  already-elevated Windows runner.
+
+inputs:
+  mode:
+    description: "seed to place the fixture files, assert to verify the sweep result"
+    required: true
+  scripts_dir:
+    description: "Scripts directory the agent writes command script files to"
+    required: true
+  orphan_path:
+    description: "Script file left behind by the force-killed command, if any"
+    required: false
+    default: ""
+  stale_age_hours:
+    description: "How far back to backdate the files that must be swept"
+    required: false
+    default: "48"
+
+runs:
+  using: composite
+  steps:
+    - name: Run script sweep fixture (Unix)
+      if: runner.os != 'Windows'
+      shell: bash
+      env:
+        MODE: ${{ inputs.mode }}
+        SCRIPTS_DIR: ${{ inputs.scripts_dir }}
+        ORPHAN_PATH: ${{ inputs.orphan_path }}
+        STALE_AGE_HOURS: ${{ inputs.stale_age_hours }}
+      run: |
+        set -euo pipefail
+        # Resolve pwsh up front: sudo resets PATH via secure_path on some runners.
+        pwsh_path="$(command -v pwsh)"
+        sudo "$pwsh_path" -NoProfile -File "$GITHUB_ACTION_PATH/fixture.ps1" \
+          -Mode "$MODE" \
+          -ScriptsDir "$SCRIPTS_DIR" \
+          -OrphanPath "$ORPHAN_PATH" \
+          -StaleAgeHours "$STALE_AGE_HOURS"
+
+    - name: Run script sweep fixture (Windows)
+      if: runner.os == 'Windows'
+      shell: pwsh
+      env:
+        MODE: ${{ inputs.mode }}
+        SCRIPTS_DIR: ${{ inputs.scripts_dir }}
+        ORPHAN_PATH: ${{ inputs.orphan_path }}
+        STALE_AGE_HOURS: ${{ inputs.stale_age_hours }}
+      run: |
+        & "$env:GITHUB_ACTION_PATH/fixture.ps1" `
+          -Mode $env:MODE `
+          -ScriptsDir $env:SCRIPTS_DIR `
+          -OrphanPath $env:ORPHAN_PATH `
+          -StaleAgeHours ([int]$env:STALE_AGE_HOURS)

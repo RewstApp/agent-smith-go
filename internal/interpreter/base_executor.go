@@ -128,7 +128,7 @@ func (e *baseExecutor) Execute(
 		return errorResultBytes(logger, err)
 	}
 
-	tempfile, err := os.CreateTemp(scriptsDir, "exec-*.ps1")
+	tempfile, err := os.CreateTemp(scriptsDir, scriptTempPattern)
 	if err != nil {
 		return errorResultBytes(logger, err)
 	}
