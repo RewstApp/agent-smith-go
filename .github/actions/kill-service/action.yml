@@ -1,0 +1,75 @@
+name: Kill service
+description: >
+  Abruptly kill the agent service process tree with SIGKILL (taskkill /F /T on
+  Windows), giving the agent no chance to shut down cleanly. Unlike stop-service
+  this deliberately skips the graceful path, so the agent's deferred cleanup
+  never runs - the same state a force-stop, OOM kill or host power loss leaves
+  behind. On Linux and macOS the service manager brings the agent back up on its
+  own afterwards (Restart=always / KeepAlive), mirroring a real abrupt restart;
+  on Windows the service stays stopped until the next start.
+
+inputs:
+  service:
+    description: "Service name"
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Kill service (Linux)
+      if: runner.os == 'Linux'
+      shell: bash
+      env:
+        SERVICE: ${{ inputs.service }}
+      run: |
+        set -euo pipefail
+        echo "Force-killing service $SERVICE"
+        # systemctl kill signals every process in the unit's cgroup, so the shell
+        # the agent spawned for the in-flight command dies with it and cannot keep
+        # holding its script file open.
+        sudo systemctl kill --signal=SIGKILL "$SERVICE"
+        sudo systemctl status "$SERVICE" --no-pager || true
+
+    - name: Kill service (macOS)
+      if: runner.os == 'macOS'
+      shell: bash
+      env:
+        SERVICE: ${{ inputs.service }}
+      run: |
+        set -euo pipefail
+        # Resolve the running pid from launchd and signal it directly: the
+        # "launchctl kill" signal argument spelling varies between releases,
+        # whereas kill -9 on the reported pid behaves the same everywhere.
+        service_pid=$(sudo launchctl print "system/$SERVICE" | awk '/^\tpid = /{print $3; exit}')
+        if [ -z "${service_pid:-}" ]; then
+          echo "Could not determine pid for service $SERVICE" >&2
+          sudo launchctl print "system/$SERVICE" >&2 || true
+          exit 1
+        fi
+        echo "Force-killing service $SERVICE (pid $service_pid)"
+        sudo kill -9 "$service_pid"
+
+    - name: Kill service (Windows)
+      if: runner.os == 'Windows'
+      shell: pwsh
+      env:
+        SERVICE: ${{ inputs.service }}
+      run: |
+        $query = sc.exe queryex "$env:SERVICE"
+        $pidMatch = $query | Select-String -Pattern 'PID\s*:\s*(\d+)'
+        if (-not $pidMatch) {
+          Write-Output ($query | Out-String)
+          Write-Error "Could not determine PID for service $env:SERVICE"
+          exit 1
+        }
+        $servicePid = [int]$pidMatch.Matches[0].Groups[1].Value
+        if ($servicePid -le 0) {
+          Write-Error "Service $env:SERVICE is not running (reported PID $servicePid)"
+          exit 1
+        }
+        Write-Output "Force-killing service $env:SERVICE (PID $servicePid)"
+        # /T kills the spawned PowerShell along with the agent, so no child is
+        # left holding the in-flight script file open (Windows blocks deletion of
+        # open files, which would otherwise defeat the sweep under test).
+        taskkill.exe /F /T /PID $servicePid
+        sc.exe query "$env:SERVICE"

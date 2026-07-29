@@ -117,6 +117,7 @@ jobs:
               success_commands = '"echo \"hello world\""'
               failure_commands = '"exit 1"'
               timeout_commands = '"sleep 30"'
+              sweep_commands = '"sleep 180"'
               success_patterns = "Command completed`nSending postback`nPostback sent"
               no_auto_updates_extra = ''
               uninstall_paths = "/etc/rewst_remote_agent/$orgId`n/usr/local/bin/rewst_remote_agent/$orgId`n/tmp/rewst_remote_agent/scripts/$orgId"
@@ -134,6 +135,7 @@ jobs:
               success_commands = $winSuccess
               failure_commands = $winFailure
               timeout_commands = '"Start-Sleep -Seconds 30"'
+              sweep_commands = '"Start-Sleep -Seconds 180"'
               success_patterns = "Command completed`nSending postback`nPostback already sent"
               no_auto_updates_extra = '--disable-agent-postback'
               uninstall_paths = "C:\ProgramData\RewstRemoteAgent\$orgId`nC:\Program Files\RewstRemoteAgent\$orgId`nC:\RewstRemoteAgent\scripts\$orgId"
@@ -151,6 +153,7 @@ jobs:
               success_commands = '"echo \"hello world\""'
               failure_commands = '"exit 1"'
               timeout_commands = '"sleep 30"'
+              sweep_commands = '"sleep 180"'
               success_patterns = "Command completed`nSending postback`nPostback sent"
               no_auto_updates_extra = ''
               uninstall_paths = "/Library/Application Support/rewst_remote_agent/$orgId`n/usr/local/bin/rewst_remote_agent/$orgId`n`$env:TMPDIR/rewst_remote_agent/scripts/$orgId"
@@ -662,6 +665,152 @@ jobs:
           }
           Write-Error "No command completed after SAS renewal (count stayed at $baseline)"
           exit 1
+
+      # ---- Stale script file sweep scenario (sc-103967) ----
+      # A command interrupted by an abrupt kill (force-stop, OOM kill, power
+      # loss) never runs its deferred temp-file cleanup, so its script file is
+      # stranded in the scripts directory and nothing used to reclaim it. Verify
+      # the startup sweep now does: force-kill the service mid-command to strand
+      # a real script file, age it (plus a control set) into the months-old
+      # debris a long-lived install accumulates, restart, and confirm only the
+      # agent's own stale files are removed.
+      #
+      # The release binary is reinstalled first, with auto-updates off and the
+      # per-command timeout raised well past the command's runtime, so nothing
+      # ends the command before the kill lands - not the 5s timeout from the
+      # earlier scenario, the 30s auto-updater, or the IT binary's 90s SAS
+      # lifetime. Each of those tears the command down gracefully, and graceful
+      # teardown DOES run the cleanup, leaving no stranded file to sweep.
+      - name: Capture sweep scenario baseline counts
+        id: sweep_baseline
+        shell: pwsh
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+        run: |
+          $content = Get-Content $env:LOG_FILE -Raw -ErrorAction SilentlyContinue
+          $subscribed = if ($content) { ([regex]::Matches($content, [regex]::Escape("Subscribed to messages"))).Count } else { 0 }
+          $saved      = if ($content) { ([regex]::Matches($content, [regex]::Escape("Command saved to"))).Count } else { 0 }
+          "subscribed=$subscribed" >> $env:GITHUB_OUTPUT
+          "saved=$saved"           >> $env:GITHUB_OUTPUT
+          Write-Output "Baseline counts -> subscribed=$subscribed saved=$saved"
+
+      - name: Install release binary for the sweep scenario
+        uses: ./.github/actions/run-agent
+        with:
+          binary: ${{ matrix.binary }}
+          args: --update --org-id ${{ vars.IT_ORG_ID }} --no-auto-updates ${{ matrix.no_auto_updates_extra }} --command-timeout-seconds 600 --github-token ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Wait for fresh subscription before the sweep scenario
+        shell: pwsh
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+          BASELINE: ${{ steps.sweep_baseline.outputs.subscribed }}
+        run: |
+          # A delta, not a bare match: the log already carries many "Subscribed to
+          # messages" lines from earlier scenarios, so only a new one proves the
+          # restarted agent is connected and ready to receive the command.
+          $baseline = [int]$env:BASELINE
+          for ($i = 1; $i -le 60; $i++) {
+            $content = Get-Content $env:LOG_FILE -Raw -ErrorAction SilentlyContinue
+            $count = if ($content) { ([regex]::Matches($content, [regex]::Escape("Subscribed to messages"))).Count } else { 0 }
+            if ($count -gt $baseline) {
+              Write-Output "Agent subscribed after the sweep-scenario install (count $count > baseline $baseline) after ~$($i * 2)s"
+              exit 0
+            }
+            Start-Sleep -Seconds 2
+          }
+          Write-Error "Agent did not subscribe after the sweep-scenario install (count stayed at $baseline)"
+          exit 1
+
+      - name: Send long-running command
+        uses: ./.github/actions/send-command
+        with:
+          trigger_url: ${{ vars.IT_SEND_COMMAND_TRIGGER_URL }}
+          device_id: ${{ steps.config.outputs.device_id }}
+          commands: ${{ matrix.sweep_commands }}
+
+      - name: Capture the in-flight script file path
+        id: inflight_script
+        shell: pwsh
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+          BASELINE: ${{ steps.sweep_baseline.outputs.saved }}
+        run: |
+          # The agent logs the temp file it wrote the command to, so read the path
+          # (and the scripts directory) straight from the log instead of
+          # re-deriving the platform path - the service's temp directory is not
+          # the runner's, notably root's private TMPDIR on macOS.
+          $baseline = [int]$env:BASELINE
+          for ($i = 1; $i -le 30; $i++) {
+            $content = Get-Content $env:LOG_FILE -Raw -ErrorAction SilentlyContinue
+            $found = if ($content) { [regex]::Matches($content, 'Command saved to[^\r\n]*path=(?<p>\S+)') } else { @() }
+            if ($found.Count -gt $baseline) {
+              $path = $found[$found.Count - 1].Groups['p'].Value.Trim('"')
+              $dir = Split-Path -Parent $path
+              "path=$path" >> $env:GITHUB_OUTPUT
+              "scripts_dir=$dir" >> $env:GITHUB_OUTPUT
+              Write-Output "In-flight script file: $path (scripts directory $dir)"
+              exit 0
+            }
+            Start-Sleep -Seconds 2
+          }
+          Write-Error "Agent never logged a script file for the long-running command (count stayed at $baseline)"
+          exit 1
+
+      - name: Force-kill the agent mid-command
+        uses: ./.github/actions/kill-service
+        with:
+          service: ${{ matrix.service }}
+
+      - name: Age the stranded script file and seed sweep control files
+        uses: ./.github/actions/script-sweep-fixture
+        with:
+          mode: seed
+          scripts_dir: ${{ steps.inflight_script.outputs.scripts_dir }}
+          orphan_path: ${{ steps.inflight_script.outputs.path }}
+
+      - name: Capture sweep log baseline count
+        id: sweep_log_baseline
+        shell: pwsh
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+        run: |
+          $content = Get-Content $env:LOG_FILE -Raw -ErrorAction SilentlyContinue
+          $swept = if ($content) { ([regex]::Matches($content, [regex]::Escape("Swept stale script files"))).Count } else { 0 }
+          "swept=$swept" >> $env:GITHUB_OUTPUT
+          Write-Output "Baseline counts -> swept=$swept"
+
+      - name: Restart agent to trigger the startup sweep
+        uses: ./.github/actions/run-agent
+        with:
+          binary: ${{ matrix.binary }}
+          args: --update --org-id ${{ vars.IT_ORG_ID }} --no-auto-updates ${{ matrix.no_auto_updates_extra }} --github-token ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Wait for and assert the startup sweep was logged
+        shell: pwsh
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+          BASELINE: ${{ steps.sweep_log_baseline.outputs.swept }}
+        run: |
+          $baseline = [int]$env:BASELINE
+          for ($i = 1; $i -le 60; $i++) {
+            $content = Get-Content $env:LOG_FILE -Raw -ErrorAction SilentlyContinue
+            $swept = if ($content) { ([regex]::Matches($content, [regex]::Escape("Swept stale script files"))).Count } else { 0 }
+            if ($swept -gt $baseline) {
+              Write-Output "Startup sweep logged (count $swept > baseline $baseline) after ~$($i * 2)s"
+              exit 0
+            }
+            Start-Sleep -Seconds 2
+          }
+          Write-Error "Startup sweep was never logged (count stayed at $baseline)"
+          exit 1
+
+      - name: Assert stale script files swept and live files untouched
+        uses: ./.github/actions/script-sweep-fixture
+        with:
+          mode: assert
+          scripts_dir: ${{ steps.inflight_script.outputs.scripts_dir }}
+          orphan_path: ${{ steps.inflight_script.outputs.path }}
 
       - name: Uninstall agent
         uses: ./.github/actions/run-agent
