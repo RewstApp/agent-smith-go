@@ -129,8 +129,13 @@ func TestSweepStaleScripts_MissingDirectoryIsNotAnError(t *testing.T) {
 }
 
 func TestSweepStaleScripts_ReadDirFailureIsLoggedNotFatal(t *testing.T) {
-	// A path that is a regular file, not a directory: ReadDir fails with a
-	// non-NotExist error, which must be logged and swallowed.
+	// A path that is a regular file rather than a directory. What ReadDir reports
+	// for that is platform-specific — ENOTDIR on Unix, but a not-exist-flavoured
+	// error or simply zero entries on Windows, where the directory read runs
+	// against an open file handle — so the log expectation is derived from what
+	// this platform actually reports. What must hold everywhere is that the sweep
+	// removes nothing and does not fail; a reported failure is logged, and an
+	// absent or not-exist error stays silent like the fresh-install case.
 	path := writeScriptFile(t, t.TempDir(), "not-a-dir", 0)
 
 	logger, buf := newSweepLogger()
@@ -138,8 +143,17 @@ func TestSweepStaleScripts_ReadDirFailureIsLoggedNotFatal(t *testing.T) {
 		t.Errorf("expected 0 files removed, got %d", removed)
 	}
 
-	if logs := buf.String(); !strings.Contains(logs, "Failed to read scripts directory") {
-		t.Errorf("expected the read failure to be logged, got %q", logs)
+	logs := buf.String()
+	_, readErr := os.ReadDir(path)
+	if readErr == nil || os.IsNotExist(readErr) {
+		if strings.Contains(logs, "[ERROR]") {
+			t.Errorf("expected no error log when ReadDir reports %v, got %q", readErr, logs)
+		}
+		return
+	}
+
+	if !strings.Contains(logs, "Failed to read scripts directory") {
+		t.Errorf("expected the read failure (%v) to be logged, got %q", readErr, logs)
 	}
 }
 
