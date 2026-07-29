@@ -305,6 +305,34 @@ value. Example snippet:
 }
 ```
 
+### Notification Plugin Supervision
+
+Notification plugins run as separate subprocesses reached over RPC, and every
+notification the agent sends is best effort — a delivery failure never interferes
+with command execution. On its own that combination hides a plugin that dies:
+once the subprocess exits, its RPC client stays broken forever and every later
+notification (`AgentStatus:Online`/`Offline`/`Reconnecting`, `AgentPostbackFailed`,
+`AgentMessageDropped`) silently goes nowhere.
+
+Loaded plugins are therefore supervised for the lifetime of the service:
+
+- A subprocess that exits or crashes is detected — by a health check that polls
+  every 30s, and immediately on the notification path if one arrives first — and
+  **relaunched**, so notifications resume without restarting the agent.
+- Relaunches use an exponential backoff (5s up to 5 minutes) so a plugin that
+  crashes on startup cannot turn into a process-spawn loop. A plugin that ran
+  for at least 2 minutes before dying is treated as a one-off and relaunched
+  immediately.
+- Failures are observable instead of silent: a failed delivery is logged at
+  `Error` level once per failure transition (with a matching recovery line), so a
+  persistently broken plugin cannot flood the log, and cumulative counters for
+  missed notifications, restarts and failed restarts are reported in a
+  `Plugin notification health summary` line on shutdown.
+- An error the plugin itself returns is counted and logged but leaves the healthy
+  subprocess running; only a broken RPC channel triggers a relaunch.
+
+Deployments with no plugins configured are unaffected — no supervision runs.
+
 ## Build
 Required tools and packages:
 

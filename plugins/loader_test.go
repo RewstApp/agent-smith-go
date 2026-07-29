@@ -3,9 +3,20 @@ package plugins
 import (
 	"bytes"
 	"errors"
+	"fmt"
+	"io"
+	"net/rpc"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/RewstApp/agent-smith-go/internal/agent"
+	"github.com/hashicorp/go-hclog"
 )
 
 // mockNotifier for testing
@@ -313,7 +324,7 @@ func TestLoadNotifer_EmptyPluginList(t *testing.T) {
 	logBuf := &bytes.Buffer{}
 	plugins := []agent.Plugin{}
 
-	wrapper, err := LoadNotifer(plugins, logBuf)
+	wrapper, err := LoadNotifer(plugins, logBuf, hclog.NewNullLogger())
 	if err != nil {
 		t.Errorf("expected no error for empty list, got %v", err)
 	}
@@ -338,7 +349,7 @@ func TestLoadNotifer_InvalidExecutable(t *testing.T) {
 		},
 	}
 
-	wrapper, err := LoadNotifer(plugins, logBuf)
+	wrapper, err := LoadNotifer(plugins, logBuf, hclog.NewNullLogger())
 
 	// Should return a wrapper even with errors
 	if wrapper == nil {
@@ -375,7 +386,7 @@ func TestLoadNotifer_MultipleInvalidPlugins(t *testing.T) {
 		},
 	}
 
-	wrapper, err := LoadNotifer(plugins, logBuf)
+	wrapper, err := LoadNotifer(plugins, logBuf, hclog.NewNullLogger())
 
 	if wrapper == nil {
 		t.Fatal("expected non-nil wrapper")
@@ -402,7 +413,7 @@ func TestLoadNotifer_NilLogWriter(t *testing.T) {
 		},
 	}
 
-	wrapper, err := LoadNotifer(plugins, nil)
+	wrapper, err := LoadNotifer(plugins, nil, nil)
 
 	if wrapper == nil {
 		t.Fatal("expected non-nil wrapper")
@@ -470,6 +481,528 @@ func TestToNotifier_Nil(t *testing.T) {
 	}
 	if notifier != nil {
 		t.Fatal("expected nil notifier")
+	}
+}
+
+// syncBuffer is a concurrency-safe log sink. go-plugin drains the plugin's
+// stderr on its own goroutine, so a buffer shared with the host logger must be
+// locked.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// newBufferedLogger returns a logger writing to out so tests can assert on the
+// log lines emitted for failures, restarts and recoveries.
+func newBufferedLogger(out io.Writer) hclog.Logger {
+	return hclog.New(&hclog.LoggerOptions{
+		Name:   "test",
+		Output: out,
+		Level:  hclog.Debug,
+	})
+}
+
+// countLines counts how many times substr appears at the start of a log line.
+func countLines(logged, substr string) int {
+	count := 0
+	for _, line := range strings.Split(logged, "\n") {
+		if strings.Contains(line, substr) {
+			count++
+		}
+	}
+	return count
+}
+
+// TestIsTransportError distinguishes a broken RPC channel (the subprocess is
+// gone) from an error the plugin itself returned.
+func TestIsTransportError(t *testing.T) {
+	tests := []struct {
+		name     string
+		err      error
+		expected bool
+	}{
+		{"nil", nil, false},
+		{"plugin_returned_error", rpc.ServerError("webhook rejected"), false},
+		{"wrapped_plugin_error", fmt.Errorf("notify: %w", rpc.ServerError("nope")), false},
+		{"rpc_shutdown", rpc.ErrShutdown, true},
+		{"eof", io.EOF, true},
+		{"generic", errors.New("broken pipe"), true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isTransportError(tt.err); got != tt.expected {
+				t.Errorf("isTransportError(%v) = %v, want %v", tt.err, got, tt.expected)
+			}
+		})
+	}
+}
+
+// TestOptionalNotifierWrapper_Notify_TransportErrorDropsHandle verifies that a
+// broken RPC channel drops the plugin handle so the next attempt relaunches the
+// subprocess instead of calling a dead client forever.
+func TestOptionalNotifierWrapper_Notify_TransportErrorDropsHandle(t *testing.T) {
+	mock := &mockNotifier{notifyErr: rpc.ErrShutdown}
+	wrapper := &optionalNotifierWrapper{plugin: mock, name: "test"}
+
+	if err := wrapper.Notify("hello"); err == nil {
+		t.Fatal("expected an error from a broken RPC channel")
+	}
+
+	if wrapper.plugin != nil {
+		t.Error("expected the plugin handle to be dropped after a transport error")
+	}
+
+	if got := wrapper.Stats().NotifyFailures; got != 1 {
+		t.Errorf("expected 1 notify failure, got %d", got)
+	}
+}
+
+// TestOptionalNotifierWrapper_Notify_PluginErrorKeepsHandle verifies that an
+// error the plugin itself returned is counted but does not tear down a healthy
+// subprocess.
+func TestOptionalNotifierWrapper_Notify_PluginErrorKeepsHandle(t *testing.T) {
+	mock := &mockNotifier{notifyErr: rpc.ServerError("webhook rejected")}
+	wrapper := &optionalNotifierWrapper{plugin: mock, name: "test"}
+
+	if err := wrapper.Notify("hello"); err == nil {
+		t.Fatal("expected the plugin error to be returned")
+	}
+
+	if wrapper.plugin == nil {
+		t.Error("expected a plugin-side error to leave the subprocess handle in place")
+	}
+
+	if got := wrapper.Stats().NotifyFailures; got != 1 {
+		t.Errorf("expected 1 notify failure, got %d", got)
+	}
+}
+
+// TestOptionalNotifierWrapper_Notify_LogsOncePerFailureTransition verifies the
+// counter increments on every failure while the log stays quiet until the plugin
+// recovers, so a persistently broken plugin cannot flood the agent log.
+func TestOptionalNotifierWrapper_Notify_LogsOncePerFailureTransition(t *testing.T) {
+	logBuf := &bytes.Buffer{}
+	mock := &mockNotifier{notifyErr: rpc.ServerError("still broken")}
+	wrapper := &optionalNotifierWrapper{
+		plugin: mock,
+		name:   "test",
+		logger: newBufferedLogger(logBuf),
+	}
+
+	for range 3 {
+		if err := wrapper.Notify("hello"); err == nil {
+			t.Fatal("expected notify to fail")
+		}
+	}
+
+	if got := wrapper.Stats().NotifyFailures; got != 3 {
+		t.Errorf("expected 3 notify failures counted, got %d", got)
+	}
+
+	if got := countLines(logBuf.String(), "Notification delivery failed"); got != 1 {
+		t.Errorf("expected exactly 1 failure log line for 3 failures, got %d", got)
+	}
+
+	// Recovery closes out the failure, and the next failure run logs again.
+	mock.notifyErr = nil
+	if err := wrapper.Notify("hello"); err != nil {
+		t.Fatalf("expected recovery notify to succeed, got %v", err)
+	}
+
+	if got := countLines(logBuf.String(), "Notification delivery recovered"); got != 1 {
+		t.Errorf("expected 1 recovery log line, got %d", got)
+	}
+
+	mock.notifyErr = rpc.ServerError("broken again")
+	if err := wrapper.Notify("hello"); err == nil {
+		t.Fatal("expected notify to fail again")
+	}
+
+	if got := countLines(logBuf.String(), "Notification delivery failed"); got != 2 {
+		t.Errorf("expected a second failure log line after recovery, got %d", got)
+	}
+}
+
+// TestOptionalNotifierWrapper_Notify_NotRunningIsSurfaced verifies that a
+// configured plugin with no live subprocess reports the missed notification
+// instead of silently discarding it.
+func TestOptionalNotifierWrapper_Notify_NotRunningIsSurfaced(t *testing.T) {
+	logBuf := &bytes.Buffer{}
+	wrapper := &optionalNotifierWrapper{
+		name:   "test",
+		info:   agent.Plugin{Name: "test", ExecutablePath: "/nonexistent/path/to/plugin"},
+		logger: newBufferedLogger(logBuf),
+	}
+
+	err := wrapper.Notify("hello")
+	if err == nil {
+		t.Fatal("expected an error when the configured plugin is not running")
+	}
+
+	stats := wrapper.Stats()
+	if stats.NotifyFailures != 1 {
+		t.Errorf("expected 1 notify failure, got %d", stats.NotifyFailures)
+	}
+	if stats.RestartFailures != 1 {
+		t.Errorf("expected 1 restart failure, got %d", stats.RestartFailures)
+	}
+
+	logged := logBuf.String()
+	if !strings.Contains(logged, "Failed to restart notification plugin") {
+		t.Errorf("expected the failed relaunch to be logged, got %q", logged)
+	}
+	if !strings.Contains(logged, "Notification delivery failed") {
+		t.Errorf("expected the missed notification to be logged, got %q", logged)
+	}
+}
+
+// TestOptionalNotifierWrapper_CheckHealth_RestartBackoff verifies a plugin that
+// cannot be relaunched is retried on a backoff schedule rather than re-spawned on
+// every check.
+func TestOptionalNotifierWrapper_CheckHealth_RestartBackoff(t *testing.T) {
+	wrapper := &optionalNotifierWrapper{
+		name:           "test",
+		info:           agent.Plugin{Name: "test", ExecutablePath: "/nonexistent/path/to/plugin"},
+		restartBackoff: restartBaseBackoff,
+	}
+
+	wrapper.CheckHealth()
+	if got := wrapper.Stats().RestartFailures; got != 1 {
+		t.Fatalf("expected 1 restart attempt, got %d", got)
+	}
+
+	// An immediate second check falls inside the backoff window.
+	wrapper.CheckHealth()
+	if got := wrapper.Stats().RestartFailures; got != 1 {
+		t.Errorf("expected the second check to be deferred by backoff, got %d attempts", got)
+	}
+
+	if wrapper.restartBackoff <= restartBaseBackoff {
+		t.Errorf(
+			"expected the backoff to grow after a failed restart, got %v",
+			wrapper.restartBackoff,
+		)
+	}
+}
+
+// TestOptionalNotifierWrapper_CheckHealth_StableUptimeResetsBackoff verifies that
+// a plugin which ran past the stability window is relaunched immediately when it
+// dies, rather than waiting out a backoff inherited from an earlier crash.
+func TestOptionalNotifierWrapper_CheckHealth_StableUptimeResetsBackoff(t *testing.T) {
+	wrapper := &optionalNotifierWrapper{
+		name:           "test",
+		info:           agent.Plugin{Name: "test", ExecutablePath: "/nonexistent/path/to/plugin"},
+		startedAt:      time.Now().Add(-2 * restartStableUptime),
+		nextRestartAt:  time.Now().Add(restartMaxBackoff),
+		restartBackoff: restartMaxBackoff,
+	}
+
+	wrapper.CheckHealth()
+
+	if got := wrapper.Stats().RestartFailures; got != 1 {
+		t.Errorf("expected an immediate relaunch attempt after stable uptime, got %d", got)
+	}
+}
+
+// TestOptionalNotifierWrapper_CheckHealth_NotRestartable verifies a wrapper with
+// no plugin behind it is left alone.
+func TestOptionalNotifierWrapper_CheckHealth_NotRestartable(t *testing.T) {
+	wrapper := &optionalNotifierWrapper{name: "test"}
+
+	wrapper.CheckHealth()
+
+	if stats := wrapper.Stats(); stats != (NotifierStats{}) {
+		t.Errorf("expected no activity for a wrapper with no plugin, got %+v", stats)
+	}
+}
+
+// TestOptionalNotifierWrapper_CheckHealth_AfterKill verifies teardown wins: a
+// health check racing with shutdown must not resurrect the plugin.
+func TestOptionalNotifierWrapper_CheckHealth_AfterKill(t *testing.T) {
+	wrapper := &optionalNotifierWrapper{
+		name:           "test",
+		info:           agent.Plugin{Name: "test", ExecutablePath: "/nonexistent/path/to/plugin"},
+		restartBackoff: restartBaseBackoff,
+	}
+
+	wrapper.Kill()
+	wrapper.CheckHealth()
+
+	if got := wrapper.Stats().RestartFailures; got != 0 {
+		t.Errorf("expected no relaunch attempt after Kill, got %d", got)
+	}
+
+	if err := wrapper.Notify("hello"); err != nil {
+		t.Errorf("expected Notify after Kill to be a no-op, got %v", err)
+	}
+	if got := wrapper.Stats().NotifyFailures; got != 0 {
+		t.Errorf("expected no notify failures counted after Kill, got %d", got)
+	}
+}
+
+// TestNotifierSetWrapper_CheckHealth_Empty tests CheckHealth with an empty set
+func TestNotifierSetWrapper_CheckHealth_Empty(t *testing.T) {
+	set := &notifierSetWrapper{}
+
+	// Should not panic
+	set.CheckHealth()
+
+	if stats := set.Stats(); stats != (NotifierStats{}) {
+		t.Errorf("expected zero stats for an empty set, got %+v", stats)
+	}
+}
+
+// TestNotifierSetWrapper_Stats_Aggregates verifies the set reports the sum of its
+// plugins' counters.
+func TestNotifierSetWrapper_Stats_Aggregates(t *testing.T) {
+	first := &optionalNotifierWrapper{name: "plugin1"}
+	first.notifyFailures.Add(2)
+	first.restarts.Add(1)
+
+	second := &optionalNotifierWrapper{name: "plugin2"}
+	second.notifyFailures.Add(3)
+	second.restartFailures.Add(4)
+
+	set := &notifierSetWrapper{notifiers: []*optionalNotifierWrapper{first, second}}
+
+	expected := NotifierStats{NotifyFailures: 5, Restarts: 1, RestartFailures: 4}
+	if got := set.Stats(); got != expected {
+		t.Errorf("expected %+v, got %+v", expected, got)
+	}
+}
+
+// buildTestNotifierPlugin compiles the testdata notifier plugin and returns the
+// path to the binary.
+func buildTestNotifierPlugin(t *testing.T) string {
+	t.Helper()
+
+	if _, err := exec.LookPath("go"); err != nil {
+		t.Skip("go toolchain not available; skipping plugin subprocess test")
+	}
+
+	name := "notifier_plugin"
+	if runtime.GOOS == "windows" {
+		name += ".exe"
+	}
+
+	path := filepath.Join(t.TempDir(), name)
+	output, err := exec.Command("go", "build", "-o", path, "./testdata/notifier_plugin").
+		CombinedOutput()
+	if err != nil {
+		t.Fatalf("failed to build test plugin: %v\n%s", err, output)
+	}
+
+	return path
+}
+
+// waitFor polls cond until it returns true or the timeout elapses.
+func waitFor(t *testing.T, timeout time.Duration, cond func() bool) bool {
+	t.Helper()
+
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return true
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	return cond()
+}
+
+// loadTestNotifier builds and loads the testdata plugin, returning the wrapper,
+// the single loaded plugin wrapper and the path of the file the plugin appends
+// delivered notifications to.
+func loadTestNotifier(t *testing.T) (NotifierWrapper, *optionalNotifierWrapper, string) {
+	t.Helper()
+
+	executablePath := buildTestNotifierPlugin(t)
+	notifyLog := filepath.Join(t.TempDir(), "notifications.log")
+	t.Setenv("AGENT_SMITH_TEST_NOTIFY_LOG", notifyLog)
+
+	logBuf := &syncBuffer{}
+	wrapper, err := LoadNotifer(
+		[]agent.Plugin{{Name: "test-plugin", ExecutablePath: executablePath}},
+		logBuf,
+		newBufferedLogger(logBuf),
+	)
+	if err != nil {
+		t.Fatalf("failed to load test plugin: %v\n%s", err, logBuf.String())
+	}
+	t.Cleanup(wrapper.Kill)
+
+	set, ok := wrapper.(*notifierSetWrapper)
+	if !ok || len(set.notifiers) != 1 {
+		t.Fatalf("expected exactly 1 loaded plugin, got %v", wrapper.Plugins())
+	}
+
+	return wrapper, set.notifiers[0], notifyLog
+}
+
+// killPlugin kills the plugin subprocess and waits until go-plugin observes the
+// exit, mimicking a plugin that crashes mid-run.
+func killPlugin(t *testing.T, notifier *optionalNotifierWrapper) {
+	t.Helper()
+
+	notifier.mu.Lock()
+	reattach := notifier.client.ReattachConfig()
+	notifier.mu.Unlock()
+
+	if reattach == nil || reattach.Pid == 0 {
+		t.Fatal("expected a running plugin subprocess with a pid")
+	}
+
+	process, err := os.FindProcess(reattach.Pid)
+	if err != nil {
+		t.Fatalf("failed to find plugin process %d: %v", reattach.Pid, err)
+	}
+	if err := process.Kill(); err != nil {
+		t.Fatalf("failed to kill plugin process %d: %v", reattach.Pid, err)
+	}
+
+	exited := waitFor(t, 10*time.Second, func() bool {
+		notifier.mu.Lock()
+		defer notifier.mu.Unlock()
+		return notifier.client != nil && notifier.client.Exited()
+	})
+	if !exited {
+		t.Fatal("plugin subprocess exit was never observed")
+	}
+}
+
+// deliveredNotifications returns the notifications the plugin subprocess has
+// written to its log file.
+func deliveredNotifications(t *testing.T, notifyLog string) []string {
+	t.Helper()
+
+	contents, err := os.ReadFile(notifyLog)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		t.Fatalf("failed to read notification log: %v", err)
+	}
+
+	var messages []string
+	for _, line := range strings.Split(string(contents), "\n") {
+		if line != "" {
+			messages = append(messages, line)
+		}
+	}
+
+	return messages
+}
+
+// TestLoadNotifer_HealthCheckRestartsCrashedPlugin is the end-to-end regression
+// test for the silent-notification-loss bug: a plugin subprocess that is killed
+// mid-run is detected by the health check, relaunched, and keeps delivering
+// notifications without the agent being restarted.
+func TestLoadNotifer_HealthCheckRestartsCrashedPlugin(t *testing.T) {
+	wrapper, notifier, notifyLog := loadTestNotifier(t)
+
+	if err := wrapper.Notify("AgentStatus:Online"); err != nil {
+		t.Fatalf("expected the first notification to be delivered, got %v", err)
+	}
+
+	killPlugin(t, notifier)
+
+	wrapper.CheckHealth()
+
+	if got := wrapper.Stats().Restarts; got != 1 {
+		t.Fatalf("expected the crashed plugin to be restarted once, got %d", got)
+	}
+
+	if err := wrapper.Notify("AgentStatus:Reconnecting"); err != nil {
+		t.Fatalf("expected notifications to resume after the restart, got %v", err)
+	}
+
+	expected := []string{"AgentStatus:Online", "AgentStatus:Reconnecting"}
+	delivered := waitFor(t, 5*time.Second, func() bool {
+		return len(deliveredNotifications(t, notifyLog)) == len(expected)
+	})
+	if !delivered {
+		t.Fatalf(
+			"expected %v to be delivered, got %v",
+			expected,
+			deliveredNotifications(t, notifyLog),
+		)
+	}
+
+	for i, message := range deliveredNotifications(t, notifyLog) {
+		if message != expected[i] {
+			t.Errorf("notification %d: expected %q, got %q", i, expected[i], message)
+		}
+	}
+}
+
+// TestLoadNotifer_NotifyRestartsCrashedPlugin verifies the relaunch also happens
+// on the notification path, so a notification arriving between the crash and the
+// next health check is still delivered.
+func TestLoadNotifer_NotifyRestartsCrashedPlugin(t *testing.T) {
+	wrapper, notifier, notifyLog := loadTestNotifier(t)
+
+	killPlugin(t, notifier)
+
+	if err := wrapper.Notify("AgentStatus:Offline"); err != nil {
+		t.Fatalf("expected Notify to relaunch the plugin and deliver, got %v", err)
+	}
+
+	stats := wrapper.Stats()
+	if stats.Restarts != 1 {
+		t.Errorf("expected 1 restart, got %d", stats.Restarts)
+	}
+	if stats.NotifyFailures != 0 {
+		t.Errorf("expected no missed notifications, got %d", stats.NotifyFailures)
+	}
+
+	delivered := waitFor(t, 5*time.Second, func() bool {
+		return len(deliveredNotifications(t, notifyLog)) == 1
+	})
+	if !delivered {
+		t.Fatalf(
+			"expected the notification to be delivered by the relaunched plugin, got %v",
+			deliveredNotifications(t, notifyLog),
+		)
+	}
+}
+
+// TestLoadNotifer_HealthyPluginIsNotRestarted verifies the supervision is inert
+// while the plugin stays healthy.
+func TestLoadNotifer_HealthyPluginIsNotRestarted(t *testing.T) {
+	wrapper, _, notifyLog := loadTestNotifier(t)
+
+	for range 3 {
+		wrapper.CheckHealth()
+		if err := wrapper.Notify("AgentStatus:Online"); err != nil {
+			t.Fatalf("expected the notification to be delivered, got %v", err)
+		}
+	}
+
+	if stats := wrapper.Stats(); stats != (NotifierStats{}) {
+		t.Errorf("expected no failures or restarts for a healthy plugin, got %+v", stats)
+	}
+
+	delivered := waitFor(t, 5*time.Second, func() bool {
+		return len(deliveredNotifications(t, notifyLog)) == 3
+	})
+	if !delivered {
+		t.Errorf(
+			"expected 3 notifications delivered, got %v",
+			deliveredNotifications(t, notifyLog),
+		)
 	}
 }
 
