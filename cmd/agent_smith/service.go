@@ -196,17 +196,31 @@ func (svc *serviceContext) Execute(
 		logger.Info("Service stopped")
 	}()
 
-	notifier, err := plugins.LoadNotifer(device.Plugins, logFile)
+	notifier, err := plugins.LoadNotifer(device.Plugins, logFile, logger)
 	if err != nil {
 		logger.Warn("Failed to load plugin", "error", err)
 	}
-	defer notifier.Kill()
+	defer func() {
+		// Notification delivery is best effort at every call site, so a plugin that
+		// dies mid-run would otherwise leave no trace at all. Surface the cumulative
+		// counters once on the way out whenever anything went wrong.
+		if stats := notifier.Stats(); stats != (plugins.NotifierStats{}) {
+			logger.Warn(
+				"Plugin notification health summary",
+				"notify_failures", stats.NotifyFailures,
+				"plugin_restarts", stats.Restarts,
+				"restart_failures", stats.RestartFailures,
+			)
+		}
 
-	plugins := notifier.Plugins()
-	if len(plugins) == 1 {
-		logger.Info("Plugin loaded", "plugin", plugins[0])
-	} else if len(plugins) > 1 {
-		logger.Info("Plugins loaded", "plugins", plugins)
+		notifier.Kill()
+	}()
+
+	loadedPlugins := notifier.Plugins()
+	if len(loadedPlugins) == 1 {
+		logger.Info("Plugin loaded", "plugin", loadedPlugins[0])
+	} else if len(loadedPlugins) > 1 {
+		logger.Info("Plugins loaded", "plugins", loadedPlugins)
 	}
 
 	// Create a channel for stopped signal. It is closed (never sent to) when a
@@ -228,6 +242,35 @@ func (svc *serviceContext) Execute(
 
 	running <- struct{}{}
 	_ = notifier.Notify("AgentStarted") // Best effort notification
+
+	// Supervise the plugin subprocesses for the lifetime of the service. A plugin
+	// that exits or crashes leaves its RPC client permanently broken, and because
+	// every Notify call is best effort the loss of all status notifications would
+	// otherwise be completely silent until the agent is restarted. Polling for
+	// exits relaunches the plugin proactively instead of waiting for the next
+	// notification, which on an idle agent may be a long way off. The monitor is
+	// only started when a plugin actually loaded, so a deployment without plugins
+	// keeps exactly its previous behaviour. Its stop channel is closed before the
+	// deferred notifier.Kill (later defers run first), so the monitor can never
+	// resurrect a plugin during teardown.
+	if len(loadedPlugins) > 0 {
+		monitorStopped := make(chan struct{})
+		defer close(monitorStopped)
+
+		utils.SafeGo(logger, func() {
+			ticker := time.NewTicker(plugins.DefaultHealthCheckInterval)
+			defer ticker.Stop()
+
+			for {
+				select {
+				case <-monitorStopped:
+					return
+				case <-ticker.C:
+					notifier.CheckHealth()
+				}
+			}
+		}, "scope", "plugin_health_monitor")
+	}
 
 	// Reclaim script files left behind by previous runs that were killed before
 	// their deferred cleanup could run (force-stop, host power loss, OOM kill).

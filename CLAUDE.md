@@ -63,6 +63,8 @@ Required tools:
 
 Agent Smith uses a plugin architecture for extensible notifications. Plugins are separate executables that implement the `Notifier` interface via RPC. The system supports loading multiple plugins simultaneously and sends status notifications (AgentStarted, AgentStatus:Online, AgentStatus:Offline, etc.) to all loaded plugins.
 
+Loaded plugins are supervised: a subprocess that exits or crashes is detected (by a periodic health check and on the notification path) and relaunched with backoff, and delivery failures increment counters and are logged once per failure transition. See the README's "Notification Plugin Supervision" section.
+
 ### Message Processing Flow
 
 1. Agent connects to Azure IoT Hub via MQTT on topic `devices/{device_id}/messages/devicebound/#`

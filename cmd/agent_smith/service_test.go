@@ -1599,3 +1599,126 @@ func TestExecute_SweepsStaleScriptFilesOnStartup(t *testing.T) {
 		t.Errorf("expected the sweep to be logged, log was:\n%s", logBytes)
 	}
 }
+
+// runExecuteWithDevice writes device to a config file, runs Execute against a
+// mock MQTT client until it reports running, stops it, and returns the log
+// contents. It is used by the plugin supervision tests, which care about what the
+// service logs around plugin loading rather than about message flow.
+func runExecuteWithDevice(t *testing.T, orgId string, device agent.Device) string {
+	t.Helper()
+
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.json")
+	logPath := filepath.Join(tmpDir, "test.log")
+
+	configBytes, err := json.Marshal(device)
+	if err != nil {
+		t.Fatalf("failed to marshal config: %v", err)
+	}
+	if err := os.WriteFile(configPath, configBytes, utils.DefaultFileMod); err != nil {
+		t.Fatalf("failed to write config: %v", err)
+	}
+
+	origNewClient := inmqtt.NewClient
+	inmqtt.NewClient = func(o *pahomqtt.ClientOptions) pahomqtt.Client {
+		return &mockMQTTClient{}
+	}
+	defer func() { inmqtt.NewClient = origNewClient }()
+
+	svc := &serviceContext{
+		ConfigFile: configPath,
+		LogFile:    logPath,
+		OrgId:      orgId,
+		Executor:   &mockExecutor{},
+	}
+
+	stop := make(chan struct{})
+	running := make(chan struct{}, 1)
+
+	done := make(chan service.ServiceExitCode, 1)
+	go func() {
+		done <- svc.Execute(stop, running)
+	}()
+
+	select {
+	case <-running:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Execute did not signal running within timeout")
+	}
+
+	close(stop)
+
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Execute did not exit within timeout")
+	}
+
+	logBytes, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("failed to read log: %v", err)
+	}
+
+	return string(logBytes)
+}
+
+// TestExecute_NoPluginsConfiguredSkipsSupervision verifies that plugin
+// supervision is inert for the common case of a device with no plugins: nothing
+// is loaded, no health summary is reported, and the service starts and stops
+// exactly as before.
+func TestExecute_NoPluginsConfiguredSkipsSupervision(t *testing.T) {
+	orgId := "test-org-no-plugins"
+	logged := runExecuteWithDevice(t, orgId, agent.Device{
+		DeviceId:             "test-device",
+		SharedAccessKey:      "dGVzdC1zaGFyZWQta2V5LXRoYXQtaXMtbG9uZy1lbm91Z2gtZm9yLWJhc2U2NC1kZWNvZGluZw==",
+		AzureIotHubHost:      "test.azure-devices.net",
+		RewstOrgId:           orgId,
+		LoggingLevel:         "debug",
+		DisableAutoUpdates:   true,
+		DisableAgentPostback: true,
+	})
+
+	for _, unexpected := range []string{
+		"Plugin loaded",
+		"Plugins loaded",
+		"Plugin notification health summary",
+		"Notification delivery failed",
+	} {
+		if strings.Contains(logged, unexpected) {
+			t.Errorf(
+				"expected no %q line with no plugins configured, log was:\n%s",
+				unexpected,
+				logged,
+			)
+		}
+	}
+}
+
+// TestExecute_UnloadablePluginIsReportedNotSupervised verifies that a plugin that
+// cannot be launched at startup is still reported (as before) and does not leave
+// the service supervising a plugin that was never loaded.
+func TestExecute_UnloadablePluginIsReportedNotSupervised(t *testing.T) {
+	orgId := "test-org-bad-plugin"
+	logged := runExecuteWithDevice(t, orgId, agent.Device{
+		DeviceId:             "test-device",
+		SharedAccessKey:      "dGVzdC1zaGFyZWQta2V5LXRoYXQtaXMtbG9uZy1lbm91Z2gtZm9yLWJhc2U2NC1kZWNvZGluZw==",
+		AzureIotHubHost:      "test.azure-devices.net",
+		RewstOrgId:           orgId,
+		LoggingLevel:         "debug",
+		DisableAutoUpdates:   true,
+		DisableAgentPostback: true,
+		Plugins: []agent.Plugin{
+			{Name: "missing-plugin", ExecutablePath: filepath.Join(t.TempDir(), "does-not-exist")},
+		},
+	})
+
+	if !strings.Contains(logged, "Failed to load plugin") {
+		t.Errorf("expected the failed plugin load to be logged, log was:\n%s", logged)
+	}
+	if strings.Contains(logged, "Plugin loaded") {
+		t.Errorf("expected no plugin to be reported as loaded, log was:\n%s", logged)
+	}
+	if strings.Contains(logged, "Plugin notification health summary") {
+		t.Errorf("expected no health summary for a plugin that never loaded, log was:\n%s", logged)
+	}
+}

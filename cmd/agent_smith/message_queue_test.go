@@ -12,15 +12,18 @@ import (
 
 	"github.com/RewstApp/agent-smith-go/internal/agent"
 	"github.com/RewstApp/agent-smith-go/internal/interpreter"
+	"github.com/RewstApp/agent-smith-go/plugins"
 	"github.com/hashicorp/go-hclog"
 )
 
 // mockNotifierWrapper implements plugins.NotifierWrapper for tests.
 type mockNotifierWrapper struct{}
 
-func (m *mockNotifierWrapper) Kill()               {}
-func (m *mockNotifierWrapper) Plugins() []string   { return nil }
-func (m *mockNotifierWrapper) Notify(string) error { return nil }
+func (m *mockNotifierWrapper) Kill()                        {}
+func (m *mockNotifierWrapper) Plugins() []string            { return nil }
+func (m *mockNotifierWrapper) Notify(string) error          { return nil }
+func (m *mockNotifierWrapper) CheckHealth()                 {}
+func (m *mockNotifierWrapper) Stats() plugins.NotifierStats { return plugins.NotifierStats{} }
 
 // recordingNotifierWrapper records every notification message it receives so
 // tests can assert that drops are surfaced to plugins.
@@ -29,8 +32,10 @@ type recordingNotifierWrapper struct {
 	messages []string
 }
 
-func (m *recordingNotifierWrapper) Kill()             {}
-func (m *recordingNotifierWrapper) Plugins() []string { return nil }
+func (m *recordingNotifierWrapper) Kill()                        {}
+func (m *recordingNotifierWrapper) Plugins() []string            { return nil }
+func (m *recordingNotifierWrapper) CheckHealth()                 {}
+func (m *recordingNotifierWrapper) Stats() plugins.NotifierStats { return plugins.NotifierStats{} }
 func (m *recordingNotifierWrapper) Notify(msg string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
