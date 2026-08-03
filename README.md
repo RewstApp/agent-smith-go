@@ -238,6 +238,54 @@ stays unbounded, preserving the historical behavior. Example snippet:
 }
 ```
 
+#### Bounding per-command output size
+
+A command's `stdout` and `stderr` are each captured through a **bounded writer**,
+so a script that writes a very large volume of output cannot exhaust memory on
+the endpoint and get the agent OOM-killed. Once a stream reaches its ceiling,
+further bytes from that stream are discarded instead of accumulated, which keeps
+the memory one command's output costs the agent a small constant multiple of the
+ceiling no matter how much the script writes.
+
+| Config key | Default | Description |
+|------------|---------|-------------|
+| `max_output_bytes` | `10485760` (10 MiB) | Maximum bytes of command output kept, applied independently to `stdout` and `stderr`. |
+
+The default is far above any legitimate observed command result, so existing
+workflows are unaffected. It falls back to the default when omitted or set to a
+non-positive value, so the bound can never be disabled by configuration. The
+value can also be set at install time with `--max-output-bytes <N>`, or changed
+later with `--update --max-output-bytes <N>`.
+
+Truncation is deliberately non-fatal:
+
+- **The command is not killed for being verbose.** It runs to completion (or to
+  its `command_timeout_seconds` deadline) with the excess output dropped, so a
+  script whose real work succeeds still reports success.
+- **The output produced before the ceiling was reached is still delivered** — a
+  truncated result is never turned into an empty or error-only one.
+- **The result says so explicitly**, so a workflow can tell a truncated result
+  from a complete one instead of silently trusting a partial one:
+
+```json
+{
+  "output": "...the first max_output_bytes of stdout...",
+  "error": "...the first max_output_bytes of stderr...",
+  "truncated": true,
+  "output_bytes_produced": 2097152000,
+  "output_bytes_kept": 20971520
+}
+```
+
+`output_bytes_produced` and `output_bytes_kept` are totals across both streams.
+All three keys are **omitted** when the output was captured in full, so a
+complete result is byte-identical to what previous releases posted back. A
+command that was both verbose and hung carries `"truncated": true` alongside
+`"timed_out": true`.
+
+Each truncation is logged **once per command** at `Warn` level with the
+`message_id`, the ceiling in effect, and both byte counts — never once per write.
+
 ### Command Result Delivery
 
 After a command runs, the agent posts its result back to the Rewst engine with

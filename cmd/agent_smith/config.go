@@ -131,6 +131,7 @@ func runConfig(params *configContext) error {
 	)
 	response.Configuration.CommandTimeoutSeconds = tuningPtr(params.Tuning.CommandTimeoutSeconds)
 	response.Configuration.SasTokenLifetimeHours = tuningPtr(params.Tuning.SasTokenLifetimeHours)
+	response.Configuration.MaxOutputBytes = tuningPtr(params.Tuning.MaxOutputBytes)
 
 	// Create the data directory
 	dataDir := agent.GetDataDirectory(params.OrgId)

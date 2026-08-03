@@ -69,7 +69,7 @@ Loaded plugins are supervised: a subprocess that exits or crashes is detected (b
 
 1. Agent connects to Azure IoT Hub via MQTT on topic `devices/{device_id}/messages/devicebound/#`
 2. Receives JSON messages containing either `commands` (shell scripts) or `get_installation` (system info requests)
-3. Executes commands using platform-appropriate interpreter (PowerShell on Windows, Bash on Unix)
+3. Executes commands using platform-appropriate interpreter (PowerShell on Windows, Bash on Unix). Stdout and stderr are each captured through an independently bounded writer (`max_output_bytes`, default 10 MiB per stream) so a verbose script cannot OOM the agent; output past the ceiling is discarded and the result is flagged `truncated` with both byte counts. See the README's "Bounding per-command output size" section.
 4. Posts results back to Rewst engine at `https://{rewst_engine_host}/webhooks/custom/action/{post_id}`
 
 ### Client System Deployment

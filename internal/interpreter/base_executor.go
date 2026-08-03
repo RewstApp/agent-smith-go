@@ -1,7 +1,6 @@
 package interpreter
 
 import (
-	"bytes"
 	"context"
 	"encoding/base64"
 	"errors"
@@ -169,7 +168,15 @@ func (e *baseExecutor) Execute(
 		return errorResultBytes(logger, err)
 	}
 
-	var stdoutBuf, stderrBuf bytes.Buffer
+	// Capture stdout and stderr through independently bounded writers so a script
+	// that writes an unbounded volume of output cannot grow the agent's heap until
+	// the service is OOM-killed and the endpoint drops offline. Output past the
+	// ceiling is discarded rather than accumulated, which is invisible to the
+	// command itself: it still runs to completion (or to its deadline) and
+	// everything it produced up to the ceiling is still delivered.
+	maxOutputBytes := device.ResolvedMaxOutputBytes()
+	stdoutBuf := newBoundedWriter(maxOutputBytes)
+	stderrBuf := newBoundedWriter(maxOutputBytes)
 
 	// Bound the command to the configured per-command timeout when one is set, so
 	// a hung or interactive script (infinite loop, blocked on stdin, stuck network
@@ -185,14 +192,14 @@ func (e *baseExecutor) Execute(
 
 	// #nosec G204
 	cmd := exec.CommandContext(execCtx, e.Shell, e.BuildExecuteFileArgs(tempfile.Name())...)
-	cmd.Stdout = &stdoutBuf
-	cmd.Stderr = &stderrBuf
+	cmd.Stdout = stdoutBuf
+	cmd.Stderr = stderrBuf
 	cmd.Env = os.Environ()
 	cmd.Env = append(cmd.Env, fmt.Sprintf("AGENT_SMITH_VERSION=%s", version.Version[1:]))
 
 	// Kill the whole process group on cancellation (see configureProcessGroup) so
 	// a shell that spawned children is fully torn down, and bound how long Run may
-	// block on output pipes afterward. Because stdout/stderr are in-memory buffers
+	// block on output pipes afterward. Because stdout/stderr are in-memory writers
 	// (not *os.File), the runtime copies them through a pipe a killed child can
 	// still hold open; WaitDelay guarantees Run returns and the worker is released
 	// even then. This only takes effect when the context is cancelled, so commands
@@ -201,6 +208,24 @@ func (e *baseExecutor) Execute(
 	cmd.WaitDelay = commandWaitDelay
 
 	err = cmd.Run()
+
+	// Report discarded output once per command — never per write — and before any
+	// result is built, so every return path below carries the same signal.
+	trunc := truncationOf(stdoutBuf, stderrBuf)
+	if trunc.Truncated {
+		logger.Warn(
+			"Command output truncated",
+			"message_id",
+			message.PostId,
+			"max_output_bytes",
+			maxOutputBytes,
+			"output_bytes_produced",
+			trunc.Produced,
+			"output_bytes_kept",
+			trunc.Kept,
+		)
+	}
+
 	if err != nil {
 		// Distinguish a command killed by the per-command timeout from a normal
 		// non-zero exit. execCtx exceeding its deadline while the parent ctx is
@@ -226,7 +251,7 @@ func (e *baseExecutor) Execute(
 			if stderrBuf.Len() > 0 {
 				errMsg = fmt.Sprintf("%s: %s", errMsg, stderrBuf.String())
 			}
-			return timeoutResultBytes(logger, errMsg, stdoutBuf.String())
+			return timeoutResultBytes(logger, errMsg, stdoutBuf.String(), trunc)
 		}
 
 		logger.Error("Command failed", "error", err)
@@ -237,7 +262,7 @@ func (e *baseExecutor) Execute(
 			"info",
 			stdoutBuf.String(),
 		)
-		return resultBytes(logger, stderrBuf.String(), stdoutBuf.String())
+		return resultBytes(logger, stderrBuf.String(), stdoutBuf.String(), trunc)
 	}
 
 	logger.Info(
@@ -255,7 +280,7 @@ func (e *baseExecutor) Execute(
 		stdoutBuf.String(),
 	)
 
-	return resultBytes(logger, stderrBuf.String(), stdoutBuf.String())
+	return resultBytes(logger, stderrBuf.String(), stdoutBuf.String(), trunc)
 }
 
 func (e *baseExecutor) AlwaysPostback() bool {

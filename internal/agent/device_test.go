@@ -102,6 +102,28 @@ func TestResolvedPostbackMaxAttempts(t *testing.T) {
 	}
 }
 
+func TestResolvedMaxOutputBytes(t *testing.T) {
+	tests := []struct {
+		name   string
+		value  *int
+		expect int
+	}{
+		{"unset falls back to default", nil, DefaultMaxOutputBytes},
+		{"zero falls back to default", intPtr(0), DefaultMaxOutputBytes},
+		{"negative falls back to default", intPtr(-1024), DefaultMaxOutputBytes},
+		{"positive override honored", intPtr(1024), 1024},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			d := Device{MaxOutputBytes: tt.value}
+			if got := d.ResolvedMaxOutputBytes(); got != tt.expect {
+				t.Errorf("ResolvedMaxOutputBytes() = %d, want %d", got, tt.expect)
+			}
+		})
+	}
+}
+
 func TestSasTokenLifetime(t *testing.T) {
 	tests := []struct {
 		name   string

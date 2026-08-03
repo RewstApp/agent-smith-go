@@ -55,6 +55,17 @@ type Device struct {
 	// a worker: the command is cancelled once the deadline elapses even if the
 	// MQTT connection stays up.
 	CommandTimeoutSeconds *int `json:"command_timeout_seconds,omitempty"`
+	// MaxOutputBytes optionally overrides how many bytes of a single command's
+	// output the agent keeps, applied independently to stdout and stderr. When
+	// unset (or non-positive) the agent falls back to DefaultMaxOutputBytes.
+	// Output past the ceiling is discarded instead of buffered, so a script that
+	// writes an unbounded volume (a full filesystem listing, a large event-log
+	// dump, an error loop printing per iteration) can no longer exhaust memory
+	// and get the agent OOM-killed; the result posted back is flagged as
+	// truncated and carries both byte counts. Raise it for a device that
+	// legitimately returns very large results, lower it to tighten the memory
+	// ceiling.
+	MaxOutputBytes *int `json:"max_output_bytes,omitempty"`
 	// SasTokenLifetimeHours optionally overrides the lifetime of the Azure IoT
 	// Hub SAS token minted for each MQTT connection, in hours. When unset (or
 	// non-positive) the agent falls back to utils.DefaultSasTokenLifetime. Azure
@@ -90,6 +101,14 @@ const (
 	// total retry window still widens with more attempts, but no single sleep can
 	// overflow, hang a worker for days, or collapse into a tight loop.
 	DefaultPostbackMaxRetryBackoff = 64 * time.Second
+	// DefaultMaxOutputBytes is the ceiling on how much of a single command's
+	// output the agent keeps, applied independently to stdout and stderr, used
+	// when MaxOutputBytes is not configured. 10 MiB per stream is far above any
+	// legitimate observed command result, so existing workflows see no
+	// behavioral change, while bounding the memory one command's output can cost
+	// the agent to a small constant multiple of it instead of tracking however
+	// much the script decides to write.
+	DefaultMaxOutputBytes = 10 * 1024 * 1024
 )
 
 // ResolvedWorkerCount returns the number of command-execution workers to start,
@@ -141,6 +160,17 @@ func (d Device) ResolvedCommandTimeout() (time.Duration, bool) {
 		return time.Duration(*d.CommandTimeoutSeconds) * time.Second, true
 	}
 	return 0, false
+}
+
+// ResolvedMaxOutputBytes returns the per-stream ceiling on captured command
+// output, honoring the per-device override when set to a positive value and
+// falling back to DefaultMaxOutputBytes otherwise. It is always positive, so the
+// bound can never be disabled (or collapsed to zero) by configuration.
+func (d Device) ResolvedMaxOutputBytes() int {
+	if d.MaxOutputBytes != nil && *d.MaxOutputBytes > 0 {
+		return *d.MaxOutputBytes
+	}
+	return DefaultMaxOutputBytes
 }
 
 // MqttConnectTimeout returns the per-attempt MQTT connect timeout, honoring the
