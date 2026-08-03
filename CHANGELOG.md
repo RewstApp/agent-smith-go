@@ -1,3 +1,14 @@
+## v1.5.1 (2026-08-03)
+
+### Fix
+
+- [sc-103966] Supervise notification plugins so a crash stops silencing them (#96)
+- [sc-103967] Sweep stale temp script files on agent startup (#95)
+- [sc-105154] Upgrade vulnerable google.golang.org/grpc to v1.82.1 (#94)
+- [sc-103969] extend SAS token lifetime and renew before expiry to stop hourly disconnect churn (#93)
+- [sc-103965] Cap postback retry backoff to prevent overflow busy-loop (#92)
+- [sc-103835] Add configurable per-command execution timeout (#91)
+
 ## v1.5.0 (2026-07-21)
 
 ### Feat
