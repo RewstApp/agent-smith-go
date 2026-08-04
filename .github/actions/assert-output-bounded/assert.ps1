@@ -28,11 +28,19 @@ Four things are asserted:
      produced at least -MinProducedBytes, and what was kept falls in the
      [-MinKeptBytes, -MaxKeptBytes] window the caller expects.
 
-The kept-bytes window is what distinguishes the two flood shapes. For a stdout
-flood it is the ceiling exactly. For a stderr flood the caller sets the window
-just above the ceiling, because the small stdout line the script also writes is
+The kept-bytes window is what distinguishes the two flood shapes. A stdout flood
+starts at the ceiling, because stdout fills it on its own. A stderr flood starts
+just *above* the ceiling, because the small stdout line the script also writes is
 kept on top of a full stderr capture - which can only happen if the two streams
 are bounded independently instead of sharing one budget.
+
+Callers give the upper end of that window several KiB of headroom rather than
+pinning it exactly. The shell contributes output of its own that the scenario does
+not control: on Windows this run deliberately injects a PROFILE_NOISE_<guid>
+marker into the all-users PowerShell profile, and every agent-spawned PowerShell
+echoes it. What the upper bound exists to catch is a stream that was not capped at
+all, which lands near the produced volume rather than a few bytes past the
+ceiling, so the headroom costs nothing.
 
 Counts are compared against a caller-supplied baseline because the agent log
 accumulates across scenarios and already carries warnings from earlier commands.

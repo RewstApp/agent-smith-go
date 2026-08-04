@@ -839,10 +839,16 @@ jobs:
           log_file: ${{ matrix.log_file }}
           baseline_truncations: ${{ steps.output_baseline.outputs.truncated }}
           expected_ceiling_bytes: "262144"
-          # Exactly the ceiling: stdout alone was flooded, so nothing else
-          # contributes to the kept total.
+          # At least the whole ceiling, since stdout alone floods it. The upper
+          # bound carries 4 KiB of headroom rather than being exact because the
+          # shell contributes a preamble of its own that is not this scenario's to
+          # control - on Windows the run deliberately injects a
+          # PROFILE_NOISE_<guid> marker into the all-users PowerShell profile,
+          # which every agent-spawned PowerShell echoes. What the bound has to
+          # catch is a stream that was not capped at all, and that would land
+          # near the 200 MiB produced, not a few bytes over.
           min_kept_bytes: "262144"
-          max_kept_bytes: "262144"
+          max_kept_bytes: "266240"
           min_produced_bytes: "209715200"
           max_rss_mb: "250"
 
@@ -949,9 +955,12 @@ jobs:
           # Above the ceiling on purpose: the script floods stderr to its full
           # ceiling AND writes a short stdout line, so the kept total can only
           # exceed the ceiling if the two streams have separate budgets. A shared
-          # budget would cap the total at 262144 and starve one of them.
+          # budget would cap the total at 262144 and starve one of them. The upper
+          # bound has the same 4 KiB of headroom as the stdout flood, for the same
+          # reason: the stdout side carries the shell's preamble as well as the
+          # scenario's own line.
           min_kept_bytes: "262145"
-          max_kept_bytes: "262208"
+          max_kept_bytes: "266240"
           min_produced_bytes: "209715200"
           max_rss_mb: "250"
 
@@ -1013,8 +1022,10 @@ jobs:
           log_file: ${{ matrix.log_file }}
           baseline_truncations: ${{ steps.compose_baseline.outputs.truncated }}
           expected_ceiling_bytes: "262144"
+          # Same headroom as the other floods: stdout fills the ceiling on its
+          # own, and anything the shell adds on either stream is incidental.
           min_kept_bytes: "262144"
-          max_kept_bytes: "262144"
+          max_kept_bytes: "266240"
           # Lower than the flood's full 200 MiB: the command is killed at its
           # deadline, so only the volume written before the kill is counted.
           min_produced_bytes: "104857600"
