@@ -106,6 +106,24 @@ jobs:
 
           $orgId = $env:ORG_ID
 
+          # Output-flood scripts for the bounded-output scenario (sc-106105).
+          # Deliberately quote-free and backslash-free so they survive the trip
+          # through the trigger's JSON-quoted commands field unchanged, and
+          # byte-exact so the produced counts the agent reports are predictable:
+          #   verbose        200 MiB to stdout, then a clean exit
+          #   verbose_stderr a short stdout line, then 200 MiB to stderr
+          #   verbose_hang   200 MiB to stdout, then a hang past the timeout
+          # All three write 200 MiB - three orders of magnitude past the ceiling
+          # the scenario configures - so the RSS ceiling asserted while they run
+          # is far below what buffering the output whole would cost.
+          $winVerbose = '"$chunk = [string]::new([char]120, 1048576); 1..200 | ForEach-Object { $chunk }"'
+          $winVerboseStderr = '"Write-Output keep-stdout; $chunk = [string]::new([char]101, 1048576); 1..200 | ForEach-Object { [Console]::Error.Write($chunk) }"'
+          $winVerboseHang = '"$chunk = [string]::new([char]120, 1048576); 1..200 | ForEach-Object { $chunk }; Start-Sleep -Seconds 60"'
+
+          $unixVerbose = '"yes x | head -c 209715200"'
+          $unixVerboseStderr = '"echo keep-stdout; yes e | head -c 209715200 >&2"'
+          $unixVerboseHang = '"yes x | head -c 209715200; sleep 60"'
+
           $entries = @(
             [ordered]@{
               os = 'ubuntu-latest'
@@ -118,6 +136,9 @@ jobs:
               failure_commands = '"exit 1"'
               timeout_commands = '"sleep 30"'
               sweep_commands = '"sleep 180"'
+              verbose_commands = $unixVerbose
+              verbose_stderr_commands = $unixVerboseStderr
+              verbose_hang_commands = $unixVerboseHang
               success_patterns = "Command completed`nSending postback`nPostback sent"
               no_auto_updates_extra = ''
               uninstall_paths = "/etc/rewst_remote_agent/$orgId`n/usr/local/bin/rewst_remote_agent/$orgId`n/tmp/rewst_remote_agent/scripts/$orgId"
@@ -136,6 +157,9 @@ jobs:
               failure_commands = $winFailure
               timeout_commands = '"Start-Sleep -Seconds 30"'
               sweep_commands = '"Start-Sleep -Seconds 180"'
+              verbose_commands = $winVerbose
+              verbose_stderr_commands = $winVerboseStderr
+              verbose_hang_commands = $winVerboseHang
               success_patterns = "Command completed`nSending postback`nPostback already sent"
               no_auto_updates_extra = '--disable-agent-postback'
               uninstall_paths = "C:\ProgramData\RewstRemoteAgent\$orgId`nC:\Program Files\RewstRemoteAgent\$orgId`nC:\RewstRemoteAgent\scripts\$orgId"
@@ -154,6 +178,9 @@ jobs:
               failure_commands = '"exit 1"'
               timeout_commands = '"sleep 30"'
               sweep_commands = '"sleep 180"'
+              verbose_commands = $unixVerbose
+              verbose_stderr_commands = $unixVerboseStderr
+              verbose_hang_commands = $unixVerboseHang
               success_patterns = "Command completed`nSending postback`nPostback sent"
               no_auto_updates_extra = ''
               uninstall_paths = "/Library/Application Support/rewst_remote_agent/$orgId`n/usr/local/bin/rewst_remote_agent/$orgId`n`$env:TMPDIR/rewst_remote_agent/scripts/$orgId"
@@ -665,6 +692,389 @@ jobs:
           }
           Write-Error "No command completed after SAS renewal (count stayed at $baseline)"
           exit 1
+
+      # ---- Bounded command output scenario (sc-106105) ----
+      # A command's stdout and stderr used to be buffered whole in memory, so the
+      # agent's heap tracked however much a script decided to write and a verbose
+      # one could OOM-kill the service. Configure a deliberately small ceiling,
+      # flood it by three orders of magnitude, and assert the two properties that
+      # matter: the agent's RSS stays near the ceiling instead of near the output
+      # size, and the discarded output is reported rather than silently dropped.
+      #
+      # The release binary is installed first with the per-command timeout raised
+      # well past the floods' runtime, because the earlier timeout scenario left a
+      # 5s deadline in the config that would kill these commands mid-write, and
+      # the SAS scenario left the IT binary running with a 90s token lifetime
+      # whose reconnect would cancel them. --logging-level is deliberately not
+      # passed: it resets to the default (Info), which keeps the Warn under test
+      # visible while leaving the debug handler that dumps whole command outputs
+      # into the log switched off. --disable-agent-postback is likewise not
+      # passed (unlike the sweep scenario) so the truncated result actually
+      # traverses the postback path on every platform.
+      #
+      # Coverage note: these steps assert on the agent log, which is where the
+      # byte counts are observable on the endpoint. The same counts are what the
+      # postback carries as truncated/output_bytes_produced/output_bytes_kept -
+      # both come from one value computed once per command - but the postback body
+      # is never logged, so confirming the workflow's received payload stays a
+      # Rewst-side QA step.
+      - name: Resolve the scripts directory
+        id: scripts_dir
+        shell: pwsh
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+        run: |
+          # Read the directory off a "Command saved to" line rather than
+          # re-deriving the platform path: the service's temp directory is not the
+          # runner's, notably root's private TMPDIR on macOS. Many earlier
+          # scenarios have already logged one.
+          $content = Get-Content $env:LOG_FILE -Raw -ErrorAction SilentlyContinue
+          $found = if ($content) { [regex]::Matches($content, 'Command saved to[^\r\n]*path=(?<p>\S+)') } else { @() }
+          if ($found.Count -eq 0) {
+            Write-Error "No 'Command saved to' line in the log; cannot resolve the scripts directory"
+            exit 1
+          }
+          $path = $found[$found.Count - 1].Groups['p'].Value.Trim('"')
+          $dir = Split-Path -Parent $path
+          "path=$dir" >> $env:GITHUB_OUTPUT
+          Write-Output "Scripts directory: $dir"
+
+      - name: Snapshot temp script files before the output floods
+        uses: ./.github/actions/assert-no-orphaned-scripts
+        with:
+          mode: snapshot
+          scripts_dir: ${{ steps.scripts_dir.outputs.path }}
+
+      # Captured before the update below restarts the service: the restart's own
+      # "Subscribed to messages" line must land after this snapshot for the delta
+      # wait to mean anything.
+      - name: Capture bounded-output baseline counts
+        id: output_baseline
+        shell: pwsh
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+        run: |
+          $content = Get-Content $env:LOG_FILE -Raw -ErrorAction SilentlyContinue
+          $subscribed = if ($content) { ([regex]::Matches($content, [regex]::Escape("Subscribed to messages"))).Count } else { 0 }
+          $truncated  = if ($content) { ([regex]::Matches($content, [regex]::Escape("Command output truncated"))).Count } else { 0 }
+          $completed  = if ($content) { ([regex]::Matches($content, [regex]::Escape("Command completed"))).Count } else { 0 }
+          "subscribed=$subscribed" >> $env:GITHUB_OUTPUT
+          "truncated=$truncated"   >> $env:GITHUB_OUTPUT
+          "completed=$completed"   >> $env:GITHUB_OUTPUT
+          Write-Output "Baseline counts -> subscribed=$subscribed truncated=$truncated completed=$completed"
+
+      - name: Configure a small output ceiling
+        uses: ./.github/actions/run-agent
+        with:
+          binary: ${{ matrix.binary }}
+          args: --update --org-id ${{ vars.IT_ORG_ID }} --no-auto-updates --max-output-bytes 262144 --command-timeout-seconds 600 --github-token ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Assert a non-positive output ceiling is rejected
+        shell: pwsh
+        env:
+          BINARY: ${{ matrix.binary }}
+          ORG_ID: ${{ vars.IT_ORG_ID }}
+        run: |
+          # The bound must not be disablable by configuration: a non-positive
+          # value is refused outright rather than accepted as "no limit" (a
+          # hand-edited config falls back to the documented default instead).
+          foreach ($value in @('0', '-1')) {
+            if ($IsWindows) {
+              $out = & "./dist/$env:BINARY" --update --org-id $env:ORG_ID --max-output-bytes $value 2>&1 | Out-String
+            } else {
+              $out = & sudo "./dist/$env:BINARY" --update --org-id $env:ORG_ID --max-output-bytes $value 2>&1 | Out-String
+            }
+            $code = $LASTEXITCODE
+            if ($code -eq 0) {
+              Write-Output $out
+              Write-Error "--max-output-bytes $value was accepted (exit 0); the bound must not be disablable"
+              exit 1
+            }
+            if ($out -notmatch 'invalid max-output-bytes: must be a positive integer') {
+              Write-Output $out
+              Write-Error "--max-output-bytes $value was rejected without the expected validation message"
+              exit 1
+            }
+            Write-Output "OK: --max-output-bytes $value rejected (exit $code) with the expected message"
+          }
+          # Explicit success: the runner appends "exit $LASTEXITCODE" to pwsh
+          # steps, and the last thing this step ran was a deliberately failing
+          # agent invocation, so falling off the end would report that failure as
+          # the step's own.
+          exit 0
+
+      - name: Wait for fresh subscription after the output ceiling update
+        shell: pwsh
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+          BASELINE: ${{ steps.output_baseline.outputs.subscribed }}
+        run: |
+          # A delta, not a bare match: the log already carries many "Subscribed to
+          # messages" lines, so only a new one proves the restarted agent is
+          # connected with the new ceiling in effect.
+          $baseline = [int]$env:BASELINE
+          for ($i = 1; $i -le 60; $i++) {
+            $content = Get-Content $env:LOG_FILE -Raw -ErrorAction SilentlyContinue
+            $count = if ($content) { ([regex]::Matches($content, [regex]::Escape("Subscribed to messages"))).Count } else { 0 }
+            if ($count -gt $baseline) {
+              Write-Output "Agent subscribed with the new output ceiling (count $count > baseline $baseline) after ~$($i * 2)s"
+              exit 0
+            }
+            Start-Sleep -Seconds 2
+          }
+          Write-Error "Agent did not subscribe after the output ceiling update (count stayed at $baseline)"
+          exit 1
+
+      - name: Send stdout flood command
+        uses: ./.github/actions/send-command
+        with:
+          trigger_url: ${{ vars.IT_SEND_COMMAND_TRIGGER_URL }}
+          device_id: ${{ steps.config.outputs.device_id }}
+          commands: ${{ matrix.verbose_commands }}
+
+      - name: Assert the stdout flood was bounded
+        uses: ./.github/actions/assert-output-bounded
+        with:
+          service: ${{ matrix.service }}
+          log_file: ${{ matrix.log_file }}
+          baseline_truncations: ${{ steps.output_baseline.outputs.truncated }}
+          expected_ceiling_bytes: "262144"
+          # Exactly the ceiling: stdout alone was flooded, so nothing else
+          # contributes to the kept total.
+          min_kept_bytes: "262144"
+          max_kept_bytes: "262144"
+          min_produced_bytes: "209715200"
+          max_rss_mb: "250"
+
+      - name: Assert the flooding command still succeeded
+        shell: pwsh
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+          BASELINE: ${{ steps.output_baseline.outputs.completed }}
+        run: |
+          # Being verbose is not a failure: the command runs to completion with the
+          # excess discarded, so it reports "Command completed", not "Command
+          # failed" or "Command timed out".
+          $baseline = [int]$env:BASELINE
+          for ($i = 1; $i -le 30; $i++) {
+            $content = Get-Content $env:LOG_FILE -Raw -ErrorAction SilentlyContinue
+            $count = if ($content) { ([regex]::Matches($content, [regex]::Escape("Command completed"))).Count } else { 0 }
+            if ($count -gt $baseline) {
+              Write-Output "Flooding command completed normally (count $count > baseline $baseline)"
+              exit 0
+            }
+            Start-Sleep -Seconds 2
+          }
+          Write-Error "The flooding command never completed (count stayed at $baseline): it was killed for being verbose"
+          exit 1
+
+      - name: Capture small-output baseline counts
+        id: small_output_baseline
+        shell: pwsh
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+        run: |
+          $content = Get-Content $env:LOG_FILE -Raw -ErrorAction SilentlyContinue
+          $truncated = if ($content) { ([regex]::Matches($content, [regex]::Escape("Command output truncated"))).Count } else { 0 }
+          $completed = if ($content) { ([regex]::Matches($content, [regex]::Escape("Command completed"))).Count } else { 0 }
+          "truncated=$truncated" >> $env:GITHUB_OUTPUT
+          "completed=$completed" >> $env:GITHUB_OUTPUT
+          Write-Output "Baseline counts -> truncated=$truncated completed=$completed"
+
+      - name: Send ordinary command after the flood
+        uses: ./.github/actions/send-command
+        with:
+          trigger_url: ${{ vars.IT_SEND_COMMAND_TRIGGER_URL }}
+          device_id: ${{ steps.config.outputs.device_id }}
+          commands: ${{ matrix.success_commands }}
+
+      - name: Assert output below the ceiling is untouched and the worker recovered
+        shell: pwsh
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+          COMPLETED_BASELINE: ${{ steps.small_output_baseline.outputs.completed }}
+          TRUNCATED_BASELINE: ${{ steps.small_output_baseline.outputs.truncated }}
+        run: |
+          # Two things at once: the worker the flood used was released (a later
+          # command completes), and a command whose output fits under the ceiling
+          # is not flagged - the bound only engages on the output that exceeds it.
+          $completedBaseline = [int]$env:COMPLETED_BASELINE
+          $truncatedBaseline = [int]$env:TRUNCATED_BASELINE
+          $completed = $completedBaseline
+          for ($i = 1; $i -le 30; $i++) {
+            Start-Sleep -Seconds 2
+            $content = Get-Content $env:LOG_FILE -Raw -ErrorAction SilentlyContinue
+            $completed = if ($content) { ([regex]::Matches($content, [regex]::Escape("Command completed"))).Count } else { 0 }
+            if ($completed -gt $completedBaseline) { break }
+          }
+          if ($completed -le $completedBaseline) {
+            Write-Error "No command completed after the flood (count stayed at $completedBaseline): the worker was not released"
+            exit 1
+          }
+          Write-Output "Worker released; a later command completed (count $completed > baseline $completedBaseline)"
+
+          $content = Get-Content $env:LOG_FILE -Raw
+          $truncated = ([regex]::Matches($content, [regex]::Escape("Command output truncated"))).Count
+          if ($truncated -ne $truncatedBaseline) {
+            Write-Error "A small-output command was flagged as truncated (count rose from $truncatedBaseline to $truncated)"
+            exit 1
+          }
+          Write-Output "Confirmed small-output command was not truncated (count stayed at $truncatedBaseline)"
+
+      - name: Capture stderr-flood baseline counts
+        id: stderr_flood_baseline
+        shell: pwsh
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+        run: |
+          $content = Get-Content $env:LOG_FILE -Raw -ErrorAction SilentlyContinue
+          $truncated = if ($content) { ([regex]::Matches($content, [regex]::Escape("Command output truncated"))).Count } else { 0 }
+          "truncated=$truncated" >> $env:GITHUB_OUTPUT
+          Write-Output "Baseline counts -> truncated=$truncated"
+
+      - name: Send stderr flood command
+        uses: ./.github/actions/send-command
+        with:
+          trigger_url: ${{ vars.IT_SEND_COMMAND_TRIGGER_URL }}
+          device_id: ${{ steps.config.outputs.device_id }}
+          commands: ${{ matrix.verbose_stderr_commands }}
+
+      - name: Assert stderr is bounded independently of stdout
+        uses: ./.github/actions/assert-output-bounded
+        with:
+          service: ${{ matrix.service }}
+          log_file: ${{ matrix.log_file }}
+          baseline_truncations: ${{ steps.stderr_flood_baseline.outputs.truncated }}
+          expected_ceiling_bytes: "262144"
+          # Above the ceiling on purpose: the script floods stderr to its full
+          # ceiling AND writes a short stdout line, so the kept total can only
+          # exceed the ceiling if the two streams have separate budgets. A shared
+          # budget would cap the total at 262144 and starve one of them.
+          min_kept_bytes: "262145"
+          max_kept_bytes: "262208"
+          min_produced_bytes: "209715200"
+          max_rss_mb: "250"
+
+      # Captured before the update below restarts the service, for the same
+      # reason as the bounded-output baseline.
+      - name: Capture timeout-composition baseline counts
+        id: compose_baseline
+        shell: pwsh
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+        run: |
+          $content = Get-Content $env:LOG_FILE -Raw -ErrorAction SilentlyContinue
+          $subscribed = if ($content) { ([regex]::Matches($content, [regex]::Escape("Subscribed to messages"))).Count } else { 0 }
+          $truncated  = if ($content) { ([regex]::Matches($content, [regex]::Escape("Command output truncated"))).Count } else { 0 }
+          $timedOut   = if ($content) { ([regex]::Matches($content, [regex]::Escape("Command timed out"))).Count } else { 0 }
+          $completed  = if ($content) { ([regex]::Matches($content, [regex]::Escape("Command completed"))).Count } else { 0 }
+          "subscribed=$subscribed" >> $env:GITHUB_OUTPUT
+          "truncated=$truncated"   >> $env:GITHUB_OUTPUT
+          "timed_out=$timedOut"    >> $env:GITHUB_OUTPUT
+          "completed=$completed"   >> $env:GITHUB_OUTPUT
+          Write-Output "Baseline counts -> subscribed=$subscribed truncated=$truncated timed_out=$timedOut completed=$completed"
+
+      - name: Shorten the command timeout for the composition check
+        uses: ./.github/actions/run-agent
+        with:
+          binary: ${{ matrix.binary }}
+          args: --update --org-id ${{ vars.IT_ORG_ID }} --no-auto-updates --max-output-bytes 262144 --command-timeout-seconds 30 --github-token ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Wait for fresh subscription after the timeout update
+        shell: pwsh
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+          BASELINE: ${{ steps.compose_baseline.outputs.subscribed }}
+        run: |
+          $baseline = [int]$env:BASELINE
+          for ($i = 1; $i -le 60; $i++) {
+            $content = Get-Content $env:LOG_FILE -Raw -ErrorAction SilentlyContinue
+            $count = if ($content) { ([regex]::Matches($content, [regex]::Escape("Subscribed to messages"))).Count } else { 0 }
+            if ($count -gt $baseline) {
+              Write-Output "Agent subscribed with the short timeout (count $count > baseline $baseline) after ~$($i * 2)s"
+              exit 0
+            }
+            Start-Sleep -Seconds 2
+          }
+          Write-Error "Agent did not subscribe after the timeout update (count stayed at $baseline)"
+          exit 1
+
+      - name: Send verbose command that then hangs
+        uses: ./.github/actions/send-command
+        with:
+          trigger_url: ${{ vars.IT_SEND_COMMAND_TRIGGER_URL }}
+          device_id: ${{ steps.config.outputs.device_id }}
+          commands: ${{ matrix.verbose_hang_commands }}
+
+      - name: Assert the hanging command's output was still bounded
+        uses: ./.github/actions/assert-output-bounded
+        with:
+          service: ${{ matrix.service }}
+          log_file: ${{ matrix.log_file }}
+          baseline_truncations: ${{ steps.compose_baseline.outputs.truncated }}
+          expected_ceiling_bytes: "262144"
+          min_kept_bytes: "262144"
+          max_kept_bytes: "262144"
+          # Lower than the flood's full 200 MiB: the command is killed at its
+          # deadline, so only the volume written before the kill is counted.
+          min_produced_bytes: "104857600"
+          max_rss_mb: "250"
+          # The warning lands once the deadline kills the process group, and
+          # cmd.WaitDelay can hold Run for up to 10s more after that.
+          max_attempts: "120"
+
+      - name: Assert the hanging command also timed out and released its worker
+        shell: pwsh
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+          TIMED_OUT_BASELINE: ${{ steps.compose_baseline.outputs.timed_out }}
+        run: |
+          # The two bounds compose: the same command is reported as truncated
+          # (asserted above) and as timed out, neither masking the other.
+          $baseline = [int]$env:TIMED_OUT_BASELINE
+          for ($i = 1; $i -le 30; $i++) {
+            $content = Get-Content $env:LOG_FILE -Raw -ErrorAction SilentlyContinue
+            $count = if ($content) { ([regex]::Matches($content, [regex]::Escape("Command timed out"))).Count } else { 0 }
+            if ($count -gt $baseline) {
+              Write-Output "Verbose hanging command was killed by the timeout (count $count > baseline $baseline) after ~$($i * 2)s"
+              exit 0
+            }
+            Start-Sleep -Seconds 2
+          }
+          Write-Error "Verbose hanging command was not killed by the per-command timeout (count stayed at $baseline)"
+          exit 1
+
+      - name: Send command after the verbose timeout
+        uses: ./.github/actions/send-command
+        with:
+          trigger_url: ${{ vars.IT_SEND_COMMAND_TRIGGER_URL }}
+          device_id: ${{ steps.config.outputs.device_id }}
+          commands: ${{ matrix.success_commands }}
+
+      - name: Assert the worker recovered after the verbose timeout
+        shell: pwsh
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+          BASELINE: ${{ steps.compose_baseline.outputs.completed }}
+        run: |
+          $baseline = [int]$env:BASELINE
+          for ($i = 1; $i -le 30; $i++) {
+            Start-Sleep -Seconds 2
+            $content = Get-Content $env:LOG_FILE -Raw -ErrorAction SilentlyContinue
+            $count = if ($content) { ([regex]::Matches($content, [regex]::Escape("Command completed"))).Count } else { 0 }
+            if ($count -gt $baseline) {
+              Write-Output "Worker recovered after the verbose timeout (count $count > baseline $baseline)"
+              exit 0
+            }
+          }
+          Write-Error "No command completed after the verbose timeout (count stayed at $baseline)"
+          exit 1
+
+      - name: Assert the output floods left no orphaned script files
+        uses: ./.github/actions/assert-no-orphaned-scripts
+        with:
+          mode: assert
+          scripts_dir: ${{ steps.scripts_dir.outputs.path }}
 
       # ---- Stale script file sweep scenario (sc-103967) ----
       # A command interrupted by an abrupt kill (force-stop, OOM kill, power

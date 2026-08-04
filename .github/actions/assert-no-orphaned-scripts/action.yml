@@ -1,0 +1,55 @@
+name: Assert no orphaned script files
+description: >
+  Snapshot (mode=snapshot) the agent's exec-<digits>.ps1 temp script files before
+  a scenario and verify (mode=assert) afterwards that none were left behind, which
+  proves each command exited cleanly enough to run its deferred cleanup. See
+  fixture.ps1 for details. The scripts directory belongs to the service account
+  (root / SYSTEM) and on macOS lives under root's own temp directory, so the
+  shared implementation runs elevated: under sudo on Unix, natively on the
+  already-elevated Windows runner.
+
+inputs:
+  mode:
+    description: "snapshot to record the current files, assert to verify nothing new was left behind"
+    required: true
+  scripts_dir:
+    description: "Scripts directory the agent writes command script files to"
+    required: true
+  baseline_file:
+    description: "Path the snapshot is written to and read back from"
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Assert no orphaned scripts (Unix)
+      if: runner.os != 'Windows'
+      shell: bash
+      env:
+        MODE: ${{ inputs.mode }}
+        SCRIPTS_DIR: ${{ inputs.scripts_dir }}
+        BASELINE_FILE: ${{ inputs.baseline_file }}
+      run: |
+        set -euo pipefail
+        baseline="${BASELINE_FILE:-$RUNNER_TEMP/agent-script-files.baseline}"
+        # Resolve pwsh up front: sudo resets PATH via secure_path on some runners.
+        pwsh_path="$(command -v pwsh)"
+        sudo "$pwsh_path" -NoProfile -File "$GITHUB_ACTION_PATH/fixture.ps1" \
+          -Mode "$MODE" \
+          -ScriptsDir "$SCRIPTS_DIR" \
+          -BaselineFile "$baseline"
+
+    - name: Assert no orphaned scripts (Windows)
+      if: runner.os == 'Windows'
+      shell: pwsh
+      env:
+        MODE: ${{ inputs.mode }}
+        SCRIPTS_DIR: ${{ inputs.scripts_dir }}
+        BASELINE_FILE: ${{ inputs.baseline_file }}
+      run: |
+        $baseline = if ($env:BASELINE_FILE) { $env:BASELINE_FILE } else { Join-Path $env:RUNNER_TEMP 'agent-script-files.baseline' }
+        & "$env:GITHUB_ACTION_PATH/fixture.ps1" `
+          -Mode $env:MODE `
+          -ScriptsDir $env:SCRIPTS_DIR `
+          -BaselineFile $baseline
