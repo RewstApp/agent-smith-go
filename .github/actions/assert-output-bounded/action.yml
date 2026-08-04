@@ -1,0 +1,111 @@
+name: Assert command output bounded
+description: >
+  Sample the agent process's RSS while a verbose command runs and assert the
+  output was bounded rather than buffered whole (sc-106105): the process
+  survives with peak RSS near the configured ceiling, and exactly one truncation
+  warning is logged carrying the message id, the ceiling and both byte counts.
+  See assert.ps1 for the full set of assertions. Resolving the service pid and
+  reading the agent log require elevation, so the shared implementation runs
+  under sudo on Unix and natively on the already-elevated Windows runner.
+
+inputs:
+  service:
+    description: "Service name, used to resolve the running agent pid"
+    required: true
+  log_file:
+    description: "Path to the agent log file"
+    required: true
+  baseline_truncations:
+    description: "Count of 'Command output truncated' lines before this command was sent"
+    required: true
+  expected_ceiling_bytes:
+    description: "The max_output_bytes value configured for the device; the warning must report exactly this"
+    required: true
+  min_kept_bytes:
+    description: "Lower bound for the reported output_bytes_kept"
+    required: true
+  max_kept_bytes:
+    description: "Upper bound for the reported output_bytes_kept"
+    required: true
+  min_produced_bytes:
+    description: "Minimum volume the command must have written for the scenario to be meaningful"
+    required: true
+  max_rss_mb:
+    description: "Peak agent RSS allowed while the command runs"
+    required: true
+  max_attempts:
+    description: "Maximum number of RSS samples to take while waiting for the truncation warning"
+    required: false
+    default: "120"
+  interval_seconds:
+    description: "Seconds between RSS samples"
+    required: false
+    default: "1"
+  settle_samples:
+    description: "Extra samples taken after the warning appears, so the post-command result copies are included in the peak"
+    required: false
+    default: "10"
+
+runs:
+  using: composite
+  steps:
+    - name: Assert output bounded (Unix)
+      if: runner.os != 'Windows'
+      shell: bash
+      env:
+        SERVICE: ${{ inputs.service }}
+        LOG_FILE: ${{ inputs.log_file }}
+        BASELINE_TRUNCATIONS: ${{ inputs.baseline_truncations }}
+        EXPECTED_CEILING_BYTES: ${{ inputs.expected_ceiling_bytes }}
+        MIN_KEPT_BYTES: ${{ inputs.min_kept_bytes }}
+        MAX_KEPT_BYTES: ${{ inputs.max_kept_bytes }}
+        MIN_PRODUCED_BYTES: ${{ inputs.min_produced_bytes }}
+        MAX_RSS_MB: ${{ inputs.max_rss_mb }}
+        MAX_ATTEMPTS: ${{ inputs.max_attempts }}
+        INTERVAL_SECONDS: ${{ inputs.interval_seconds }}
+        SETTLE_SAMPLES: ${{ inputs.settle_samples }}
+      run: |
+        set -euo pipefail
+        # Resolve pwsh up front: sudo resets PATH via secure_path on some runners.
+        pwsh_path="$(command -v pwsh)"
+        sudo --preserve-env=GITHUB_STEP_SUMMARY "$pwsh_path" -NoProfile -File "$GITHUB_ACTION_PATH/assert.ps1" \
+          -Service "$SERVICE" \
+          -LogFile "$LOG_FILE" \
+          -BaselineTruncations "$BASELINE_TRUNCATIONS" \
+          -ExpectedCeilingBytes "$EXPECTED_CEILING_BYTES" \
+          -MinKeptBytes "$MIN_KEPT_BYTES" \
+          -MaxKeptBytes "$MAX_KEPT_BYTES" \
+          -MinProducedBytes "$MIN_PRODUCED_BYTES" \
+          -MaxRssMb "$MAX_RSS_MB" \
+          -MaxAttempts "$MAX_ATTEMPTS" \
+          -IntervalSeconds "$INTERVAL_SECONDS" \
+          -SettleSamples "$SETTLE_SAMPLES"
+
+    - name: Assert output bounded (Windows)
+      if: runner.os == 'Windows'
+      shell: pwsh
+      env:
+        SERVICE: ${{ inputs.service }}
+        LOG_FILE: ${{ inputs.log_file }}
+        BASELINE_TRUNCATIONS: ${{ inputs.baseline_truncations }}
+        EXPECTED_CEILING_BYTES: ${{ inputs.expected_ceiling_bytes }}
+        MIN_KEPT_BYTES: ${{ inputs.min_kept_bytes }}
+        MAX_KEPT_BYTES: ${{ inputs.max_kept_bytes }}
+        MIN_PRODUCED_BYTES: ${{ inputs.min_produced_bytes }}
+        MAX_RSS_MB: ${{ inputs.max_rss_mb }}
+        MAX_ATTEMPTS: ${{ inputs.max_attempts }}
+        INTERVAL_SECONDS: ${{ inputs.interval_seconds }}
+        SETTLE_SAMPLES: ${{ inputs.settle_samples }}
+      run: |
+        & "$env:GITHUB_ACTION_PATH/assert.ps1" `
+          -Service $env:SERVICE `
+          -LogFile $env:LOG_FILE `
+          -BaselineTruncations ([int]$env:BASELINE_TRUNCATIONS) `
+          -ExpectedCeilingBytes ([int]$env:EXPECTED_CEILING_BYTES) `
+          -MinKeptBytes ([int]$env:MIN_KEPT_BYTES) `
+          -MaxKeptBytes ([int]$env:MAX_KEPT_BYTES) `
+          -MinProducedBytes ([long]$env:MIN_PRODUCED_BYTES) `
+          -MaxRssMb ([int]$env:MAX_RSS_MB) `
+          -MaxAttempts ([int]$env:MAX_ATTEMPTS) `
+          -IntervalSeconds ([int]$env:INTERVAL_SECONDS) `
+          -SettleSamples ([int]$env:SETTLE_SAMPLES)

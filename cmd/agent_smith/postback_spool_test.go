@@ -165,15 +165,22 @@ func TestSpool_AgeBoundOnFlush(t *testing.T) {
 
 // TestSpool_AgeBoundOnEnqueue verifies that a later enqueue prunes entries that
 // have aged out, bounding growth even without a flush.
+//
+// Age is decided by comparing an entry's CreatedAt against now-maxAge, so the
+// two entries are separated by backdating the old one rather than by sleeping
+// past a short maxAge. A sleep-based version has to pick a maxAge small enough to
+// keep the test quick, which then also has to outlast the directory read and
+// flush that follow - on a slow or loaded runner the fresh entry ages out too and
+// the flush delivers nothing. Backdating keeps maxAge comfortably longer than the
+// whole test while still putting the old entry unambiguously past it.
 func TestSpool_AgeBoundOnEnqueue(t *testing.T) {
-	s := newTestSpool(t, 10, 10*time.Millisecond)
+	s := newTestSpool(t, 10, time.Minute)
 
 	if err := s.enqueue(
-		spoolEntry{PostId: "old", Result: []byte("x"), CreatedAt: time.Now()},
+		spoolEntry{PostId: "old", Result: []byte("x"), CreatedAt: time.Now().Add(-time.Hour)},
 	); err != nil {
 		t.Fatalf("enqueue old: %v", err)
 	}
-	time.Sleep(30 * time.Millisecond)
 	if err := s.enqueue(
 		spoolEntry{PostId: "new", Result: []byte("y"), CreatedAt: time.Now()},
 	); err != nil {

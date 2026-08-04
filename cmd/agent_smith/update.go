@@ -117,6 +117,9 @@ func runUpdate(params *updateContext) {
 	if params.Tuning.SasTokenLifetimeHours != tuningFlagUnset {
 		device.SasTokenLifetimeHours = tuningPtr(params.Tuning.SasTokenLifetimeHours)
 	}
+	if params.Tuning.MaxOutputBytes != tuningFlagUnset {
+		device.MaxOutputBytes = tuningPtr(params.Tuning.MaxOutputBytes)
+	}
 
 	// Save the updated configuration file
 	configBytes, err := json.MarshalIndent(device, "", "  ")
