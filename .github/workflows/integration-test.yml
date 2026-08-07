@@ -575,6 +575,7 @@ jobs:
           args: --update --org-id ${{ vars.IT_ORG_ID }} --mqtt-subscribe-timeout-seconds 10 --github-token ${{ secrets.GITHUB_TOKEN }}
 
       - name: Assert bounded subscribe failure and growing backoff
+        id: assert_suback_withheld
         shell: pwsh
         env:
           LOG_FILE: ${{ matrix.log_file }}
@@ -646,6 +647,20 @@ jobs:
             exit 1
           }
           Write-Output "Confirmed the reconnect backoff grows after a withheld SUBACK"
+
+      # What the agent actually did against the stub is only visible in its own
+      # log, and the assertion above deliberately reads counts rather than lines.
+      # Dumping the tail on failure makes a fixture problem (never reached the
+      # broker at all) distinguishable from a real regression (reached it and
+      # blocked) without re-running the job.
+      - name: Dump agent log on withheld-SUBACK failure
+        if: failure() && steps.assert_suback_withheld.outcome == 'failure'
+        shell: pwsh
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+        run: |
+          Write-Output "---- last 100 lines of $($env:LOG_FILE) ----"
+          Get-Content $env:LOG_FILE -Tail 100 -ErrorAction SilentlyContinue
 
       # The original defect made this impossible: with the cycle parked in
       # token.Wait() the stop signal was never reached, the platform waited out

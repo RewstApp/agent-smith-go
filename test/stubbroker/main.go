@@ -19,7 +19,9 @@
 // It mints its own certificate chain on startup and writes the CA certificate to
 // -ca-out so the caller can install it into the host trust store, since the agent
 // verifies the broker's TLS certificate against the system roots like any other
-// Azure IoT Hub connection.
+// Azure IoT Hub connection. The certificate always carries the loopback
+// addresses as SANs, so the agent can be pointed straight at 127.0.0.1 and no
+// hosts-file entry (nor any name resolution) is involved.
 //
 // Whether a SUBSCRIBE is acknowledged is read from -mode-file on every packet,
 // so the harness can flip the broker between withholding and acknowledging
@@ -164,11 +166,20 @@ func newTLSConfig(host string) (*tls.Config, []byte, error) {
 		NotAfter:     time.Now().Add(certValidity),
 		KeyUsage:     x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
 		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
-		// The verifiers on all three platforms match the name against the SAN,
-		// not the common name.
-		DNSNames:              []string{host},
-		IPAddresses:           []net.IP{net.ParseIP("127.0.0.1"), net.IPv6loopback},
+		// The loopback addresses are always present so the agent can be pointed
+		// straight at 127.0.0.1, with no hosts-file entry and therefore no name
+		// resolution involved at all. The verifiers on all three platforms match
+		// against the SAN, not the common name, so an IP host has to land in
+		// IPAddresses; putting an IP literal in DNSNames would simply never match.
+		IPAddresses:           []net.IP{net.IPv4(127, 0, 0, 1), net.IPv6loopback},
 		BasicConstraintsValid: true,
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		if !ip.IsLoopback() {
+			leafTemplate.IPAddresses = append(leafTemplate.IPAddresses, ip)
+		}
+	} else {
+		leafTemplate.DNSNames = []string{host}
 	}
 	leafDER, err := x509.CreateCertificate(
 		rand.Reader,
