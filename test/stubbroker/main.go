@@ -89,7 +89,28 @@ func main() {
 		fmt.Sprintf("path to a file containing %q to acknowledge subscriptions; "+
 			"any other content withholds SUBACK", modeAck),
 	)
+	logPath := flag.String(
+		"log",
+		"",
+		"path to write this broker's log to (defaults to stderr)",
+	)
 	flag.Parse()
+
+	// Redirected here rather than by the launching shell because on Windows the
+	// broker has to be started detached from the step that launches it (a child
+	// tied to that step's console is reaped when the step ends), and a detached
+	// launch has nowhere to attach a redirect. Set up before anything else so a
+	// startup failure - a port already in use, say - lands in the file the
+	// harness reports rather than on a stderr nobody is reading.
+	if *logPath != "" {
+		logFile, err := os.OpenFile(*logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "failed to open log file %s: %v\n", *logPath, err)
+			os.Exit(1)
+		}
+		defer func() { _ = logFile.Close() }()
+		log.SetOutput(logFile)
+	}
 
 	if *host == "" || *caOut == "" {
 		log.Fatal("both -host and -ca-out are required")

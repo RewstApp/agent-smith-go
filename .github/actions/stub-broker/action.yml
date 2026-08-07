@@ -8,13 +8,16 @@ description: >
   and takes the ordinary reconnect path - so it needs a broker that stays alive
   and simply never acknowledges.
 
+  On Windows the broker must be launched detached (via WMI), because a child
+  started with Start-Process -NoNewWindow shares the launching step's console and
+  job object and is reaped when that step ends - the broker bound port 8883,
+  logged "listening", and was gone before the next step could connect.
+
   The broker answers on 127.0.0.1 and its certificate carries the loopback
   addresses as SANs, so the agent is pointed straight at the IP. An earlier
   revision issued the certificate for a fake hostname and mapped it in the hosts
-  file; that resolved on Linux but never took effect on the Windows runner, where
-  the agent's connections never reached the broker at all. Taking name resolution
-  out of the path removes that whole class of failure, and leaves no hosts-file
-  entry a missed cleanup could strand on a runner.
+  file; taking name resolution out of the path keeps the fixture simple and
+  leaves no hosts-file entry a missed cleanup could strand on a runner.
 
   mode=start builds and launches the broker (withholding SUBACK), installs its
   freshly minted CA into the host trust store, and verifies with a real TLS
@@ -92,11 +95,15 @@ runs:
         # The broker binds a high port and reads only files it owns, so it runs
         # unprivileged; the agent reaches it over loopback regardless of the
         # service account it runs as.
+        # The broker writes its own log (-log) rather than having the shell
+        # redirect it, so both platforms capture output the same way; see the
+        # Windows launch for why that flag has to exist at all.
         nohup "$WORKDIR/stubbroker" \
           -listen ":$PORT" \
           -host "$HOST" \
           -ca-out "$CA_FILE" \
-          -mode-file "$MODE_FILE" > "$LOG_FILE" 2>&1 &
+          -mode-file "$MODE_FILE" \
+          -log "$LOG_FILE" > /dev/null 2>&1 &
         echo $! > "$PID_FILE"
 
         for _ in $(seq 1 30); do
@@ -151,17 +158,28 @@ runs:
         go build -tags integration -o $exe ./test/stubbroker
         if ($LASTEXITCODE -ne 0) { throw "failed to build stub broker" }
 
-        # Go's log package writes to stderr, so both streams are captured.
-        $proc = Start-Process -FilePath $exe -PassThru -NoNewWindow `
-          -ArgumentList @(
-            '-listen', ":$($env:PORT)",
-            '-host', $env:HOST,
-            '-ca-out', $env:CA_FILE,
-            '-mode-file', $env:MODE_FILE
-          ) `
-          -RedirectStandardOutput $env:LOG_FILE `
-          -RedirectStandardError "$($env:LOG_FILE).err"
-        Set-Content -Path $env:PID_FILE -Value $proc.Id
+        # Launched through WMI rather than Start-Process. A process started with
+        # Start-Process -NoNewWindow shares this step's console and job object,
+        # so the runner reaps it the moment the step ends: the broker bound port
+        # 8883, logged "listening", and was gone by the time the next step
+        # connected - which surfaced as "the target machine actively refused it".
+        # Win32_Process.Create parents the process to WmiPrvSE instead, outside
+        # both, so it survives to the end of the job. It offers no stream
+        # redirection, which is why the broker takes -log and writes its own.
+        $arguments = @(
+          "`"$exe`"",
+          "-listen", "`":$($env:PORT)`"",
+          "-host", $env:HOST,
+          "-ca-out", "`"$($env:CA_FILE)`"",
+          "-mode-file", "`"$($env:MODE_FILE)`"",
+          "-log", "`"$($env:LOG_FILE)`""
+        ) -join ' '
+        $created = Invoke-CimMethod -ClassName Win32_Process -MethodName Create `
+          -Arguments @{ CommandLine = $arguments }
+        if ($created.ReturnValue -ne 0) {
+          throw "Win32_Process.Create failed with return value $($created.ReturnValue)"
+        }
+        Set-Content -Path $env:PID_FILE -Value $created.ProcessId
 
         for ($i = 0; $i -lt 30; $i++) {
           if ((Test-Path $env:CA_FILE) -and (Get-Item $env:CA_FILE).Length -gt 0) { break }
@@ -169,12 +187,12 @@ runs:
         }
         if (-not (Test-Path $env:CA_FILE) -or (Get-Item $env:CA_FILE).Length -eq 0) {
           Write-Output "Stub broker never wrote its CA certificate; log follows:"
-          Get-Content "$($env:LOG_FILE).err" -ErrorAction SilentlyContinue
+          Get-Content $env:LOG_FILE -ErrorAction SilentlyContinue
           throw "stub broker failed to start"
         }
 
         Import-Certificate -FilePath $env:CA_FILE -CertStoreLocation Cert:\LocalMachine\Root | Out-Null
-        Write-Output "Stub broker started (pid $($proc.Id))"
+        Write-Output "Stub broker started (pid $($created.ProcessId))"
 
     # Proves TCP reachability and that the CA landed in the machine trust store,
     # under default certificate validation - the same verdict the agent reaches.
@@ -187,6 +205,7 @@ runs:
         HOST: ${{ inputs.host }}
         PORT: ${{ inputs.port }}
         LOG_FILE: ${{ steps.paths.outputs.log_file }}
+        PID_FILE: ${{ steps.paths.outputs.pid_file }}
       run: |
         $lastError = $null
         for ($i = 1; $i -le 15; $i++) {
@@ -208,11 +227,19 @@ runs:
           } finally { $tcp.Dispose() }
         }
 
-        Write-Output "Broker log follows:"
-        foreach ($path in @($env:LOG_FILE, "$($env:LOG_FILE).err")) {
-          if (Test-Path $path) { Get-Content $path -ErrorAction SilentlyContinue }
+        # Distinguishes the two ways this fails. A broker that logged "listening"
+        # but is no longer running was reaped after its launching step (the
+        # original Windows failure); one still running means TCP reached it and
+        # the certificate was rejected, i.e. the trust-store install did not take.
+        $alive = $false
+        if (Test-Path $env:PID_FILE) {
+          $brokerPid = (Get-Content $env:PID_FILE).Trim()
+          $alive = $null -ne (Get-Process -Id $brokerPid -ErrorAction SilentlyContinue)
+          Write-Output "Broker process $brokerPid alive: $alive"
         }
-        Write-Error "Stub broker not reachable or not trusted: $lastError"
+        Write-Output "Broker log follows:"
+        if (Test-Path $env:LOG_FILE) { Get-Content $env:LOG_FILE -ErrorAction SilentlyContinue }
+        Write-Error "Stub broker not reachable or not trusted (process alive: $alive): $lastError"
         exit 1
 
     - name: Set broker acknowledgement mode
@@ -233,11 +260,9 @@ runs:
       env:
         LOG_FILE: ${{ steps.paths.outputs.log_file }}
       run: |
-        foreach ($path in @($env:LOG_FILE, "$($env:LOG_FILE).err")) {
-          if (Test-Path $path) {
-            Write-Output "---- $path ----"
-            Get-Content $path -ErrorAction SilentlyContinue
-          }
+        if (Test-Path $env:LOG_FILE) {
+          Write-Output "---- $($env:LOG_FILE) ----"
+          Get-Content $env:LOG_FILE -ErrorAction SilentlyContinue
         }
 
     - name: Tear down broker (Unix)
