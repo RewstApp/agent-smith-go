@@ -520,12 +520,10 @@ jobs:
           $subscribed = Get-PatternCount $content "Subscribed to messages"
           $timedOut   = Get-PatternCount $content "Failed to subscribe: timed out waiting for broker acknowledgement"
           $backoffs   = Get-PatternCount $content "Reconnecting in"
-          $stops      = Get-PatternCount $content "Service stopped"
           "subscribed=$subscribed" >> $env:GITHUB_OUTPUT
           "timed_out=$timedOut"    >> $env:GITHUB_OUTPUT
           "backoffs=$backoffs"     >> $env:GITHUB_OUTPUT
-          "stops=$stops"           >> $env:GITHUB_OUTPUT
-          Write-Output "Baseline -> subscribed=$subscribed timed_out=$timedOut backoffs=$backoffs stops=$stops"
+          Write-Output "Baseline -> subscribed=$subscribed timed_out=$timedOut backoffs=$backoffs"
 
       # Read off a logged path rather than re-deriving the platform path; see the
       # fuller note on the bounded-output scenario's copy of this step.
@@ -670,9 +668,21 @@ jobs:
         env:
           LOG_FILE: ${{ matrix.log_file }}
           SERVICE: ${{ matrix.service }}
-          BASE_STOPS: ${{ steps.suback_baseline.outputs.stops }}
         run: |
-          $baseStops = [int]$env:BASE_STOPS
+          function Get-StopCount {
+            $content = Get-Content $env:LOG_FILE -Raw -ErrorAction SilentlyContinue
+            if ($content) { ([regex]::Matches($content, [regex]::Escape("Service stopped"))).Count } else { 0 }
+          }
+
+          # Counted here rather than reusing the scenario-wide baseline: the
+          # --update that pointed the agent at the stub broker restarts the
+          # service, and that restart logs its own "Service stopped". Measured
+          # against the older baseline the delta was already satisfied before this
+          # stop was even issued, so the assertion "passed" in 0.2s without
+          # observing the stop it exists to test.
+          $before = Get-StopCount
+          Write-Output "Service stopped lines before issuing the stop: $before"
+
           $sw = [System.Diagnostics.Stopwatch]::StartNew()
 
           if ($IsWindows) {
@@ -683,14 +693,21 @@ jobs:
             sudo launchctl stop "system/$($env:SERVICE)"
           }
 
+          # launchctl exits non-zero in situations that are not failures here -
+          # the repo's own stop-service action already guards it with `|| true` -
+          # and the pwsh shell ends by exiting with $LASTEXITCODE, which failed
+          # this step on macOS even after the assertion below had passed. Report
+          # the code and clear it; whether the stop was honored is decided by the
+          # agent's log, not by the service manager's exit status.
+          Write-Output "Stop command exit code: $LASTEXITCODE"
+          $global:LASTEXITCODE = 0
+
           # A clean exit runs the agent's deferred teardown, whose last act is the
           # "Service stopped" line; a force-kill past the stop deadline never
           # produces one.
           $stopped = $false
           while ($sw.Elapsed.TotalSeconds -lt 30) {
-            $content = Get-Content $env:LOG_FILE -Raw -ErrorAction SilentlyContinue
-            $stops = if ($content) { ([regex]::Matches($content, [regex]::Escape("Service stopped"))).Count } else { 0 }
-            if ($stops -gt $baseStops) { $stopped = $true; break }
+            if ((Get-StopCount) -gt $before) { $stopped = $true; break }
             Start-Sleep -Milliseconds 500
           }
           $sw.Stop()
@@ -700,6 +717,7 @@ jobs:
             exit 1
           }
           Write-Output "Service stopped cleanly after $([math]::Round($sw.Elapsed.TotalSeconds, 1))s while wedged"
+          exit 0
 
       - name: Assert no orphaned scripts after the wedged stop
         uses: ./.github/actions/assert-no-orphaned-scripts
