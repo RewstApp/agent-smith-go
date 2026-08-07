@@ -88,6 +88,7 @@ func TestNewConfigContext(t *testing.T) {
 
 	// Tuning flags default to the unset sentinel when omitted.
 	if result.Tuning.MqttConnectTimeoutSeconds != tuningFlagUnset ||
+		result.Tuning.MqttSubscribeTimeoutSeconds != tuningFlagUnset ||
 		result.Tuning.WorkerCount != tuningFlagUnset ||
 		result.Tuning.MessageQueueSize != tuningFlagUnset ||
 		result.Tuning.PostbackMaxAttempts != tuningFlagUnset ||
@@ -104,6 +105,7 @@ func TestNewConfigContext(t *testing.T) {
 			"--config-url", configUrl,
 			"--config-secret", configSecret,
 			"--mqtt-connect-timeout-seconds", "45",
+			"--mqtt-subscribe-timeout-seconds", "60",
 			"--worker-count", "20",
 			"--message-queue-size", "250",
 			"--postback-max-attempts", "5",
@@ -120,6 +122,12 @@ func TestNewConfigContext(t *testing.T) {
 		t.Errorf(
 			"expected MqttConnectTimeoutSeconds 45, got %v",
 			resultWithTuning.Tuning.MqttConnectTimeoutSeconds,
+		)
+	}
+	if resultWithTuning.Tuning.MqttSubscribeTimeoutSeconds != 60 {
+		t.Errorf(
+			"expected MqttSubscribeTimeoutSeconds 60, got %v",
+			resultWithTuning.Tuning.MqttSubscribeTimeoutSeconds,
 		)
 	}
 	if resultWithTuning.Tuning.WorkerCount != 20 {
@@ -223,6 +231,15 @@ func TestNewConfigContext(t *testing.T) {
 				"--postback-max-attempts", "abc",
 			},
 			"invalid value",
+		},
+		{
+			[]string{
+				"--org-id", orgId,
+				"--config-url", configUrl,
+				"--config-secret", configSecret,
+				"--mqtt-subscribe-timeout-seconds", "0",
+			},
+			"invalid mqtt-subscribe-timeout-seconds: must be a positive integer",
 		},
 		{
 			[]string{

@@ -1,0 +1,32 @@
+name: Start service
+description: >
+  Start the agent service via the appropriate platform service manager. The
+  counterpart to stop-service, for scenarios that stop the agent mid-run and need
+  it back (e.g. verifying a stop is honored while the broker is wedged, then
+  resuming the same cycle-by-cycle recovery).
+
+inputs:
+  service:
+    description: "Service name"
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Start service (Linux)
+      if: runner.os == 'Linux'
+      shell: bash
+      run: |
+        sudo systemctl start "${{ inputs.service }}"
+
+    - name: Start service (Windows)
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        sc.exe start "${{ inputs.service }}"
+
+    - name: Start service (macOS)
+      if: runner.os == 'macOS'
+      shell: bash
+      run: |
+        sudo launchctl start "system/${{ inputs.service }}"

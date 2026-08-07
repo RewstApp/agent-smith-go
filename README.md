@@ -353,6 +353,62 @@ value. Example snippet:
 }
 ```
 
+### Bounded MQTT Operations
+
+Every MQTT operation in the connection cycle waits with a deadline, and the
+subscribe wait is additionally interruptible by a service stop. Without that, a
+broker which holds the connection open and answers keepalive pings but stops
+responding to control packets — exactly what Azure IoT Hub does when it throttles
+a device, and what a stateful firewall, VPN idle-timeout, captive portal, or
+SD-WAN appliance that half-opens a connection produces — left the agent parked
+mid-operation forever. It looked healthy (connected, keepalive fine, no errors
+logged) while silently never subscribing, so every command sent to it was queued
+at the broker and never ran, and a stop, upgrade, or uninstall hung until the
+platform's stop deadline expired and force-killed the process.
+
+With bounded waits, a broker in that state produces a clean, logged failure and a
+normal reconnect instead:
+
+- **Subscribe** — a SUBACK that does not arrive within the timeout is logged at
+  `Error` as **`Failed to subscribe: timed out waiting for broker
+  acknowledgement`** (with the timeout and elapsed wait), ends the cycle, and is
+  retried on the reconnect backoff schedule. The backoff is deliberately **not**
+  cleared, so a throttling broker gets progressively longer waits rather than
+  being hammered. A stop arriving during the wait is honored immediately rather
+  than after the timeout.
+- **Connect** — bounded as a backstop above paho's own connect timeout, and
+  likewise stop-interruptible.
+- **Unsubscribe (teardown)** — bounded by a short fixed timeout so total teardown
+  stays inside the Windows SCM stop window and systemd's `TimeoutStopSec`.
+  Exceeding it logs a `Warn` and proceeds to disconnect; against a black-holed
+  connection an unbounded wait would otherwise block until keepalive plus ping
+  timeout elapsed, which alone exceeds the Windows default.
+- **Device-twin reported properties** — bounded so the informational version
+  report cannot wedge the cycle before the agent has subscribed. Its failure
+  stays non-fatal (`Warn`).
+
+Because the service now always exits through its own teardown rather than being
+force-killed, deferred cleanup still runs: temp script files are removed, and the
+spooled-postback and plugin subprocesses are shut down rather than orphaned.
+
+| Config key | Default | Description |
+|------------|---------|-------------|
+| `mqtt_connect_timeout_seconds` | `30` | Bounds a single MQTT connect attempt. |
+| `mqtt_subscribe_timeout_seconds` | `30` | How long to wait for the broker's SUBACK before treating the connection attempt as failed. |
+
+Both fall back to their defaults when omitted or set to a non-positive value, and
+can also be set at install or update time with `--mqtt-connect-timeout-seconds`
+and `--mqtt-subscribe-timeout-seconds`. The teardown-side timeouts (unsubscribe,
+device-twin publish) are fixed constants rather than per-device knobs, because a
+tunable value there could push total teardown past a platform stop deadline the
+operator cannot see. Example snippet:
+
+```json
+{
+  "mqtt_subscribe_timeout_seconds": 45
+}
+```
+
 ### Notification Plugin Supervision
 
 Notification plugins run as separate subprocesses reached over RPC, and every

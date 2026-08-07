@@ -414,22 +414,55 @@ func (svc *serviceContext) runCycle(
 	subscribed := false
 	defer func() {
 		if subscribed && client.IsConnected() {
-			if token := client.Unsubscribe(topic); token.Wait() && token.Error() != nil {
+			// Bounded rather than an open-ended Wait: against a black-holed
+			// connection (packets dropped with no RST) the UNSUBACK never arrives
+			// and an unbounded wait would hold teardown until keepalive plus ping
+			// timeout elapsed, blowing the platform's stop deadline. The
+			// unsubscribe is only an optimization against persistent sessions, so
+			// exceeding the bound warns and falls through to Disconnect.
+			token := client.Unsubscribe(topic)
+			switch {
+			case !token.WaitTimeout(utils.MqttUnsubscribeTimeout):
+				logger.Warn(
+					"Timed out waiting for unsubscribe; disconnecting anyway",
+					"topic", topic,
+					"timeout", utils.MqttUnsubscribeTimeout,
+				)
+			case token.Error() != nil:
 				logger.Warn("Failed to unsubscribe", "topic", topic, "error", token.Error())
 			}
 		}
 		client.Disconnect(disconnectQuiesce)
 	}()
 
+	// Bound the CONNACK wait as a backstop against a token that never resolves,
+	// and make it interruptible so a stop issued mid-handshake is honored at once
+	// instead of after the timeout. See utils.MqttConnectWaitMargin for why the
+	// bound sits above paho's own ConnectTimeout.
+	connectTimeout := device.MqttConnectTimeout() + utils.MqttConnectWaitMargin
+	connectStarted := time.Now()
 	token := client.Connect()
-	if token.Wait() && token.Error() != nil {
+	switch mqtt.WaitToken(token, connectTimeout, stopped) {
+	case mqtt.TokenTimedOut:
+		logger.Error(
+			"Failed to connect: timed out waiting for broker",
+			"timeout", connectTimeout,
+			"elapsed", time.Since(connectStarted),
+		)
+		return false, false, 0
+	case mqtt.TokenInterrupted:
+		logger.Info("Connect abandoned: service is stopping")
+		_ = notifier.Notify("AgentStatus:Stopped") // Best effort notification
+		return true, false, 0
+	}
+	if token.Error() != nil {
 		logger.Error("Failed to connect", "error", token.Error())
 		return false, false, 0
 	}
 
 	err = mqtt.UpdateReportedProperties(client, mqtt.ReportedProperties{
 		AgentVersion: version.Version,
-	})
+	}, utils.MqttPublishTimeout)
 	if err != nil {
 		logger.Warn("Failed to update device twin reported properties", "error", err)
 	} else {
@@ -446,7 +479,34 @@ func (svc *serviceContext) runCycle(
 		svc.enqueueMessage(msg.Payload(), msgQueue, draining, resolvedQueueSize, logger, notifier)
 	})
 
-	if token.Wait() && token.Error() != nil {
+	// paho puts no deadline on a subscribe token, so a broker that keeps the
+	// connection open and answers PINGREQ but never sends SUBACK — a throttling
+	// Azure IoT Hub, or a middlebox that half-opens the connection — used to park
+	// the cycle here forever: connected, never subscribed, executing nothing, and
+	// unable to reach the stop select below. The wait is now bounded and
+	// stop-interruptible. A timeout is handled exactly like a subscribe error:
+	// the cycle ends and the caller's reconnect backoff (deliberately not
+	// cleared) governs the retry, so a throttling broker is backed off from
+	// rather than hammered. subscribed stays false on both failure paths, so
+	// teardown skips the unsubscribe a broker in this state would not answer
+	// either.
+	subscribeTimeout := device.MqttSubscribeTimeout()
+	subscribeStarted := time.Now()
+	switch mqtt.WaitToken(token, subscribeTimeout, stopped) {
+	case mqtt.TokenTimedOut:
+		logger.Error(
+			"Failed to subscribe: timed out waiting for broker acknowledgement",
+			"topic", topic,
+			"timeout", subscribeTimeout,
+			"elapsed", time.Since(subscribeStarted),
+		)
+		return false, false, 0
+	case mqtt.TokenInterrupted:
+		logger.Info("Subscribe abandoned: service is stopping", "topic", topic)
+		_ = notifier.Notify("AgentStatus:Stopped") // Best effort notification
+		return true, false, 0
+	}
+	if token.Error() != nil {
 		logger.Error("Failed to subscribe", "error", token.Error())
 		return false, false, 0
 	}

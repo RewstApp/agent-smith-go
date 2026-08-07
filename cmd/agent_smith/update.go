@@ -97,6 +97,9 @@ func runUpdate(params *updateContext) {
 	if params.Tuning.MqttConnectTimeoutSeconds != tuningFlagUnset {
 		device.MqttConnectTimeoutSeconds = tuningPtr(params.Tuning.MqttConnectTimeoutSeconds)
 	}
+	if params.Tuning.MqttSubscribeTimeoutSeconds != tuningFlagUnset {
+		device.MqttSubscribeTimeoutSeconds = tuningPtr(params.Tuning.MqttSubscribeTimeoutSeconds)
+	}
 	if params.Tuning.WorkerCount != tuningFlagUnset {
 		device.WorkerCount = tuningPtr(params.Tuning.WorkerCount)
 	}

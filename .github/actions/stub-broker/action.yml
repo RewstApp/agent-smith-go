@@ -1,0 +1,249 @@
+name: Stub MQTT broker
+description: >
+  Run the test/stubbroker fixture on the loopback interface as a stand-in Azure
+  IoT Hub, so the agent can be pointed at a broker that completes the TLS
+  handshake, answers CONNECT with CONNACK, keeps answering PINGREQ, and withholds
+  SUBACK for the device's SUBSCRIBE (sc-106107). That combination cannot be
+  produced by cutting the network - a severed connection is detected by keepalive
+  and takes the ordinary reconnect path - so it needs a broker that stays alive
+  and simply never acknowledges.
+
+  mode=start builds and launches the broker (withholding SUBACK), installs its
+  freshly minted CA into the host trust store, and maps the broker hostname to
+  127.0.0.1 in the hosts file, so the agent verifies the connection exactly as it
+  would a real hub. mode=ack / mode=withhold flip the behavior on a live
+  connection without restarting anything. mode=stop tears all of it down and is
+  idempotent and tolerant of missing state, so an always() cleanup step can run
+  it even if start never completed - a runner is never left with a stale trust
+  anchor or hosts entry.
+
+inputs:
+  mode:
+    description: "start, ack, withhold, or stop"
+    required: true
+  host:
+    description: "Hostname to issue the broker certificate for and map to loopback"
+    required: false
+    default: "stub-broker.rewst-it.test"
+  port:
+    description: "Port to listen on (the agent reaches a hub on 8883)"
+    required: false
+    default: "8883"
+
+outputs:
+  host:
+    description: "Hostname the stub broker answers on"
+    value: ${{ inputs.host }}
+  log_file:
+    description: "Path the broker's own log is written to"
+    value: ${{ steps.paths.outputs.log_file }}
+
+runs:
+  using: composite
+  steps:
+    - name: Resolve working paths
+      id: paths
+      shell: pwsh
+      env:
+        RUNNER_TEMP_DIR: ${{ runner.temp }}
+      run: |
+        $workdir = Join-Path $env:RUNNER_TEMP_DIR 'stub-broker'
+        New-Item -ItemType Directory -Force -Path $workdir | Out-Null
+        "workdir=$workdir"                                   >> $env:GITHUB_OUTPUT
+        "log_file=$(Join-Path $workdir 'broker.log')"        >> $env:GITHUB_OUTPUT
+        "mode_file=$(Join-Path $workdir 'mode')"             >> $env:GITHUB_OUTPUT
+        "ca_file=$(Join-Path $workdir 'ca.pem')"             >> $env:GITHUB_OUTPUT
+        "pid_file=$(Join-Path $workdir 'broker.pid')"        >> $env:GITHUB_OUTPUT
+
+    - name: Setup go
+      if: inputs.mode == 'start'
+      uses: actions/setup-go@v6
+      with:
+        go-version: "1.25.0"
+        cache: true
+
+    # The broker starts in the withholding mode so a harness that forgets to set
+    # a mode reproduces the bug rather than silently passing.
+    - name: Launch broker (Unix)
+      if: inputs.mode == 'start' && runner.os != 'Windows'
+      shell: bash
+      env:
+        WORKDIR: ${{ steps.paths.outputs.workdir }}
+        MODE_FILE: ${{ steps.paths.outputs.mode_file }}
+        CA_FILE: ${{ steps.paths.outputs.ca_file }}
+        LOG_FILE: ${{ steps.paths.outputs.log_file }}
+        PID_FILE: ${{ steps.paths.outputs.pid_file }}
+        HOST: ${{ inputs.host }}
+        PORT: ${{ inputs.port }}
+      run: |
+        set -euo pipefail
+        printf 'withhold' > "$MODE_FILE"
+        rm -f "$CA_FILE"
+        # The fixture is behind the `integration` build tag; see its package doc.
+        go build -tags integration -o "$WORKDIR/stubbroker" ./test/stubbroker
+        # The broker binds a high port and reads only files it owns, so it runs
+        # unprivileged; the agent reaches it over loopback regardless of the
+        # service account it runs as.
+        nohup "$WORKDIR/stubbroker" \
+          -listen ":$PORT" \
+          -host "$HOST" \
+          -ca-out "$CA_FILE" \
+          -mode-file "$MODE_FILE" > "$LOG_FILE" 2>&1 &
+        echo $! > "$PID_FILE"
+
+        for _ in $(seq 1 30); do
+          if [ -s "$CA_FILE" ]; then break; fi
+          sleep 1
+        done
+        if [ ! -s "$CA_FILE" ]; then
+          echo "Stub broker never wrote its CA certificate; log follows:"
+          cat "$LOG_FILE" || true
+          exit 1
+        fi
+        echo "Stub broker started (pid $(cat "$PID_FILE"))"
+
+    - name: Trust broker CA and map hostname (Linux)
+      if: inputs.mode == 'start' && runner.os == 'Linux'
+      shell: bash
+      env:
+        CA_FILE: ${{ steps.paths.outputs.ca_file }}
+        HOST: ${{ inputs.host }}
+      run: |
+        set -euo pipefail
+        sudo cp "$CA_FILE" /usr/local/share/ca-certificates/rewst-it-stub-broker.crt
+        sudo update-ca-certificates
+        echo "127.0.0.1 $HOST" | sudo tee -a /etc/hosts
+
+    - name: Trust broker CA and map hostname (macOS)
+      if: inputs.mode == 'start' && runner.os == 'macOS'
+      shell: bash
+      env:
+        CA_FILE: ${{ steps.paths.outputs.ca_file }}
+        HOST: ${{ inputs.host }}
+      run: |
+        set -euo pipefail
+        sudo security add-trusted-cert -d -r trustRoot \
+          -k /Library/Keychains/System.keychain "$CA_FILE"
+        echo "127.0.0.1 $HOST" | sudo tee -a /etc/hosts
+
+    - name: Launch broker and trust CA (Windows)
+      if: inputs.mode == 'start' && runner.os == 'Windows'
+      shell: pwsh
+      env:
+        WORKDIR: ${{ steps.paths.outputs.workdir }}
+        MODE_FILE: ${{ steps.paths.outputs.mode_file }}
+        CA_FILE: ${{ steps.paths.outputs.ca_file }}
+        LOG_FILE: ${{ steps.paths.outputs.log_file }}
+        PID_FILE: ${{ steps.paths.outputs.pid_file }}
+        HOST: ${{ inputs.host }}
+        PORT: ${{ inputs.port }}
+      run: |
+        $ErrorActionPreference = 'Stop'
+        Set-Content -Path $env:MODE_FILE -Value 'withhold' -NoNewline
+        Remove-Item -Path $env:CA_FILE -ErrorAction SilentlyContinue
+
+        $exe = Join-Path $env:WORKDIR 'stubbroker.exe'
+        # The fixture is behind the `integration` build tag; see its package doc.
+        go build -tags integration -o $exe ./test/stubbroker
+        if ($LASTEXITCODE -ne 0) { throw "failed to build stub broker" }
+
+        # Go's log package writes to stderr, so both streams are captured.
+        $proc = Start-Process -FilePath $exe -PassThru -NoNewWindow `
+          -ArgumentList @(
+            '-listen', ":$($env:PORT)",
+            '-host', $env:HOST,
+            '-ca-out', $env:CA_FILE,
+            '-mode-file', $env:MODE_FILE
+          ) `
+          -RedirectStandardOutput $env:LOG_FILE `
+          -RedirectStandardError "$($env:LOG_FILE).err"
+        Set-Content -Path $env:PID_FILE -Value $proc.Id
+
+        for ($i = 0; $i -lt 30; $i++) {
+          if ((Test-Path $env:CA_FILE) -and (Get-Item $env:CA_FILE).Length -gt 0) { break }
+          Start-Sleep -Seconds 1
+        }
+        if (-not (Test-Path $env:CA_FILE) -or (Get-Item $env:CA_FILE).Length -eq 0) {
+          Write-Output "Stub broker never wrote its CA certificate; log follows:"
+          Get-Content "$($env:LOG_FILE).err" -ErrorAction SilentlyContinue
+          throw "stub broker failed to start"
+        }
+
+        Import-Certificate -FilePath $env:CA_FILE -CertStoreLocation Cert:\LocalMachine\Root | Out-Null
+        Add-Content -Path "$env:SystemRoot\System32\drivers\etc\hosts" -Value "127.0.0.1 $($env:HOST)"
+        Write-Output "Stub broker started (pid $($proc.Id))"
+
+    - name: Set broker acknowledgement mode
+      if: inputs.mode == 'ack' || inputs.mode == 'withhold'
+      shell: pwsh
+      env:
+        MODE: ${{ inputs.mode }}
+        MODE_FILE: ${{ steps.paths.outputs.mode_file }}
+      run: |
+        # The broker re-reads this file per packet, so the change applies to the
+        # live connection without a reconnect.
+        Set-Content -Path $env:MODE_FILE -Value $env:MODE -NoNewline
+        Write-Output "Stub broker mode set to $($env:MODE)"
+
+    - name: Report broker log
+      if: inputs.mode == 'stop'
+      shell: pwsh
+      env:
+        LOG_FILE: ${{ steps.paths.outputs.log_file }}
+      run: |
+        foreach ($path in @($env:LOG_FILE, "$($env:LOG_FILE).err")) {
+          if (Test-Path $path) {
+            Write-Output "---- $path ----"
+            Get-Content $path -ErrorAction SilentlyContinue
+          }
+        }
+
+    - name: Tear down broker (Unix)
+      if: inputs.mode == 'stop' && runner.os != 'Windows'
+      shell: bash
+      env:
+        PID_FILE: ${{ steps.paths.outputs.pid_file }}
+        HOST: ${{ inputs.host }}
+      run: |
+        # Every step tolerates missing state so this can run from an always()
+        # cleanup even when start never got far.
+        if [ -f "$PID_FILE" ]; then
+          kill "$(cat "$PID_FILE")" 2>/dev/null || true
+          rm -f "$PID_FILE"
+        fi
+        sudo sed -i.bak "/[[:space:]]$HOST\$/d" /etc/hosts || true
+        if [ "$RUNNER_OS" = "Linux" ]; then
+          sudo rm -f /usr/local/share/ca-certificates/rewst-it-stub-broker.crt
+          sudo update-ca-certificates --fresh || true
+        else
+          sudo security delete-certificate \
+            -c "Rewst Integration Test Stub Broker CA" \
+            /Library/Keychains/System.keychain 2>/dev/null || true
+        fi
+        echo "Stub broker torn down"
+
+    - name: Tear down broker (Windows)
+      if: inputs.mode == 'stop' && runner.os == 'Windows'
+      shell: pwsh
+      env:
+        PID_FILE: ${{ steps.paths.outputs.pid_file }}
+        HOST: ${{ inputs.host }}
+      run: |
+        if (Test-Path $env:PID_FILE) {
+          $brokerPid = Get-Content $env:PID_FILE
+          Stop-Process -Id $brokerPid -Force -ErrorAction SilentlyContinue
+          Remove-Item $env:PID_FILE -ErrorAction SilentlyContinue
+        }
+
+        $hosts = "$env:SystemRoot\System32\drivers\etc\hosts"
+        if (Test-Path $hosts) {
+          (Get-Content $hosts) |
+            Where-Object { $_ -notmatch "\s$([regex]::Escape($env:HOST))\s*$" } |
+            Set-Content $hosts
+        }
+
+        Get-ChildItem Cert:\LocalMachine\Root |
+          Where-Object { $_.Subject -like '*Rewst Integration Test Stub Broker CA*' } |
+          Remove-Item -ErrorAction SilentlyContinue
+
+        Write-Output "Stub broker torn down"

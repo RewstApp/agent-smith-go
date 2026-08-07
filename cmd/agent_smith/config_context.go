@@ -25,6 +25,7 @@ const tuningFlagUnset = -1
 // the corresponding configuration field alone.
 type tuningFlags struct {
 	MqttConnectTimeoutSeconds       int
+	MqttSubscribeTimeoutSeconds     int
 	WorkerCount                     int
 	MessageQueueSize                int
 	PostbackMaxAttempts             int
@@ -43,6 +44,7 @@ type tuningFlags struct {
 // they appear in usage output.
 var tuningFlagNames = []string{
 	"mqtt-connect-timeout-seconds",
+	"mqtt-subscribe-timeout-seconds",
 	"worker-count",
 	"message-queue-size",
 	"postback-max-attempts",
@@ -76,6 +78,12 @@ func bindTuningFlags(fs *flag.FlagSet, t *tuningFlags) {
 		"mqtt-connect-timeout-seconds",
 		tuningFlagUnset,
 		"MQTT connect timeout in seconds (positive integer)",
+	)
+	fs.IntVar(
+		&t.MqttSubscribeTimeoutSeconds,
+		"mqtt-subscribe-timeout-seconds",
+		tuningFlagUnset,
+		"MQTT subscribe acknowledgement timeout in seconds (positive integer)",
 	)
 	fs.IntVar(
 		&t.WorkerCount,
@@ -130,6 +138,7 @@ func (t tuningFlags) validate() error {
 		value int
 	}{
 		{"mqtt-connect-timeout-seconds", t.MqttConnectTimeoutSeconds},
+		{"mqtt-subscribe-timeout-seconds", t.MqttSubscribeTimeoutSeconds},
 		{"worker-count", t.WorkerCount},
 		{"message-queue-size", t.MessageQueueSize},
 		{"postback-max-attempts", t.PostbackMaxAttempts},

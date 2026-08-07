@@ -1,4 +1,10 @@
 version: "2"
+run:
+  # The integration-test fixtures (test/stubbroker) are excluded from
+  # `go test ./...` by this tag so they cannot count uncovered statements
+  # against the coverage threshold; listing it here keeps them linted.
+  build-tags:
+    - integration
 linters:
   enable:
     - errcheck

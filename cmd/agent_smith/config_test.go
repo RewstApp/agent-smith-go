@@ -505,6 +505,7 @@ func TestRunConfig_AppliesTuningFlags(t *testing.T) {
 	}
 	params.Tuning = tuningFlags{
 		MqttConnectTimeoutSeconds:       45,
+		MqttSubscribeTimeoutSeconds:     60,
 		WorkerCount:                     20,
 		MessageQueueSize:                250,
 		PostbackMaxAttempts:             5,
@@ -519,6 +520,12 @@ func TestRunConfig_AppliesTuningFlags(t *testing.T) {
 	device := findWrittenConfig(t, writtenFiles)
 	if device.MqttConnectTimeoutSeconds == nil || *device.MqttConnectTimeoutSeconds != 45 {
 		t.Errorf("expected MqttConnectTimeoutSeconds 45, got %v", device.MqttConnectTimeoutSeconds)
+	}
+	if device.MqttSubscribeTimeoutSeconds == nil || *device.MqttSubscribeTimeoutSeconds != 60 {
+		t.Errorf(
+			"expected MqttSubscribeTimeoutSeconds 60, got %v",
+			device.MqttSubscribeTimeoutSeconds,
+		)
 	}
 	if device.WorkerCount == nil || *device.WorkerCount != 20 {
 		t.Errorf("expected WorkerCount 20, got %v", device.WorkerCount)
@@ -559,6 +566,7 @@ func TestRunConfig_OmittedTuningFlagsFallBackToDefault(t *testing.T) {
 	// Mirror the sentinel defaults a real invocation would carry.
 	params.Tuning = tuningFlags{
 		MqttConnectTimeoutSeconds:       tuningFlagUnset,
+		MqttSubscribeTimeoutSeconds:     tuningFlagUnset,
 		WorkerCount:                     tuningFlagUnset,
 		MessageQueueSize:                tuningFlagUnset,
 		PostbackMaxAttempts:             tuningFlagUnset,
@@ -572,6 +580,7 @@ func TestRunConfig_OmittedTuningFlagsFallBackToDefault(t *testing.T) {
 
 	device := findWrittenConfig(t, writtenFiles)
 	if device.MqttConnectTimeoutSeconds != nil ||
+		device.MqttSubscribeTimeoutSeconds != nil ||
 		device.WorkerCount != nil ||
 		device.MessageQueueSize != nil ||
 		device.PostbackMaxAttempts != nil ||
