@@ -29,4 +29,8 @@ runs:
       if: runner.os == 'macOS'
       shell: bash
       run: |
-        sudo launchctl start "system/${{ inputs.service }}"
+        # Bare label, not a "system/<label>" service target: launchctl's `start`
+        # is a legacy subcommand that resolves a label in the current domain, so
+        # the target form is taken as a literal label and exits 3 (ESRCH). This
+        # mirrors what the agent's own darwinService.Start does.
+        sudo launchctl start "${{ inputs.service }}"
