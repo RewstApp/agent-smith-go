@@ -203,3 +203,47 @@ func TestResolvedPostbackBaseRetryBackoff(t *testing.T) {
 		})
 	}
 }
+
+func TestMqttSubscribeTimeout(t *testing.T) {
+	tests := []struct {
+		name   string
+		value  *int
+		expect time.Duration
+	}{
+		{"unset falls back to default", nil, utils.DefaultMqttSubscribeTimeout},
+		{"zero falls back to default", intPtr(0), utils.DefaultMqttSubscribeTimeout},
+		{"negative falls back to default", intPtr(-5), utils.DefaultMqttSubscribeTimeout},
+		{"positive override honored", intPtr(45), 45 * time.Second},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			d := Device{MqttSubscribeTimeoutSeconds: tt.value}
+			if got := d.MqttSubscribeTimeout(); got != tt.expect {
+				t.Errorf("MqttSubscribeTimeout() = %v, want %v", got, tt.expect)
+			}
+		})
+	}
+}
+
+func TestMqttConnectTimeout(t *testing.T) {
+	tests := []struct {
+		name   string
+		value  *int
+		expect time.Duration
+	}{
+		{"unset falls back to default", nil, utils.DefaultMqttConnectTimeout},
+		{"zero falls back to default", intPtr(0), utils.DefaultMqttConnectTimeout},
+		{"negative falls back to default", intPtr(-5), utils.DefaultMqttConnectTimeout},
+		{"positive override honored", intPtr(45), 45 * time.Second},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			d := Device{MqttConnectTimeoutSeconds: tt.value}
+			if got := d.MqttConnectTimeout(); got != tt.expect {
+				t.Errorf("MqttConnectTimeout() = %v, want %v", got, tt.expect)
+			}
+		})
+	}
+}

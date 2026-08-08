@@ -25,6 +25,13 @@ type Device struct {
 	// utils.DefaultMqttConnectTimeout. Useful for endpoints with slow TLS
 	// handshakes that need more than the default.
 	MqttConnectTimeoutSeconds *int `json:"mqtt_connect_timeout_seconds,omitempty"`
+	// MqttSubscribeTimeoutSeconds optionally overrides how long the agent waits
+	// for the broker to acknowledge its SUBSCRIBE before treating the connection
+	// attempt as failed. When unset (or non-positive) the agent falls back to
+	// utils.DefaultMqttSubscribeTimeout. Raising it suits an endpoint whose
+	// broker legitimately acknowledges slowly; lowering it makes a throttling or
+	// half-open broker be abandoned (and retried on the reconnect backoff) sooner.
+	MqttSubscribeTimeoutSeconds *int `json:"mqtt_subscribe_timeout_seconds,omitempty"`
 	// WorkerCount optionally overrides how many concurrent command-execution
 	// workers drain the inbound message queue. When unset (or non-positive) the
 	// agent falls back to DefaultWorkerCount. Deployments that expect a high
@@ -180,6 +187,17 @@ func (d Device) MqttConnectTimeout() time.Duration {
 		return time.Duration(*d.MqttConnectTimeoutSeconds) * time.Second
 	}
 	return utils.DefaultMqttConnectTimeout
+}
+
+// MqttSubscribeTimeout returns how long to wait for the broker's SUBACK before
+// treating the connection attempt as failed, honoring the per-device override
+// when set to a positive value and falling back to the documented default. It is
+// always positive, so the bound can never be disabled by configuration.
+func (d Device) MqttSubscribeTimeout() time.Duration {
+	if d.MqttSubscribeTimeoutSeconds != nil && *d.MqttSubscribeTimeoutSeconds > 0 {
+		return time.Duration(*d.MqttSubscribeTimeoutSeconds) * time.Second
+	}
+	return utils.DefaultMqttSubscribeTimeout
 }
 
 // sasTokenLifetimeOverrideStr is overridable via -ldflags for integration

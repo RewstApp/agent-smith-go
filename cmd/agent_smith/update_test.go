@@ -112,6 +112,7 @@ func TestRunUpdate_AppliesProvidedTuningFlags(t *testing.T) {
 	params.FS = captureUpdateFS(deviceWithTuningJSON("test-org", 10, 1, 10, 1, 1, 1), &written)
 	params.Tuning = tuningFlags{
 		MqttConnectTimeoutSeconds:       45,
+		MqttSubscribeTimeoutSeconds:     60,
 		WorkerCount:                     20,
 		MessageQueueSize:                250,
 		PostbackMaxAttempts:             5,
@@ -123,6 +124,12 @@ func TestRunUpdate_AppliesProvidedTuningFlags(t *testing.T) {
 
 	if written.MqttConnectTimeoutSeconds == nil || *written.MqttConnectTimeoutSeconds != 45 {
 		t.Errorf("expected MqttConnectTimeoutSeconds 45, got %v", written.MqttConnectTimeoutSeconds)
+	}
+	if written.MqttSubscribeTimeoutSeconds == nil || *written.MqttSubscribeTimeoutSeconds != 60 {
+		t.Errorf(
+			"expected MqttSubscribeTimeoutSeconds 60, got %v",
+			written.MqttSubscribeTimeoutSeconds,
+		)
 	}
 	if written.WorkerCount == nil || *written.WorkerCount != 20 {
 		t.Errorf("expected WorkerCount 20, got %v", written.WorkerCount)
@@ -152,6 +159,7 @@ func TestRunUpdate_OmittedTuningFlagsPreserveExistingValues(t *testing.T) {
 	// Only overwrite one field; the others must be preserved as-is.
 	params.Tuning = tuningFlags{
 		MqttConnectTimeoutSeconds:       tuningFlagUnset,
+		MqttSubscribeTimeoutSeconds:     tuningFlagUnset,
 		WorkerCount:                     15,
 		MessageQueueSize:                tuningFlagUnset,
 		PostbackMaxAttempts:             tuningFlagUnset,

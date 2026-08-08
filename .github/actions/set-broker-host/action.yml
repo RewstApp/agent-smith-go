@@ -1,0 +1,62 @@
+name: Set agent broker host
+description: >
+  Point the installed agent at a different MQTT broker by rewriting
+  azure_iot_hub_host in its config file, exposing the replaced value as an output
+  so a later step can restore it. Used to swap a test agent between the real
+  Azure IoT Hub and the local stub broker (sc-106107); the agent reads its config
+  only when a service cycle starts, so the change takes effect on the next
+  service restart. See fixture.ps1 for details.
+
+inputs:
+  config_dir:
+    description: "Directory containing the per-org agent config (without org id suffix)"
+    required: true
+  org_id:
+    description: "Organization id whose config should be rewritten"
+    required: true
+  host:
+    description: "Broker hostname to write into the config"
+    required: true
+
+outputs:
+  previous_host:
+    description: "The azure_iot_hub_host value that was replaced"
+    value: ${{ steps.rewrite_unix.outputs.previous_host || steps.rewrite_windows.outputs.previous_host }}
+
+runs:
+  using: composite
+  steps:
+    - name: Set broker host (Unix)
+      id: rewrite_unix
+      if: runner.os != 'Windows'
+      shell: bash
+      env:
+        CONFIG_DIR: ${{ inputs.config_dir }}
+        ORG_ID: ${{ inputs.org_id }}
+        BROKER_HOST: ${{ inputs.host }}
+      run: |
+        set -euo pipefail
+        previous_file="$RUNNER_TEMP/agent-previous-broker-host"
+        # Resolve pwsh up front: sudo resets PATH via secure_path on some runners.
+        pwsh_path="$(command -v pwsh)"
+        sudo "$pwsh_path" -NoProfile -File "$GITHUB_ACTION_PATH/fixture.ps1" \
+          -ConfigFile "$CONFIG_DIR/$ORG_ID/config.json" \
+          -BrokerHost "$BROKER_HOST" \
+          -PreviousHostFile "$previous_file"
+        echo "previous_host=$(cat "$previous_file")" >> "$GITHUB_OUTPUT"
+
+    - name: Set broker host (Windows)
+      id: rewrite_windows
+      if: runner.os == 'Windows'
+      shell: pwsh
+      env:
+        CONFIG_DIR: ${{ inputs.config_dir }}
+        ORG_ID: ${{ inputs.org_id }}
+        BROKER_HOST: ${{ inputs.host }}
+      run: |
+        $previousFile = Join-Path $env:RUNNER_TEMP 'agent-previous-broker-host'
+        & "$env:GITHUB_ACTION_PATH/fixture.ps1" `
+          -ConfigFile (Join-Path (Join-Path $env:CONFIG_DIR $env:ORG_ID) 'config.json') `
+          -BrokerHost $env:BROKER_HOST `
+          -PreviousHostFile $previousFile
+        "previous_host=$(Get-Content $previousFile -Raw)" >> $env:GITHUB_OUTPUT

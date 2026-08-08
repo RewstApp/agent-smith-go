@@ -494,6 +494,328 @@ jobs:
           }
           Write-Output "Confirmed exactly one post-reconnect command execution"
 
+      # ---- Withheld-SUBACK scenario (sc-106107) ----
+      # The reconnection scenario above severs the connection, which keepalive
+      # detects and the agent handles as an ordinary reconnect. This one covers
+      # the harder case it cannot reach: a broker that stays alive - completing
+      # the TLS handshake, answering CONNECT with CONNACK, and answering every
+      # PINGREQ - while never sending SUBACK. That is what Azure IoT Hub does when
+      # it throttles a device, and what a middlebox that half-opens a connection
+      # produces. Before the fix it left the agent connected but never subscribed,
+      # silently running no commands and unable to honor a stop; now the subscribe
+      # wait is bounded and stop-interruptible, so the agent fails cleanly, backs
+      # off, and recovers on a later cycle once the broker starts acknowledging.
+      # Counts are compared as deltas because the log already carries lines from
+      # earlier cycles.
+      - name: Capture SUBACK-withheld baseline counts
+        id: suback_baseline
+        shell: pwsh
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+        run: |
+          $content = Get-Content $env:LOG_FILE -Raw -ErrorAction SilentlyContinue
+          function Get-PatternCount($text, $needle) {
+            if ($text) { ([regex]::Matches($text, [regex]::Escape($needle))).Count } else { 0 }
+          }
+          $subscribed = Get-PatternCount $content "Subscribed to messages"
+          $timedOut   = Get-PatternCount $content "Failed to subscribe: timed out waiting for broker acknowledgement"
+          $backoffs   = Get-PatternCount $content "Reconnecting in"
+          "subscribed=$subscribed" >> $env:GITHUB_OUTPUT
+          "timed_out=$timedOut"    >> $env:GITHUB_OUTPUT
+          "backoffs=$backoffs"     >> $env:GITHUB_OUTPUT
+          Write-Output "Baseline -> subscribed=$subscribed timed_out=$timedOut backoffs=$backoffs"
+
+      # Read off a logged path rather than re-deriving the platform path; see the
+      # fuller note on the bounded-output scenario's copy of this step.
+      - name: Resolve the scripts directory (SUBACK scenario)
+        id: suback_scripts_dir
+        shell: pwsh
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+        run: |
+          $content = Get-Content $env:LOG_FILE -Raw -ErrorAction SilentlyContinue
+          $found = if ($content) { [regex]::Matches($content, 'Command saved to[^\r\n]*path=(?<p>\S+)') } else { @() }
+          if ($found.Count -eq 0) {
+            Write-Error "No 'Command saved to' line in the log; cannot resolve the scripts directory"
+            exit 1
+          }
+          $dir = Split-Path -Parent $found[$found.Count - 1].Groups['p'].Value.Trim('"')
+          "path=$dir" >> $env:GITHUB_OUTPUT
+          Write-Output "Scripts directory: $dir"
+
+      - name: Snapshot temp script files before the withheld-SUBACK scenario
+        uses: ./.github/actions/assert-no-orphaned-scripts
+        with:
+          mode: snapshot
+          scripts_dir: ${{ steps.suback_scripts_dir.outputs.path }}
+
+      - name: Start stub broker withholding SUBACK
+        id: stub_broker
+        uses: ./.github/actions/stub-broker
+        with:
+          mode: start
+
+      - name: Point agent at the stub broker
+        id: stub_host
+        uses: ./.github/actions/set-broker-host
+        with:
+          config_dir: ${{ matrix.config_dir }}
+          org_id: ${{ vars.IT_ORG_ID }}
+          host: ${{ steps.stub_broker.outputs.host }}
+
+      # --update restarts the service, so the rewritten broker host takes effect.
+      # The short subscribe timeout keeps each wedged cycle to ~10s so several
+      # backoff slots are observable inside the job.
+      - name: Restart agent against the stub broker
+        uses: ./.github/actions/run-agent
+        with:
+          binary: ${{ matrix.binary }}
+          args: --update --org-id ${{ vars.IT_ORG_ID }} --mqtt-subscribe-timeout-seconds 10 --github-token ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Assert bounded subscribe failure and growing backoff
+        id: assert_suback_withheld
+        shell: pwsh
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+          BASE_TIMED_OUT: ${{ steps.suback_baseline.outputs.timed_out }}
+          BASE_BACKOFFS: ${{ steps.suback_baseline.outputs.backoffs }}
+          BASE_SUBSCRIBED: ${{ steps.suback_baseline.outputs.subscribed }}
+        run: |
+          $baseTimedOut   = [int]$env:BASE_TIMED_OUT
+          $baseBackoffs   = [int]$env:BASE_BACKOFFS
+          $baseSubscribed = [int]$env:BASE_SUBSCRIBED
+          $needle = "Failed to subscribe: timed out waiting for broker acknowledgement"
+
+          # Two wedged cycles plus their backoff waits take roughly 10+2+10+4s.
+          $content = ""
+          for ($i = 1; $i -le 60; $i++) {
+            $content = Get-Content $env:LOG_FILE -Raw -ErrorAction SilentlyContinue
+            $timedOut = if ($content) { ([regex]::Matches($content, [regex]::Escape($needle))).Count } else { 0 }
+            $backoffs = if ($content) { ([regex]::Matches($content, [regex]::Escape("Reconnecting in"))).Count } else { 0 }
+            if (($timedOut - $baseTimedOut) -ge 2 -and ($backoffs - $baseBackoffs) -ge 2) { break }
+            Start-Sleep -Seconds 2
+          }
+
+          $timedOut = if ($content) { ([regex]::Matches($content, [regex]::Escape($needle))).Count } else { 0 }
+          if (($timedOut - $baseTimedOut) -lt 2) {
+            Write-Error "Expected at least two bounded subscribe timeouts, got $($timedOut - $baseTimedOut)"
+            exit 1
+          }
+          Write-Output "Bounded subscribe timeouts observed: $($timedOut - $baseTimedOut)"
+
+          # The agent must not have subscribed: a withheld SUBACK means no
+          # subscription, and a "Subscribed to messages" line here would mean the
+          # stub broker is not the broker the agent reached.
+          $subscribed = ([regex]::Matches($content, [regex]::Escape("Subscribed to messages"))).Count
+          if ($subscribed -ne $baseSubscribed) {
+            Write-Error "Agent reported a subscription against a broker that withholds SUBACK"
+            exit 1
+          }
+
+          # The backoff must not be cleared by a timed-out subscribe: a throttling
+          # broker needs progressively longer waits, not a tight reconnect loop.
+          # Go renders a duration as concatenated unit components ("4.1s",
+          # "1m4s"), so each component is summed rather than parsed as one number.
+          function ConvertTo-Seconds([string]$value) {
+            $total = 0.0
+            foreach ($m in [regex]::Matches($value, '(?<n>[0-9.]+)(?<u>ms|us|ns|h|m|s)')) {
+              $n = [double]$m.Groups['n'].Value
+              switch ($m.Groups['u'].Value) {
+                'ns' { $total += $n / 1e9 }
+                'us' { $total += $n / 1e6 }
+                'ms' { $total += $n / 1e3 }
+                's'  { $total += $n }
+                'm'  { $total += $n * 60 }
+                'h'  { $total += $n * 3600 }
+              }
+            }
+            return $total
+          }
+
+          $waits = [regex]::Matches($content, 'Reconnecting in: timeout=(?<t>[0-9.a-z]+)') |
+            ForEach-Object { ConvertTo-Seconds $_.Groups['t'].Value }
+          $new = @($waits | Select-Object -Skip $baseBackoffs)
+          if ($new.Count -lt 2) {
+            Write-Error "Expected at least two reconnect waits after the subscribe timeouts, got $($new.Count)"
+            exit 1
+          }
+          Write-Output "Reconnect waits after the subscribe timeouts: $($new -join ', ')"
+          if ($new[1] -le $new[0]) {
+            Write-Error "Reconnect backoff did not grow ($($new[0]) then $($new[1])); a timed-out subscribe must not clear it"
+            exit 1
+          }
+          Write-Output "Confirmed the reconnect backoff grows after a withheld SUBACK"
+
+      # What the agent actually did against the stub is only visible in its own
+      # log, and the assertion above deliberately reads counts rather than lines.
+      # Dumping the tail on failure makes a fixture problem (never reached the
+      # broker at all) distinguishable from a real regression (reached it and
+      # blocked) without re-running the job.
+      - name: Dump agent log on withheld-SUBACK failure
+        if: failure() && steps.assert_suback_withheld.outcome == 'failure'
+        shell: pwsh
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+        run: |
+          Write-Output "---- last 100 lines of $($env:LOG_FILE) ----"
+          Get-Content $env:LOG_FILE -Tail 100 -ErrorAction SilentlyContinue
+
+      # The original defect made this impossible: with the cycle parked in
+      # token.Wait() the stop signal was never reached, the platform waited out
+      # its stop deadline (30s on the Windows SCM) and force-killed the process.
+      - name: Assert the service stops promptly while wedged on the stub broker
+        shell: pwsh
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+          SERVICE: ${{ matrix.service }}
+        run: |
+          function Get-StopCount {
+            $content = Get-Content $env:LOG_FILE -Raw -ErrorAction SilentlyContinue
+            if ($content) { ([regex]::Matches($content, [regex]::Escape("Service stopped"))).Count } else { 0 }
+          }
+
+          # Counted here rather than reusing the scenario-wide baseline: the
+          # --update that pointed the agent at the stub broker restarts the
+          # service, and that restart logs its own "Service stopped". Measured
+          # against the older baseline the delta was already satisfied before this
+          # stop was even issued, so the assertion "passed" in 0.2s without
+          # observing the stop it exists to test.
+          $before = Get-StopCount
+          Write-Output "Service stopped lines before issuing the stop: $before"
+
+          $sw = [System.Diagnostics.Stopwatch]::StartNew()
+
+          if ($IsWindows) {
+            sc.exe stop $env:SERVICE | Out-Null
+          } elseif ($IsLinux) {
+            sudo systemctl stop $env:SERVICE
+          } else {
+            # Bare label, not a "system/<label>" service target. launchctl's
+            # `stop` is a legacy subcommand that resolves a label in the current
+            # domain, so the target form is taken as a literal label, matches
+            # nothing, and exits 3 (ESRCH) without ever signalling the agent.
+            # This mirrors what the agent's own darwinService.Stop does. `stop`
+            # leaves the job loaded, so the later start-service can run it again.
+            sudo launchctl stop $env:SERVICE
+          }
+
+          # launchctl exits non-zero in situations that are not failures here -
+          # the repo's own stop-service action already guards it with `|| true` -
+          # and the pwsh shell ends by exiting with $LASTEXITCODE, which failed
+          # this step on macOS even after the assertion below had passed. Report
+          # the code and clear it; whether the stop was honored is decided by the
+          # agent's log, not by the service manager's exit status.
+          Write-Output "Stop command exit code: $LASTEXITCODE"
+          $global:LASTEXITCODE = 0
+
+          # A clean exit runs the agent's deferred teardown, whose last act is the
+          # "Service stopped" line; a force-kill past the stop deadline never
+          # produces one.
+          $stopped = $false
+          while ($sw.Elapsed.TotalSeconds -lt 30) {
+            if ((Get-StopCount) -gt $before) { $stopped = $true; break }
+            Start-Sleep -Milliseconds 500
+          }
+          $sw.Stop()
+
+          if (-not $stopped) {
+            # Both halves matter when this fails: the agent log says whether the
+            # stop was received and ignored, and the service manager says whether
+            # it was ever delivered.
+            Write-Output "---- last 60 lines of the agent log ----"
+            Get-Content $env:LOG_FILE -Tail 60 -ErrorAction SilentlyContinue
+            Write-Output "---- service manager state ----"
+            if ($IsWindows) {
+              sc.exe query $env:SERVICE
+            } elseif ($IsLinux) {
+              sudo systemctl status $env:SERVICE --no-pager
+            } else {
+              # print, unlike stop, is a modern subcommand and does take the
+              # system/<label> service target.
+              sudo launchctl print "system/$($env:SERVICE)"
+            }
+            $global:LASTEXITCODE = 0
+            Write-Error "Service did not log a clean stop within 30s while wedged on a withholding broker"
+            exit 1
+          }
+          Write-Output "Service stopped cleanly after $([math]::Round($sw.Elapsed.TotalSeconds, 1))s while wedged"
+          exit 0
+
+      - name: Assert no orphaned scripts after the wedged stop
+        uses: ./.github/actions/assert-no-orphaned-scripts
+        with:
+          mode: assert
+          scripts_dir: ${{ steps.suback_scripts_dir.outputs.path }}
+
+      - name: Restart the service against the still-withholding broker
+        uses: ./.github/actions/start-service
+        with:
+          service: ${{ matrix.service }}
+
+      - name: Wait for the agent to wedge on the stub broker again
+        uses: ./.github/actions/wait-for-log-line
+        with:
+          log_file: ${{ matrix.log_file }}
+          pattern: "Failed to subscribe: timed out waiting for broker acknowledgement"
+          max_attempts: "60"
+          interval_seconds: "2"
+
+      # Flipped on the live connection - the stub re-reads its mode per packet -
+      # so recovery is the agent's own next reconnect cycle, not a restart.
+      - name: Switch stub broker to acknowledge SUBACK
+        uses: ./.github/actions/stub-broker
+        with:
+          mode: ack
+
+      - name: Assert the agent recovers on a later cycle
+        shell: pwsh
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+          BASELINE: ${{ steps.suback_baseline.outputs.subscribed }}
+        run: |
+          $baseline = [int]$env:BASELINE
+          for ($i = 1; $i -le 60; $i++) {
+            $content = Get-Content $env:LOG_FILE -Raw -ErrorAction SilentlyContinue
+            $count = if ($content) { ([regex]::Matches($content, [regex]::Escape("Subscribed to messages"))).Count } else { 0 }
+            if ($count -gt $baseline) {
+              Write-Output "Agent subscribed on a later cycle once SUBACK arrived (count $count > baseline $baseline) after ~$($i * 2)s"
+              exit 0
+            }
+            Start-Sleep -Seconds 2
+          }
+          Write-Error "Agent never subscribed after the stub broker started acknowledging"
+          exit 1
+
+      - name: Restore the real broker host
+        if: always() && steps.stub_host.outputs.previous_host != ''
+        uses: ./.github/actions/set-broker-host
+        with:
+          config_dir: ${{ matrix.config_dir }}
+          org_id: ${{ vars.IT_ORG_ID }}
+          host: ${{ steps.stub_host.outputs.previous_host }}
+
+      - name: Stop stub broker
+        if: always()
+        uses: ./.github/actions/stub-broker
+        with:
+          mode: stop
+
+      - name: Restart agent against the real broker
+        if: always() && steps.stub_host.outputs.previous_host != ''
+        uses: ./.github/actions/run-agent
+        with:
+          binary: ${{ matrix.binary }}
+          args: --update --org-id ${{ vars.IT_ORG_ID }} --mqtt-subscribe-timeout-seconds 30 --github-token ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Wait for resubscription to the real broker
+        if: always() && steps.stub_host.outputs.previous_host != ''
+        uses: ./.github/actions/wait-for-log-line
+        with:
+          log_file: ${{ matrix.log_file }}
+          pattern: Subscribed to messages
+          max_attempts: "60"
+          interval_seconds: "2"
+
       # ---- Per-command execution timeout scenario (sc-103835) ----
       # Configure a short per-command timeout, dispatch a script that sleeps well
       # beyond it, and confirm the agent kills the command (logging a timeout) and

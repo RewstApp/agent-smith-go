@@ -67,7 +67,7 @@ Loaded plugins are supervised: a subprocess that exits or crashes is detected (b
 
 ### Message Processing Flow
 
-1. Agent connects to Azure IoT Hub via MQTT on topic `devices/{device_id}/messages/devicebound/#`
+1. Agent connects to Azure IoT Hub via MQTT on topic `devices/{device_id}/messages/devicebound/#`. Every MQTT operation waits with a deadline rather than an open-ended `token.Wait()`, and the connect/subscribe waits are additionally interruptible by the service stop signal, so a broker that keeps the connection open but stops acknowledging control packets (a throttling hub, a half-open middlebox) produces a logged failure and a backed-off reconnect instead of a device that is connected but never subscribed and cannot be stopped. See the README's "Bounded MQTT Operations" section.
 2. Receives JSON messages containing either `commands` (shell scripts) or `get_installation` (system info requests)
 3. Executes commands using platform-appropriate interpreter (PowerShell on Windows, Bash on Unix). Stdout and stderr are each captured through an independently bounded writer (`max_output_bytes`, default 10 MiB per stream) so a verbose script cannot OOM the agent; output past the ceiling is discarded and the result is flagged `truncated` with both byte counts. See the README's "Bounding per-command output size" section.
 4. Posts results back to Rewst engine at `https://{rewst_engine_host}/webhooks/custom/action/{post_id}`

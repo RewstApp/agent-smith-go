@@ -123,6 +123,9 @@ func runConfig(params *configContext) error {
 	response.Configuration.MqttConnectTimeoutSeconds = tuningPtr(
 		params.Tuning.MqttConnectTimeoutSeconds,
 	)
+	response.Configuration.MqttSubscribeTimeoutSeconds = tuningPtr(
+		params.Tuning.MqttSubscribeTimeoutSeconds,
+	)
 	response.Configuration.WorkerCount = tuningPtr(params.Tuning.WorkerCount)
 	response.Configuration.MessageQueueSize = tuningPtr(params.Tuning.MessageQueueSize)
 	response.Configuration.PostbackMaxAttempts = tuningPtr(params.Tuning.PostbackMaxAttempts)

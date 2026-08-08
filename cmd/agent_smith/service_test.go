@@ -660,23 +660,42 @@ func (m *teardownTrackingClient) Disconnect(_ uint) {
 	*m.calls = append(*m.calls, "disconnect")
 }
 
-// blockingToken is a mock MQTT token whose Wait blocks until release is closed.
-// started is a buffered channel that receives one item when Wait is first called.
+// blockingToken is a mock MQTT token whose waits block until release is closed.
+// started is a buffered channel that receives one item when a wait is first
+// entered. WaitTimeout honors its deadline (returning false when it elapses
+// first) so callers that bound their wait behave as they would against paho.
 type blockingToken struct {
 	started chan struct{}
 	release chan struct{}
 }
 
-func (t *blockingToken) Wait() bool {
+func (t *blockingToken) signalStarted() {
 	select {
 	case t.started <- struct{}{}:
 	default:
 	}
+}
+
+func (t *blockingToken) Wait() bool {
+	t.signalStarted()
 	<-t.release
 	return true
 }
-func (t *blockingToken) WaitTimeout(_ time.Duration) bool { return true }
+
+func (t *blockingToken) WaitTimeout(d time.Duration) bool {
+	t.signalStarted()
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-t.release:
+		return true
+	case <-timer.C:
+		return false
+	}
+}
+
 func (t *blockingToken) Done() <-chan struct{} {
+	t.signalStarted()
 	ch := make(chan struct{})
 	go func() { <-t.release; close(ch) }()
 	return ch
