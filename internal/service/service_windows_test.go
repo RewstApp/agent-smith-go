@@ -433,6 +433,39 @@ func TestWindowsService_Stop_RunningIsPolledNotRejected(t *testing.T) {
 	}
 }
 
+func TestWindowsService_ResolveStopTimeout(t *testing.T) {
+	orig := stopTimeoutOverrideStr
+	t.Cleanup(func() { stopTimeoutOverrideStr = orig })
+
+	// No override: the documented constant.
+	stopTimeoutOverrideStr = ""
+	s := &windowsService{}
+	if got := s.resolveStopTimeout(); got != serviceStopTimeout {
+		t.Errorf("expected %s, got %s", serviceStopTimeout, got)
+	}
+
+	// A valid, positive override wins (integration builds).
+	stopTimeoutOverrideStr = "25s"
+	if got := s.resolveStopTimeout(); got != 25*time.Second {
+		t.Errorf("expected 25s, got %s", got)
+	}
+
+	// Garbage and non-positive overrides fall back rather than disabling the bound.
+	for _, bad := range []string{"nonsense", "0s", "-5s"} {
+		stopTimeoutOverrideStr = bad
+		if got := s.resolveStopTimeout(); got != serviceStopTimeout {
+			t.Errorf("override %q: expected fallback to %s, got %s", bad, serviceStopTimeout, got)
+		}
+	}
+
+	// The per-instance value (unit tests) wins over the override.
+	stopTimeoutOverrideStr = "25s"
+	s.stopTimeout = time.Millisecond
+	if got := s.resolveStopTimeout(); got != time.Millisecond {
+		t.Errorf("expected 1ms, got %s", got)
+	}
+}
+
 func TestServiceStateName(t *testing.T) {
 	cases := map[svc.State]string{
 		svc.Stopped:         "Stopped",

@@ -1555,6 +1555,304 @@ jobs:
           scripts_dir: ${{ steps.inflight_script.outputs.scripts_dir }}
           orphan_path: ${{ steps.inflight_script.outputs.path }}
 
+      # ---- Wedged Windows service stop scenario (sc-106108) ----
+      # windowsService.Stop() polled the service state every 250ms in an
+      # unbounded loop, so a service that never reached Stopped hung its caller
+      # forever - and every caller is blocking: the unattended auto-updater, the
+      # installer, and uninstall. The symptom was a device that went offline
+      # during a routine update with no error logged anywhere.
+      #
+      # The wedge is produced by pointing the agent's own service registration at
+      # the test/wedgedservice fixture, which accepts the stop control, reports
+      # StopPending, and never stops (see the action for why killing or
+      # suspending the agent will not do). The installed agent executable and
+      # config file are left alone, so they can be hashed before and after to
+      # prove an aborted update did not touch them.
+      #
+      # Windows only: the Unix service implementations have no such polling loop.
+      - name: Capture installed file hashes before the wedge
+        if: matrix.os == 'windows-latest'
+        id: wedge_hashes
+        shell: pwsh
+        env:
+          ORG_ID: ${{ vars.IT_ORG_ID }}
+          CONFIG_DIR: ${{ matrix.config_dir }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $exe = Join-Path $env:PROGRAMFILES "RewstRemoteAgent\$($env:ORG_ID)\agent_smith.win.exe"
+          $config = Join-Path $env:CONFIG_DIR "$($env:ORG_ID)\config.json"
+          foreach ($path in @($exe, $config)) {
+            if (-not (Test-Path $path)) { throw "expected installed file is missing: $path" }
+          }
+          $exeHash = (Get-FileHash -Path $exe -Algorithm SHA256).Hash
+          $configHash = (Get-FileHash -Path $config -Algorithm SHA256).Hash
+          "exe_path=$exe"         >> $env:GITHUB_OUTPUT
+          "config_path=$config"   >> $env:GITHUB_OUTPUT
+          "exe_hash=$exeHash"     >> $env:GITHUB_OUTPUT
+          "config_hash=$configHash" >> $env:GITHUB_OUTPUT
+          Write-Output "agent executable $exe sha256=$exeHash"
+          Write-Output "config file $config sha256=$configHash"
+
+      - name: Wedge the agent service in StopPending
+        if: matrix.os == 'windows-latest'
+        uses: ./.github/actions/wedged-service
+        with:
+          mode: wedge
+          service: ${{ matrix.service }}
+
+      - name: Assert the update aborts on a wedged stop
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        env:
+          IT_BINARY: ${{ matrix.it_binary }}
+          ORG_ID: ${{ vars.IT_ORG_ID }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # The integration binary is the invoker because its stop deadline is
+          # overridden to 25s (see scripts/build_integration_test.ps1). The
+          # released default is five minutes; that the constant is what governs a
+          # production build is covered by unit tests rather than by keeping a
+          # runner idle for five minutes here.
+          $sw = [System.Diagnostics.Stopwatch]::StartNew()
+          $out = & "./dist/$($env:IT_BINARY)" --update --org-id $env:ORG_ID `
+            --github-token $env:GH_TOKEN 2>&1 | Out-String
+          $sw.Stop()
+          # The updater reports an aborted update through its log, not its exit
+          # status, and this step's verdict comes from the log below.
+          $global:LASTEXITCODE = 0
+          $elapsed = [math]::Round($sw.Elapsed.TotalSeconds, 1)
+          Write-Output "---- updater output after ${elapsed}s ----"
+          Write-Output $out
+
+          $failures = @()
+          # Returning at all is the headline: before the fix this call never came
+          # back. The floor proves it waited out its deadline rather than failing
+          # fast for an unrelated reason; the ceiling is far above the 25s
+          # deadline yet far below an unbounded hang.
+          if ($sw.Elapsed.TotalSeconds -lt 20) {
+            $failures += "update returned after ${elapsed}s, before its 25s stop deadline could elapse"
+          }
+          if ($sw.Elapsed.TotalSeconds -gt 180) {
+            $failures += "update took ${elapsed}s, far past its 25s stop deadline"
+          }
+          # The log has to name the service, the deadline and the last observed
+          # state, since that is the only account of why an unattended update
+          # aborted.
+          foreach ($needle in @(
+            'Failed to stop service',
+            'did not stop within',
+            'last observed state StopPending',
+            'Update aborted; existing installation left untouched'
+          )) {
+            if (-not $out.Contains($needle)) { $failures += "missing from the log: '$needle'" }
+          }
+          # And it must not have carried on as if the stop had succeeded.
+          foreach ($absent in @(
+            'Configuration successfully updated',
+            'Agent installed to',
+            'Service started'
+          )) {
+            if ($out.Contains($absent)) { $failures += "update proceeded past the failed stop: '$absent'" }
+          }
+
+          if ($failures.Count -gt 0) {
+            $failures | ForEach-Object { Write-Output "FAIL: $_" }
+            Write-Error "the update did not abort cleanly on a wedged stop"
+            exit 1
+          }
+          Write-Output "Update aborted on the wedged stop after ${elapsed}s, as expected"
+          exit 0
+
+      - name: Assert the aborted update left the installation untouched
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        env:
+          EXE_PATH: ${{ steps.wedge_hashes.outputs.exe_path }}
+          CONFIG_PATH: ${{ steps.wedge_hashes.outputs.config_path }}
+          EXE_HASH: ${{ steps.wedge_hashes.outputs.exe_hash }}
+          CONFIG_HASH: ${{ steps.wedge_hashes.outputs.config_hash }}
+        run: |
+          # The whole point of aborting: the wedged process may still hold the
+          # executable open, so a half-written binary or a rewritten config would
+          # leave the endpoint unrecoverable without hands on it.
+          $ErrorActionPreference = 'Stop'
+          $failures = @()
+          foreach ($pair in @(
+            @{ Path = $env:EXE_PATH;    Expected = $env:EXE_HASH;    Label = 'agent executable' },
+            @{ Path = $env:CONFIG_PATH; Expected = $env:CONFIG_HASH; Label = 'config file' }
+          )) {
+            if (-not (Test-Path $pair.Path)) {
+              $failures += "$($pair.Label) was removed: $($pair.Path)"
+              continue
+            }
+            $actual = (Get-FileHash -Path $pair.Path -Algorithm SHA256).Hash
+            if ($actual -ne $pair.Expected) {
+              $failures += "$($pair.Label) changed: $($pair.Expected) -> $actual"
+            } else {
+              Write-Output "$($pair.Label) unchanged (sha256=$actual)"
+            }
+          }
+          if ($failures.Count -gt 0) {
+            $failures | ForEach-Object { Write-Output "FAIL: $_" }
+            Write-Error "the aborted update modified the installation"
+            exit 1
+          }
+          exit 0
+
+      # The failed stop above left the service in StopPending, and the agent
+      # treats only Running as active - so an uninstall issued now would skip the
+      # stop entirely instead of exercising it. Start a fresh wedged run so the
+      # uninstall meets a Running service, as an operator would.
+      - name: Re-wedge the service for the uninstall check
+        if: matrix.os == 'windows-latest'
+        uses: ./.github/actions/wedged-service
+        with:
+          mode: rewedge
+          service: ${{ matrix.service }}
+
+      - name: Assert the uninstall aborts on a wedged stop
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        env:
+          IT_BINARY: ${{ matrix.it_binary }}
+          ORG_ID: ${{ vars.IT_ORG_ID }}
+          SERVICE: ${{ matrix.service }}
+          EXE_PATH: ${{ steps.wedge_hashes.outputs.exe_path }}
+          CONFIG_PATH: ${{ steps.wedge_hashes.outputs.config_path }}
+          EXE_HASH: ${{ steps.wedge_hashes.outputs.exe_hash }}
+          CONFIG_HASH: ${{ steps.wedge_hashes.outputs.config_hash }}
+          UNINSTALL_PATHS: ${{ matrix.uninstall_paths }}
+        run: |
+          $sw = [System.Diagnostics.Stopwatch]::StartNew()
+          $out = & "./dist/$($env:IT_BINARY)" --uninstall --org-id $env:ORG_ID 2>&1 | Out-String
+          $sw.Stop()
+          $global:LASTEXITCODE = 0
+          $elapsed = [math]::Round($sw.Elapsed.TotalSeconds, 1)
+          Write-Output "---- uninstaller output after ${elapsed}s ----"
+          Write-Output $out
+
+          $failures = @()
+          if ($sw.Elapsed.TotalSeconds -lt 20) {
+            $failures += "uninstall returned after ${elapsed}s, before its 25s stop deadline could elapse"
+          }
+          if ($sw.Elapsed.TotalSeconds -gt 180) {
+            $failures += "uninstall took ${elapsed}s, far past its 25s stop deadline"
+          }
+          foreach ($needle in @(
+            'Failed to stop service',
+            'did not stop within',
+            'Uninstall aborted; nothing was removed'
+          )) {
+            if (-not $out.Contains($needle)) { $failures += "missing from the log: '$needle'" }
+          }
+          foreach ($absent in @('Service deleted', 'Directory deleted')) {
+            if ($out.Contains($absent)) { $failures += "uninstall proceeded past the failed stop: '$absent'" }
+          }
+
+          # Fully intact or fully removed, never mixed: the registration, the
+          # installed directories, and both hashed files must all still be there.
+          if (-not (Get-Service -Name $env:SERVICE -ErrorAction SilentlyContinue)) {
+            $failures += "service registration $($env:SERVICE) was deleted"
+          }
+          foreach ($path in ($env:UNINSTALL_PATHS -split "`n" | ForEach-Object { $_.Trim() } |
+              Where-Object { $_ })) {
+            if (-not (Test-Path $path)) { $failures += "installed directory was removed: $path" }
+          }
+          foreach ($pair in @(
+            @{ Path = $env:EXE_PATH;    Expected = $env:EXE_HASH;    Label = 'agent executable' },
+            @{ Path = $env:CONFIG_PATH; Expected = $env:CONFIG_HASH; Label = 'config file' }
+          )) {
+            if (-not (Test-Path $pair.Path)) {
+              $failures += "$($pair.Label) was removed: $($pair.Path)"
+            } elseif ((Get-FileHash -Path $pair.Path -Algorithm SHA256).Hash -ne $pair.Expected) {
+              $failures += "$($pair.Label) changed during the aborted uninstall"
+            }
+          }
+
+          if ($failures.Count -gt 0) {
+            $failures | ForEach-Object { Write-Output "FAIL: $_" }
+            Write-Error "the uninstall did not abort cleanly on a wedged stop"
+            exit 1
+          }
+          Write-Output "Uninstall aborted on the wedged stop after ${elapsed}s with nothing removed"
+          exit 0
+
+      # Captured before the restore restarts the real agent, so the delta below
+      # can only come from the recovered service.
+      - name: Capture recovery baseline counts
+        if: matrix.os == 'windows-latest'
+        id: wedge_recovery_baseline
+        shell: pwsh
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+        run: |
+          $content = Get-Content $env:LOG_FILE -Raw -ErrorAction SilentlyContinue
+          $subscribed = if ($content) { ([regex]::Matches($content, [regex]::Escape("Subscribed to messages"))).Count } else { 0 }
+          "subscribed=$subscribed" >> $env:GITHUB_OUTPUT
+          Write-Output "Baseline counts -> subscribed=$subscribed"
+
+      # always(): a failed assertion above must not leave the runner's service
+      # registration pointing at the fixture, or the rest of the job (and the
+      # final uninstall) would be testing the fixture instead of the agent.
+      - name: Restore the agent service after the wedge
+        if: always() && matrix.os == 'windows-latest'
+        uses: ./.github/actions/wedged-service
+        with:
+          mode: restore
+          service: ${{ matrix.service }}
+
+      - name: Assert the recovered endpoint comes back online
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+          BASELINE: ${{ steps.wedge_recovery_baseline.outputs.subscribed }}
+        run: |
+          $baseline = [int]$env:BASELINE
+          for ($i = 1; $i -le 60; $i++) {
+            $content = Get-Content $env:LOG_FILE -Raw -ErrorAction SilentlyContinue
+            $count = if ($content) { ([regex]::Matches($content, [regex]::Escape("Subscribed to messages"))).Count } else { 0 }
+            if ($count -gt $baseline) {
+              Write-Output "Recovered agent subscribed again (count $count > baseline $baseline) after ~$($i * 2)s"
+              exit 0
+            }
+            Start-Sleep -Seconds 2
+          }
+          Write-Error "Recovered agent never resubscribed (count stayed at $baseline)"
+          exit 1
+
+      - name: Assert a subsequent update succeeds after recovery
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        env:
+          BINARY: ${{ matrix.binary }}
+          ORG_ID: ${{ vars.IT_ORG_ID }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NO_AUTO_UPDATES_EXTRA: ${{ matrix.no_auto_updates_extra }}
+        run: |
+          # The bound must only catch a wedge: once the endpoint is recovered, an
+          # ordinary update stops the service, replaces the binary and starts it
+          # again with no behavioral change.
+          $out = & "./dist/$($env:BINARY)" --update --org-id $env:ORG_ID --no-auto-updates `
+            $env:NO_AUTO_UPDATES_EXTRA --github-token $env:GH_TOKEN 2>&1 | Out-String
+          $global:LASTEXITCODE = 0
+          Write-Output $out
+
+          $failures = @()
+          foreach ($needle in @('Agent installed to', 'Service started')) {
+            if (-not $out.Contains($needle)) { $failures += "missing from the log: '$needle'" }
+          }
+          if ($out.Contains('Failed to stop service')) {
+            $failures += "a healthy stop was reported as a failure"
+          }
+          if ($failures.Count -gt 0) {
+            $failures | ForEach-Object { Write-Output "FAIL: $_" }
+            Write-Error "the post-recovery update did not complete normally"
+            exit 1
+          }
+          Write-Output "Post-recovery update completed normally"
+          exit 0
+
       - name: Uninstall agent
         uses: ./.github/actions/run-agent
         with:

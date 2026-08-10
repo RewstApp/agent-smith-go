@@ -30,6 +30,13 @@ const pollingInterval = 250 * time.Millisecond
 // the same day it runs.
 const serviceStopTimeout = 5 * time.Minute
 
+// stopTimeoutOverrideStr is overridable via -ldflags for integration testing.
+// When set to a valid, positive Go duration it replaces serviceStopTimeout, so a
+// wedged service can be observed being given up on in seconds rather than the
+// production five minutes. It is empty in production builds.
+// Example: -ldflags "-X github.com/RewstApp/agent-smith-go/internal/service.stopTimeoutOverrideStr=25s"
+var stopTimeoutOverrideStr = ""
+
 type windowsService struct {
 	handle windowsServiceHandle
 
@@ -105,6 +112,22 @@ func stopInProgress(state svc.State) bool {
 	}
 }
 
+// resolveStopTimeout returns how long Stop waits for the service to reach
+// Stopped: the per-instance value if one is set (unit tests only), then the
+// ldflags-injected override (integration builds only), otherwise the documented
+// serviceStopTimeout.
+func (winSvc *windowsService) resolveStopTimeout() time.Duration {
+	if winSvc.stopTimeout > 0 {
+		return winSvc.stopTimeout
+	}
+	if stopTimeoutOverrideStr != "" {
+		if timeout, err := time.ParseDuration(stopTimeoutOverrideStr); err == nil && timeout > 0 {
+			return timeout
+		}
+	}
+	return serviceStopTimeout
+}
+
 // Stop requests a stop and waits at most serviceStopTimeout for the service to
 // reach Stopped. It never waits indefinitely: overrunning the deadline, or
 // observing a state the service cannot reach Stopped from, returns an error
@@ -115,10 +138,7 @@ func (winSvc *windowsService) Stop() error {
 		return err
 	}
 
-	timeout := winSvc.stopTimeout
-	if timeout <= 0 {
-		timeout = serviceStopTimeout
-	}
+	timeout := winSvc.resolveStopTimeout()
 	interval := winSvc.pollInterval
 	if interval <= 0 {
 		interval = pollingInterval
