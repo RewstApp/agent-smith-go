@@ -36,7 +36,16 @@ func runUninstall(params *uninstallContext) {
 		logger.Info("Stopping service", "service", name)
 		err = service.Stop()
 		if err != nil {
-			logger.Error("Failed to stop service", "error", err)
+			// Abort before deleting anything. Removing the registration and the
+			// files while the process is still live would leave a half-removed
+			// installation that neither runs nor uninstalls cleanly.
+			logger.Error("Failed to stop service", "service", name, "error", err)
+			logger.Error(
+				"Uninstall aborted; nothing was removed",
+				"service", name,
+				"service_registration", "intact",
+				"installed_files", "intact",
+			)
 			return
 		}
 

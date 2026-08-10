@@ -4,11 +4,27 @@ package service
 
 import (
 	"errors"
+	"strings"
 	"testing"
+	"time"
 
 	"golang.org/x/sys/windows/svc"
 	"golang.org/x/sys/windows/svc/mgr"
 )
+
+// fakeClock advances only when the code under test sleeps, so the bounded stop
+// wait can be exercised deterministically and instantly.
+type fakeClock struct {
+	now   time.Time
+	slept []time.Duration
+}
+
+func (c *fakeClock) Now() time.Time { return c.now }
+
+func (c *fakeClock) Sleep(d time.Duration) {
+	c.now = c.now.Add(d)
+	c.slept = append(c.slept, d)
+}
 
 // mockWindowsServiceHandle
 
@@ -21,7 +37,14 @@ type mockWindowsServiceHandle struct {
 
 	controlStatus svc.Status
 	queryStatuses []svc.Status
-	queryCallIdx  int
+	// queryFallback, when set, is returned once queryStatuses is exhausted.
+	// Without it the mock falls back to Stopped, which no bounded-wait test can
+	// use because the service would always eventually stop.
+	queryFallback *svc.Status
+	// queryHook, when set, is consulted before each Query result and can fail a
+	// specific call by its zero-based index.
+	queryHook    func(callIdx int) error
+	queryCallIdx int
 
 	closeCalled   bool
 	startCalled   bool
@@ -53,10 +76,20 @@ func (m *mockWindowsServiceHandle) Query() (svc.Status, error) {
 	if m.queryErr != nil {
 		return svc.Status{}, m.queryErr
 	}
+	if m.queryHook != nil {
+		if err := m.queryHook(m.queryCallIdx); err != nil {
+			m.queryCallIdx++
+			return svc.Status{}, err
+		}
+	}
 	if m.queryCallIdx < len(m.queryStatuses) {
 		status := m.queryStatuses[m.queryCallIdx]
 		m.queryCallIdx++
 		return status, nil
+	}
+	m.queryCallIdx++
+	if m.queryFallback != nil {
+		return *m.queryFallback, nil
 	}
 	return svc.Status{State: svc.Stopped}, nil
 }
@@ -206,13 +239,18 @@ func TestWindowsService_Stop_PollingUntilStopped(t *testing.T) {
 			{State: svc.Stopped},
 		},
 	}
-	s := &windowsService{handle: handle}
+	clock := &fakeClock{}
+	s := &windowsService{handle: handle, now: clock.Now, sleep: clock.Sleep}
 
 	if err := s.Stop(); err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
 	if handle.queryCallIdx != 2 {
 		t.Errorf("expected 2 Query calls, got %d", handle.queryCallIdx)
+	}
+	// Polls on the documented interval.
+	if len(clock.slept) != 2 || clock.slept[0] != pollingInterval {
+		t.Errorf("expected polls at %s, got %v", pollingInterval, clock.slept)
 	}
 }
 
@@ -230,10 +268,187 @@ func TestWindowsService_Stop_QueryError(t *testing.T) {
 		controlStatus: svc.Status{State: svc.StopPending},
 		queryErr:      errors.New("query failed"),
 	}
-	s := &windowsService{handle: handle}
+	clock := &fakeClock{}
+	s := &windowsService{handle: handle, now: clock.Now, sleep: clock.Sleep}
 
 	if err := s.Stop(); err == nil {
 		t.Error("expected error from Query, got nil")
+	}
+}
+
+func TestWindowsService_Stop_TimesOutWhileStopPending(t *testing.T) {
+	stopPending := svc.Status{State: svc.StopPending}
+	handle := &mockWindowsServiceHandle{
+		controlStatus: stopPending,
+		queryFallback: &stopPending,
+	}
+	clock := &fakeClock{}
+	s := &windowsService{
+		handle:       handle,
+		name:         "rewst_agent_smith_test-org",
+		stopTimeout:  10 * time.Millisecond,
+		pollInterval: time.Millisecond,
+		now:          clock.Now,
+		sleep:        clock.Sleep,
+	}
+
+	err := s.Stop()
+	if err == nil {
+		t.Fatal("expected an error when the service never leaves StopPending")
+	}
+	for _, want := range []string{"rewst_agent_smith_test-org", "10ms", "StopPending"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("expected error to mention %q, got %q", want, err.Error())
+		}
+	}
+	// Bounded: polls for the deadline and no longer.
+	if len(clock.slept) != 10 {
+		t.Errorf("expected 10 polls within the deadline, got %d", len(clock.slept))
+	}
+	if handle.queryCallIdx != 10 {
+		t.Errorf("expected 10 Query calls, got %d", handle.queryCallIdx)
+	}
+}
+
+func TestWindowsService_Stop_StoppedOnLastPollBeforeDeadline(t *testing.T) {
+	handle := &mockWindowsServiceHandle{
+		controlStatus: svc.Status{State: svc.StopPending},
+		queryStatuses: []svc.Status{
+			{State: svc.StopPending},
+			{State: svc.StopPending},
+			{State: svc.StopPending},
+			{State: svc.Stopped},
+		},
+	}
+	clock := &fakeClock{}
+	s := &windowsService{
+		handle:       handle,
+		name:         "rewst_agent_smith_test-org",
+		stopTimeout:  4 * time.Millisecond,
+		pollInterval: time.Millisecond,
+		now:          clock.Now,
+		sleep:        clock.Sleep,
+	}
+
+	if err := s.Stop(); err != nil {
+		t.Fatalf("expected no error when the service stops on the last poll, got %v", err)
+	}
+	if handle.queryCallIdx != 4 {
+		t.Errorf("expected 4 Query calls, got %d", handle.queryCallIdx)
+	}
+}
+
+func TestWindowsService_Stop_UnexpectedStateFailsFast(t *testing.T) {
+	handle := &mockWindowsServiceHandle{
+		controlStatus: svc.Status{State: svc.Paused},
+	}
+	clock := &fakeClock{}
+	s := &windowsService{
+		handle:       handle,
+		name:         "rewst_agent_smith_test-org",
+		stopTimeout:  time.Hour,
+		pollInterval: time.Millisecond,
+		now:          clock.Now,
+		sleep:        clock.Sleep,
+	}
+
+	err := s.Stop()
+	if err == nil {
+		t.Fatal("expected an error for a state the service cannot stop from")
+	}
+	if !strings.Contains(err.Error(), "Paused") {
+		t.Errorf("expected error to name the observed state, got %q", err.Error())
+	}
+	// Fails immediately rather than burning the deadline.
+	if len(clock.slept) != 0 {
+		t.Errorf("expected no polling, got %d sleeps", len(clock.slept))
+	}
+	if handle.queryCallIdx != 0 {
+		t.Errorf("expected no Query calls, got %d", handle.queryCallIdx)
+	}
+}
+
+func TestWindowsService_Stop_QueryErrorMidPoll(t *testing.T) {
+	stopPending := svc.Status{State: svc.StopPending}
+	handle := &mockWindowsServiceHandle{
+		controlStatus: stopPending,
+		queryFallback: &stopPending,
+	}
+	clock := &fakeClock{}
+	s := &windowsService{
+		handle:       handle,
+		name:         "rewst_agent_smith_test-org",
+		stopTimeout:  time.Hour,
+		pollInterval: time.Millisecond,
+		now:          clock.Now,
+		sleep:        clock.Sleep,
+	}
+
+	// Fail the third Query, after the wait is already under way.
+	handle.queryStatuses = []svc.Status{stopPending, stopPending}
+	handle.queryHook = func(callIdx int) error {
+		if callIdx >= 2 {
+			return errors.New("query failed")
+		}
+		return nil
+	}
+
+	err := s.Stop()
+	if err == nil {
+		t.Fatal("expected the Query error to be returned")
+	}
+	if err.Error() != "query failed" {
+		t.Errorf("expected 'query failed', got %q", err.Error())
+	}
+	if len(clock.slept) != 3 {
+		t.Errorf("expected 3 polls before the failure, got %d", len(clock.slept))
+	}
+}
+
+func TestWindowsService_Stop_RunningIsPolledNotRejected(t *testing.T) {
+	handle := &mockWindowsServiceHandle{
+		// Control can report the pre-stop state before the service thread picks
+		// the control up; that must not be treated as a refusal to stop.
+		controlStatus: svc.Status{State: svc.Running},
+		queryStatuses: []svc.Status{
+			{State: svc.StopPending},
+			{State: svc.Stopped},
+		},
+	}
+	clock := &fakeClock{}
+	s := &windowsService{
+		handle:       handle,
+		name:         "rewst_agent_smith_test-org",
+		stopTimeout:  time.Minute,
+		pollInterval: time.Millisecond,
+		now:          clock.Now,
+		sleep:        clock.Sleep,
+	}
+
+	if err := s.Stop(); err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if handle.queryCallIdx != 2 {
+		t.Errorf("expected 2 Query calls, got %d", handle.queryCallIdx)
+	}
+}
+
+func TestServiceStateName(t *testing.T) {
+	cases := map[svc.State]string{
+		svc.Stopped:         "Stopped",
+		svc.StartPending:    "StartPending",
+		svc.StopPending:     "StopPending",
+		svc.Running:         "Running",
+		svc.ContinuePending: "ContinuePending",
+		svc.PausePending:    "PausePending",
+		svc.Paused:          "Paused",
+		svc.State(99):       "Unknown(99)",
+	}
+
+	for state, want := range cases {
+		if got := serviceStateName(state); got != want {
+			t.Errorf("serviceStateName(%d) = %q, want %q", uint32(state), got, want)
+		}
 	}
 }
 

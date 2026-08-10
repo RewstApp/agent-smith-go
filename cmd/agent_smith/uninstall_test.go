@@ -37,6 +37,42 @@ func TestRunUninstall_StopFails(t *testing.T) {
 	runUninstall(params)
 }
 
+// A stop that fails — a wedged service that never reaches Stopped — must abort
+// the uninstall before anything is removed, so the endpoint is left either fully
+// installed or fully removed, never mixed.
+func TestRunUninstall_StopFails_RemovesNothing(t *testing.T) {
+	var removed []string
+	svc := &mockService{
+		isActive: true,
+		stopErr: errors.New(
+			"service rewst_agent_smith_test-org did not stop within 5m0s: " +
+				"last observed state StopPending",
+		),
+	}
+	params := &uninstallContext{
+		OrgId:          "test-org",
+		ServiceManager: &mockServiceManager{openService: svc},
+		FS: &mockFileSystem{
+			removeAllFunc: func(path string) error {
+				removed = append(removed, path)
+				return nil
+			},
+		},
+	}
+
+	runUninstall(params)
+
+	if !svc.stopCalled {
+		t.Error("expected Stop to be attempted")
+	}
+	if svc.deleteCalled {
+		t.Error("expected the service registration to survive a failed stop")
+	}
+	if len(removed) != 0 {
+		t.Errorf("expected no directories removed after a failed stop, got %v", removed)
+	}
+}
+
 func TestRunUninstall_ActiveService_DeleteFails(t *testing.T) {
 	params := &uninstallContext{
 		OrgId: "test-org",
