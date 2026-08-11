@@ -40,7 +40,18 @@ func runUpdate(params *updateContext) {
 		logger.Info("Stopping service", "service", name)
 		err = svc.Stop()
 		if err != nil {
+			// Abort without touching the installation. The old process may still
+			// be running and holding the agent executable open, so overwriting it
+			// would either fail or leave a half-updated install behind. Leaving
+			// everything in place keeps the endpoint recoverable: stop the wedged
+			// process, start the service, and the next update succeeds.
 			logger.Error("Failed to stop service", "service", name, "error", err)
+			logger.Error(
+				"Update aborted; existing installation left untouched",
+				"service", name,
+				"agent_executable", "not modified",
+				"config_file", "not modified",
+			)
 			return
 		}
 

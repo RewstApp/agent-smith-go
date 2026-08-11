@@ -54,7 +54,7 @@ Required tools:
 - **internal/agent/**: Device configuration, installation paths, and OS-specific host information
 - **internal/interpreter/**: Command execution engine supporting both PowerShell and Bash interpreters  
 - **internal/mqtt/**: Azure IoT Hub MQTT client implementation with auto-reconnection
-- **internal/service/**: Cross-platform service management utilities
+- **internal/service/**: Cross-platform service management utilities. On Windows, `Stop()` waits a bounded, documented deadline (5 minutes) for the service to reach `Stopped` and otherwise returns an error naming the service and last observed state, so a wedged service aborts an update/install/uninstall with an actionable message instead of hanging forever. See the README's "Bounded Windows Service Stop" section.
 - **internal/syslog/**: OS-specific system logging (Linux/macOS/Windows)
 - **plugins/**: Plugin loader using HashiCorp's go-plugin framework
 - **shared/**: Plugin interfaces and RPC definitions

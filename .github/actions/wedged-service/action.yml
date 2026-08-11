@@ -1,0 +1,283 @@
+name: Wedged Windows service
+description: >
+  Put the agent's Windows service into the state sc-106108 fixed - accepting a
+  stop control, reporting SERVICE_STOP_PENDING, and never reaching Stopped - by
+  pointing that service's binPath at the test/wedgedservice fixture and starting
+  it. The agent executable and config file on disk are never touched, so a
+  scenario can hash them before and after an update that aborts on the wedged
+  stop.
+
+  A wedge cannot be produced by killing the agent (a dead process makes the SCM
+  report Stopped almost at once, which is the happy path), and suspending its
+  threads instead is not deterministic - the SCM then fails the control request
+  outright rather than exercising the bounded wait. Rewriting binPath is
+  deterministic and reversible: the fixture reports Stopped as soon as its
+  release file appears, and mode=restore puts the real binPath back and starts
+  the agent again.
+
+  mode=wedge saves the current binPath, stops the agent, and starts the fixture
+  in its place. mode=rewedge releases the current wedged run and starts a fresh
+  one, which a scenario needs between two wedged stops: once a stop has been
+  requested the service sits in StopPending, and the agent's IsActive() reports
+  only Running as active, so a second caller would skip the stop entirely.
+  mode=restore is idempotent and tolerant of missing state, so an always()
+  cleanup step can run it even when the wedge never took.
+
+  Windows only: Linux and macOS have no equivalent state and their service
+  implementations do not poll for a stop.
+
+inputs:
+  mode:
+    description: "wedge, rewedge, or restore"
+    required: true
+  service:
+    description: "Service name to wedge (the agent's own registered service)"
+    required: true
+
+outputs:
+  log_file:
+    description: "Path the fixture's own log is written to"
+    value: ${{ steps.paths.outputs.log_file }}
+
+runs:
+  using: composite
+  steps:
+    - name: Resolve working paths
+      id: paths
+      shell: pwsh
+      env:
+        RUNNER_TEMP_DIR: ${{ runner.temp }}
+      run: |
+        $ErrorActionPreference = 'Stop'
+        if (-not $IsWindows) {
+          throw "the wedged-service action is Windows-only"
+        }
+        $workdir = Join-Path $env:RUNNER_TEMP_DIR 'wedged-service'
+        # The fixture's binPath is assembled without quoting, because sc.exe's
+        # "keyword= value" parsing turns nested quotes into a coin toss. A
+        # working directory containing a space would therefore truncate the
+        # command line into something that fails to start, so refuse it here
+        # rather than debugging a service that will not launch.
+        if ($workdir -match '\s') {
+          throw "working directory '$workdir' contains whitespace; the fixture binPath cannot be built safely"
+        }
+        New-Item -ItemType Directory -Force -Path $workdir | Out-Null
+        "workdir=$workdir"                                    >> $env:GITHUB_OUTPUT
+        "log_file=$(Join-Path $workdir 'wedged.log')"         >> $env:GITHUB_OUTPUT
+        "release_file=$(Join-Path $workdir 'release')"        >> $env:GITHUB_OUTPUT
+        "binpath_file=$(Join-Path $workdir 'binpath.txt')"    >> $env:GITHUB_OUTPUT
+
+    - name: Setup go
+      if: inputs.mode == 'wedge'
+      uses: actions/setup-go@v6
+      with:
+        go-version: "1.25.0"
+        cache: true
+
+    - name: Wedge the service
+      if: inputs.mode == 'wedge'
+      shell: pwsh
+      env:
+        SERVICE: ${{ inputs.service }}
+        WORKDIR: ${{ steps.paths.outputs.workdir }}
+        LOG_FILE: ${{ steps.paths.outputs.log_file }}
+        RELEASE_FILE: ${{ steps.paths.outputs.release_file }}
+        BINPATH_FILE: ${{ steps.paths.outputs.binpath_file }}
+      run: |
+        $ErrorActionPreference = 'Stop'
+        $exe = Join-Path $env:WORKDIR 'wedgedservice.exe'
+
+        # The fixture is behind the `integration` build tag; see its package doc.
+        go build -tags integration -o $exe ./test/wedgedservice
+        if ($LASTEXITCODE -ne 0) { throw "failed to build the wedged service fixture" }
+
+        # The service's command line is read and written through its ImagePath
+        # registry value rather than sc.exe. It is the same value sc.exe edits,
+        # but it round-trips exactly: the agent's own command line carries quoted
+        # paths, and pushing those back through sc.exe's "keyword= value" parsing
+        # (and PowerShell's native-argument quoting on the way) is a needless way
+        # to corrupt the registration we have to restore.
+        $key = "HKLM:\SYSTEM\CurrentControlSet\Services\$($env:SERVICE)"
+
+        # Saved once and only once: a second wedge must not record the fixture's
+        # own path as the thing to restore.
+        if (-not (Test-Path $env:BINPATH_FILE)) {
+          $current = (Get-ItemProperty -Path $key -Name ImagePath).ImagePath
+          if (-not $current) { throw "could not read the ImagePath of $env:SERVICE" }
+          Set-Content -Path $env:BINPATH_FILE -Value $current -NoNewline
+        }
+        Write-Output "Original ImagePath: $(Get-Content $env:BINPATH_FILE -Raw)"
+
+        # A release file left over from an earlier run would let the fixture stop
+        # on request, which reads as a healthy stop and would pass the scenario
+        # while testing nothing. The fixture refuses to start if it finds one.
+        Remove-Item $env:RELEASE_FILE -ErrorAction SilentlyContinue
+        Remove-Item $env:LOG_FILE -ErrorAction SilentlyContinue
+
+        # Only asked for if it is actually running: sc.exe writes "the service has
+        # not been started" to stderr otherwise, which this step's stop-on-error
+        # setting would turn into a failure.
+        if ((Get-Service -Name $env:SERVICE).Status -ne 'Stopped') {
+          Write-Output "Stopping $env:SERVICE before swapping its executable"
+          sc.exe stop $env:SERVICE | Out-Null
+          $global:LASTEXITCODE = 0
+        }
+        for ($i = 0; $i -lt 60; $i++) {
+          if ((Get-Service -Name $env:SERVICE).Status -eq 'Stopped') { break }
+          Start-Sleep -Seconds 1
+        }
+        if ((Get-Service -Name $env:SERVICE).Status -ne 'Stopped') {
+          # The real agent refusing to stop here would be a finding of its own,
+          # but it also leaves nothing to swap, so report and fail.
+          sc.exe query $env:SERVICE
+          throw "$env:SERVICE did not stop; cannot install the wedged fixture"
+        }
+        # The SCM reports Stopped as soon as the service says so, which can be a
+        # moment before its process is gone; starting into that window is a
+        # needless way to fail.
+        Start-Sleep -Seconds 2
+
+        $binPath = "$exe -name $env:SERVICE -log $env:LOG_FILE -release $env:RELEASE_FILE"
+        Write-Output "Setting ImagePath to: $binPath"
+        # ExpandString because that is the type the SCM gives a service it
+        # creates; nothing here contains %VARIABLES%, so expansion is a no-op and
+        # the value is used literally either way.
+        Set-ItemProperty -Path $key -Name ImagePath -Value $binPath -Type ExpandString
+
+        sc.exe start $env:SERVICE | Out-Null
+        $global:LASTEXITCODE = 0
+        for ($i = 0; $i -lt 60; $i++) {
+          if ((Get-Service -Name $env:SERVICE).Status -eq 'Running') { break }
+          Start-Sleep -Seconds 1
+        }
+        if ((Get-Service -Name $env:SERVICE).Status -ne 'Running') {
+          Write-Output "---- fixture log ----"
+          Get-Content $env:LOG_FILE -ErrorAction SilentlyContinue
+          sc.exe query $env:SERVICE
+          throw "the wedged fixture did not reach Running as $env:SERVICE"
+        }
+        Write-Output "$env:SERVICE is now running the wedged fixture and will not honor a stop"
+
+    - name: Re-wedge the service
+      if: inputs.mode == 'rewedge'
+      shell: pwsh
+      env:
+        SERVICE: ${{ inputs.service }}
+        LOG_FILE: ${{ steps.paths.outputs.log_file }}
+        RELEASE_FILE: ${{ steps.paths.outputs.release_file }}
+      run: |
+        $ErrorActionPreference = 'Stop'
+
+        # Release whatever wedged run is in StopPending, then start a fresh one,
+        # so the next caller finds the service Running and actually attempts a
+        # stop.
+        New-Item -ItemType File -Force -Path $env:RELEASE_FILE | Out-Null
+        for ($i = 0; $i -lt 60; $i++) {
+          if ((Get-Service -Name $env:SERVICE).Status -eq 'Stopped') { break }
+          Start-Sleep -Seconds 1
+        }
+        if ((Get-Service -Name $env:SERVICE).Status -ne 'Stopped') {
+          Write-Output "---- fixture log ----"
+          Get-Content $env:LOG_FILE -ErrorAction SilentlyContinue
+          sc.exe query $env:SERVICE
+          throw "the wedged fixture did not stop after its release file appeared"
+        }
+
+        Remove-Item $env:RELEASE_FILE -ErrorAction SilentlyContinue
+        # As in mode=wedge: let the released process finish exiting before the
+        # SCM is asked to launch another one.
+        Start-Sleep -Seconds 2
+        sc.exe start $env:SERVICE | Out-Null
+        $global:LASTEXITCODE = 0
+        for ($i = 0; $i -lt 60; $i++) {
+          if ((Get-Service -Name $env:SERVICE).Status -eq 'Running') { break }
+          Start-Sleep -Seconds 1
+        }
+        if ((Get-Service -Name $env:SERVICE).Status -ne 'Running') {
+          Write-Output "---- fixture log ----"
+          Get-Content $env:LOG_FILE -ErrorAction SilentlyContinue
+          sc.exe query $env:SERVICE
+          throw "the wedged fixture did not restart as $env:SERVICE"
+        }
+        Write-Output "$env:SERVICE is wedged again and Running"
+
+    - name: Restore the agent service
+      if: inputs.mode == 'restore'
+      shell: pwsh
+      env:
+        SERVICE: ${{ inputs.service }}
+        LOG_FILE: ${{ steps.paths.outputs.log_file }}
+        RELEASE_FILE: ${{ steps.paths.outputs.release_file }}
+        BINPATH_FILE: ${{ steps.paths.outputs.binpath_file }}
+      run: |
+        # Deliberately not stop-on-error: this runs from an always() cleanup, so
+        # every stage tolerates state the wedge never created.
+        $ErrorActionPreference = 'Continue'
+
+        if (Test-Path $env:LOG_FILE) {
+          Write-Output "---- fixture log ----"
+          Get-Content $env:LOG_FILE -ErrorAction SilentlyContinue
+        }
+
+        if (-not (Test-Path $env:BINPATH_FILE)) {
+          Write-Output "No saved binPath; the service was never wedged, nothing to restore"
+          exit 0
+        }
+
+        New-Item -ItemType File -Force -Path $env:RELEASE_FILE | Out-Null
+        for ($i = 0; $i -lt 60; $i++) {
+          if ((Get-Service -Name $env:SERVICE).Status -eq 'Stopped') { break }
+          Start-Sleep -Seconds 1
+        }
+
+        # The fixture honors its release file, so this is a backstop for a run
+        # that never got as far as reading it - leaving it running would hold the
+        # service registration and defeat the restore.
+        if ((Get-Service -Name $env:SERVICE).Status -ne 'Stopped') {
+          Write-Output "Fixture still not stopped; force-killing it"
+          $query = sc.exe queryex $env:SERVICE
+          $found = $query | Select-String -Pattern 'PID\s*:\s*(\d+)'
+          if ($found) {
+            $fixturePid = [int]$found.Matches[0].Groups[1].Value
+            if ($fixturePid -gt 0) { taskkill.exe /F /T /PID $fixturePid }
+          }
+          Start-Sleep -Seconds 5
+        }
+
+        Remove-Item $env:RELEASE_FILE -ErrorAction SilentlyContinue
+        Start-Sleep -Seconds 2
+
+        $key = "HKLM:\SYSTEM\CurrentControlSet\Services\$($env:SERVICE)"
+        $original = (Get-Content $env:BINPATH_FILE -Raw)
+        Write-Output "Restoring ImagePath to: $original"
+        Set-ItemProperty -Path $key -Name ImagePath -Value $original -Type ExpandString
+
+        # Read it back: a restore that silently failed would leave the service
+        # reaching Running as the fixture, which the check below cannot tell apart
+        # from a recovered agent - and every later step would test the fixture.
+        $restored = (Get-ItemProperty -Path $key -Name ImagePath).ImagePath
+        if ($restored -ne $original) {
+          Write-Error "ImagePath restore did not take; it is now '$restored'"
+          exit 1
+        }
+
+        sc.exe start $env:SERVICE | Out-Null
+        $global:LASTEXITCODE = 0
+        $running = $false
+        for ($i = 0; $i -lt 60; $i++) {
+          if ((Get-Service -Name $env:SERVICE).Status -eq 'Running') { $running = $true; break }
+          Start-Sleep -Seconds 1
+        }
+
+        # The saved path is dropped either way: a second restore has nothing left
+        # to do, and keeping a stale file would make it overwrite a good binPath.
+        Remove-Item $env:BINPATH_FILE -ErrorAction SilentlyContinue
+
+        if (-not $running) {
+          sc.exe query $env:SERVICE
+          $global:LASTEXITCODE = 0
+          Write-Error "restored $env:SERVICE did not reach Running; the agent is not back"
+          exit 1
+        }
+        Write-Output "$env:SERVICE restored to the real agent and Running"
+        exit 0

@@ -409,6 +409,45 @@ operator cannot see. Example snippet:
 }
 ```
 
+### Bounded Windows Service Stop (Windows only)
+
+Update, install and uninstall all stop the running service first, and on Windows
+that means asking the Service Control Manager to stop it and then waiting for the
+service to report `Stopped`. That wait used to be unbounded: it polled the service
+state every 250 ms forever. A service that never reaches `Stopped` — a wedged
+agent process, or Windows itself holding the service in `StopPending` behind a
+stuck operation — therefore hung the caller indefinitely. Because the auto-updater
+runs unattended, the visible symptom was a device that went offline during a
+routine update with no error logged anywhere, needing hands on the endpoint to
+recover; an interactive uninstall simply hung with no output.
+
+The wait is now bounded:
+
+- The stop waits at most **5 minutes** for the service to reach `Stopped`. The
+  bound is deliberately generous — it exists to catch a wedge, not to race a
+  normal shutdown, so a healthy agent draining long-running commands is never cut
+  short.
+- A service observed in `StopPending` keeps being polled until the deadline, while
+  a state the service cannot reach `Stopped` from fails immediately rather than
+  burning the full deadline. `Running` and `StartPending` are treated as
+  still-stopping, because the SCM can report the pre-stop state before the service
+  thread picks the control up.
+- Overrunning the deadline logs at `Error` and names the service, the deadline and
+  the last observed state — for example `service rewst_agent_smith_<org> did not
+  stop within 5m0s: last observed state StopPending` — so the reason an update
+  aborted is visible in the log.
+- Callers abort instead of proceeding as if the stop succeeded. **Update** does
+  not overwrite the agent executable or the config file, since the old process may
+  still hold the executable open, leaving the existing installation intact and the
+  service recoverable. **Uninstall** does not delete the registration or any files
+  out from under a live process, and logs plainly that nothing was removed.
+  **Install** (`--config`) likewise aborts before deleting a pre-existing wedged
+  service.
+
+Recovery is the ordinary one: end the wedged agent process, start the service, and
+re-run the update or uninstall. Linux and macOS are unaffected — their service
+implementations do not use this polling loop.
+
 ### Notification Plugin Supervision
 
 Notification plugins run as separate subprocesses reached over RPC, and every

@@ -7,6 +7,11 @@
 # - sasTokenLifetimeOverrideStr overridden to 90s (proactive SAS token renewal
 #   fires ~30s in - lifetime minus the ~60s renew margin - so the renewal path
 #   can be exercised in seconds not hours)
+# - stopTimeoutOverrideStr overridden to 25s (the bounded wait for a Windows
+#   service to reach Stopped, so the wedged-service scenario observes the update
+#   abort in seconds instead of the production five minutes). The symbol only
+#   exists in the Windows build; -X against a missing symbol is ignored, so the
+#   same flag is harmless on Linux and macOS.
 
 $env:GOARCH = "amd64"
 
@@ -15,7 +20,8 @@ $intervalFlag = "-X github.com/RewstApp/agent-smith-go/internal/agent.updateInte
 $baseBackoffFlag = "-X github.com/RewstApp/agent-smith-go/internal/agent.baseBackoffStr=10s"
 $maxRetriesFlag = "-X github.com/RewstApp/agent-smith-go/internal/agent.maxRetriesStr=6"
 $sasTokenLifetimeFlag = "-X github.com/RewstApp/agent-smith-go/internal/agent.sasTokenLifetimeOverrideStr=90s"
-$ldflags = "-w -s $versionFlag $intervalFlag $baseBackoffFlag $maxRetriesFlag $sasTokenLifetimeFlag"
+$stopTimeoutFlag = "-X github.com/RewstApp/agent-smith-go/internal/service.stopTimeoutOverrideStr=25s"
+$ldflags = "-w -s $versionFlag $intervalFlag $baseBackoffFlag $maxRetriesFlag $sasTokenLifetimeFlag $stopTimeoutFlag"
 
 if ($IsWindows) {
     $buildOutput = "./dist/rewst_agent_config.win.it.exe"

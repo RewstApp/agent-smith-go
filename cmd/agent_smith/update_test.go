@@ -216,6 +216,48 @@ func TestRunUpdate_StopFails(t *testing.T) {
 	runUpdate(params)
 }
 
+// A stop that fails — a wedged service that never reaches Stopped — must abort
+// the update with the installation untouched: the old process may still hold the
+// executable open, and a half-updated install is unrecoverable without hands on
+// the endpoint.
+func TestRunUpdate_StopFails_LeavesInstallationUntouched(t *testing.T) {
+	var writes []string
+	params := newBaseUpdateParams()
+	params.FS = &mockFileSystem{
+		executableFunc: func() (string, error) { return "/fake/agent", nil },
+		readFileFunc:   func(string) ([]byte, error) { return validDeviceJSON("test-org"), nil },
+		writeFileFunc: func(name string, _ []byte, _ os.FileMode) error {
+			writes = append(writes, name)
+			return nil
+		},
+		mkdirAllFunc:  func(string) error { return nil },
+		removeAllFunc: func(string) error { return nil },
+	}
+	svc := &mockService{
+		isActive: true,
+		stopErr: errors.New(
+			"service rewst_agent_smith_test-org did not stop within 5m0s: " +
+				"last observed state StopPending",
+		),
+	}
+	params.ServiceManager = &mockServiceManager{openService: svc}
+
+	runUpdate(params)
+
+	if !svc.stopCalled {
+		t.Error("expected Stop to be attempted")
+	}
+	if len(writes) != 0 {
+		t.Errorf("expected no files written after a failed stop, got %v", writes)
+	}
+	if svc.startCalled {
+		t.Error("expected the service not to be started after a failed stop")
+	}
+	if svc.deleteCalled {
+		t.Error("expected the service registration to be left alone after a failed stop")
+	}
+}
+
 func TestRunUpdate_PathsDataError(t *testing.T) {
 	params := newBaseUpdateParams()
 	params.Sys = &mockSystemInfoProvider{hostPlatformErr: errors.New("platform error")}

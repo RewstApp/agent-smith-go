@@ -165,13 +165,19 @@ func runConfig(params *configContext) error {
 	if err == nil {
 		if existingService.IsActive() {
 			logger.Info("Stopping service", "service", name)
-			err = existingService.Stop()
-			if err != nil {
-				err = existingService.Close()
-				if err != nil {
-					return fmt.Errorf("failed to close service %s: %w", name, err)
+			// Abort before deleting the registration or overwriting the
+			// executable: a service that will not stop may still hold both.
+			// Report the stop failure itself, not the handle cleanup, so the
+			// reason the install aborted is visible.
+			if stopErr := existingService.Stop(); stopErr != nil {
+				if closeErr := existingService.Close(); closeErr != nil {
+					logger.Error(
+						"Failed to close service handle",
+						"service", name,
+						"error", closeErr,
+					)
 				}
-				return fmt.Errorf("failed to stop service %s: %w", name, err)
+				return fmt.Errorf("failed to stop service %s: %w", name, stopErr)
 			}
 		}
 

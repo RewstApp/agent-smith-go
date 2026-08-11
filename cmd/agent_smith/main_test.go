@@ -100,13 +100,30 @@ type mockService struct {
 	stopErr   error
 	deleteErr error
 	startErr  error
+
+	stopCalled   bool
+	deleteCalled bool
+	startCalled  bool
 }
 
 func (m *mockService) IsActive() bool { return m.isActive }
-func (m *mockService) Stop() error    { return m.stopErr }
-func (m *mockService) Delete() error  { return m.deleteErr }
-func (m *mockService) Start() error   { return m.startErr }
-func (m *mockService) Close() error   { return nil }
+
+func (m *mockService) Stop() error {
+	m.stopCalled = true
+	return m.stopErr
+}
+
+func (m *mockService) Delete() error {
+	m.deleteCalled = true
+	return m.deleteErr
+}
+
+func (m *mockService) Start() error {
+	m.startCalled = true
+	return m.startErr
+}
+
+func (m *mockService) Close() error { return nil }
 
 type mockServiceManager struct {
 	openErr       error
