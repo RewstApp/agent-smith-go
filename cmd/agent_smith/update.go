@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"os"
 	"runtime"
-	"time"
 
 	"github.com/RewstApp/agent-smith-go/internal/agent"
 	"github.com/RewstApp/agent-smith-go/internal/service"
@@ -35,6 +34,53 @@ func runUpdate(params *updateContext) {
 		}
 	}()
 
+	// Track whether this run stopped the service and whether it got as far as
+	// starting it again. Registered after the handle cleanup so it runs first
+	// (deferred calls run last-in-first-out) and still has a usable handle.
+	stopped := false
+	completed := false
+	defer func() {
+		if completed || !stopped {
+			return
+		}
+		if svc == nil {
+			// The registration was removed on the way to re-registering the service
+			// and could not be recreated. There is nothing left to start, so say so
+			// plainly instead of leaving the endpoint quietly offline.
+			logger.Error(
+				"Update failed after the service registration was removed; the endpoint is offline until the agent is reinstalled",
+				"service",
+				name,
+			)
+			return
+		}
+		logger.Info("Restarting service after failed update", "service", name)
+		if err := svc.Start(); err != nil {
+			logger.Error(
+				"Failed to restart service after failed update; the endpoint is offline",
+				"service", name,
+				"error", err,
+			)
+			return
+		}
+		logger.Info("Service restarted after failed update", "service", name)
+	}()
+
+	// Get installation paths data. This is read before the service is stopped so
+	// the wait below knows which executable to watch.
+	pathsData, err := agent.NewPathsData(
+		context.Background(),
+		params.OrgId,
+		logger,
+		params.Sys,
+		params.Domain,
+	)
+	if err != nil {
+		logger.Error("Failed to read paths", "error", err)
+		return
+	}
+	agentExecutablePath := pathsData.AgentExecutablePath
+
 	// Stop the service if its running
 	if svc.IsActive() {
 		logger.Info("Stopping service", "service", name)
@@ -54,22 +100,39 @@ func runUpdate(params *updateContext) {
 			)
 			return
 		}
-
-		// Wait for some time for the service executable to clean up
-		logger.Info("Waiting for service executable to stop")
-		time.Sleep(serviceExecutableTimeout)
+		stopped = true
 	}
 
-	// Get installation paths data
-	pathsData, err := agent.NewPathsData(
-		context.Background(),
-		params.OrgId,
-		logger,
-		params.Sys,
-		params.Domain,
+	// Wait for the old process to actually exit. Replacing an executable that is
+	// still running fails outright on Windows and races the old process on Linux
+	// and macOS, so nothing is written until the process is observably gone. This
+	// runs even when the service was already stopped, since a process left over
+	// from a crashed or externally stopped service holds its image just as firmly.
+	// It costs a single round of probes when the process is already gone.
+	logger.Info(
+		"Waiting for the agent process to exit",
+		"service", name,
+		"agent_executable", agentExecutablePath,
 	)
-	if err != nil {
-		logger.Error("Failed to read paths", "error", err)
+	if err := waitForAgentProcessExit(
+		logger,
+		svc,
+		params.FS,
+		agentExecutablePath,
+		params.exitWait,
+	); err != nil {
+		logger.Error(
+			"Agent process did not exit",
+			"service", name,
+			"agent_executable", agentExecutablePath,
+			"error", err,
+		)
+		logger.Error(
+			"Update aborted; existing installation left untouched",
+			"service", name,
+			"agent_executable", "not modified",
+			"config_file", "not modified",
+		)
 		return
 	}
 
@@ -142,7 +205,9 @@ func runUpdate(params *updateContext) {
 		return
 	}
 
-	err = params.FS.WriteFile(configFilePath, configBytes, utils.DefaultFileMod)
+	// Written atomically: a config file truncated by a failed write would leave
+	// the service unable to start at all.
+	err = writeFileAtomic(params.FS, configFilePath, configBytes, utils.DefaultFileMod)
 	if err != nil {
 		logger.Error("Failed to save config", "error", err)
 		return
@@ -163,8 +228,15 @@ func runUpdate(params *updateContext) {
 		return
 	}
 
-	agentExecutablePath := pathsData.AgentExecutablePath
-	err = params.FS.WriteFile(agentExecutablePath, execFileBytes, utils.DefaultExecutableFileMod)
+	// Written atomically so a failure here leaves the installed binary exactly as
+	// it was: the endpoint keeps running the old agent rather than a truncated
+	// one that cannot start.
+	err = writeFileAtomic(
+		params.FS,
+		agentExecutablePath,
+		execFileBytes,
+		utils.DefaultExecutableFileMod,
+	)
 	if err != nil {
 		logger.Error("Failed to create agent executable", "error", err)
 		return
@@ -193,8 +265,22 @@ func runUpdate(params *updateContext) {
 		}
 		svc = nil
 
-		logger.Info("Waiting for service executable to stop")
-		time.Sleep(serviceExecutableTimeout)
+		// Wait for the deleted registration to disappear rather than assuming a
+		// fixed sleep covered it. If it somehow outlives the deadline, still try to
+		// create the service: failing here would leave the endpoint with no
+		// registration at all, and Create reports the real conflict if there is one.
+		logger.Info("Waiting for the service registration to be removed", "service", name)
+		if err := waitForServiceDeregistration(
+			params.ServiceManager,
+			name,
+			params.exitWait,
+		); err != nil {
+			logger.Error(
+				"Service registration outlived its deletion; re-registering anyway",
+				"service", name,
+				"error", err,
+			)
+		}
 
 		newSvc, err := params.ServiceManager.Create(service.AgentParams{
 			Name:                name,
@@ -213,11 +299,17 @@ func runUpdate(params *updateContext) {
 		logger.Info("Service re-registered", "service", name)
 	}
 
-	// Starting the service
+	// Starting the service. From here on the start attempt is itself the recovery,
+	// so a failure is reported once rather than retried by the deferred restart.
+	completed = true
 	logger.Info("Starting service", "service", name)
 	err = svc.Start()
 	if err != nil {
-		logger.Error("Failed to start service", "service", name, "error", err)
+		logger.Error(
+			"Failed to start service; the endpoint is offline",
+			"service", name,
+			"error", err,
+		)
 		return
 	}
 

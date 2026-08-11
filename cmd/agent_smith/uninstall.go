@@ -3,14 +3,11 @@ package main
 import (
 	"os"
 	"runtime"
-	"time"
 
 	"github.com/RewstApp/agent-smith-go/internal/agent"
 	"github.com/RewstApp/agent-smith-go/internal/utils"
 	"github.com/RewstApp/agent-smith-go/internal/version"
 )
-
-const serviceExecutableTimeout = time.Second * 5
 
 func runUninstall(params *uninstallContext) {
 	logger := utils.ConfigureLogger("agent_smith", os.Stdout, utils.Default)
@@ -32,6 +29,8 @@ func runUninstall(params *uninstallContext) {
 		}
 	}()
 
+	agentExecutablePath := agent.GetAgentExecutablePath(params.OrgId)
+
 	if service.IsActive() {
 		logger.Info("Stopping service", "service", name)
 		err = service.Stop()
@@ -52,6 +51,37 @@ func runUninstall(params *uninstallContext) {
 		logger.Info("Service stopped", "service", name)
 	}
 
+	// Wait for the old process to actually exit before removing anything. Files
+	// deleted out from under a live process leave a partially removed install
+	// that neither runs nor reinstalls cleanly, so the deletion only starts once
+	// the process is observably gone.
+	logger.Info(
+		"Waiting for the agent process to exit",
+		"service", name,
+		"agent_executable", agentExecutablePath,
+	)
+	if err := waitForAgentProcessExit(
+		logger,
+		service,
+		params.FS,
+		agentExecutablePath,
+		params.exitWait,
+	); err != nil {
+		logger.Error(
+			"Agent process did not exit",
+			"service", name,
+			"agent_executable", agentExecutablePath,
+			"error", err,
+		)
+		logger.Error(
+			"Uninstall aborted; nothing was removed",
+			"service", name,
+			"service_registration", "intact",
+			"installed_files", "intact",
+		)
+		return
+	}
+
 	// Delete the service
 	err = service.Delete()
 	if err != nil {
@@ -59,10 +89,6 @@ func runUninstall(params *uninstallContext) {
 		return
 	}
 	logger.Info("Service deleted", "service", name)
-
-	// Wait for some time for the service executable to clean up
-	logger.Info("Waiting for service executable to stop")
-	time.Sleep(serviceExecutableTimeout)
 
 	// Delete data directory
 	dataDir := agent.GetDataDirectory(params.OrgId)

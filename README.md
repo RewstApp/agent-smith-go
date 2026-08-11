@@ -448,6 +448,53 @@ Recovery is the ordinary one: end the wedged agent process, start the service, a
 re-run the update or uninstall. Linux and macOS are unaffected — their service
 implementations do not use this polling loop.
 
+### Waiting for the Old Agent Process to Exit
+
+Stopping the service is not the same as the old agent process being gone. Install,
+update and uninstall used to bridge that gap with a fixed `time.Sleep` of five
+seconds and then act regardless — overwriting the agent executable, or deleting
+the installation directory. On a loaded endpoint the old process is frequently
+still alive at the five second mark, because its shutdown legitimately drains the
+commands in flight, tears down MQTT and kills its plugin subprocesses one at a
+time. Windows then refuses to replace a running image, so the update failed with
+a sharing violation *after* the service was already stopped, leaving the device
+offline until someone intervened. Uninstall had the mirror-image problem: files
+deleted out from under a live process, leaving an installation that neither ran
+nor reinstalled.
+
+Nothing is written or deleted now until the process is observed to be gone:
+
+- The wait polls three **real signals**, all of which must clear: the service
+  manager no longer reports the service active, no running process is executing
+  the agent binary, and the executable is no longer held open as a running image
+  (a sharing violation on Windows, `ETXTBSY` on Linux). The three overlap on
+  purpose — the file signal is what actually blocks the write on Windows, but
+  macOS permits writing to a running image, and a service manager can report a
+  service stopped while its process is still winding down. An elapsed poll
+  interval is never by itself treated as evidence of anything.
+- It **returns as soon as the process is gone**, so a healthy update is faster
+  than the unconditional five second sleep it replaces, not slower.
+- It is bounded by a documented **2 minute** deadline, sized for a slow but
+  legitimate shutdown (many workers, long-running commands, several plugin
+  subprocesses). Overrunning it logs at `Error` what was still outstanding and for
+  how long, and the caller aborts rather than proceeding.
+- **Update** aborts before writing anything and leaves the installation fully
+  intact, then **restarts the service it stopped** so a failed update never leaves
+  the endpoint silently offline. **Uninstall** aborts before deleting the
+  registration or any files, and logs that nothing was removed. **Install**
+  (`--config`) aborts before deleting the existing registration and restarts the
+  service it stopped.
+- A probe that cannot run at all (a restrictive ACL, a process table that cannot
+  be enumerated) is logged once at `Warn` and the remaining signals are used. A
+  probe failure is not evidence a process is alive, and must not wedge every
+  update on an endpoint where it can never succeed.
+
+The agent executable and the config file are also written **atomically** — to a
+temporary file in the destination directory, then renamed into place, the same
+pattern the postback spool uses. An interrupted or failed write therefore leaves
+the previous file byte-identical rather than truncated: the endpoint keeps running
+the old agent instead of a binary that cannot start.
+
 ### Notification Plugin Supervision
 
 Notification plugins run as separate subprocesses reached over RPC, and every

@@ -4,7 +4,9 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/RewstApp/agent-smith-go/internal/agent"
 	"github.com/RewstApp/agent-smith-go/internal/utils"
@@ -50,6 +52,7 @@ func newBaseUpdateParams() *updateContext {
 		Domain:         &mockDomainInfoProvider{},
 		FS:             newUpdateTestFS(),
 		ServiceManager: &mockServiceManager{openService: &mockService{isActive: false}},
+		exitWait:       stubExitWait(),
 	}
 }
 
@@ -255,6 +258,132 @@ func TestRunUpdate_StopFails_LeavesInstallationUntouched(t *testing.T) {
 	}
 	if svc.deleteCalled {
 		t.Error("expected the service registration to be left alone after a failed stop")
+	}
+}
+
+// A process that never releases the executable must abort the update before
+// anything is written, and the service must be brought back up rather than left
+// stopped with the endpoint silently offline.
+func TestRunUpdate_ProcessNeverExits_AbortsAndRestartsService(t *testing.T) {
+	clock := newFakeClock()
+	var writes []string
+	params := newBaseUpdateParams()
+	params.exitWait = clock.options(2*time.Minute, 250*time.Millisecond)
+	params.FS = &mockFileSystem{
+		executableFunc: func() (string, error) { return "/fake/agent", nil },
+		readFileFunc:   func(string) ([]byte, error) { return validDeviceJSON("test-org"), nil },
+		writeFileFunc: func(name string, _ []byte, _ os.FileMode) error {
+			writes = append(writes, name)
+			return nil
+		},
+		mkdirAllFunc:  func(string) error { return nil },
+		removeAllFunc: func(string) error { return nil },
+		// The old process holds its image open for as long as it lives.
+		executableInUseFunc: func(string) (bool, error) { return true, nil },
+	}
+	svc := &mockService{isActive: true}
+	params.ServiceManager = &mockServiceManager{openService: svc}
+
+	runUpdate(params)
+
+	if !svc.stopCalled {
+		t.Error("expected the service to be stopped")
+	}
+	if len(writes) != 0 {
+		t.Errorf("expected nothing written while the old process is alive, got %v", writes)
+	}
+	if svc.deleteCalled {
+		t.Error("expected the service registration to be left alone")
+	}
+	if !svc.startCalled {
+		t.Error("expected the service to be restarted so the endpoint does not stay offline")
+	}
+	if clock.slept < 2*time.Minute {
+		t.Errorf("expected the full deadline to be waited out, waited %s", clock.slept)
+	}
+}
+
+// The executable is replaced by writing a temporary file next to it and renaming
+// it into place, so an interrupted update can never leave a truncated binary.
+func TestRunUpdate_ReplacesExecutableAtomically(t *testing.T) {
+	var writes []string
+	var renames [][2]string
+	params := newBaseUpdateParams()
+	params.FS = &mockFileSystem{
+		executableFunc: func() (string, error) { return "/fake/agent", nil },
+		readFileFunc:   func(string) ([]byte, error) { return validDeviceJSON("test-org"), nil },
+		writeFileFunc: func(name string, _ []byte, _ os.FileMode) error {
+			writes = append(writes, name)
+			return nil
+		},
+		renameFunc: func(oldPath string, newPath string) error {
+			renames = append(renames, [2]string{oldPath, newPath})
+			return nil
+		},
+		mkdirAllFunc:  func(string) error { return nil },
+		removeAllFunc: func(string) error { return nil },
+	}
+
+	runUpdate(params)
+
+	agentExecutablePath := agent.GetAgentExecutablePath("test-org")
+	for _, name := range writes {
+		if !strings.HasSuffix(name, ".new") {
+			t.Errorf("expected every write to target a temporary file, got %q", name)
+		}
+		if name == agentExecutablePath {
+			t.Errorf("expected the installed executable never to be written in place")
+		}
+	}
+
+	committed := false
+	for _, rename := range renames {
+		if rename[1] == agentExecutablePath && rename[0] == agentExecutablePath+".new" {
+			committed = true
+		}
+	}
+	if !committed {
+		t.Errorf(
+			"expected the executable to be committed by renaming %s.new into place, got %v",
+			agentExecutablePath,
+			renames,
+		)
+	}
+}
+
+// A commit that fails — the sharing violation this ticket is about, or a full
+// disk — must leave the endpoint running the old agent rather than stopped.
+func TestRunUpdate_ExecutableCommitFails_RestartsService(t *testing.T) {
+	params := newBaseUpdateParams()
+	agentExecutablePath := agent.GetAgentExecutablePath("test-org")
+	removedTemps := []string{}
+	params.FS = &mockFileSystem{
+		executableFunc: func() (string, error) { return "/fake/agent", nil },
+		readFileFunc:   func(string) ([]byte, error) { return validDeviceJSON("test-org"), nil },
+		writeFileFunc:  func(string, []byte, os.FileMode) error { return nil },
+		renameFunc: func(oldPath string, _ string) error {
+			if oldPath == agentExecutablePath+".new" {
+				return errors.New("sharing violation")
+			}
+			return nil
+		},
+		removeFunc: func(name string) error {
+			removedTemps = append(removedTemps, name)
+			return nil
+		},
+		mkdirAllFunc:  func(string) error { return nil },
+		removeAllFunc: func(string) error { return nil },
+	}
+	svc := &mockService{isActive: true}
+	params.ServiceManager = &mockServiceManager{openService: svc}
+
+	runUpdate(params)
+
+	if !svc.startCalled {
+		t.Error("expected the service to be restarted after a failed executable write")
+	}
+	if len(removedTemps) != 1 || removedTemps[0] != agentExecutablePath+".new" {
+		t.Errorf("expected the uncommitted temporary file to be cleaned up, got %v", removedTemps)
 	}
 }
 

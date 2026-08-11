@@ -51,6 +51,18 @@ Required tools:
   - Service mode: `--config-file --log-file --org-id` 
   - Uninstall mode: `--uninstall --org-id`
 
+  The install, update and uninstall paths never assume the old agent process has
+  exited: after stopping the service they wait (bounded, 2 minutes, documented)
+  for real exit signals — the service manager no longer reporting the service
+  active, no process still executing the agent binary, and the executable no
+  longer held open — and return as soon as the process is gone. Overrunning the
+  deadline aborts before writing or deleting anything, leaves the installation
+  intact, and restarts the service that was stopped so a failed update cannot
+  leave an endpoint offline. The agent executable and config file are written to a
+  temp file and atomically renamed into place, so a failed write leaves the
+  previous file byte-identical. See the README's "Waiting for the Old Agent
+  Process to Exit" section.
+
 - **internal/agent/**: Device configuration, installation paths, and OS-specific host information
 - **internal/interpreter/**: Command execution engine supporting both PowerShell and Bash interpreters  
 - **internal/mqtt/**: Azure IoT Hub MQTT client implementation with auto-reconnection

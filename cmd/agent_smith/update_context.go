@@ -28,6 +28,11 @@ type updateContext struct {
 
 	ServiceManager service.ServiceManager
 	FS             utils.FileSystem
+
+	// exitWait holds the test seams for the bounded wait for the old agent
+	// process to exit. Zero values select the documented defaults, so nothing
+	// outside tests ever sets it.
+	exitWait exitWaitOptions
 }
 
 // newUpdateFlagSet builds the flag set for update mode, binding flags to the

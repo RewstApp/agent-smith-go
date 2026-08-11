@@ -115,3 +115,102 @@ func TestDefaultFileSystem_ReadFile_NotFound(t *testing.T) {
 		t.Error("expected error reading nonexistent file, got nil")
 	}
 }
+
+func TestDefaultFileSystem_Rename(t *testing.T) {
+	fs := NewFileSystem()
+	dir := t.TempDir()
+	source := filepath.Join(dir, "agent.new")
+	destination := filepath.Join(dir, "agent")
+
+	if err := os.WriteFile(source, []byte("new"), DefaultExecutableFileMod); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(destination, []byte("old"), DefaultExecutableFileMod); err != nil {
+		t.Fatal(err)
+	}
+
+	// Renaming over an existing file must replace it: that is what makes the
+	// executable replacement a single atomic step.
+	if err := fs.Rename(source, destination); err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+
+	contents, err := os.ReadFile(destination)
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if string(contents) != "new" {
+		t.Errorf("expected the destination replaced, got %q", contents)
+	}
+	if _, statErr := os.Stat(source); !os.IsNotExist(statErr) {
+		t.Errorf("expected the source to be gone, stat returned %v", statErr)
+	}
+}
+
+func TestDefaultFileSystem_Remove(t *testing.T) {
+	fs := NewFileSystem()
+	path := filepath.Join(t.TempDir(), "agent.new")
+
+	if err := os.WriteFile(path, []byte("temp"), DefaultFileMod); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := fs.Remove(path); err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
+		t.Errorf("expected the file to be removed, stat returned %v", statErr)
+	}
+}
+
+func TestDefaultFileSystem_ExecutableInUse_MissingFile(t *testing.T) {
+	fs := NewFileSystem()
+
+	inUse, err := fs.ExecutableInUse(filepath.Join(t.TempDir(), "never-installed"))
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if inUse {
+		t.Error("expected a path with nothing installed at it not to be in use")
+	}
+}
+
+func TestDefaultFileSystem_ExecutableInUse_IdleFile(t *testing.T) {
+	fs := NewFileSystem()
+	path := filepath.Join(t.TempDir(), "agent")
+	contents := []byte("not running")
+
+	if err := os.WriteFile(path, contents, DefaultExecutableFileMod); err != nil {
+		t.Fatal(err)
+	}
+
+	inUse, err := fs.ExecutableInUse(path)
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if inUse {
+		t.Error("expected a file no process is running not to be in use")
+	}
+
+	// The probe opens the file for writing; it must not disturb the contents it
+	// is only inspecting.
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(contents) {
+		t.Errorf("expected the probe to leave the file untouched, got %q", after)
+	}
+}
+
+func TestDefaultFileSystem_ExecutableInUse_UnprobeablePath(t *testing.T) {
+	fs := NewFileSystem()
+
+	// A path that cannot be opened for writing at all is reported as an error
+	// rather than silently as "free": the caller decides what to do about a probe
+	// it could not run, and must not read it as evidence the process is gone.
+	_, err := fs.ExecutableInUse(t.TempDir())
+	if err == nil {
+		t.Error("expected an error probing a path that is not a regular file")
+	}
+}
