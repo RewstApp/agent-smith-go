@@ -417,6 +417,13 @@ func (r *AutoUpdateRunner) Start() {
 				if err := r.runUpdate(); err != nil {
 					r.logger.Error("Update failed, starting retry backoff", "error", err)
 					if r.retryWithBackoff() {
+						// A stop observed inside the backoff wait exits here rather
+						// than through the select above, so it is logged here too:
+						// otherwise the one path where a stop has to interrupt a
+						// pending wait - the path the bounded, jittered schedule
+						// exists for - would be the only one that leaves no record
+						// of the updater shutting down.
+						r.logger.Info("Auto updater stopped")
 						return
 					}
 				}

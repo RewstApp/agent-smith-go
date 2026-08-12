@@ -1,11 +1,15 @@
 package agent
 
 import (
+	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/RewstApp/agent-smith-go/internal/utils"
 	"github.com/hashicorp/go-hclog"
 )
 
@@ -290,3 +294,68 @@ func TestResolveLatestReleaseUrl_IntegrationBuildReadsOverrideFile(t *testing.T)
 }
 
 func ptr(s string) *string { return &s }
+
+// TestAutoUpdateRunner_LogsStopDuringBackoff pins the record left behind when a
+// stop lands while the runner is waiting out a retry backoff. That wait is the
+// one place a stop has to interrupt a pending sleep, so an exit with no log line
+// leaves the path the bounded, jittered schedule exists for unobservable - and
+// the integration workflow reads exactly this line to prove the stop was prompt.
+func TestAutoUpdateRunner_LogsStopDuringBackoff(t *testing.T) {
+	var buf bytes.Buffer
+	logger := utils.ConfigureLogger("test", &buf, utils.Info)
+	mock := &mockUpdater{runErr: fmt.Errorf("release endpoint unavailable")}
+
+	// A tick almost immediately, then a backoff long enough that only the stop
+	// can end it. The cap is raised past the interval-derived default for the
+	// same reason.
+	runner := NewAutoUpdateRunner(logger, mock, time.Millisecond, 5, time.Hour)
+	runner.maxBackoff = time.Hour
+
+	runner.Start()
+
+	// Wait until the runner is actually inside the backoff wait, so the stop
+	// cannot be observed by the outer select instead.
+	deadline := time.Now().Add(5 * time.Second)
+	for !strings.Contains(buf.String(), "Retrying update") {
+		if time.Now().After(deadline) {
+			t.Fatal("runner never entered a retry backoff")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	stopped := make(chan struct{})
+	go func() {
+		runner.Stop()
+		close(stopped)
+	}()
+
+	select {
+	case <-stopped:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Stop did not return promptly during a backoff wait")
+	}
+
+	output := buf.String()
+	if !strings.Contains(output, "Auto updater stopped") {
+		t.Fatalf("expected a stop to be logged from the backoff wait, got %q", output)
+	}
+	if strings.Count(output, "Auto updater stopped") != 1 {
+		t.Fatalf("expected the stop to be logged exactly once, got %q", output)
+	}
+}
+
+// TestAutoUpdateRunner_LogsStopWhileIdle covers the other exit: a stop observed
+// by the run loop's own select, between checks.
+func TestAutoUpdateRunner_LogsStopWhileIdle(t *testing.T) {
+	var buf bytes.Buffer
+	logger := utils.ConfigureLogger("test", &buf, utils.Info)
+
+	runner := NewAutoUpdateRunner(logger, &mockUpdater{}, time.Hour, 3, time.Millisecond)
+	runner.Start()
+	runner.Stop()
+
+	output := buf.String()
+	if strings.Count(output, "Auto updater stopped") != 1 {
+		t.Fatalf("expected the stop to be logged exactly once, got %q", output)
+	}
+}
