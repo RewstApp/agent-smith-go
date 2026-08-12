@@ -185,6 +185,11 @@ type configContext struct {
 	FS             utils.FileSystem
 	ServiceManager service.ServiceManager
 	HTTPClient     *http.Client
+
+	// exitWait holds the test seams for the bounded wait for the old agent
+	// process to exit. Zero values select the documented defaults, so nothing
+	// outside tests ever sets it.
+	exitWait exitWaitOptions
 }
 
 // newConfigFlagSet builds the flag set for config mode, binding flags to the

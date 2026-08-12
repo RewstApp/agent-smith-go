@@ -12,6 +12,10 @@
 #   abort in seconds instead of the production five minutes). The symbol only
 #   exists in the Windows build; -X against a missing symbol is ignored, so the
 #   same flag is harmless on Linux and macOS.
+# - exitTimeoutOverrideStr overridden to 25s (the bounded wait for the old agent
+#   process to actually exit before its files are replaced or deleted, so a
+#   process that never exits is given up on in seconds instead of the production
+#   two minutes)
 
 $env:GOARCH = "amd64"
 
@@ -21,7 +25,8 @@ $baseBackoffFlag = "-X github.com/RewstApp/agent-smith-go/internal/agent.baseBac
 $maxRetriesFlag = "-X github.com/RewstApp/agent-smith-go/internal/agent.maxRetriesStr=6"
 $sasTokenLifetimeFlag = "-X github.com/RewstApp/agent-smith-go/internal/agent.sasTokenLifetimeOverrideStr=90s"
 $stopTimeoutFlag = "-X github.com/RewstApp/agent-smith-go/internal/service.stopTimeoutOverrideStr=25s"
-$ldflags = "-w -s $versionFlag $intervalFlag $baseBackoffFlag $maxRetriesFlag $sasTokenLifetimeFlag $stopTimeoutFlag"
+$exitTimeoutFlag = "-X main.exitTimeoutOverrideStr=25s"
+$ldflags = "-w -s $versionFlag $intervalFlag $baseBackoffFlag $maxRetriesFlag $sasTokenLifetimeFlag $stopTimeoutFlag $exitTimeoutFlag"
 
 if ($IsWindows) {
     $buildOutput = "./dist/rewst_agent_config.win.it.exe"

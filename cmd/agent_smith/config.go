@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"os"
 	"runtime"
-	"time"
 
 	"github.com/RewstApp/agent-smith-go/internal/agent"
 	"github.com/RewstApp/agent-smith-go/internal/service"
@@ -153,16 +152,20 @@ func runConfig(params *configContext) error {
 	// Got configuration
 	logger.Info("Received configuration", "configuration", string(configBytes))
 
-	err = params.FS.WriteFile(configFilePath, configBytes, utils.DefaultFileMod)
+	// Written atomically so a failed write cannot leave a truncated config file
+	// that the service is then unable to start from.
+	err = writeFileAtomic(params.FS, configFilePath, configBytes, utils.DefaultFileMod)
 	if err != nil {
 		return fmt.Errorf("failed to save config: %w", err)
 	}
 
 	name := agent.GetServiceName(params.OrgId)
+	agentExecutablePath := agent.GetAgentExecutablePath(params.OrgId)
 
 	// Stop and delete the service if it already exists
 	existingService, err := params.ServiceManager.Open(name)
 	if err == nil {
+		stopped := false
 		if existingService.IsActive() {
 			logger.Info("Stopping service", "service", name)
 			// Abort before deleting the registration or overwriting the
@@ -179,6 +182,56 @@ func runConfig(params *configContext) error {
 				}
 				return fmt.Errorf("failed to stop service %s: %w", name, stopErr)
 			}
+			stopped = true
+		}
+
+		// Wait for the old process to actually exit before the registration is
+		// deleted and the executable is replaced. A process that is still running
+		// holds its own image open, so proceeding here is what fails the install
+		// with a sharing violation on Windows.
+		logger.Info(
+			"Waiting for the agent process to exit",
+			"service", name,
+			"agent_executable", agentExecutablePath,
+		)
+		if waitErr := waitForAgentProcessExit(
+			logger,
+			existingService,
+			params.FS,
+			agentExecutablePath,
+			params.exitWait,
+		); waitErr != nil {
+			// The config file was already refreshed above, so say so rather than
+			// claiming nothing changed: the installed agent and its registration are
+			// what had to be left alone while the old process is alive.
+			logger.Error(
+				"Install aborted; the existing agent and its service registration were left untouched",
+				"service",
+				name,
+				"agent_executable",
+				"not modified",
+				"service_registration",
+				"intact",
+				"config_file",
+				"updated",
+				"error",
+				waitErr,
+			)
+			// Put the endpoint back the way it was found rather than leaving a
+			// stopped service behind.
+			if stopped {
+				if startErr := existingService.Start(); startErr != nil {
+					logger.Error(
+						"Failed to restart service after aborted install; the endpoint is offline",
+						"service", name,
+						"error", startErr,
+					)
+				}
+			}
+			if closeErr := existingService.Close(); closeErr != nil {
+				logger.Error("Failed to close service handle", "service", name, "error", closeErr)
+			}
+			return fmt.Errorf("failed to wait for agent process to exit: %w", waitErr)
 		}
 
 		// Delete the service
@@ -188,13 +241,26 @@ func runConfig(params *configContext) error {
 		}
 		logger.Info("Service deleted", "service", name)
 
-		// Wait for some time for the service executable to clean up
 		err = existingService.Close()
 		if err != nil {
 			return fmt.Errorf("failed to close service %s: %w", name, err)
 		}
-		logger.Info("Waiting for service executable to stop")
-		time.Sleep(serviceExecutableTimeout)
+
+		// Wait for the deleted registration to be reaped so the name is free to
+		// register again. A registration that outlives the deadline is reported and
+		// creation is attempted anyway, which surfaces the real conflict.
+		logger.Info("Waiting for the service registration to be removed", "service", name)
+		if deregErr := waitForServiceDeregistration(
+			params.ServiceManager,
+			name,
+			params.exitWait,
+		); deregErr != nil {
+			logger.Error(
+				"Service registration outlived its deletion; registering anyway",
+				"service", name,
+				"error", deregErr,
+			)
+		}
 	}
 
 	logger.Info("Configuration saved to", "path", configFilePath)
@@ -218,8 +284,14 @@ func runConfig(params *configContext) error {
 		return fmt.Errorf("failed to read executable file: %w", err)
 	}
 
-	agentExecutablePath := agent.GetAgentExecutablePath(params.OrgId)
-	err = params.FS.WriteFile(agentExecutablePath, execFileBytes, utils.DefaultExecutableFileMod)
+	// Written atomically so a failure here leaves any previously installed binary
+	// byte-identical instead of truncated.
+	err = writeFileAtomic(
+		params.FS,
+		agentExecutablePath,
+		execFileBytes,
+		utils.DefaultExecutableFileMod,
+	)
 	if err != nil {
 		return fmt.Errorf("failed to create agent executable: %w", err)
 	}

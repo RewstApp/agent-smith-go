@@ -74,6 +74,7 @@ func newBaseConfigParams(configURL string) *configContext {
 		Domain:         &mockDomainInfoProvider{},
 		FS:             newConfigTestFS(),
 		ServiceManager: newConfigTestServiceManager(),
+		exitWait:       stubExitWait(),
 	}
 }
 
@@ -270,6 +271,55 @@ func TestRunConfig_ExistingService_StopFails(t *testing.T) {
 
 	if err == nil || !strings.Contains(err.Error(), "failed to stop service") {
 		t.Errorf("expected 'failed to stop service' error, got %v", err)
+	}
+}
+
+// A pre-existing agent whose process never exits must abort the install before
+// the registration is deleted or the executable replaced, and the service it
+// stopped must be brought back up.
+func TestRunConfig_ExistingService_ProcessNeverExits(t *testing.T) {
+	srv := newConfigServer(t, http.StatusOK, validConfigResponseBody("test-org"))
+	defer srv.Close()
+
+	clock := newFakeClock()
+	params := newBaseConfigParams(srv.URL)
+	params.exitWait = clock.options(2*time.Minute, 250*time.Millisecond)
+	var renames [][2]string
+	params.FS = &mockFileSystem{
+		executableFunc: func() (string, error) { return "/fake/agent", nil },
+		readFileFunc:   func(string) ([]byte, error) { return []byte("binary"), nil },
+		writeFileFunc:  func(string, []byte, os.FileMode) error { return nil },
+		mkdirAllFunc:   func(string) error { return nil },
+		removeAllFunc:  func(string) error { return nil },
+		renameFunc: func(oldPath string, newPath string) error {
+			renames = append(renames, [2]string{oldPath, newPath})
+			return nil
+		},
+		// The old process holds its image open for as long as it lives.
+		executableInUseFunc: func(string) (bool, error) { return true, nil },
+	}
+	existing := &mockService{isActive: true}
+	params.ServiceManager = &mockServiceManager{
+		openService:   existing,
+		createService: &mockService{},
+	}
+
+	err := runConfig(params)
+
+	if err == nil || !strings.Contains(err.Error(), "failed to wait for agent process to exit") {
+		t.Errorf("expected the install to abort on the exit wait, got %v", err)
+	}
+	if existing.deleteCalled {
+		t.Error("expected the existing service registration to be left alone")
+	}
+	if !existing.startCalled {
+		t.Error("expected the existing service to be restarted rather than left stopped")
+	}
+	agentExecutablePath := agent.GetAgentExecutablePath("test-org")
+	for _, rename := range renames {
+		if rename[1] == agentExecutablePath {
+			t.Error("expected the agent executable never to be replaced while the process is alive")
+		}
 	}
 }
 
