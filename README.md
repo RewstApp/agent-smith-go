@@ -495,6 +495,33 @@ pattern the postback spool uses. An interrupted or failed write therefore leaves
 the previous file byte-identical rather than truncated: the endpoint keeps running
 the old agent instead of a binary that cannot start.
 
+### Capped and Jittered Auto-Update Retries
+
+When an update check or download fails, the agent retries on an exponential
+schedule (base 5 minutes, doubling per retry, 5 retries) before waiting out the
+next 48-hour check interval. Two bounds keep that schedule safe at fleet scale:
+
+- **A cap.** No single retry sleep exceeds **1 hour**, or a quarter of the check
+  interval when that is shorter (integration builds shorten the interval via
+  ldflags). Without a ceiling the doubling reaches a 42-hour sleep by retry 10 —
+  longer than the interval the retries are nested inside — and a large retry
+  count overflows the doubling into a negative duration, which makes the wait
+  return immediately and spin the retry loop against the release endpoint. The
+  schedule is computed by iterated doubling with an early exit at the cap, so no
+  intermediate value can overflow and every slot is strictly positive and
+  bounded.
+- **Jitter.** Each slot is spread by up to **±25%**, mirroring the reconnect and
+  postback backoffs. An unjittered schedule makes every agent that failed at the
+  same moment retry at the same instants, so a GitHub releases outage or rate
+  limit turns the whole fleet into a synchronized retry storm that sustains the
+  condition it is recovering from and keeps endpoints on older versions long
+  after the outage ends. Jitter is applied after clamping and re-clamped, so a
+  jittered slot never exceeds the cap or drops to zero.
+
+The backoff wait stays interruptible by the service stop signal, so a stop is
+never delayed by a pending retry, and a retry that succeeds resets the schedule
+for the next cycle.
+
 ### Notification Plugin Supervision
 
 Notification plugins run as separate subprocesses reached over RPC, and every
