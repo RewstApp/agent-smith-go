@@ -1,6 +1,8 @@
 package agent
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -220,3 +222,71 @@ func TestUpdateRetryBackoff_BaseAboveCapClamped(t *testing.T) {
 		}
 	}
 }
+
+// TestResolveLatestReleaseUrl_ReleasedBuildIgnoresOverrideFile pins the gate on
+// the override seam: with no ldflags injection (the released build) the file is
+// never consulted, so the update source of a shipped agent cannot be redirected
+// by dropping a file on an endpoint.
+func TestResolveLatestReleaseUrl_ReleasedBuildIgnoresOverrideFile(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(
+		filepath.Join(dir, "release_url_override"),
+		[]byte("http://127.0.0.1:8765/releases/latest"),
+		0o644,
+	); err != nil {
+		t.Fatalf("failed to seed override file: %v", err)
+	}
+
+	const defaultUrl = "https://api.github.com/repos/rewstapp/agent-smith-go/releases/latest"
+	got := resolveLatestReleaseUrl(hclog.NewNullLogger(), dir, defaultUrl)
+	if got != defaultUrl {
+		t.Fatalf("expected released build to keep %q, got %q", defaultUrl, got)
+	}
+}
+
+// TestResolveLatestReleaseUrl_IntegrationBuildReadsOverrideFile covers the
+// integration-test build: the override is honored when present, and every
+// degenerate case (missing, empty, whitespace-only) falls back to the compiled-in
+// endpoint so a fixture that failed to write the file leaves the agent updating
+// normally rather than silently not updating at all.
+func TestResolveLatestReleaseUrl_IntegrationBuildReadsOverrideFile(t *testing.T) {
+	const (
+		defaultUrl = "https://api.github.com/repos/rewstapp/agent-smith-go/releases/latest"
+		stubUrl    = "http://127.0.0.1:8765/releases/latest"
+	)
+
+	previous := releaseUrlOverrideFileStr
+	releaseUrlOverrideFileStr = "release_url_override"
+	t.Cleanup(func() { releaseUrlOverrideFileStr = previous })
+
+	cases := []struct {
+		name     string
+		contents *string
+		expected string
+	}{
+		{name: "missing file", contents: nil, expected: defaultUrl},
+		{name: "empty file", contents: ptr(""), expected: defaultUrl},
+		{name: "whitespace only", contents: ptr("  \n"), expected: defaultUrl},
+		{name: "url", contents: ptr(stubUrl), expected: stubUrl},
+		{name: "url with trailing newline", contents: ptr(stubUrl + "\n"), expected: stubUrl},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if c.contents != nil {
+				path := filepath.Join(dir, releaseUrlOverrideFileStr)
+				if err := os.WriteFile(path, []byte(*c.contents), 0o644); err != nil {
+					t.Fatalf("failed to write override file: %v", err)
+				}
+			}
+
+			got := resolveLatestReleaseUrl(hclog.NewNullLogger(), dir, defaultUrl)
+			if got != c.expected {
+				t.Fatalf("expected %q, got %q", c.expected, got)
+			}
+		})
+	}
+}
+
+func ptr(s string) *string { return &s }

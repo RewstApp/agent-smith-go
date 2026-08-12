@@ -7,6 +7,8 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/RewstApp/agent-smith-go/internal/utils"
@@ -45,6 +47,19 @@ var baseBackoffStr = ""
 // maxRetriesStr is overridable via -ldflags for integration testing.
 // Example: -ldflags "-X github.com/RewstApp/agent-smith-go/internal/agent.maxRetriesStr=3"
 var maxRetriesStr = ""
+
+// releaseUrlOverrideFileStr names a file inside the org's data directory whose
+// contents replace the compiled-in release endpoint. It is overridable via
+// -ldflags for integration testing, which points the auto-updater at a local
+// stub release endpoint so the retry schedule can be observed against an
+// endpoint that fails on demand (sc-106110); a real GitHub outage is not
+// something CI can arrange.
+// Example: -ldflags "-X github.com/RewstApp/agent-smith-go/internal/agent.releaseUrlOverrideFileStr=release_url_override"
+//
+// Released builds leave it empty and then never look for the file at all, so the
+// update source of a shipped agent is fixed at build time and cannot be
+// redirected by dropping a file on an endpoint.
+var releaseUrlOverrideFileStr = ""
 
 const (
 	defaultUpdateInterval = 48 * time.Hour
@@ -121,6 +136,39 @@ func DefaultMaxRetries() int {
 		}
 	}
 	return defaultMaxRetries
+}
+
+// ResolveLatestReleaseUrl returns the endpoint the auto-updater should query for
+// the latest release: defaultUrl for released builds, and for an
+// integration-test build the URL named by releaseUrlOverrideFileStr when that
+// file exists in the org's data directory. A missing, unreadable, or empty
+// override file falls back to defaultUrl, so a fixture that failed to write it
+// leaves the agent updating normally rather than silently not updating at all.
+func ResolveLatestReleaseUrl(logger hclog.Logger, orgId string, defaultUrl string) string {
+	return resolveLatestReleaseUrl(logger, GetDataDirectory(orgId), defaultUrl)
+}
+
+func resolveLatestReleaseUrl(logger hclog.Logger, dataDir string, defaultUrl string) string {
+	if releaseUrlOverrideFileStr == "" {
+		return defaultUrl
+	}
+
+	path := filepath.Join(dataDir, releaseUrlOverrideFileStr)
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			logger.Warn("Failed to read release url override", "path", path, "error", err)
+		}
+		return defaultUrl
+	}
+
+	url := strings.TrimSpace(string(contents))
+	if url == "" {
+		return defaultUrl
+	}
+
+	logger.Info("Using release url override", "path", path, "url", url)
+	return url
 }
 
 type RunCommandFunc = func(path string, args []string) error

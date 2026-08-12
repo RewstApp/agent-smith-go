@@ -1555,6 +1555,408 @@ jobs:
           scripts_dir: ${{ steps.inflight_script.outputs.scripts_dir }}
           orphan_path: ${{ steps.inflight_script.outputs.path }}
 
+      # ---- Capped and jittered auto-update retry scenario (sc-106110) ----
+      # The auto-update retry delay was base * (1 << attempt) with no ceiling and
+      # no jitter. Unjittered, every agent that failed against the release
+      # endpoint at the same moment retried at the same instants, so an outage or
+      # rate limit was sustained by the fleet trying to recover from it; uncapped,
+      # a large retry count overflowed the shift into a negative duration, which
+      # made the wait return immediately and spun the loop against the endpoint.
+      #
+      # A GitHub outage is not something CI can arrange and an unroutable address
+      # produces connection errors rather than the HTTP failure the ticket
+      # describes, so the agent is pointed at the test/stubrelease fixture through
+      # the override file the integration build honors. The fixture fails every
+      # request until it is flipped, which puts the agent into retryWithBackoff
+      # with the shortened build knobs - base 2s, 6 retries, 30s check interval,
+      # so the cap is a quarter of that interval (7.5s) - and makes a full
+      # schedule observable in under a minute.
+      #
+      # Fleet-wide de-synchronization needs many agents and is covered by unit
+      # tests over the schedule itself. What one endpoint can show, and what these
+      # steps assert, is that every slot is strictly positive, bounded by the cap,
+      # varies rather than repeating, and is never served back to back.
+      - name: Start stub release endpoint (failing)
+        id: stub_release
+        uses: ./.github/actions/stub-release
+        with:
+          mode: start
+
+      - name: Capture auto-update retry baseline counts
+        id: retry_baseline
+        shell: pwsh
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+        run: |
+          $content = Get-Content $env:LOG_FILE -Raw -ErrorAction SilentlyContinue
+          $retrying  = if ($content) { ([regex]::Matches($content, [regex]::Escape("Retrying update"))).Count } else { 0 }
+          $succeeded = if ($content) { ([regex]::Matches($content, [regex]::Escape("Update succeeded on retry"))).Count } else { 0 }
+          "retrying=$retrying"   >> $env:GITHUB_OUTPUT
+          "succeeded=$succeeded" >> $env:GITHUB_OUTPUT
+          Write-Output "Baseline counts -> retrying=$retrying succeeded=$succeeded"
+
+      # Written before the install, because the updater reads the override when a
+      # service cycle constructs it - a file written afterwards would not be seen
+      # until the next restart, and the agent would spend the scenario updating
+      # itself from the real releases API instead.
+      - name: Point the agent at the stub release endpoint
+        uses: ./.github/actions/set-release-url
+        with:
+          mode: set
+          config_dir: ${{ matrix.config_dir }}
+          org_id: ${{ vars.IT_ORG_ID }}
+          url: ${{ steps.stub_release.outputs.url }}
+
+      - name: Install integration test binary with auto-updates on
+        uses: ./.github/actions/run-agent
+        with:
+          binary: ${{ matrix.it_binary }}
+          args: --update --org-id ${{ vars.IT_ORG_ID }} --github-token ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Wait for the update retry schedule to run
+        shell: pwsh
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+          BASELINE: ${{ steps.retry_baseline.outputs.retrying }}
+        run: |
+          # The first check fires 30s after the service starts, then the schedule
+          # is roughly 2s, 4s, 7.5s, 7.5s... Three new lines prove the loop is
+          # running and leave three more slots for the recovery flip below to land
+          # in, so the flip cannot race the end of the retry budget.
+          $baseline = [int]$env:BASELINE
+          for ($i = 1; $i -le 150; $i++) {
+            $content = Get-Content $env:LOG_FILE -Raw -ErrorAction SilentlyContinue
+            $count = if ($content) { ([regex]::Matches($content, [regex]::Escape("Retrying update"))).Count } else { 0 }
+            if (($count - $baseline) -ge 3) {
+              Write-Output "Observed $($count - $baseline) update retries after ~${i}s"
+              exit 0
+            }
+            Start-Sleep -Seconds 1
+          }
+          Write-Error "The agent never retried the update against the failing release endpoint"
+          exit 1
+
+      # Flipped mid-sequence - the fixture re-reads its mode per request - so the
+      # recovery is the agent's own next retry, not a restart.
+      - name: Serve a valid release payload mid-sequence
+        uses: ./.github/actions/stub-release
+        with:
+          mode: ok
+
+      - name: Assert the update succeeds on a retry
+        shell: pwsh
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+          BASELINE: ${{ steps.retry_baseline.outputs.succeeded }}
+        run: |
+          # The fixture serves the running agent's own version as tag_name, so a
+          # recovered check ends at "No updates available" and the retry is seen
+          # succeeding without downloading or executing anything - the recovery is
+          # what is under test here, not the installer.
+          $baseline = [int]$env:BASELINE
+          for ($i = 1; $i -le 60; $i++) {
+            $content = Get-Content $env:LOG_FILE -Raw -ErrorAction SilentlyContinue
+            $count = if ($content) { ([regex]::Matches($content, [regex]::Escape("Update succeeded on retry"))).Count } else { 0 }
+            if ($count -gt $baseline) {
+              Write-Output "Update succeeded on a retry after ~$($i * 2)s (count $count > baseline $baseline)"
+              exit 0
+            }
+            Start-Sleep -Seconds 2
+          }
+
+          # Separates a real regression from a flip that landed after the budget
+          # was already spent, which would leave the next check succeeding on its
+          # first try and logging no retry at all.
+          $content = Get-Content $env:LOG_FILE -Raw -ErrorAction SilentlyContinue
+          if ($content -and $content.Contains("All retries exhausted")) {
+            Write-Output "Note: the log records an exhausted retry budget; the recovery flip may have landed after the last slot"
+          }
+          Write-Output "---- last 40 log lines ----"
+          Get-Content $env:LOG_FILE -Tail 40 -ErrorAction SilentlyContinue
+          Write-Error "The agent never logged a successful update retry after the endpoint recovered"
+          exit 1
+
+      - name: Assert the retry schedule is capped, jittered and never immediate
+        shell: pwsh
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+          BASELINE: ${{ steps.retry_baseline.outputs.retrying }}
+        run: |
+          # The cap the integration build lands on: a quarter of its 30s check
+          # interval, which is below the absolute 1h ceiling a released build uses.
+          $cap = 7.5
+          $baseline = [int]$env:BASELINE
+          $failures = @()
+
+          function ConvertTo-Seconds([string]$value) {
+            # Go renders a duration as concatenated unit components ("4.1s",
+            # "1m4s"), and a negative one with a leading '-'. The sign is read
+            # separately because the overflow this scenario guards against
+            # produced exactly that negative value, and summing the components
+            # alone would report it as positive.
+            $sign = if ($value.StartsWith('-')) { -1.0 } else { 1.0 }
+            $total = 0.0
+            foreach ($m in [regex]::Matches($value, '(?<n>[0-9.]+)(?<u>ms|us|ns|h|m|s)')) {
+              $n = [double]$m.Groups['n'].Value
+              switch ($m.Groups['u'].Value) {
+                'ns' { $total += $n / 1e9 }
+                'us' { $total += $n / 1e6 }
+                'ms' { $total += $n / 1e3 }
+                's'  { $total += $n }
+                'm'  { $total += $n * 60 }
+                'h'  { $total += $n * 3600 }
+              }
+            }
+            return $sign * $total
+          }
+
+          $lines = @(Get-Content $env:LOG_FILE -ErrorAction SilentlyContinue |
+            Where-Object { $_ -match 'Retrying update' } |
+            Select-Object -Skip $baseline)
+
+          $slots = @()
+          foreach ($line in $lines) {
+            # hclog writes "<timestamp> [INFO]  agent_smith: Retrying update: attempt=N backoff=D".
+            # The timestamp is a fixed-width local time followed by its offset, so
+            # the first 23 characters parse without worrying about the offset form.
+            $m = [regex]::Match($line, '^(?<ts>\S{23}).*Retrying update: attempt=(?<attempt>\d+) backoff=(?<backoff>\S+)')
+            if (-not $m.Success) {
+              $failures += "could not parse a retry line: $line"
+              continue
+            }
+            $stamp = $null
+            try {
+              $stamp = [datetime]::ParseExact(
+                $m.Groups['ts'].Value,
+                'yyyy-MM-ddTHH:mm:ss.fff',
+                [Globalization.CultureInfo]::InvariantCulture)
+            } catch {
+              $failures += "could not parse the timestamp of: $line"
+            }
+            $slots += [pscustomobject]@{
+              Attempt = [int]$m.Groups['attempt'].Value
+              Backoff = ConvertTo-Seconds $m.Groups['backoff'].Value
+              Time    = $stamp
+            }
+          }
+
+          if ($slots.Count -lt 3) {
+            Write-Error "Expected at least three retry slots to inspect, got $($slots.Count)"
+            exit 1
+          }
+
+          # The timestamp table the ticket asks for: every slot, what it waited,
+          # and how long actually elapsed before the next one arrived.
+          Write-Output "---- observed update retry schedule ----"
+          for ($i = 0; $i -lt $slots.Count; $i++) {
+            $gap = ''
+            if ($i -lt $slots.Count - 1 -and $slots[$i].Time -and $slots[$i + 1].Time) {
+              $gap = [math]::Round(($slots[$i + 1].Time - $slots[$i].Time).TotalSeconds, 3)
+            }
+            Write-Output ("attempt={0} backoff={1}s elapsed_to_next={2}" -f $slots[$i].Attempt, [math]::Round($slots[$i].Backoff, 3), $gap)
+          }
+
+          foreach ($slot in $slots) {
+            # A zero or negative slot is the overflow busy-spin: time.After fires
+            # immediately and the loop issues requests as fast as it can.
+            if ($slot.Backoff -le 0) {
+              $failures += "attempt $($slot.Attempt): backoff $($slot.Backoff)s is not strictly positive"
+            }
+            # The tolerance covers the millisecond rendering, not the cap itself.
+            if ($slot.Backoff -gt ($cap + 0.05)) {
+              $failures += "attempt $($slot.Attempt): backoff $($slot.Backoff)s exceeds the ${cap}s cap"
+            }
+          }
+
+          # Jitter: a fixed schedule repeats the same values bit for bit.
+          $distinct = @($slots | ForEach-Object { [math]::Round($_.Backoff, 3) } | Select-Object -Unique)
+          if ($distinct.Count -lt 2) {
+            $failures += "every retry slot was $($distinct -join ', ')s - the schedule is not jittered"
+          }
+          # Distinct values alone are weak evidence, because the doubling produces
+          # distinct values on its own until it reaches the ceiling. The slots that
+          # do reach it are the discriminator: an unjittered schedule pins every
+          # one of them to exactly the cap, while jitter spreads them across the
+          # band below it. Skipped when the sequence was cut short by the recovery
+          # flip before two slots got that far.
+          $nearCap = @($slots | Where-Object { $_.Backoff -ge ($cap * 0.75) })
+          if ($nearCap.Count -ge 2) {
+            $distinctNearCap = @($nearCap | ForEach-Object { [math]::Round($_.Backoff, 3) } | Select-Object -Unique)
+            if ($distinctNearCap.Count -lt 2) {
+              $failures += "the capped slots all measured $($distinctNearCap -join ', ')s - the jitter is not being applied"
+            }
+          }
+
+          # Growth: the schedule still doubles up to the cap rather than being flat.
+          $maxBackoff = ($slots | Measure-Object -Property Backoff -Maximum).Maximum
+          if ($maxBackoff -le $slots[0].Backoff) {
+            $failures += "the schedule never grew (first $($slots[0].Backoff)s, largest ${maxBackoff}s)"
+          }
+
+          # Spacing: consecutive slots of one sequence must be separated by at
+          # least the wait that was logged. Pairs that are not consecutive attempts
+          # belong to different retry sequences and are skipped.
+          for ($i = 0; $i -lt $slots.Count - 1; $i++) {
+            if ($slots[$i + 1].Attempt -ne $slots[$i].Attempt + 1) { continue }
+            if (-not $slots[$i].Time -or -not $slots[$i + 1].Time) { continue }
+            $gap = ($slots[$i + 1].Time - $slots[$i].Time).TotalSeconds
+            if ($gap -lt 1) {
+              $failures += "attempts $($slots[$i].Attempt) and $($slots[$i + 1].Attempt) arrived ${gap}s apart - back to back"
+            }
+            if ($gap -lt ($slots[$i].Backoff * 0.8)) {
+              $failures += "attempt $($slots[$i].Attempt) logged a $($slots[$i].Backoff)s backoff but the next retry came after ${gap}s"
+            }
+          }
+
+          if ($failures.Count -gt 0) {
+            $failures | ForEach-Object { Write-Output "FAIL: $_" }
+            Write-Error "the update retry schedule is not capped, jittered and spaced as expected"
+            exit 1
+          }
+          Write-Output "Retry schedule bounded by ${cap}s, jittered across $($distinct.Count) distinct values, and never served back to back"
+          exit 0
+
+      - name: Fail the release endpoint again for the stop check
+        uses: ./.github/actions/stub-release
+        with:
+          mode: fail
+
+      - name: Capture stop-during-backoff baseline counts
+        id: retry_stop_baseline
+        shell: pwsh
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+        run: |
+          $content = Get-Content $env:LOG_FILE -Raw -ErrorAction SilentlyContinue
+          $retrying = if ($content) { ([regex]::Matches($content, [regex]::Escape("Retrying update"))).Count } else { 0 }
+          $stopped  = if ($content) { ([regex]::Matches($content, [regex]::Escape("Auto updater stopped"))).Count } else { 0 }
+          "retrying=$retrying" >> $env:GITHUB_OUTPUT
+          "stopped=$stopped"   >> $env:GITHUB_OUTPUT
+          Write-Output "Baseline counts -> retrying=$retrying stopped=$stopped"
+
+      - name: Wait for a fresh backoff to be entered
+        shell: pwsh
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+          BASELINE: ${{ steps.retry_stop_baseline.outputs.retrying }}
+        run: |
+          $baseline = [int]$env:BASELINE
+          for ($i = 1; $i -le 90; $i++) {
+            $content = Get-Content $env:LOG_FILE -Raw -ErrorAction SilentlyContinue
+            $count = if ($content) { ([regex]::Matches($content, [regex]::Escape("Retrying update"))).Count } else { 0 }
+            if ($count -gt $baseline) {
+              Write-Output "Agent is in a retry backoff again after ~${i}s"
+              exit 0
+            }
+            Start-Sleep -Seconds 1
+          }
+          Write-Error "The agent never entered a retry backoff after the endpoint was failed again"
+          exit 1
+
+      - name: Assert a service stop during a backoff is prompt
+        shell: pwsh
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+          SERVICE: ${{ matrix.service }}
+          BASELINE: ${{ steps.retry_stop_baseline.outputs.stopped }}
+        run: |
+          # The agent has just entered a backoff with most of its 6-slot budget
+          # left (~30s of waiting at the 7.5s cap). A stop that has to wait out
+          # the pending slot - or worse, the whole budget - delays every caller of
+          # Stop(): the installer, an upgrade, and an uninstall.
+          $baseline = [int]$env:BASELINE
+          $sw = [System.Diagnostics.Stopwatch]::StartNew()
+          if ($IsWindows) {
+            sc.exe stop $env:SERVICE | Out-Null
+          } elseif ($IsLinux) {
+            sudo systemctl stop $env:SERVICE
+          } else {
+            # Bare label, not "system/<label>": stop is a legacy launchctl
+            # subcommand that resolves a label in the current domain, and a
+            # service-target form is read as a literal label that matches nothing.
+            sudo launchctl stop $env:SERVICE
+          }
+          # The service managers disagree about exit status for a stop that was
+          # delivered; the verdict here comes from the agent's own log.
+          $global:LASTEXITCODE = 0
+
+          for ($i = 1; $i -le 60; $i++) {
+            $content = Get-Content $env:LOG_FILE -Raw -ErrorAction SilentlyContinue
+            $count = if ($content) { ([regex]::Matches($content, [regex]::Escape("Auto updater stopped"))).Count } else { 0 }
+            if ($count -gt $baseline) {
+              $sw.Stop()
+              $elapsed = [math]::Round($sw.Elapsed.TotalSeconds, 1)
+              if ($sw.Elapsed.TotalSeconds -gt 20) {
+                Write-Error "The auto updater stopped only after ${elapsed}s, long enough to have waited out its retry schedule"
+                exit 1
+              }
+              Write-Output "Auto updater stopped ${elapsed}s after the stop was issued, mid-backoff"
+              exit 0
+            }
+            Start-Sleep -Milliseconds 500
+          }
+          $sw.Stop()
+          Write-Output "---- last 40 log lines ----"
+          Get-Content $env:LOG_FILE -Tail 40 -ErrorAction SilentlyContinue
+          Write-Error "The auto updater never logged a stop after the service was stopped mid-backoff"
+          exit 1
+
+      # The restore steps run under always() so a failed assertion above cannot
+      # leave the rest of the job running an agent that points at a stub release
+      # endpoint (or leave the service stopped for the scenarios that follow).
+      - name: Capture restore baseline counts
+        if: always()
+        id: retry_restore_baseline
+        shell: pwsh
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+        run: |
+          $content = Get-Content $env:LOG_FILE -Raw -ErrorAction SilentlyContinue
+          $subscribed = if ($content) { ([regex]::Matches($content, [regex]::Escape("Subscribed to messages"))).Count } else { 0 }
+          "subscribed=$subscribed" >> $env:GITHUB_OUTPUT
+          Write-Output "Baseline counts -> subscribed=$subscribed"
+
+      - name: Clear the release url override
+        if: always()
+        uses: ./.github/actions/set-release-url
+        with:
+          mode: clear
+          config_dir: ${{ matrix.config_dir }}
+          org_id: ${{ vars.IT_ORG_ID }}
+
+      - name: Stop stub release endpoint
+        if: always()
+        uses: ./.github/actions/stub-release
+        with:
+          mode: stop
+
+      - name: Reinstall the release binary after the retry scenario
+        if: always()
+        uses: ./.github/actions/run-agent
+        with:
+          binary: ${{ matrix.binary }}
+          args: --update --org-id ${{ vars.IT_ORG_ID }} --no-auto-updates ${{ matrix.no_auto_updates_extra }} --github-token ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Wait for resubscription after the retry scenario
+        if: always()
+        shell: pwsh
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+          BASELINE: ${{ steps.retry_restore_baseline.outputs.subscribed }}
+        run: |
+          $baseline = [int]$env:BASELINE
+          for ($i = 1; $i -le 60; $i++) {
+            $content = Get-Content $env:LOG_FILE -Raw -ErrorAction SilentlyContinue
+            $count = if ($content) { ([regex]::Matches($content, [regex]::Escape("Subscribed to messages"))).Count } else { 0 }
+            if ($count -gt $baseline) {
+              Write-Output "Agent resubscribed after the retry scenario (count $count > baseline $baseline) after ~$($i * 2)s"
+              exit 0
+            }
+            Start-Sleep -Seconds 2
+          }
+          Write-Error "Agent never resubscribed after the retry scenario"
+          exit 1
+
       # ---- Wedged Windows service stop scenario (sc-106108) ----
       # windowsService.Stop() polled the service state every 250ms in an
       # unbounded loop, so a service that never reached Stopped hung its caller

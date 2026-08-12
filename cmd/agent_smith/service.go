@@ -30,9 +30,15 @@ const (
 	// config does not override them via worker_count / message_queue_size. The
 	// effective values are resolved per cycle from the device config; see
 	// agent.Device.ResolvedWorkerCount / ResolvedMessageQueueSize.
-	workerCount              = agent.DefaultWorkerCount
-	messageQueueSize         = agent.DefaultMessageQueueSize
-	postbackHTTPTimeout      = 30 * time.Second
+	workerCount         = agent.DefaultWorkerCount
+	messageQueueSize    = agent.DefaultMessageQueueSize
+	postbackHTTPTimeout = 30 * time.Second
+
+	// defaultLatestReleaseUrl is the release endpoint the auto-updater queries.
+	// Released builds always use it; an integration-test build can be pointed at
+	// a stub endpoint instead (see agent.ResolveLatestReleaseUrl).
+	defaultLatestReleaseUrl = "https://api.github.com/repos/rewstapp/agent-smith-go/releases/latest"
+
 	postbackMaxAttempts      = agent.DefaultPostbackMaxAttempts
 	postbackBaseRetryBackoff = agent.DefaultPostbackBaseRetryBackoff
 	postbackMaxRetryBackoff  = agent.DefaultPostbackMaxRetryBackoff
@@ -161,7 +167,7 @@ func (svc *serviceContext) Execute(
 		updater := agent.NewUpdater(
 			logger,
 			&device,
-			"https://api.github.com/repos/rewstapp/agent-smith-go/releases/latest",
+			agent.ResolveLatestReleaseUrl(logger, svc.OrgId, defaultLatestReleaseUrl),
 			device.GithubToken,
 			func(path string, args []string) error {
 				return detachedCommand(path, args, logFile, logFile).Start()
