@@ -270,3 +270,58 @@ func TestReconnectTimeoutGeneratorJitterDiffers(t *testing.T) {
 		t.Error("expected two independent generators to produce different jittered sequences")
 	}
 }
+
+// TestJitteredBackoffSpreadsAtTheCap is the regression for jitter that was
+// clamped to the ceiling instead of reflected under it. Clamping put roughly
+// half of every capped draw on exactly maxBackoff, so a fleet whose schedules
+// had all reached the ceiling - which is where a sustained outage puts it - fired
+// half its retries at the same instant, the very synchronization the jitter is
+// there to break up. It was caught by the integration scenario, whose two capped
+// slots landed on exactly the cap on two of three platforms.
+func TestJitteredBackoffSpreadsAtTheCap(t *testing.T) {
+	base := time.Second
+	maxBackoff := 8 * time.Second
+
+	const samples = 1000
+	atCap := 0
+	distinct := make(map[time.Duration]struct{}, samples)
+	minSeen := maxBackoff
+
+	for range samples {
+		// A step well past the point where the schedule reaches the ceiling.
+		got := JitteredBackoff(base, maxBackoff, 10)
+		if got <= 0 || got > maxBackoff {
+			t.Fatalf("expected 0 < backoff <= %v, got %v", maxBackoff, got)
+		}
+		if got == maxBackoff {
+			atCap++
+		}
+		if got < minSeen {
+			minSeen = got
+		}
+		distinct[got] = struct{}{}
+	}
+
+	// The clamped implementation this replaces scored ~500 here.
+	if atCap > samples/100 {
+		t.Fatalf(
+			"%d of %d capped slots landed on exactly %v; the jitter is clamped to the cap rather than spread under it",
+			atCap,
+			samples,
+			maxBackoff,
+		)
+	}
+	if len(distinct) < samples/2 {
+		t.Fatalf("expected capped slots to spread, got only %d distinct values across %d samples",
+			len(distinct), samples)
+	}
+	// The spread should reach into the band below the ceiling rather than
+	// hovering against it.
+	if minSeen > time.Duration(float64(maxBackoff)*0.9) {
+		t.Fatalf(
+			"capped slots never dropped meaningfully below the cap (smallest %v of %v)",
+			minSeen,
+			maxBackoff,
+		)
+	}
+}

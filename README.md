@@ -515,8 +515,10 @@ next 48-hour check interval. Two bounds keep that schedule safe at fleet scale:
   same moment retry at the same instants, so a GitHub releases outage or rate
   limit turns the whole fleet into a synchronized retry storm that sustains the
   condition it is recovering from and keeps endpoints on older versions long
-  after the outage ends. Jitter is applied after clamping and re-clamped, so a
-  jittered slot never exceeds the cap or drops to zero.
+  after the outage ends. Jitter is applied after the cap, and a slot that would
+  exceed the cap is reflected back under it rather than clamped to it — clamping
+  would land half of every capped slot on exactly the ceiling, so a fleet held at
+  the cap by a long outage would re-synchronize there.
 
 The backoff wait stays interruptible by the service stop signal, so a stop is
 never delayed by a pending retry, and a retry that succeeds resets the schedule

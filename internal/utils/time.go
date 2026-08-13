@@ -188,12 +188,18 @@ const MinJitteredBackoff time.Duration = time.Second
 // count widens the total retry window without ever producing a negative, zero,
 // or multi-day sleep.
 //
-// The jitter mirrors ReconnectTimeoutGenerator.Next: without it every agent in a
-// fleet that fails against the same endpoint at the same time retries on an
-// identical, perfectly synchronized cadence, and the fleet sustains the outage
-// or rate limit it is trying to recover from. It is applied after clamping and
-// the result is clamped again, so a jittered slot never exceeds maxBackoff and
-// never collapses to zero or negative.
+// The jitter exists because without it every agent in a fleet that fails against
+// the same endpoint at the same time retries on an identical, perfectly
+// synchronized cadence, and the fleet sustains the outage or rate limit it is
+// trying to recover from. It is applied after clamping, and a jittered slot that
+// would exceed maxBackoff is reflected back under the ceiling rather than
+// clamped to it: clamping looks harmless but collapses half of every capped slot
+// onto exactly maxBackoff, so once a schedule reaches its ceiling — which is
+// where a sustained outage puts the whole fleet — around half of all agents fire
+// at the same instant again. Reflecting keeps the result strictly below the
+// ceiling and spread across the band beneath it, and it can never reach zero or
+// go negative because the jitter is at most a quarter of a value that is itself
+// at most maxBackoff.
 //
 // Degenerate inputs are tolerated rather than propagated: a non-positive base
 // falls back to MinJitteredBackoff, a non-positive maxBackoff disables the
@@ -228,7 +234,11 @@ func JitteredBackoff(base, maxBackoff time.Duration, step int) time.Duration {
 	jitter := time.Duration(float64(backoff) * 0.25 * (2*rand.Float64() - 1))
 	backoff += jitter
 	if backoff > maxBackoff {
-		backoff = maxBackoff
+		// Reflected, not clamped: see the doc comment. backoff was at most
+		// maxBackoff before the jitter and the jitter is at most a quarter of it,
+		// so the reflection lands in [0.75*maxBackoff, maxBackoff] and stays
+		// strictly positive.
+		backoff = 2*maxBackoff - backoff
 	}
 	if backoff <= 0 {
 		backoff = base
