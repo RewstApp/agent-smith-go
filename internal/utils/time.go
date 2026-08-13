@@ -168,6 +168,84 @@ func SasTokenRenewMargin(lifetime time.Duration) time.Duration {
 	return margin
 }
 
+// MinJitteredBackoff is the floor substituted for a non-positive base delay in
+// JitteredBackoff. Callers are expected to normalize their own configuration
+// defaults before calling; this exists only so a mis-set knob can never make the
+// helper return a zero or negative delay that would turn a retry loop into a
+// busy-spin.
+const MinJitteredBackoff time.Duration = time.Second
+
+// JitteredBackoff returns the delay to wait before the retry at the given
+// zero-based step of an exponential schedule (base, 2*base, 4*base, ...),
+// clamped to maxBackoff and spread with up to ±25% jitter.
+//
+// The doubling is performed by iterated multiplication with an early exit at
+// maxBackoff rather than the naive base * (1 << step) shift. That shift grows
+// without bound and, for a large caller-configured retry count, overflows int64
+// nanoseconds into a negative time.Duration — time.After then fires immediately
+// and the retry loop busy-spins. Clamping to maxBackoff before any doubling can
+// overflow keeps every slot strictly positive and bounded, so raising the retry
+// count widens the total retry window without ever producing a negative, zero,
+// or multi-day sleep.
+//
+// The jitter exists because without it every agent in a fleet that fails against
+// the same endpoint at the same time retries on an identical, perfectly
+// synchronized cadence, and the fleet sustains the outage or rate limit it is
+// trying to recover from. It is applied after clamping, and a jittered slot that
+// would exceed maxBackoff is reflected back under the ceiling rather than
+// clamped to it: clamping looks harmless but collapses half of every capped slot
+// onto exactly maxBackoff, so once a schedule reaches its ceiling — which is
+// where a sustained outage puts the whole fleet — around half of all agents fire
+// at the same instant again. Reflecting keeps the result strictly below the
+// ceiling and spread across the band beneath it, and it can never reach zero or
+// go negative because the jitter is at most a quarter of a value that is itself
+// at most maxBackoff.
+//
+// Degenerate inputs are tolerated rather than propagated: a non-positive base
+// falls back to MinJitteredBackoff, a non-positive maxBackoff disables the
+// ceiling (it becomes the base), and a base above the ceiling is clamped down to
+// it so the cap always wins.
+func JitteredBackoff(base, maxBackoff time.Duration, step int) time.Duration {
+	if base <= 0 {
+		base = MinJitteredBackoff
+	}
+	if maxBackoff <= 0 {
+		maxBackoff = base
+	}
+	if base > maxBackoff {
+		base = maxBackoff
+	}
+
+	backoff := base
+	for range step {
+		// Stop before doubling would reach or overflow the cap. Because backoff
+		// never exceeds maxBackoff (a small, sane duration), base * 2^n can never
+		// overflow int64 nanoseconds into a negative value.
+		if backoff >= maxBackoff/2 {
+			backoff = maxBackoff
+			break
+		}
+		backoff *= 2
+	}
+	if backoff > maxBackoff {
+		backoff = maxBackoff
+	}
+
+	jitter := time.Duration(float64(backoff) * 0.25 * (2*rand.Float64() - 1))
+	backoff += jitter
+	if backoff > maxBackoff {
+		// Reflected, not clamped: see the doc comment. backoff was at most
+		// maxBackoff before the jitter and the jitter is at most a quarter of it,
+		// so the reflection lands in [0.75*maxBackoff, maxBackoff] and stays
+		// strictly positive.
+		backoff = 2*maxBackoff - backoff
+	}
+	if backoff <= 0 {
+		backoff = base
+	}
+	return backoff
+}
+
 type ReconnectTimeoutGenerator struct {
 	base    time.Duration
 	timeout time.Duration

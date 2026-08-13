@@ -124,6 +124,134 @@ func TestSasTokenRenewMargin(t *testing.T) {
 	}
 }
 
+// TestJitteredBackoffSchedule verifies the exponential schedule doubles per step
+// and flattens at the cap. Jitter is bounded to ±25%, so each slot is asserted
+// within that band rather than exactly.
+func TestJitteredBackoffSchedule(t *testing.T) {
+	base := time.Second
+	maxBackoff := 8 * time.Second
+
+	cases := []struct {
+		step   int
+		expect time.Duration // exponential base before jitter
+	}{
+		{step: 0, expect: 1 * time.Second},
+		{step: 1, expect: 2 * time.Second},
+		{step: 2, expect: 4 * time.Second},
+		{step: 3, expect: 8 * time.Second},
+		{step: 4, expect: 8 * time.Second},
+	}
+
+	for _, c := range cases {
+		for range 500 {
+			got := JitteredBackoff(base, maxBackoff, c.step)
+			low := time.Duration(float64(c.expect) * 0.75)
+			high := time.Duration(float64(c.expect) * 1.25)
+			if high > maxBackoff {
+				high = maxBackoff
+			}
+			if got < low || got > high {
+				t.Fatalf("step %d: backoff %v outside expected jittered band [%v, %v]",
+					c.step, got, low, high)
+			}
+		}
+	}
+}
+
+// TestJitteredBackoffStaysPositiveAndCapped is the overflow regression: for step
+// numbers well past the point where base * (1 << step) wraps int64 nanoseconds
+// negative, the result must remain strictly positive and within the cap.
+func TestJitteredBackoffStaysPositiveAndCapped(t *testing.T) {
+	base := 5 * time.Minute
+	maxBackoff := time.Hour
+
+	for _, step := range []int{0, 10, 33, 63, 64, 128, 10000, 1 << 20} {
+		for range 100 {
+			got := JitteredBackoff(base, maxBackoff, step)
+			if got <= 0 {
+				t.Fatalf("step %d: backoff must be strictly positive, got %v", step, got)
+			}
+			if got > maxBackoff {
+				t.Fatalf("step %d: backoff %v exceeds cap %v", step, got, maxBackoff)
+			}
+		}
+	}
+}
+
+// TestJitteredBackoffDegenerateInputs verifies the guards for a non-positive
+// base, a non-positive cap, a base above the cap, and a negative step.
+func TestJitteredBackoffDegenerateInputs(t *testing.T) {
+	cases := []struct {
+		name       string
+		base       time.Duration
+		maxBackoff time.Duration
+		step       int
+		maxAllowed time.Duration
+	}{
+		{name: "zero base", base: 0, maxBackoff: time.Minute, step: 5, maxAllowed: time.Minute},
+		{
+			name:       "negative base",
+			base:       -time.Second,
+			maxBackoff: time.Minute,
+			step:       3,
+			maxAllowed: time.Minute,
+		},
+		{
+			name:       "zero cap",
+			base:       2 * time.Second,
+			maxBackoff: 0,
+			step:       4,
+			maxAllowed: 2 * time.Second,
+		},
+		{
+			name:       "base above cap",
+			base:       time.Hour,
+			maxBackoff: time.Second,
+			step:       6,
+			maxAllowed: time.Second,
+		},
+		// A negative step is treated as step 0, so the slot is the base plus at
+		// most the +25% jitter.
+		{
+			name:       "negative step",
+			base:       2 * time.Second,
+			maxBackoff: time.Minute,
+			step:       -3,
+			maxAllowed: 2500 * time.Millisecond,
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			for range 200 {
+				got := JitteredBackoff(c.base, c.maxBackoff, c.step)
+				if got <= 0 {
+					t.Fatalf("expected strictly positive backoff, got %v", got)
+				}
+				if got > c.maxAllowed {
+					t.Fatalf("expected backoff within %v, got %v", c.maxAllowed, got)
+				}
+			}
+		})
+	}
+}
+
+// TestJitteredBackoffDesynchronizes demonstrates why the jitter exists: repeated
+// computations of the same slot spread out instead of returning one repeated
+// value, so a fleet retrying against the same endpoint does not synchronize.
+func TestJitteredBackoffDesynchronizes(t *testing.T) {
+	const samples = 1000
+	distinct := make(map[time.Duration]struct{}, samples)
+	for range samples {
+		distinct[JitteredBackoff(time.Second, time.Minute, 3)] = struct{}{}
+	}
+
+	if len(distinct) < samples/2 {
+		t.Fatalf("expected a spread of delays, got only %d distinct values across %d samples",
+			len(distinct), samples)
+	}
+}
+
 func TestReconnectTimeoutGeneratorJitterDiffers(t *testing.T) {
 	// Two independent generators must produce different sequences
 	g1 := ReconnectTimeoutGenerator{}
@@ -140,5 +268,60 @@ func TestReconnectTimeoutGeneratorJitterDiffers(t *testing.T) {
 	}
 	if !different {
 		t.Error("expected two independent generators to produce different jittered sequences")
+	}
+}
+
+// TestJitteredBackoffSpreadsAtTheCap is the regression for jitter that was
+// clamped to the ceiling instead of reflected under it. Clamping put roughly
+// half of every capped draw on exactly maxBackoff, so a fleet whose schedules
+// had all reached the ceiling - which is where a sustained outage puts it - fired
+// half its retries at the same instant, the very synchronization the jitter is
+// there to break up. It was caught by the integration scenario, whose two capped
+// slots landed on exactly the cap on two of three platforms.
+func TestJitteredBackoffSpreadsAtTheCap(t *testing.T) {
+	base := time.Second
+	maxBackoff := 8 * time.Second
+
+	const samples = 1000
+	atCap := 0
+	distinct := make(map[time.Duration]struct{}, samples)
+	minSeen := maxBackoff
+
+	for range samples {
+		// A step well past the point where the schedule reaches the ceiling.
+		got := JitteredBackoff(base, maxBackoff, 10)
+		if got <= 0 || got > maxBackoff {
+			t.Fatalf("expected 0 < backoff <= %v, got %v", maxBackoff, got)
+		}
+		if got == maxBackoff {
+			atCap++
+		}
+		if got < minSeen {
+			minSeen = got
+		}
+		distinct[got] = struct{}{}
+	}
+
+	// The clamped implementation this replaces scored ~500 here.
+	if atCap > samples/100 {
+		t.Fatalf(
+			"%d of %d capped slots landed on exactly %v; the jitter is clamped to the cap rather than spread under it",
+			atCap,
+			samples,
+			maxBackoff,
+		)
+	}
+	if len(distinct) < samples/2 {
+		t.Fatalf("expected capped slots to spread, got only %d distinct values across %d samples",
+			len(distinct), samples)
+	}
+	// The spread should reach into the band below the ceiling rather than
+	// hovering against it.
+	if minSeen > time.Duration(float64(maxBackoff)*0.9) {
+		t.Fatalf(
+			"capped slots never dropped meaningfully below the cap (smallest %v of %v)",
+			minSeen,
+			maxBackoff,
+		)
 	}
 }

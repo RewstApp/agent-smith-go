@@ -1,0 +1,66 @@
+name: Set agent release url
+description: >
+  Point the installed integration-test agent at a different release endpoint by
+  writing the override file its build honors (sc-106110), or remove that file to
+  put it back on the real GitHub releases API. Used to drive the auto-update
+  retry schedule against the local stub release endpoint.
+
+  Only the integration build looks for this file at all - released builds compile
+  the endpoint in - so this is inert against a release binary. The agent reads it
+  when a service cycle constructs its updater, so the change takes effect on the
+  next service start. See fixture.ps1 for details.
+
+inputs:
+  mode:
+    description: "set or clear"
+    required: true
+  config_dir:
+    description: "Directory containing the per-org agent data directory (without org id suffix)"
+    required: true
+  org_id:
+    description: "Organization id whose agent should be pointed at the endpoint"
+    required: true
+  url:
+    description: "Release endpoint URL to write (required when mode is set)"
+    required: false
+    default: ""
+  file_name:
+    description: "Override file name, matching releaseUrlOverrideFileStr in the integration build"
+    required: false
+    default: "release_url_override"
+
+runs:
+  using: composite
+  steps:
+    - name: Set release url (Unix)
+      if: runner.os != 'Windows'
+      shell: bash
+      env:
+        CONFIG_DIR: ${{ inputs.config_dir }}
+        ORG_ID: ${{ inputs.org_id }}
+        MODE: ${{ inputs.mode }}
+        URL: ${{ inputs.url }}
+        FILE_NAME: ${{ inputs.file_name }}
+      run: |
+        set -euo pipefail
+        # Resolve pwsh up front: sudo resets PATH via secure_path on some runners.
+        pwsh_path="$(command -v pwsh)"
+        sudo "$pwsh_path" -NoProfile -File "$GITHUB_ACTION_PATH/fixture.ps1" \
+          -OverrideFile "$CONFIG_DIR/$ORG_ID/$FILE_NAME" \
+          -Mode "$MODE" \
+          -Url "$URL"
+
+    - name: Set release url (Windows)
+      if: runner.os == 'Windows'
+      shell: pwsh
+      env:
+        CONFIG_DIR: ${{ inputs.config_dir }}
+        ORG_ID: ${{ inputs.org_id }}
+        MODE: ${{ inputs.mode }}
+        URL: ${{ inputs.url }}
+        FILE_NAME: ${{ inputs.file_name }}
+      run: |
+        & "$env:GITHUB_ACTION_PATH/fixture.ps1" `
+          -OverrideFile (Join-Path (Join-Path $env:CONFIG_DIR $env:ORG_ID) $env:FILE_NAME) `
+          -Mode $env:MODE `
+          -Url $env:URL

@@ -543,8 +543,11 @@ func TestAutoUpdateRunner_StopDuringBackoff(t *testing.T) {
 		runErr: fmt.Errorf("fails"),
 	}
 
-	// Use a long backoff so we can stop during it
+	// Use a long backoff so we can stop during it. The cap is normally derived
+	// from the (short) check interval, so raise it here to keep the retry slot
+	// long enough that the stop, not the timer, is what ends the wait.
 	runner := NewAutoUpdateRunner(logger, mock, 10*time.Millisecond, 5, time.Hour)
+	runner.maxBackoff = time.Hour
 
 	done := make(chan struct{})
 	go func() {

@@ -7,6 +7,8 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/RewstApp/agent-smith-go/internal/utils"
@@ -46,11 +48,61 @@ var baseBackoffStr = ""
 // Example: -ldflags "-X github.com/RewstApp/agent-smith-go/internal/agent.maxRetriesStr=3"
 var maxRetriesStr = ""
 
+// releaseUrlOverrideFileStr names a file inside the org's data directory whose
+// contents replace the compiled-in release endpoint. It is overridable via
+// -ldflags for integration testing, which points the auto-updater at a local
+// stub release endpoint so the retry schedule can be observed against an
+// endpoint that fails on demand (sc-106110); a real GitHub outage is not
+// something CI can arrange.
+// Example: -ldflags "-X github.com/RewstApp/agent-smith-go/internal/agent.releaseUrlOverrideFileStr=release_url_override"
+//
+// Released builds leave it empty and then never look for the file at all, so the
+// update source of a shipped agent is fixed at build time and cannot be
+// redirected by dropping a file on an endpoint.
+var releaseUrlOverrideFileStr = ""
+
 const (
 	defaultUpdateInterval = 48 * time.Hour
 	defaultBaseBackoff    = 5 * time.Minute
 	defaultMaxRetries     = 5
+
+	// DefaultUpdateMaxRetryBackoff caps the exponential-backoff delay between
+	// auto-update retries regardless of how high the retry count is raised. The
+	// schedule doubles the base delay on every retry (base * 2^n); without a
+	// ceiling, the production base of 5 minutes reaches a 42-hour sleep by
+	// attempt 10 — longer than the update check interval the retries are nested
+	// inside — and a large injected maxRetries overflows the doubling into a
+	// negative time.Duration that makes time.After fire immediately and the retry
+	// loop busy-spin against the release endpoint. This mirrors
+	// DefaultPostbackMaxRetryBackoff and maxTimeout in the reconnect backoff
+	// generator (see internal/utils/time.go): the per-slot wait is bounded so the
+	// total retry window still widens with more retries, but no single sleep can
+	// overflow, outlive the check interval, or collapse into a tight loop.
+	DefaultUpdateMaxRetryBackoff = 1 * time.Hour
+
+	// updateBackoffIntervalDivisor bounds a single retry slot to this fraction of
+	// the update check interval, so the retry schedule always stays meaningfully
+	// nested inside the interval it belongs to rather than outliving it. It
+	// matters most for short intervals (integration builds shorten the interval
+	// via ldflags); at the production 48-hour interval the absolute
+	// DefaultUpdateMaxRetryBackoff ceiling is far lower and wins.
+	updateBackoffIntervalDivisor = 4
 )
+
+// updateMaxRetryBackoff returns the ceiling applied to every auto-update retry
+// slot for the given check interval: the lower of DefaultUpdateMaxRetryBackoff
+// and one updateBackoffIntervalDivisor-th of the interval. A non-positive
+// interval (no meaningful schedule to nest inside) yields the absolute ceiling.
+func updateMaxRetryBackoff(interval time.Duration) time.Duration {
+	maxBackoff := DefaultUpdateMaxRetryBackoff
+	if interval > 0 && interval/updateBackoffIntervalDivisor < maxBackoff {
+		maxBackoff = interval / updateBackoffIntervalDivisor
+	}
+	if maxBackoff <= 0 {
+		maxBackoff = DefaultUpdateMaxRetryBackoff
+	}
+	return maxBackoff
+}
 
 // DefaultUpdateInterval returns the auto-update check interval.
 // Uses updateIntervalStr if set via ldflags, otherwise defaults to 48 hours.
@@ -84,6 +136,39 @@ func DefaultMaxRetries() int {
 		}
 	}
 	return defaultMaxRetries
+}
+
+// ResolveLatestReleaseUrl returns the endpoint the auto-updater should query for
+// the latest release: defaultUrl for released builds, and for an
+// integration-test build the URL named by releaseUrlOverrideFileStr when that
+// file exists in the org's data directory. A missing, unreadable, or empty
+// override file falls back to defaultUrl, so a fixture that failed to write it
+// leaves the agent updating normally rather than silently not updating at all.
+func ResolveLatestReleaseUrl(logger hclog.Logger, orgId string, defaultUrl string) string {
+	return resolveLatestReleaseUrl(logger, GetDataDirectory(orgId), defaultUrl)
+}
+
+func resolveLatestReleaseUrl(logger hclog.Logger, dataDir string, defaultUrl string) string {
+	if releaseUrlOverrideFileStr == "" {
+		return defaultUrl
+	}
+
+	path := filepath.Join(dataDir, releaseUrlOverrideFileStr)
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			logger.Warn("Failed to read release url override", "path", path, "error", err)
+		}
+		return defaultUrl
+	}
+
+	url := strings.TrimSpace(string(contents))
+	if url == "" {
+		return defaultUrl
+	}
+
+	logger.Info("Using release url override", "path", path, "url", url)
+	return url
 }
 
 type RunCommandFunc = func(path string, args []string) error
@@ -283,10 +368,13 @@ type AutoUpdateRunner struct {
 	interval    time.Duration
 	maxRetries  int
 	baseBackoff time.Duration
-	ctx         context.Context
-	cancel      context.CancelFunc
-	stop        chan struct{}
-	done        chan struct{}
+	// maxBackoff caps every retry slot; derived from the check interval at
+	// construction (see updateMaxRetryBackoff).
+	maxBackoff time.Duration
+	ctx        context.Context
+	cancel     context.CancelFunc
+	stop       chan struct{}
+	done       chan struct{}
 }
 
 func NewAutoUpdateRunner(
@@ -303,6 +391,7 @@ func NewAutoUpdateRunner(
 		interval:    interval,
 		maxRetries:  maxRetries,
 		baseBackoff: baseBackoff,
+		maxBackoff:  updateMaxRetryBackoff(interval),
 		ctx:         ctx,
 		cancel:      cancel,
 		stop:        make(chan struct{}),
@@ -328,6 +417,13 @@ func (r *AutoUpdateRunner) Start() {
 				if err := r.runUpdate(); err != nil {
 					r.logger.Error("Update failed, starting retry backoff", "error", err)
 					if r.retryWithBackoff() {
+						// A stop observed inside the backoff wait exits here rather
+						// than through the select above, so it is logged here too:
+						// otherwise the one path where a stop has to interrupt a
+						// pending wait - the path the bounded, jittered schedule
+						// exists for - would be the only one that leaves no record
+						// of the updater shutting down.
+						r.logger.Info("Auto updater stopped")
 						return
 					}
 				}
@@ -361,9 +457,38 @@ func (r *AutoUpdateRunner) Stop() {
 	<-r.done
 }
 
+// retryBackoff returns the delay to wait before the given zero-based retry
+// attempt: the exponential schedule base * 2^attempt, clamped to the runner's
+// cap (see DefaultUpdateMaxRetryBackoff) and spread with up to ±25% jitter. The
+// result is always strictly positive and never exceeds the cap, for any attempt
+// number, so the wait can never fire immediately or outlive the check interval.
+func (r *AutoUpdateRunner) retryBackoff(attempt int) time.Duration {
+	base := r.baseBackoff
+	if base <= 0 {
+		base = defaultBaseBackoff
+	}
+	maxBackoff := r.maxBackoff
+	if maxBackoff <= 0 {
+		maxBackoff = updateMaxRetryBackoff(r.interval)
+	}
+
+	return utils.JitteredBackoff(base, maxBackoff, attempt)
+}
+
+// retryWithBackoff re-runs a failed update on an exponential schedule, returning
+// true when the runner was stopped mid-backoff so the caller exits its loop.
+//
+// Each slot is computed by utils.JitteredBackoff and is therefore bounded by
+// r.maxBackoff (see DefaultUpdateMaxRetryBackoff) and spread with up to ±25%
+// jitter. The bound keeps the doubling from overflowing into a negative duration
+// that would make the wait return immediately and busy-spin against the release
+// endpoint; the jitter keeps a whole fleet that failed against the same
+// unavailable or rate-limiting endpoint from retrying in lockstep and sustaining
+// the outage it is recovering from. The wait remains interruptible by r.stop, so
+// a service stop is never delayed by a long backoff.
 func (r *AutoUpdateRunner) retryWithBackoff() bool {
 	for attempt := range r.maxRetries {
-		backoff := r.baseBackoff * (1 << attempt)
+		backoff := r.retryBackoff(attempt)
 		r.logger.Info("Retrying update", "attempt", attempt+1, "backoff", backoff)
 
 		select {

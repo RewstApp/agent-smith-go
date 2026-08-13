@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"math/rand/v2"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -31,9 +30,15 @@ const (
 	// config does not override them via worker_count / message_queue_size. The
 	// effective values are resolved per cycle from the device config; see
 	// agent.Device.ResolvedWorkerCount / ResolvedMessageQueueSize.
-	workerCount              = agent.DefaultWorkerCount
-	messageQueueSize         = agent.DefaultMessageQueueSize
-	postbackHTTPTimeout      = 30 * time.Second
+	workerCount         = agent.DefaultWorkerCount
+	messageQueueSize    = agent.DefaultMessageQueueSize
+	postbackHTTPTimeout = 30 * time.Second
+
+	// defaultLatestReleaseUrl is the release endpoint the auto-updater queries.
+	// Released builds always use it; an integration-test build can be pointed at
+	// a stub endpoint instead (see agent.ResolveLatestReleaseUrl).
+	defaultLatestReleaseUrl = "https://api.github.com/repos/rewstapp/agent-smith-go/releases/latest"
+
 	postbackMaxAttempts      = agent.DefaultPostbackMaxAttempts
 	postbackBaseRetryBackoff = agent.DefaultPostbackBaseRetryBackoff
 	postbackMaxRetryBackoff  = agent.DefaultPostbackMaxRetryBackoff
@@ -162,7 +167,7 @@ func (svc *serviceContext) Execute(
 		updater := agent.NewUpdater(
 			logger,
 			&device,
-			"https://api.github.com/repos/rewstapp/agent-smith-go/releases/latest",
+			agent.ResolveLatestReleaseUrl(logger, svc.OrgId, defaultLatestReleaseUrl),
 			device.GithubToken,
 			func(path string, args []string) error {
 				return detachedCommand(path, args, logFile, logFile).Start()
@@ -683,19 +688,17 @@ func (svc *serviceContext) processMessage(
 // retry attempt. attempt is 1-based and counts the initial try, so the first
 // backoff is paid before attempt 2; the uncapped schedule is base * 2^(attempt-2).
 //
-// The doubling is performed by iterated multiplication with an early exit at
-// maxBackoff rather than the naive base * (1 << (attempt-2)) shift. That shift
-// grows without bound and, for a large operator-configured postback_max_attempts,
-// overflows int64 nanoseconds into a negative time.Duration — time.After then
-// fires immediately and the retry loop busy-spins. Clamping to maxBackoff before
-// any overflow can occur keeps every slot strictly positive and bounded, so
-// raising the attempt count widens the total retry window without ever producing
-// a negative, zero, or multi-day sleep.
-//
-// Up to ±25% jitter is applied — mirroring the reconnect backoff generator (see
-// internal/utils/time.go) — to avoid synchronized retry storms across many
-// agents, and the result is clamped again so it never exceeds maxBackoff and
-// always stays strictly positive.
+// The schedule is computed by utils.JitteredBackoff, which performs the doubling
+// by iterated multiplication with an early exit at maxBackoff rather than the
+// naive base * (1 << (attempt-2)) shift. That shift grows without bound and, for
+// a large operator-configured postback_max_attempts, overflows int64 nanoseconds
+// into a negative time.Duration — time.After then fires immediately and the retry
+// loop busy-spins. Clamping to maxBackoff before any overflow can occur keeps
+// every slot strictly positive and bounded, so raising the attempt count widens
+// the total retry window without ever producing a negative, zero, or multi-day
+// sleep. Up to ±25% jitter is applied to avoid synchronized retry storms across
+// many agents. The same helper backs the auto-update retry schedule (see
+// agent.DefaultUpdateMaxRetryBackoff).
 func postbackRetryBackoff(base, maxBackoff time.Duration, attempt int) time.Duration {
 	if base <= 0 {
 		base = postbackBaseRetryBackoff
@@ -703,34 +706,8 @@ func postbackRetryBackoff(base, maxBackoff time.Duration, attempt int) time.Dura
 	if maxBackoff <= 0 {
 		maxBackoff = postbackMaxRetryBackoff
 	}
-	if base > maxBackoff {
-		base = maxBackoff
-	}
 
-	backoff := base
-	for i := 0; i < attempt-2; i++ {
-		// Stop before doubling would reach or overflow the cap. Because backoff
-		// never exceeds maxBackoff (a small, sane duration), base * 2^n can never
-		// overflow int64 nanoseconds into a negative value.
-		if backoff >= maxBackoff/2 {
-			backoff = maxBackoff
-			break
-		}
-		backoff *= 2
-	}
-	if backoff > maxBackoff {
-		backoff = maxBackoff
-	}
-
-	jitter := time.Duration(float64(backoff) * 0.25 * (2*rand.Float64() - 1))
-	backoff += jitter
-	if backoff > maxBackoff {
-		backoff = maxBackoff
-	}
-	if backoff <= 0 {
-		backoff = base
-	}
-	return backoff
+	return utils.JitteredBackoff(base, maxBackoff, attempt-2)
 }
 
 // sendPostbackWithRetry posts the command result to the Rewst engine, retrying
