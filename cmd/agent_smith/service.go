@@ -160,6 +160,7 @@ func (svc *serviceContext) Execute(
 		filepath.Join(agent.GetDataDirectory(svc.OrgId), "postback_spool"),
 		defaultSpoolMaxEntries,
 		defaultSpoolMaxAge,
+		defaultSpoolMaxAttempts,
 		logger,
 	)
 
@@ -547,7 +548,7 @@ func (svc *serviceContext) runCycle(
 	// spooled to disk when the engine was previously unreachable. Run it on a
 	// cycle-scoped goroutine so it cannot block the connection loop or teardown.
 	utils.SafeGo(logger, func() {
-		svc.flushPostbackSpool(cycleCtx, device, logger)
+		svc.flushPostbackSpool(cycleCtx, device, logger, notifier)
 	}, "scope", "postback_spool_flush")
 
 	// Proactively renew the SAS token before Azure IoT Hub expires it. The token
@@ -781,8 +782,12 @@ func (svc *serviceContext) sendPostbackWithRetry(
 			}
 		}
 
-		done, err := svc.attemptPostback(ctx, message, device, resultBytes, logger, attempt)
-		if done {
+		// Both failure outcomes retry in-line: whether the engine was unreachable
+		// or rejected the request, another attempt is the right response while the
+		// budget lasts. The distinction only matters to the spool flush, which has
+		// other entries to get to.
+		outcome, err := svc.attemptPostback(ctx, message, device, resultBytes, logger, attempt)
+		if outcome == deliveryDone {
 			return
 		}
 		lastErr = err
@@ -827,29 +832,58 @@ func (svc *serviceContext) sendPostbackWithRetry(
 
 // flushPostbackSpool re-attempts delivery of any command results whose in-line
 // postback previously exhausted its retry budget and was spooled to disk. Each
-// entry is given a single attempt: a success or permanent (4xx) rejection
-// removes it from the spool, while a transient failure leaves it (and the rest)
-// for a later cycle. It is bound to the cycle context so it neither blocks the
-// connection loop nor delays teardown — cycle cancellation aborts any in-flight
-// request and stops the flush between entries.
+// entry is given a single attempt per cycle: a success or permanent (4xx)
+// rejection removes it from the spool, an unreachable engine leaves it (and the
+// rest) for a later cycle, and an entry the engine rejects is passed over so the
+// entries behind it still get their attempt. It is bound to the cycle context so
+// it neither blocks the connection loop nor delays teardown — cycle cancellation
+// aborts any in-flight request and stops the flush between entries.
+//
+// Abandoning an entry that exhausted its attempts is surfaced the same way an
+// exhausted in-line retry budget is: a best-effort plugin notification, so the
+// loss is visible outside the log file.
 func (svc *serviceContext) flushPostbackSpool(
 	ctx context.Context,
 	device agent.Device,
 	logger hclog.Logger,
+	notifier plugins.NotifierWrapper,
 ) {
 	if svc.spool == nil {
 		return
 	}
-	svc.spool.flush(ctx, func(entry spoolEntry) (bool, error) {
-		msg := &interpreter.Message{PostId: entry.PostId}
-		return svc.attemptPostback(ctx, msg, device, entry.Result, logger, 1)
-	})
+	svc.spool.flush(
+		ctx,
+		func(entry spoolEntry) (deliveryOutcome, error) {
+			msg := &interpreter.Message{PostId: entry.PostId}
+			return svc.attemptPostback(ctx, msg, device, entry.Result, logger, 1)
+		},
+		func(entry spoolEntry, err error) {
+			logger.Error(
+				"Postback result abandoned: engine kept rejecting it",
+				"post_id", entry.PostId,
+				"attempts", entry.Attempts,
+				"last_error", entry.LastError,
+			)
+			if notifier != nil {
+				_ = notifier.Notify(
+					fmt.Sprintf("AgentPostbackAbandoned:%s", entry.PostId),
+				) // Best effort notification
+			}
+		},
+	)
 }
 
-// attemptPostback performs a single postback attempt. It returns done=true
-// when no further retries should occur (success, "already fulfilled", or a
-// non-retryable 4xx response). When done=false the caller should retry; the
-// returned error describes the most recent failure for the final summary log.
+// attemptPostback performs a single postback attempt and classifies the result
+// (see deliveryOutcome). deliveryDone means no further attempt should be made —
+// success, "already fulfilled", or a non-retryable 4xx. deliveryRetryEntry means
+// the engine answered but would not take this request (5xx, or a body that could
+// not be parsed). deliveryUnreachable means no answer arrived at all: a
+// transport error, or a connection that broke while the response was being read.
+// The returned error describes the failure for the caller's summary log.
+//
+// The reachable/unreachable split is what lets the spool flush tell an engine
+// outage apart from one entry the engine refuses; do not collapse the two
+// failure outcomes back into a single boolean.
 func (svc *serviceContext) attemptPostback(
 	ctx context.Context,
 	message *interpreter.Message,
@@ -857,7 +891,7 @@ func (svc *serviceContext) attemptPostback(
 	resultBytes []byte,
 	logger hclog.Logger,
 	attempt int,
-) (bool, error) {
+) (deliveryOutcome, error) {
 	postbackReq, err := message.CreatePostbackRequest(
 		ctx,
 		device,
@@ -870,7 +904,9 @@ func (svc *serviceContext) attemptPostback(
 			"attempt", attempt,
 			"error", err,
 		)
-		return true, err
+		// Local and permanent: a request this message cannot build will not build
+		// on a later cycle either.
+		return deliveryDone, err
 	}
 
 	if attempt == 1 {
@@ -885,7 +921,8 @@ func (svc *serviceContext) attemptPostback(
 			"attempt", attempt,
 			"error", err,
 		)
-		return false, err
+		// No answer at all — the engine is unreachable, not refusing this entry.
+		return deliveryUnreachable, err
 	}
 	defer func() {
 		if cerr := res.Body.Close(); cerr != nil {
@@ -901,7 +938,9 @@ func (svc *serviceContext) attemptPostback(
 			"attempt", attempt,
 			"error", err,
 		)
-		return false, err
+		// The connection broke mid-response: the engine answered but the exchange
+		// did not complete, so treat it as connectivity rather than rejection.
+		return deliveryUnreachable, err
 	}
 
 	if res.StatusCode == http.StatusOK {
@@ -909,7 +948,7 @@ func (svc *serviceContext) attemptPostback(
 		if len(bodyBytes) > 0 {
 			logger.Info("Received response", "data", string(bodyBytes))
 		}
-		return true, nil
+		return deliveryDone, nil
 	}
 
 	var response errorResponse
@@ -918,12 +957,16 @@ func (svc *serviceContext) attemptPostback(
 	if parseErr == nil && res.StatusCode == http.StatusBadRequest &&
 		strings.Contains(strings.ToLower(response.Error), "fulfilled") {
 		logger.Info("Postback already sent", "post_id", message.PostId)
-		return true, nil
+		return deliveryDone, nil
 	}
 
 	// 5xx responses (and any other unexpected non-2xx without a parseable body)
 	// are treated as transient. 4xx responses with a parseable error body are
 	// terminal — retrying a malformed request will not help.
+	//
+	// Transient is not the same as unreachable: the engine answered, so it is
+	// plainly up and every other spooled entry may still be deliverable. This is
+	// the case that used to be misread as an outage and stall the whole spool.
 	retryable := res.StatusCode >= 500 || parseErr != nil
 
 	if retryable {
@@ -937,7 +980,11 @@ func (svc *serviceContext) attemptPostback(
 		if parseErr != nil && len(bodyBytes) > 0 {
 			logger.Error("Received error response", "data", string(bodyBytes))
 		}
-		return false, fmt.Errorf("postback failed: status %d: %s", res.StatusCode, response.Error)
+		return deliveryRetryEntry, fmt.Errorf(
+			"postback failed: status %d: %s",
+			res.StatusCode,
+			response.Error,
+		)
 	}
 
 	logger.Error(
@@ -947,7 +994,11 @@ func (svc *serviceContext) attemptPostback(
 		"status_code", res.StatusCode,
 		"message", response.Error,
 	)
-	return true, fmt.Errorf("postback failed: status %d: %s", res.StatusCode, response.Error)
+	return deliveryDone, fmt.Errorf(
+		"postback failed: status %d: %s",
+		res.StatusCode,
+		response.Error,
+	)
 }
 
 func runService(params *serviceContext) {

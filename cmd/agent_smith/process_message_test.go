@@ -5,12 +5,15 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/RewstApp/agent-smith-go/internal/agent"
+	"github.com/RewstApp/agent-smith-go/internal/interpreter"
 	"github.com/hashicorp/go-hclog"
 )
 
@@ -220,7 +223,9 @@ func TestProcessMessage_PostbackExhaustionSpoolsAndNotifies(t *testing.T) {
 	svc := newProcessMessageSvc(exec, &http.Client{
 		Transport: &schemeRewriteTransport{scheme: "http"},
 	})
-	svc.spool = newPostbackSpool(t.TempDir(), 10, time.Hour, hclog.NewNullLogger())
+	svc.spool = newPostbackSpool(
+		t.TempDir(), 10, time.Hour, defaultSpoolMaxAttempts, hclog.NewNullLogger(),
+	)
 
 	ctx := context.Background()
 	logger := hclog.NewNullLogger()
@@ -266,7 +271,9 @@ func TestFlushPostbackSpool_DeliversSpooledResult(t *testing.T) {
 	svc := newProcessMessageSvc(exec, &http.Client{
 		Transport: &schemeRewriteTransport{scheme: "http"},
 	})
-	svc.spool = newPostbackSpool(t.TempDir(), 10, time.Hour, hclog.NewNullLogger())
+	svc.spool = newPostbackSpool(
+		t.TempDir(), 10, time.Hour, defaultSpoolMaxAttempts, hclog.NewNullLogger(),
+	)
 
 	if err := svc.spool.enqueue(spoolEntry{
 		PostId:    "id:recover",
@@ -277,7 +284,7 @@ func TestFlushPostbackSpool_DeliversSpooledResult(t *testing.T) {
 	}
 
 	device := deviceWithEngine(srv.Listener.Addr().String())
-	svc.flushPostbackSpool(context.Background(), device, hclog.NewNullLogger())
+	svc.flushPostbackSpool(context.Background(), device, hclog.NewNullLogger(), nil)
 
 	if got := calls.Load(); got != 1 {
 		t.Errorf("expected exactly one re-delivery, got %d", got)
@@ -300,7 +307,9 @@ func TestFlushPostbackSpool_RetainsOnEngineDown(t *testing.T) {
 	svc := newProcessMessageSvc(exec, &http.Client{
 		Transport: &schemeRewriteTransport{scheme: "http"},
 	})
-	svc.spool = newPostbackSpool(t.TempDir(), 10, time.Hour, hclog.NewNullLogger())
+	svc.spool = newPostbackSpool(
+		t.TempDir(), 10, time.Hour, defaultSpoolMaxAttempts, hclog.NewNullLogger(),
+	)
 
 	if err := svc.spool.enqueue(spoolEntry{
 		PostId:    "id:still-down",
@@ -311,7 +320,7 @@ func TestFlushPostbackSpool_RetainsOnEngineDown(t *testing.T) {
 	}
 
 	device := deviceWithEngine(srv.Listener.Addr().String())
-	svc.flushPostbackSpool(context.Background(), device, hclog.NewNullLogger())
+	svc.flushPostbackSpool(context.Background(), device, hclog.NewNullLogger(), nil)
 
 	if n := countSpoolFiles(t, svc.spool.dir); n != 1 {
 		t.Errorf("expected spooled result retained while engine down, %d remain", n)
@@ -633,5 +642,268 @@ func TestBuildReceivedMessageNotification_BoundedAcrossSizes(t *testing.T) {
 		if len(got) > maxLen {
 			t.Errorf("size %d: notification length %d exceeds bound %d", size, len(got), maxLen)
 		}
+	}
+}
+
+// TestFlushPostbackSpool_PoisonedEntryDoesNotBlockOthers drives the sc-106112
+// scenario through the real HTTP stack rather than a stubbed deliverer: an
+// engine that rejects exactly one post_id with a 503 and answers 200 for every
+// other. That is the case the old flush misread as an outage — the engine is
+// plainly reachable, so every other spooled result must be delivered in the
+// same flush.
+func TestFlushPostbackSpool_PoisonedEntryDoesNotBlockOthers(t *testing.T) {
+	var mu sync.Mutex
+	var served []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The post id is the last path segment of the postback URL.
+		id := path.Base(r.URL.Path)
+		mu.Lock()
+		served = append(served, id)
+		mu.Unlock()
+
+		if id == "poison" {
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte(`{"error":"cannot accept this result"}`))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	exec := &mockExecutor{result: []byte(`{}`)}
+	svc := newProcessMessageSvc(exec, &http.Client{
+		Transport: &schemeRewriteTransport{scheme: "http"},
+	})
+	svc.spool = newPostbackSpool(
+		t.TempDir(), 10, time.Hour, defaultSpoolMaxAttempts, hclog.NewNullLogger(),
+	)
+
+	for _, id := range []string{"poison", "healthy-1", "healthy-2"} {
+		if err := svc.spool.enqueue(spoolEntry{
+			PostId:    id,
+			Result:    []byte(`{}`),
+			CreatedAt: time.Now(),
+		}); err != nil {
+			t.Fatalf("enqueue %s: %v", id, err)
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	device := deviceWithEngine(srv.Listener.Addr().String())
+	svc.flushPostbackSpool(context.Background(), device, hclog.NewNullLogger(), nil)
+
+	mu.Lock()
+	got := append([]string(nil), served...)
+	mu.Unlock()
+
+	want := []string{"poison", "healthy-1", "healthy-2"}
+	if len(got) != len(want) {
+		t.Fatalf("expected the engine to receive all %d results, got %v", len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("request %d: got post_id %q want %q", i, got[i], want[i])
+		}
+	}
+
+	// Only the rejected entry is still spooled.
+	if n := countSpoolFiles(t, svc.spool.dir); n != 1 {
+		t.Errorf("expected only the rejected entry retained, %d files remain", n)
+	}
+}
+
+// An entry the engine keeps rejecting is eventually abandoned, and that loss is
+// surfaced to plugins the same way an exhausted in-line retry budget is — a
+// result that never reached the engine must not vanish with only a log line.
+func TestFlushPostbackSpool_AbandonedEntryNotifiesPlugins(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"error":"cannot accept this result"}`))
+	}))
+	defer srv.Close()
+
+	const maxAttempts = 2
+	exec := &mockExecutor{result: []byte(`{}`)}
+	svc := newProcessMessageSvc(exec, &http.Client{
+		Transport: &schemeRewriteTransport{scheme: "http"},
+	})
+	svc.spool = newPostbackSpool(t.TempDir(), 10, time.Hour, maxAttempts, hclog.NewNullLogger())
+	// Count both rejections rather than waiting out the production spacing; the
+	// spacing itself is covered by TestSpool_RapidRejectionsDoNotBurnTheAttemptBudget.
+	svc.spool.attemptInterval = 0
+
+	if err := svc.spool.enqueue(spoolEntry{
+		PostId:    "id:undeliverable",
+		Result:    []byte(`{}`),
+		CreatedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+
+	device := deviceWithEngine(srv.Listener.Addr().String())
+	notifier := &recordingNotifierWrapper{}
+	for range maxAttempts {
+		svc.flushPostbackSpool(context.Background(), device, hclog.NewNullLogger(), notifier)
+	}
+
+	if n := countSpoolFiles(t, svc.spool.dir); n != 0 {
+		t.Errorf("expected the entry abandoned after its budget, %d files remain", n)
+	}
+	if got := svc.spool.droppedAttempts.Load(); got != 1 {
+		t.Errorf("expected the drop counted as attempts-exhausted, got %d", got)
+	}
+
+	var notified bool
+	for _, msg := range notifier.all() {
+		if msg == "AgentPostbackAbandoned:id:undeliverable" {
+			notified = true
+		}
+	}
+	if !notified {
+		t.Errorf("expected an abandonment notification, got %v", notifier.all())
+	}
+}
+
+// TestAttemptPostback_ClassifiesOutcomes pins the mapping the spool flush relies
+// on. Collapsing "the engine rejected this request" back into "the engine is
+// unreachable" is precisely the sc-106112 defect, so the split is asserted
+// directly rather than only through its consequences.
+func TestAttemptPostback_ClassifiesOutcomes(t *testing.T) {
+	cases := []struct {
+		name    string
+		status  int
+		body    string
+		want    deliveryOutcome
+		wantErr bool
+	}{
+		{
+			name:   "accepted",
+			status: http.StatusOK,
+			body:   "",
+			want:   deliveryDone,
+		},
+		{
+			name:   "already fulfilled",
+			status: http.StatusBadRequest,
+			body:   `{"error":"request already fulfilled"}`,
+			want:   deliveryDone,
+		},
+		{
+			name:    "permanent rejection",
+			status:  http.StatusBadRequest,
+			body:    `{"error":"malformed result"}`,
+			want:    deliveryDone,
+			wantErr: true,
+		},
+		{
+			name:    "server error is the engine refusing this entry, not an outage",
+			status:  http.StatusInternalServerError,
+			body:    `{"error":"boom"}`,
+			want:    deliveryRetryEntry,
+			wantErr: true,
+		},
+		{
+			name:    "unparseable body is treated as a rejection of this entry",
+			status:  http.StatusTeapot,
+			body:    `<html>not json</html>`,
+			want:    deliveryRetryEntry,
+			wantErr: true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			handler := func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tc.status)
+				if tc.body != "" {
+					_, _ = w.Write([]byte(tc.body))
+				}
+			}
+			srv := httptest.NewServer(http.HandlerFunc(handler))
+			defer srv.Close()
+
+			svc := newProcessMessageSvc(&mockExecutor{}, &http.Client{
+				Transport: &schemeRewriteTransport{scheme: "http"},
+			})
+			device := deviceWithEngine(srv.Listener.Addr().String())
+			msg := &interpreter.Message{PostId: "id:1"}
+
+			got, err := svc.attemptPostback(
+				context.Background(), msg, device, []byte(`{}`), hclog.NewNullLogger(), 1,
+			)
+			if got != tc.want {
+				t.Errorf("outcome = %v, want %v", got, tc.want)
+			}
+			if tc.wantErr && err == nil {
+				t.Error("expected an error describing the failure, got nil")
+			}
+			if !tc.wantErr && err != nil {
+				t.Errorf("expected no error, got %v", err)
+			}
+		})
+	}
+}
+
+// A transport failure — nothing listening at all — is the one case that really
+// does mean the engine is unreachable, and it must stay distinguishable from a
+// rejection so the flush still stops early.
+func TestAttemptPostback_TransportFailureIsUnreachable(t *testing.T) {
+	// Bind and immediately close so the port is almost certainly refusing.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	addr := srv.Listener.Addr().String()
+	srv.Close()
+
+	svc := newProcessMessageSvc(&mockExecutor{}, &http.Client{
+		Timeout:   2 * time.Second,
+		Transport: &schemeRewriteTransport{scheme: "http"},
+	})
+	device := deviceWithEngine(addr)
+	msg := &interpreter.Message{PostId: "id:1"}
+
+	got, err := svc.attemptPostback(
+		context.Background(), msg, device, []byte(`{}`), hclog.NewNullLogger(), 1,
+	)
+	if got != deliveryUnreachable {
+		t.Errorf("outcome = %v, want deliveryUnreachable", got)
+	}
+	if err == nil {
+		t.Error("expected the transport error to be returned")
+	}
+}
+
+// The flush must still stop early on a genuine outage: with nothing listening,
+// only the first entry is attempted and every entry stays spooled.
+func TestFlushPostbackSpool_StopsEarlyWhenEngineUnreachable(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	addr := srv.Listener.Addr().String()
+	srv.Close()
+
+	svc := newProcessMessageSvc(&mockExecutor{result: []byte(`{}`)}, &http.Client{
+		Timeout:   2 * time.Second,
+		Transport: &schemeRewriteTransport{scheme: "http"},
+	})
+	svc.spool = newPostbackSpool(
+		t.TempDir(), 10, time.Hour, defaultSpoolMaxAttempts, hclog.NewNullLogger(),
+	)
+
+	for _, id := range []string{"a", "b", "c"} {
+		if err := svc.spool.enqueue(spoolEntry{
+			PostId:    id,
+			Result:    []byte(`{}`),
+			CreatedAt: time.Now(),
+		}); err != nil {
+			t.Fatalf("enqueue %s: %v", id, err)
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	device := deviceWithEngine(addr)
+	svc.flushPostbackSpool(context.Background(), device, hclog.NewNullLogger(), nil)
+
+	if n := countSpoolFiles(t, svc.spool.dir); n != 3 {
+		t.Errorf("expected every entry retained through the outage, %d remain", n)
+	}
+	if got := svc.spool.droppedTotal.Load(); got != 0 {
+		t.Errorf("an outage must drop nothing, got %d drops", got)
 	}
 }

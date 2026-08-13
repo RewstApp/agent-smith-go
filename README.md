@@ -303,6 +303,47 @@ The spool is bounded by count and age (the oldest/expired entries are evicted)
 so it cannot grow without limit, and the flush is bound to the connection cycle
 so it never blocks shutdown.
 
+#### One undeliverable result never blocks the rest
+
+A flush distinguishes two failures that look alike from a distance:
+
+- **The engine is unreachable** — a transport error, or a connection that broke
+  while the response was being read. Nothing behind this entry could be
+  delivered either, so the flush stops and every remaining entry is retried on a
+  later cycle. This costs the entry nothing: an outage is not the entry's fault
+  and consumes none of its attempt budget.
+- **The engine rejected this entry** — it answered with a `5xx`, or with a body
+  that could not be parsed. The engine is plainly up, so the flush **passes over
+  this entry and keeps going**; every entry behind it still gets its attempt.
+
+The second case used to be read as the first. One result the engine consistently
+rejected would pin the queue: the flush restarted from it every cycle, retried
+it forever with no attempt bound, and the healthy results behind it were never
+attempted until the age check discarded them — logged as `expired`, which reads
+like stale-data cleanup rather than the delivery failure it was.
+
+An entry that is rejected carries a **persisted attempt counter and last error**,
+so its budget survives an agent restart. After **5 counted rejections** the entry
+is abandoned: removed with the distinct reason `attempts_exhausted`, counted
+separately, and surfaced with a best-effort `AgentPostbackAbandoned:<post_id>`
+plugin notification — never silently reported as stale.
+
+Rejections are counted **at most once every 10 minutes**. An engine that is
+failing wholesale answers `5xx` for every entry, which at the HTTP layer is
+indistinguishable from it rejecting each one specifically; without that spacing,
+a flapping connection could spend an entry's whole budget in minutes and abandon
+a result the engine would have accepted on recovery. Spacing bounds the budget in
+time rather than in reconnects, so a result survives at least 40 minutes of a
+wholesale outage however often the agent reconnects. It never delays the pass-over
+itself — a rejected entry is skipped on every flush regardless; only the counting
+is spaced.
+
+Drop reasons are counted separately (`expired`, `capacity`, `attempts_exhausted`,
+`corrupt`) so a spool shedding entries under pressure is distinguishable in
+diagnostics from one abandoning a result the engine refuses. Spool entry files
+written by an older agent have no attempt counter; they are read as
+never-attempted and delivered normally, not discarded.
+
 The in-line retry budget is tunable per deployment:
 
 | Config key | Default | Description |
