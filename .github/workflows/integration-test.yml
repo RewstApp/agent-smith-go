@@ -1555,6 +1555,78 @@ jobs:
           scripts_dir: ${{ steps.inflight_script.outputs.scripts_dir }}
           orphan_path: ${{ steps.inflight_script.outputs.path }}
 
+      # ---- Downloaded installer sweep scenario (sc-106111) ----
+      # Every auto-update downloads a full agent binary and executes it as the
+      # installer. The installer is spawned detached and the process that could
+      # delete it afterwards is the one the installer replaces, so the download
+      # path cannot clean up after itself and nothing else used to - one
+      # orphaned binary accumulated per update for the lifetime of the install,
+      # until the volume filled and took future updates and command execution
+      # with it. Verify the startup sweep now reclaims them.
+      #
+      # The fixture is planted rather than produced by a real update cycle: the
+      # sweep is what this ticket changed, and the download side (where the file
+      # lands, under what name) is covered by unit tests that assert the two
+      # halves share one pattern constant. Ageing is the only simulated part, so
+      # the production 24h threshold stays in play with no test-only override.
+      #
+      # Only the org's own updates directory is asserted here. The sweep also
+      # covers the legacy shared temp directory that older agents downloaded
+      # into, but that is the *service account's* temp directory - notably root's
+      # private TMPDIR on macOS, not the runner's - so a fixture planted from
+      # the runner would land somewhere the service never reads. That half is
+      # covered by TestExecute_SweepsStaleInstallerFilesOnStartup, which runs
+      # Execute in-process and can see its own temp directory.
+      - name: Seed the installer sweep fixture
+        uses: ./.github/actions/installer-sweep-fixture
+        with:
+          mode: seed
+          updates_dir: ${{ matrix.config_dir }}/${{ vars.IT_ORG_ID }}/updates
+
+      - name: Capture installer sweep log baseline count
+        id: installer_sweep_baseline
+        shell: pwsh
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+        run: |
+          $content = Get-Content $env:LOG_FILE -Raw -ErrorAction SilentlyContinue
+          $swept = if ($content) { ([regex]::Matches($content, [regex]::Escape("Swept stale installer files"))).Count } else { 0 }
+          "swept=$swept" >> $env:GITHUB_OUTPUT
+          Write-Output "Baseline counts -> swept=$swept"
+
+      - name: Restart agent to trigger the installer sweep
+        uses: ./.github/actions/run-agent
+        with:
+          binary: ${{ matrix.binary }}
+          args: --update --org-id ${{ vars.IT_ORG_ID }} --no-auto-updates ${{ matrix.no_auto_updates_extra }} --github-token ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Wait for and assert the installer sweep was logged
+        shell: pwsh
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+          BASELINE: ${{ steps.installer_sweep_baseline.outputs.swept }}
+        run: |
+          $baseline = [int]$env:BASELINE
+          for ($i = 1; $i -le 60; $i++) {
+            $content = Get-Content $env:LOG_FILE -Raw -ErrorAction SilentlyContinue
+            $swept = if ($content) { ([regex]::Matches($content, [regex]::Escape("Swept stale installer files"))).Count } else { 0 }
+            if ($swept -gt $baseline) {
+              Write-Output "Installer sweep logged (count $swept > baseline $baseline) after ~$($i * 2)s"
+              exit 0
+            }
+            Start-Sleep -Seconds 2
+          }
+          Write-Output "---- last 40 log lines ----"
+          Get-Content $env:LOG_FILE -Tail 40 -ErrorAction SilentlyContinue
+          Write-Error "Installer sweep was never logged (count stayed at $baseline)"
+          exit 1
+
+      - name: Assert stale installers swept and live files untouched
+        uses: ./.github/actions/installer-sweep-fixture
+        with:
+          mode: assert
+          updates_dir: ${{ matrix.config_dir }}/${{ vars.IT_ORG_ID }}/updates
+
       # ---- Capped and jittered auto-update retry scenario (sc-106110) ----
       # The auto-update retry delay was base * (1 << attempt) with no ceiling and
       # no jitter. Unjittered, every agent that failed against the release

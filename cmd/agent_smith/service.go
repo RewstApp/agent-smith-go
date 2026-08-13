@@ -91,11 +91,11 @@ func (svc *serviceContext) loadLog() (*os.File, error) {
 	return logFile, nil
 }
 
-// scriptsOrgId returns the org id whose scripts directory the executor writes
-// command script files to. The executor derives that path from the device
-// config's org id, so the startup sweep must use the same value; svc.OrgId (from
+// sweepOrgId returns the org id whose directories the startup sweeps reclaim
+// files from. The executor and the updater both derive their paths from the
+// device config's org id, so the sweeps must use the same value; svc.OrgId (from
 // the command line) is only a fallback for a config that omits it.
-func (svc *serviceContext) scriptsOrgId(device agent.Device) string {
+func (svc *serviceContext) sweepOrgId(device agent.Device) string {
 	if device.RewstOrgId != "" {
 		return device.RewstOrgId
 	}
@@ -286,10 +286,33 @@ func (svc *serviceContext) Execute(
 	// The org id is taken from the device config rather than the command line so
 	// the swept directory is exactly the one the executor writes to.
 	interpreter.SweepStaleScripts(
-		agent.GetScriptsDirectory(svc.scriptsOrgId(device)),
+		agent.GetScriptsDirectory(svc.sweepOrgId(device)),
 		interpreter.DefaultStaleScriptAge,
 		logger,
 	)
+
+	// Reclaim the installer binaries the auto-updater downloaded for previous
+	// updates. Download has to keep the file it created so the installer can be
+	// executed, and the process that could delete it afterwards is the one the
+	// installer replaces, so the only safe moment to remove it is a later start —
+	// by which time an installer that is still running is far younger than the
+	// age threshold and is left alone. Same placement and best-effort contract as
+	// the script sweep above.
+	agent.SweepStaleInstallers(
+		agent.GetUpdatesDirectory(svc.sweepOrgId(device)),
+		agent.DefaultStaleInstallerAge,
+		logger,
+	)
+
+	// Agents released before the download moved into the org's own updates
+	// directory left their installers in the shared system temp directory, where
+	// nothing has ever removed them. Sweep that location too so an upgraded
+	// endpoint reclaims the binaries it has been accumulating since it was
+	// installed, rather than only stopping the growth from here on. The matcher
+	// is the same conservative one — this agent's exact temp name pattern,
+	// regular files only, a day old at minimum — which is what makes it safe to
+	// point at a directory shared with the rest of the system.
+	agent.SweepStaleInstallers(os.TempDir(), agent.DefaultStaleInstallerAge, logger)
 
 	rg := utils.ReconnectTimeoutGenerator{}
 

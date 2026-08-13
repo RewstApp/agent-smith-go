@@ -7,9 +7,11 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/RewstApp/agent-smith-go/internal/utils"
 	"github.com/RewstApp/agent-smith-go/internal/version"
 	"github.com/hashicorp/go-hclog"
 )
@@ -22,6 +24,23 @@ func newTestDevice() *Device {
 		DisableAgentPostback: false,
 		DisableAutoUpdates:   false,
 	}
+}
+
+// newTestUpdater builds an updater whose downloads land in a scratch directory
+// instead of the org's real updates directory, which lives under the
+// installation's data directory and is not writable by an unprivileged test
+// process.
+func newTestUpdater(
+	t *testing.T,
+	device *Device,
+	latestReleaseUrl string,
+	runCommand RunCommandFunc,
+) *defaultUpdater {
+	t.Helper()
+
+	u := NewUpdater(hclog.NewNullLogger(), device, latestReleaseUrl, "", runCommand).(*defaultUpdater)
+	u.updatesDir = t.TempDir()
+	return u
 }
 
 func TestNewUpdater(t *testing.T) {
@@ -223,9 +242,7 @@ func TestDownload_Success(t *testing.T) {
 	}))
 	defer server.Close()
 
-	logger := hclog.NewNullLogger()
-	device := newTestDevice()
-	updater := NewUpdater(logger, device, "", "", nil)
+	updater := newTestUpdater(t, newTestDevice(), "", nil)
 
 	path, err := updater.Download(context.Background(), Asset{Url: server.URL})
 	if err != nil {
@@ -247,12 +264,66 @@ func TestDownload_Success(t *testing.T) {
 	if string(content) != string(fileContent) {
 		t.Errorf("expected %s, got %s", fileContent, content)
 	}
+
+	// The download must land in the directory the agent owns and sweeps, under
+	// the exact name pattern the sweep matches — the two halves of the fix only
+	// work together.
+	if dir := filepath.Dir(path); dir != updater.updatesDir {
+		t.Errorf("expected the installer in %s, got %s", updater.updatesDir, dir)
+	}
+	if name := filepath.Base(path); !isInstallerFile(name) {
+		t.Errorf("downloaded installer %q does not match the pattern the sweep reclaims", name)
+	}
+}
+
+// The updates directory is created on demand, because a fresh install has never
+// downloaded an update and nothing else creates it.
+func TestDownload_CreatesMissingUpdatesDirectory(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("fake binary content"))
+	}))
+	defer server.Close()
+
+	u := newTestUpdater(t, newTestDevice(), "", nil)
+	u.updatesDir = filepath.Join(u.updatesDir, "does-not-exist-yet", "updates")
+
+	path, err := u.Download(context.Background(), Asset{Url: server.URL})
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Errorf("expected the installer to exist at %s: %v", path, err)
+	}
+}
+
+// A download that cannot create its directory must fail rather than silently
+// falling back to a location nothing sweeps.
+func TestDownload_UncreatableUpdatesDirectoryFails(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("fake binary content"))
+	}))
+	defer server.Close()
+
+	u := newTestUpdater(t, newTestDevice(), "", nil)
+
+	// A regular file cannot also be a directory, on any platform.
+	blocker := filepath.Join(u.updatesDir, "blocker")
+	if err := os.WriteFile(blocker, []byte("not a directory"), utils.DefaultFileMod); err != nil {
+		t.Fatalf("failed to write blocker file: %v", err)
+	}
+	u.updatesDir = filepath.Join(blocker, "updates")
+
+	path, err := u.Download(context.Background(), Asset{Url: server.URL})
+	if err == nil {
+		t.Fatal("expected an error when the updates directory cannot be created, got nil")
+	}
+	if path != "" {
+		t.Errorf("expected empty path on error, got %s", path)
+	}
 }
 
 func TestDownload_HttpError(t *testing.T) {
-	logger := hclog.NewNullLogger()
-	device := newTestDevice()
-	updater := NewUpdater(logger, device, "", "", nil)
+	updater := newTestUpdater(t, newTestDevice(), "", nil)
 
 	_, err := updater.Download(context.Background(), Asset{Url: "http://invalid.invalid.invalid"})
 
@@ -267,9 +338,7 @@ func TestDownload_ChmodFailure(t *testing.T) {
 	}))
 	defer server.Close()
 
-	logger := hclog.NewNullLogger()
-	device := newTestDevice()
-	u := NewUpdater(logger, device, "", "", nil).(*defaultUpdater)
+	u := newTestUpdater(t, newTestDevice(), "", nil)
 
 	var capturedTempPath string
 	u.chmod = func(name string, mode os.FileMode) error {
@@ -307,9 +376,7 @@ func TestDownload_NonOkStatus(t *testing.T) {
 	}))
 	defer server.Close()
 
-	logger := hclog.NewNullLogger()
-	device := newTestDevice()
-	updater := NewUpdater(logger, device, "", "", nil)
+	updater := newTestUpdater(t, newTestDevice(), "", nil)
 
 	_, err := updater.Download(context.Background(), Asset{Url: server.URL})
 
@@ -599,9 +666,7 @@ func TestRun_FullUpdateFlow(t *testing.T) {
 	)
 	defer releaseServer.Close()
 
-	logger := hclog.NewNullLogger()
-	device := newTestDevice()
-	updater := NewUpdater(logger, device, releaseServer.URL, "", runCmd)
+	updater := newTestUpdater(t, newTestDevice(), releaseServer.URL, runCmd)
 
 	err := updater.Run(context.Background())
 	if err != nil {
@@ -705,9 +770,7 @@ func TestRun_UpdateCommandError(t *testing.T) {
 	)
 	defer releaseServer.Close()
 
-	logger := hclog.NewNullLogger()
-	device := newTestDevice()
-	updater := NewUpdater(logger, device, releaseServer.URL, "", runCmd)
+	updater := newTestUpdater(t, newTestDevice(), releaseServer.URL, runCmd)
 
 	err := updater.Run(context.Background())
 
@@ -794,9 +857,7 @@ func TestDownload_Timeout(t *testing.T) {
 	defer server.Close()
 	defer close(done) // unblocks handler before server.Close() drains connections
 
-	logger := hclog.NewNullLogger()
-	device := newTestDevice()
-	u := NewUpdater(logger, device, "", "", nil).(*defaultUpdater)
+	u := newTestUpdater(t, newTestDevice(), "", nil)
 	u.downloadClient = &http.Client{Timeout: 50 * time.Millisecond}
 
 	_, err := u.Download(context.Background(), Asset{Url: server.URL})
@@ -856,9 +917,7 @@ func TestDownload_ContextCancelled(t *testing.T) {
 	defer server.Close()
 	defer close(done) // unblocks handler before server.Close() drains connections
 
-	logger := hclog.NewNullLogger()
-	device := newTestDevice()
-	u := NewUpdater(logger, device, "", "", nil).(*defaultUpdater)
+	u := newTestUpdater(t, newTestDevice(), "", nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {

@@ -176,6 +176,14 @@ type RunCommandFunc = func(path string, args []string) error
 const (
 	checkTimeout    = 30 * time.Second
 	downloadTimeout = 5 * time.Minute
+
+	// updatesDirMod is the mode of the directory downloaded installers are
+	// written to. It is deliberately tighter than utils.DefaultDirMod: the agent
+	// runs as root/SYSTEM and is the only thing that ever reads these files, so
+	// nothing is gained by letting every local account traverse a directory that
+	// holds executable agent binaries. Ignored on Windows, where the directory
+	// inherits the ACL of the data directory it is created under.
+	updatesDirMod os.FileMode = 0o700
 )
 
 type defaultUpdater struct {
@@ -187,6 +195,10 @@ type defaultUpdater struct {
 	checkClient      *http.Client
 	downloadClient   *http.Client
 	chmod            func(name string, mode os.FileMode) error
+	// updatesDir is where Download writes the installer binary. It is resolved
+	// once at construction from the device's org id so tests can point it at a
+	// scratch directory instead of the real installation path.
+	updatesDir string
 }
 
 func NewUpdater(
@@ -205,6 +217,7 @@ func NewUpdater(
 		checkClient:      &http.Client{Timeout: checkTimeout},
 		downloadClient:   &http.Client{Timeout: downloadTimeout},
 		chmod:            os.Chmod,
+		updatesDir:       GetUpdatesDirectory(device.RewstOrgId),
 	}
 }
 
@@ -303,7 +316,17 @@ func (u *defaultUpdater) Download(ctx context.Context, asset Asset) (string, err
 		return "", fmt.Errorf("download failed with status code: %d", resp.StatusCode)
 	}
 
-	file, err := os.CreateTemp("", "installer-*.bin")
+	// The installer is written to a directory this agent owns rather than the
+	// shared system temp directory, so the startup sweep that reclaims it can
+	// never reach a file another program wrote and the binary is not left
+	// executable in a world-readable location. See GetUpdatesDirectory. The
+	// directory is created on demand because a fresh install has never
+	// downloaded an update.
+	if err := os.MkdirAll(u.updatesDir, updatesDirMod); err != nil {
+		return "", fmt.Errorf("failed to create updates directory %s: %w", u.updatesDir, err)
+	}
+
+	file, err := os.CreateTemp(u.updatesDir, installerTempPattern)
 	if err != nil {
 		return "", err
 	}
@@ -326,7 +349,7 @@ func (u *defaultUpdater) Download(ctx context.Context, asset Asset) (string, err
 	if err != nil {
 		return "", err
 	}
-	if err = u.chmod(file.Name(), 0o755); err != nil {
+	if err = u.chmod(file.Name(), utils.DefaultExecutableFileMod); err != nil {
 		return "", fmt.Errorf("failed to set executable permission on installer: %w", err)
 	}
 
