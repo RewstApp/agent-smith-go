@@ -1619,6 +1619,110 @@ func TestExecute_SweepsStaleScriptFilesOnStartup(t *testing.T) {
 	}
 }
 
+// TestExecute_SweepsStaleInstallerFilesOnStartup verifies the sc-106111 startup
+// sweep is actually wired into the service start, against the legacy shared temp
+// directory that agents released before the download moved into the org's own
+// updates directory left their installers in. The updates directory itself lives
+// under the installation's data directory, which an unprivileged test process
+// cannot create; it is covered by agent.SweepStaleInstallers' own tests and by
+// the integration workflow, which runs as the service account.
+func TestExecute_SweepsStaleInstallerFilesOnStartup(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.json")
+	logPath := filepath.Join(tmpDir, "test.log")
+
+	orgId := "test-org-installer-sweep"
+	device := agent.Device{
+		DeviceId:             "test-device",
+		SharedAccessKey:      "dGVzdC1zaGFyZWQta2V5LXRoYXQtaXMtbG9uZy1lbm91Z2gtZm9yLWJhc2U2NC1kZWNvZGluZw==",
+		AzureIotHubHost:      "test.azure-devices.net",
+		RewstOrgId:           orgId,
+		LoggingLevel:         "info",
+		DisableAutoUpdates:   true,
+		DisableAgentPostback: true,
+	}
+	configBytes, _ := json.Marshal(device)
+	if err := os.WriteFile(configPath, configBytes, utils.DefaultFileMod); err != nil {
+		t.Fatalf("failed to write config: %v", err)
+	}
+
+	// The legacy location is the process's own temp directory, which is what the
+	// released agents wrote to and what the sweep call has to point at. The names
+	// are deliberately far from the range os.CreateTemp produces so a concurrent
+	// download on the same machine cannot collide with them.
+	write := func(name string, age time.Duration) string {
+		path := filepath.Join(os.TempDir(), name)
+		content := []byte("fake agent binary")
+		if err := os.WriteFile(path, content, utils.DefaultFileMod); err != nil {
+			t.Fatalf("failed to write %s: %v", name, err)
+		}
+		t.Cleanup(func() { _ = os.Remove(path) })
+
+		modTime := time.Now().Add(-age)
+		if err := os.Chtimes(path, modTime, modTime); err != nil {
+			t.Fatalf("failed to set mtime on %s: %v", name, err)
+		}
+		return path
+	}
+
+	stale := write("installer-900000001.bin", 48*time.Hour)
+	recent := write("installer-900000002.bin", time.Minute)
+	foreign := write("installer-vendor-setup.bin", 48*time.Hour)
+
+	origNewClient := inmqtt.NewClient
+	inmqtt.NewClient = func(o *pahomqtt.ClientOptions) pahomqtt.Client {
+		return &mockMQTTClient{}
+	}
+	defer func() { inmqtt.NewClient = origNewClient }()
+
+	svc := &serviceContext{
+		ConfigFile: configPath,
+		LogFile:    logPath,
+		OrgId:      orgId,
+		Executor:   &mockExecutor{},
+	}
+
+	stop := make(chan struct{})
+	running := make(chan struct{}, 1)
+
+	done := make(chan service.ServiceExitCode, 1)
+	go func() {
+		done <- svc.Execute(stop, running)
+	}()
+
+	select {
+	case <-running:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Execute did not signal running within timeout")
+	}
+
+	close(stop)
+
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Execute did not exit within timeout")
+	}
+
+	if _, err := os.Stat(stale); !os.IsNotExist(err) {
+		t.Errorf("expected the stale installer file to be swept, stat err = %v", err)
+	}
+	if _, err := os.Stat(recent); err != nil {
+		t.Errorf("expected the recent installer file to survive: %v", err)
+	}
+	if _, err := os.Stat(foreign); err != nil {
+		t.Errorf("expected a file the agent did not create to survive: %v", err)
+	}
+
+	logBytes, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("failed to read log: %v", err)
+	}
+	if !strings.Contains(string(logBytes), "Swept stale installer files") {
+		t.Errorf("expected the sweep to be logged, log was:\n%s", logBytes)
+	}
+}
+
 // runExecuteWithDevice writes device to a config file, runs Execute against a
 // mock MQTT client until it reports running, stops it, and returns the log
 // contents. It is used by the plugin supervision tests, which care about what the

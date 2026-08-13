@@ -524,6 +524,51 @@ The backoff wait stays interruptible by the service stop signal, so a stop is
 never delayed by a pending retry, and a retry that succeeds resets the schedule
 for the next cycle.
 
+### Reclaiming Downloaded Installer Binaries
+
+Every auto-update downloads a full agent binary and executes it as the installer.
+That file has to survive the download — the installer is spawned detached and the
+process that could delete it afterwards is the one the installer replaces — so
+the agent cannot clean up after itself on the update path. Nothing else did
+either, so one orphaned binary (tens of megabytes) accumulated per update for the
+lifetime of the installation. On the space-constrained systems where that matters
+most — thin VDI images, small VM system disks, appliances — a full temp volume is
+not just an agent problem: it breaks Windows Installer, application logging, and
+anything else that needs scratch space, and the agent's own next update fails
+because it can no longer allocate a temp file.
+
+Two changes reclaim the space:
+
+- **Downloads land in a directory the agent owns.** Installers are written to
+  `<data directory>/updates` (`C:\ProgramData\RewstRemoteAgent\<orgId>\updates`,
+  `/etc/rewst_remote_agent/<orgId>/updates`,
+  `/Library/Application Support/rewst_remote_agent/<orgId>/updates`) instead of
+  the shared system temp directory, with the directory created `0700`. A full
+  agent binary is no longer left executable and world-readable, the sweep below
+  only ever runs against a directory this agent created, and endpoints that mount
+  `/tmp` `noexec` — a common hardening baseline — can execute the installer at
+  all. Uninstall already removes the data directory wholesale, so nothing is left
+  behind.
+- **A startup sweep removes what previous updates left.** On every service start,
+  after the service has reported itself running, installer binaries older than
+  **24 hours** are removed. Because a successful update restarts the agent, each
+  start reclaims the previous update's installer and leaves the current one
+  alone, so steady-state usage is a single file rather than one per update. The
+  legacy shared temp directory is swept as well, so an upgraded endpoint reclaims
+  everything it has accumulated since it was installed rather than only stopping
+  the growth from here on.
+
+The sweep is deliberately conservative, matching the existing stale-script sweep:
+only regular files (never symlinks or device nodes) whose name is exactly the
+`installer-<digits>.bin` pattern `os.CreateTemp` produces, and only those past the
+age threshold — which is why it is safe to point at a directory shared with the
+rest of the system. The pattern is a shared constant used by both the download
+and the sweep, so the two cannot drift. It is best effort throughout: an
+unreadable directory or an unremovable file (a Windows installer still running
+holds its own image open) is logged and skipped, never failing or delaying agent
+startup. A non-zero number of removals is logged at `Info` with the count and
+directory; individual removals are logged at `Debug`.
+
 ### Notification Plugin Supervision
 
 Notification plugins run as separate subprocesses reached over RPC, and every
