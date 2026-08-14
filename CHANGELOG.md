@@ -1,3 +1,15 @@
+## v1.5.2 (2026-08-14)
+
+### Fix
+
+- [sc-106112] Stop one undeliverable postback from blocking the spool (#103)
+- [sc-106111] Sweep downloaded installer binaries so temp stops filling (#102)
+- [sc-106110] Cap and jitter the auto-update retry backoff (#101)
+- [sc-106109] Wait for actual process exit before replacing or deleting agent files (#100)
+- [sc-106108] Bound the Windows service stop wait so a wedged service cannot hang an update (#99)
+- [sc-106107] Bound MQTT operation waits so a wedged broker cannot hang the agent (#98)
+- [sc-106105] Bound command output size so a verbose script cannot OOM the agent (#97)
+
 ## v1.5.1 (2026-08-03)
 
 ### Fix
