@@ -536,6 +536,34 @@ pattern the postback spool uses. An interrupted or failed write therefore leaves
 the previous file byte-identical rather than truncated: the endpoint keeps running
 the old agent instead of a binary that cannot start.
 
+### Surviving Its Own systemd Stop (Linux)
+
+The `--update` helper that an auto-update spawns has to stop the running
+service before it can replace the binary and start it again. On Linux that
+service runs as a systemd unit, and systemd's default `KillMode=control-group`
+tears down every process in the unit's cgroup — not just its main process —
+when the unit is stopped. The helper is launched as a child of the running
+service, so without intervention it inherits that cgroup: the moment it calls
+`systemctl stop` on its own unit, systemd kills the helper along with the
+service it just asked to stop, mid-update. The service is left stopped, the
+binary and config were never touched, and — because the kill is a signal, not
+a normal return — the helper's own deferred recovery never runs either.
+`Restart=always` does not help: the unit was stopped by an explicit
+`systemctl stop`, which systemd treats as a clean, intentional exit, not the
+unexpected one `Restart=` reacts to.
+
+The helper now runs inside its own transient systemd **scope**
+(`systemd-run --scope --collect`) rather than as a plain child process, so it
+is never a member of the unit's cgroup in the first place. Stopping the unit
+it was launched from tears down only that unit's cgroup; the helper's scope is
+untouched, so it survives to replace the binary, update the config, and start
+the service again — the same flow already used on Windows and macOS. macOS
+needed no equivalent change: launchd tears down a stopped job by BSD process
+group (`killpg`), and the `Setsid` the helper already sets moves it into a new
+process group, which is enough to escape that teardown. Linux's cgroup-based
+`KillMode` is inherited across `fork()` and untouched by `setsid()`, so the
+same call that protects the helper on macOS does not protect it on Linux.
+
 ### Capped and Jittered Auto-Update Retries
 
 When an update check or download fails, the agent retries on an exponential
