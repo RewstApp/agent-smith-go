@@ -290,6 +290,25 @@ jobs:
           binary: ${{ matrix.it_binary }}
           args: --update --org-id ${{ vars.IT_ORG_ID }} --github-token ${{ secrets.GITHUB_TOKEN }}
 
+      # Captured before the real auto-update fires, so the assertions below
+      # measure what that update did rather than the restart the IT binary
+      # install above already caused.
+      - name: Capture pre-auto-update baseline counts
+        id: autoupdate_baseline
+        shell: pwsh
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+        run: |
+          $content = Get-Content $env:LOG_FILE -Raw -ErrorAction SilentlyContinue
+          function Get-PatternCount($text, $needle) {
+            if ($text) { ([regex]::Matches($text, [regex]::Escape($needle))).Count } else { 0 }
+          }
+          $started    = Get-PatternCount $content "Service started"
+          $subscribed = Get-PatternCount $content "Subscribed to messages"
+          "started=$started"       >> $env:GITHUB_OUTPUT
+          "subscribed=$subscribed" >> $env:GITHUB_OUTPUT
+          Write-Output "Baseline counts -> started=$started subscribed=$subscribed"
+
       - name: Wait for auto updater to trigger and update
         uses: ./.github/actions/wait-for-log-line
         with:
@@ -300,6 +319,82 @@ jobs:
         uses: ./.github/actions/verify-auto-update
         with:
           log_file: ${{ matrix.log_file }}
+
+      # ---- Linux systemd cgroup-kill regression (sc-109762) ----
+      # verify-auto-update above only checks the log for "Updating agent" and
+      # that the last "Agent Smith started" line isn't the IT version - but
+      # that line is logged by the --update helper on its own startup, before
+      # it ever stops the old service, so it already names the new version
+      # even when the helper is killed moments later and never restarts
+      # anything. On Linux, the helper used to inherit the running service's
+      # systemd cgroup, so calling `systemctl stop` on its own unit triggered
+      # KillMode=control-group and killed the helper along with the service it
+      # asked to stop - the endpoint was left offline with the old binary
+      # still in place and no automatic recovery. The real proof the update
+      # finished is the helper's own "Service started" line, logged only after
+      # it replaced the binary and called svc.Start() - the exact point the
+      # cgroup kill used to cut it off. Counts are compared as deltas because
+      # "Service started" also appears once from installing the IT binary
+      # above, and "Subscribed to messages" already has lines from earlier
+      # scenarios.
+      - name: Assert the update helper survived to restart the service
+        shell: pwsh
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+          BASELINE: ${{ steps.autoupdate_baseline.outputs.started }}
+        run: |
+          $baseline = [int]$env:BASELINE
+          for ($i = 1; $i -le 30; $i++) {
+            $content = Get-Content $env:LOG_FILE -Raw -ErrorAction SilentlyContinue
+            $count = if ($content) { ([regex]::Matches($content, [regex]::Escape("Service started"))).Count } else { 0 }
+            if ($count -gt $baseline) {
+              Write-Output "Update helper restarted the service (count $count > baseline $baseline) after ~$($i * 2)s"
+              exit 0
+            }
+            Start-Sleep -Seconds 2
+          }
+          Write-Output "---- last 60 lines of the agent log ----"
+          Get-Content $env:LOG_FILE -Tail 60 -ErrorAction SilentlyContinue
+          Write-Error "Update helper never logged 'Service started' after the auto-update; it was likely killed mid-update (count stayed at $baseline)"
+          exit 1
+
+      - name: Check service is active after auto-update
+        uses: ./.github/actions/check-service
+        with:
+          service: ${{ matrix.service }}
+
+      - name: Wait for fresh subscription after auto-update
+        shell: pwsh
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+          BASELINE: ${{ steps.autoupdate_baseline.outputs.subscribed }}
+        run: |
+          $baseline = [int]$env:BASELINE
+          for ($i = 1; $i -le 30; $i++) {
+            $content = Get-Content $env:LOG_FILE -Raw -ErrorAction SilentlyContinue
+            $count = if ($content) { ([regex]::Matches($content, [regex]::Escape("Subscribed to messages"))).Count } else { 0 }
+            if ($count -gt $baseline) {
+              Write-Output "Agent resubscribed after auto-update (count $count > baseline $baseline) after ~$($i * 2)s"
+              exit 0
+            }
+            Start-Sleep -Seconds 2
+          }
+          Write-Error "Agent never resubscribed after auto-update (subscribed count stayed at $baseline)"
+          exit 1
+
+      - name: Send command after auto-update
+        uses: ./.github/actions/send-command
+        with:
+          trigger_url: ${{ vars.IT_SEND_COMMAND_TRIGGER_URL }}
+          device_id: ${{ steps.config.outputs.device_id }}
+          commands: ${{ matrix.success_commands }}
+
+      - name: Check logs for command completion after auto-update
+        uses: ./.github/actions/assert-log-contains
+        with:
+          log_file: ${{ matrix.log_file }}
+          patterns: ${{ matrix.success_patterns }}
+          wait_seconds: "15"
 
       - name: Update logging level to debug
         uses: ./.github/actions/run-agent

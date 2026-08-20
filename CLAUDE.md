@@ -61,7 +61,15 @@ Required tools:
   leave an endpoint offline. The agent executable and config file are written to a
   temp file and atomically renamed into place, so a failed write leaves the
   previous file byte-identical. See the README's "Waiting for the Old Agent
-  Process to Exit" section.
+  Process to Exit" section. On Linux, the `--update` helper that performs this
+  flow is launched in its own transient systemd scope
+  (`cmd/agent_smith/run_command_linux.go`, `systemd-run --scope --collect`)
+  rather than as a plain child of the running service, so it is never a member
+  of that service's cgroup — otherwise `systemctl stop`'s default
+  `KillMode=control-group` kills the helper along with the service it just
+  stopped, before it can restart it, leaving the endpoint offline with no
+  automatic recovery. See the README's "Surviving Its Own systemd Stop
+  (Linux)" section.
 
 - **internal/agent/**: Device configuration, installation paths, and OS-specific host information. Auto-update installers are downloaded into `<data directory>/updates` (a `0700` directory the agent owns) rather than the shared system temp directory, and `SweepStaleInstallers` reclaims installer binaries older than 24 hours at service startup — from that directory and from the legacy temp location — so the binaries a detached installer necessarily leaves behind stop accumulating one per update. See the README's "Reclaiming Downloaded Installer Binaries" section. The auto-update retry schedule is capped (1 hour, or a quarter of the check interval when shorter) and jittered (±25%) via `utils.JitteredBackoff`, the same helper the postback retry schedule uses, so the doubling cannot overflow into a negative sleep that busy-spins and a fleet-wide release-endpoint outage cannot produce a synchronized retry storm. See the README's "Capped and Jittered Auto-Update Retries" section.
 - **internal/interpreter/**: Command execution engine supporting both PowerShell and Bash interpreters  
