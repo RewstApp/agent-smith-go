@@ -9,7 +9,12 @@ import (
 )
 
 func TestDetachedCommandWrapsInSystemdScope(t *testing.T) {
-	cmd := detachedCommand("/opt/agent/rewst_agent_config.linux.bin", []string{"--update", "--org-id", "abc"}, os.Stdout, os.Stderr)
+	cmd := detachedCommand(
+		"/opt/agent/rewst_agent_config.linux.bin",
+		[]string{"--update", "--org-id", "abc"},
+		os.Stdout,
+		os.Stderr,
+	)
 
 	wantPath := "systemd-run"
 	if got := cmd.Path; got != wantPath && !strings.HasSuffix(got, "/"+wantPath) {
@@ -42,8 +47,4 @@ func TestDetachedCommandWrapsInSystemdScope(t *testing.T) {
 	if !cmd.SysProcAttr.Setsid {
 		t.Fatalf("Setsid = false, want true")
 	}
-}
-
-func endsWith(s, suffix string) bool {
-	return len(s) >= len(suffix) && s[len(s)-len(suffix):] == suffix
 }
