@@ -1,3 +1,9 @@
+## v1.5.3 (2026-08-21)
+
+### Fix
+
+- [sc-109762] Isolate the Linux auto-update helper from its own systemd cgroup (#104)
+
 ## v1.5.2 (2026-08-14)
 
 ### Fix
