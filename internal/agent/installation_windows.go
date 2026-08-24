@@ -47,17 +47,6 @@ func GetDataDirectory(orgId string) string {
 	return filepath.Join(programDataDir, fmt.Sprintf("RewstRemoteAgent/%s", orgId))
 }
 
-func GetScriptsDirectory(orgId string) string {
-	// Get program files directory
-	systemDrive := os.Getenv("SYSTEMDRIVE")
-
-	// Build the program directory based on organization id
-	return filepath.Join(
-		fmt.Sprintf("%s\\", systemDrive),
-		fmt.Sprintf("RewstRemoteAgent/scripts/%s", orgId),
-	)
-}
-
 func GetAgentExecutablePath(orgId string) string {
 	return filepath.Join(GetProgramDirectory(orgId), "agent_smith.win.exe")
 }

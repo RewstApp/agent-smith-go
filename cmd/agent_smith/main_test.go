@@ -77,6 +77,7 @@ type mockFileSystem struct {
 	renameFunc          func(oldPath string, newPath string) error
 	removeFunc          func(name string) error
 	executableInUseFunc func(name string) (bool, error)
+	ensureSecureDirFunc func(path string) error
 }
 
 func (m *mockFileSystem) Executable() (string, error) {
@@ -121,6 +122,13 @@ func (m *mockFileSystem) ExecutableInUse(name string) (bool, error) {
 		return false, nil
 	}
 	return m.executableInUseFunc(name)
+}
+
+func (m *mockFileSystem) EnsureSecureDir(path string) error {
+	if m.ensureSecureDirFunc == nil {
+		return nil
+	}
+	return m.ensureSecureDirFunc(path)
 }
 
 type mockService struct {

@@ -1,6 +1,7 @@
 package interpreter
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"errors"
@@ -20,6 +21,24 @@ import (
 )
 
 var utf8BOM = []byte{0xEF, 0xBB, 0xBF}
+
+// verifyScriptUnchanged re-reads the script file at path and compares it
+// against expected, the exact bytes Execute wrote to it. Close and the
+// shell's own subsequent open of the same path are two independent opens of
+// the file; this is what catches a swap in that window — refusing to run the
+// command rather than trusting whatever the path now resolves to — instead
+// of relying solely on directory permissions never having been momentarily
+// wrong.
+func verifyScriptUnchanged(path string, expected []byte) error {
+	onDisk, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	if !bytes.Equal(onDisk, expected) {
+		return fmt.Errorf("command script %s changed after write; refusing to execute", path)
+	}
+	return nil
+}
 
 // commandWaitDelay bounds how long cmd.Wait blocks on the output pipes after the
 // command's context is cancelled and the process (group) is killed. It is a
@@ -120,9 +139,14 @@ func (e *baseExecutor) Execute(
 		logger.Debug("Whoami", "user", user)
 	}
 
-	// Save commands to temporary file
+	// Save commands to temporary file. The directory is agent-owned (not
+	// shared system temp) and EnsureSecureDir re-asserts its restrictive
+	// ownership/mode on every call rather than trusting a pre-existing
+	// directory as-is, so a local unprivileged user can no longer pre-plant it
+	// with permissive ownership. See agent.GetScriptsDirectory and
+	// utils.EnsureSecureDir.
 	scriptsDir := agent.GetScriptsDirectory(device.RewstOrgId)
-	err = e.FS.MkdirAll(scriptsDir)
+	err = e.FS.EnsureSecureDir(scriptsDir)
 	if err != nil {
 		return errorResultBytes(logger, err)
 	}
@@ -145,6 +169,18 @@ func (e *baseExecutor) Execute(
 		}
 	}()
 
+	// expectedContent is exactly what is written below, kept so it can be
+	// compared against what is actually on disk immediately before exec (see
+	// the integrity check after Close): the two writes below and the exec
+	// call after Close each open the file independently, and confirming the
+	// bytes are unchanged is what catches a swap in that window rather than
+	// trusting whatever a path re-open returns.
+	var expectedContent []byte
+	if e.WriteUtf8BOM {
+		expectedContent = append(expectedContent, utf8BOM...)
+	}
+	expectedContent = append(expectedContent, []byte(commands)...)
+
 	if e.WriteUtf8BOM {
 		_, err = tempfile.Write(utf8BOM)
 		if err != nil {
@@ -165,6 +201,23 @@ func (e *baseExecutor) Execute(
 	// The deferred cleanup will still run Remove; its Close becomes a no-op (ErrClosed).
 	if err := tempfile.Close(); err != nil {
 		logger.Error("Failed to close temp file handle", "error", err)
+		return errorResultBytes(logger, err)
+	}
+
+	// Re-read the file by path and compare it against what was just written.
+	// Close above and the shell's own open of the same path below are two
+	// independent opens of the file; EnsureSecureDir keeps any other local
+	// account from being able to write into this directory at all, and this
+	// check catches it — refusing to execute rather than running
+	// attacker-controlled content — on the off chance content still changed
+	// in that window (e.g. the directory's mode was briefly wrong).
+	if err := verifyScriptUnchanged(tempfile.Name(), expectedContent); err != nil {
+		logger.Error(
+			"Command script integrity check failed",
+			"message_id", message.PostId,
+			"path", tempfile.Name(),
+			"error", err,
+		)
 		return errorResultBytes(logger, err)
 	}
 

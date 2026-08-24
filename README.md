@@ -286,6 +286,50 @@ command that was both verbose and hung carries `"truncated": true` alongside
 Each truncation is logged **once per command** at `Warn` level with the
 `message_id`, the ceiling in effect, and both byte counts — never once per write.
 
+#### Hardening the Command Scripts Directory
+
+Each received command is written to a temporary script file before it is
+executed. That file used to be written to a subdirectory of the shared,
+world-writable system temp directory
+(`os.TempDir()/rewst_remote_agent/scripts/<orgId>`). Because directory
+creation is a no-op against a directory that already exists, any local
+unprivileged user could pre-create that directory — or simply wait for a
+`tmpfs` `/tmp` to reset on reboot — with permissive ownership and mode before
+the agent ever ran, and the agent would silently reuse it exactly as found.
+Combined with the write, close, and path-based re-open the executor used to
+hand the script to the shell, a local user able to write into that directory
+could in principle swap the script's contents in the gap between the two
+opens and have it run with the agent's privilege (root/SYSTEM).
+
+Two changes close this off, matching the precedent already set for
+auto-update installers (see "Reclaiming Downloaded Installer Binaries"):
+
+- **Scripts land in a directory the agent owns.** The scripts directory is now
+  `<data directory>/scripts` (`C:\ProgramData\RewstRemoteAgent\<orgId>\scripts`,
+  `/etc/rewst_remote_agent/<orgId>/scripts`,
+  `/Library/Application Support/rewst_remote_agent/<orgId>/scripts`) instead of
+  the shared system temp directory — a location an unprivileged local user
+  cannot pre-create in the first place.
+- **Its permissions are re-asserted on every command, not only when first
+  created.** `EnsureSecureDir` (`internal/utils/filesystem_unix.go`,
+  `filesystem_windows.go`) runs before every command, not only the first: on
+  Linux and macOS it refuses to follow a symlink or non-directory planted at
+  that path, reclaims ownership via `chown` if the directory belongs to
+  another uid, and re-applies mode `0700` if it does not already have it —
+  failing loud rather than proceeding if either correction itself fails. A
+  directory that already has the right owner and mode is left untouched. On
+  Windows, where there are no POSIX ownership/mode bits to re-assert, the
+  directory's effective access already comes from its parent — the
+  agent-owned data directory under `ProgramData`, restricted to
+  Administrators/SYSTEM by the OS default.
+- **The write-then-exec window is verified, not just trusted.** After the
+  script file is written and closed, its contents are read back and compared
+  byte-for-byte against what was just written; a mismatch aborts the command
+  instead of executing whatever is now on disk. This is defense in depth on
+  top of the directory hardening above — with the directory locked to `0700`
+  and owned by the agent's own account, no other local user can write into it
+  at all, so the window this check exists for should never legitimately fire.
+
 ### Command Result Delivery
 
 After a command runs, the agent posts its result back to the Rewst engine with

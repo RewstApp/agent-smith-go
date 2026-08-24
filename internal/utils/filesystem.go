@@ -8,6 +8,13 @@ const (
 	DefaultFileMod           os.FileMode = 0o644
 	DefaultExecutableFileMod os.FileMode = 0o755
 	DefaultDirMod            os.FileMode = 0o755
+
+	// SecureDirMode is enforced by EnsureSecureDir on directories that must not
+	// be readable, writable, or traversable by any local account other than the
+	// one the agent runs as (root/SYSTEM) — currently the command scripts
+	// directory (see agent.GetScriptsDirectory). It is tighter than
+	// DefaultDirMod: nothing but the agent itself ever needs to see inside.
+	SecureDirMode os.FileMode = 0o700
 )
 
 type FileSystem interface {
@@ -33,6 +40,15 @@ type FileSystem interface {
 	// restrictive ACL, an unreadable parent directory) is returned as an error so
 	// the caller can decide what to do rather than silently reading as "free".
 	ExecutableInUse(name string) (bool, error)
+	// EnsureSecureDir creates path if it does not exist, or brings it in line
+	// with SecureDirMode (and, on platforms with POSIX ownership, the agent's
+	// own uid) if it does — every time it is called, not only on first
+	// creation. Unlike MkdirAll, an existing directory is not silently trusted
+	// as-is: a directory pre-planted by an unprivileged local user (or left
+	// over in a location that used to be shared, world-writable temp) is
+	// detected and corrected, or the call fails loud, rather than being reused
+	// with whatever ownership/mode it happens to carry.
+	EnsureSecureDir(path string) error
 }
 
 type defaultFileSystem struct{}
@@ -67,6 +83,10 @@ func (*defaultFileSystem) Remove(name string) error {
 
 func (*defaultFileSystem) ExecutableInUse(name string) (bool, error) {
 	return executableInUse(name)
+}
+
+func (*defaultFileSystem) EnsureSecureDir(path string) error {
+	return EnsureSecureDir(path)
 }
 
 func NewFileSystem() FileSystem {

@@ -4,6 +4,7 @@ package utils
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"syscall"
 )
@@ -37,4 +38,30 @@ func executableInUse(name string) (bool, error) {
 	}
 
 	return false, err
+}
+
+// EnsureSecureDir creates path if it does not exist. Windows has no POSIX
+// mode/ownership bits to re-assert here — the directory's effective access
+// comes from its parent, the agent-owned data directory under ProgramData,
+// which is already restricted to Administrators/SYSTEM by the OS default —
+// so an existing entry is only checked for being a plain directory. A symlink
+// or non-directory entry at path is refused rather than followed or replaced,
+// since MkdirAll never produces one.
+func EnsureSecureDir(path string) error {
+	fi, err := os.Lstat(path)
+	if os.IsNotExist(err) {
+		if err := os.MkdirAll(path, SecureDirMode); err != nil {
+			return fmt.Errorf("failed to create secure directory %s: %w", path, err)
+		}
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("failed to stat %s: %w", path, err)
+	}
+
+	if fi.Mode()&os.ModeSymlink != 0 || !fi.IsDir() {
+		return fmt.Errorf("refusing to use %s: exists and is not a plain directory", path)
+	}
+
+	return nil
 }

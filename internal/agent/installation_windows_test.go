@@ -84,7 +84,7 @@ func TestGetScriptsDirectory(t *testing.T) {
 	setEnvVars(t)
 
 	orgId := "org123"
-	expected := filepath.Join("C:\\", "RewstRemoteAgent", "scripts", orgId)
+	expected := filepath.Join(GetDataDirectory(orgId), "scripts")
 
 	result := GetScriptsDirectory(orgId)
 

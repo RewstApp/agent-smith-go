@@ -4,7 +4,6 @@ package agent
 
 import (
 	"fmt"
-	"os"
 	"path/filepath"
 )
 
@@ -28,14 +27,6 @@ func GetDataDirectory(orgId string) string {
 
 	// Build the program directory based on organization id
 	return filepath.Join(programDataDir, fmt.Sprintf("rewst_remote_agent/%s", orgId))
-}
-
-func GetScriptsDirectory(orgId string) string {
-	// Get program files directory
-	tempDir := os.TempDir()
-
-	// Build the program directory based on organization id
-	return filepath.Join(tempDir, fmt.Sprintf("rewst_remote_agent/scripts/%s", orgId))
 }
 
 func GetAgentExecutablePath(orgId string) string {

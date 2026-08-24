@@ -1543,11 +1543,20 @@ func TestExecute_SweepsStaleScriptFilesOnStartup(t *testing.T) {
 		t.Fatalf("failed to write config: %v", err)
 	}
 
+	// The production scripts directory is a privileged, agent-owned path
+	// (see agent.GetScriptsDirectory / EnsureSecureDir) that this test cannot
+	// write to unprivileged, so it is redirected to a scratch directory for
+	// the duration of this test.
+	scriptsRoot := t.TempDir()
+	agent.SetScriptsDirectoryOverrideForTesting(func(orgId string) string {
+		return filepath.Join(scriptsRoot, orgId)
+	})
+	t.Cleanup(func() { agent.SetScriptsDirectoryOverrideForTesting(nil) })
+
 	scriptsDir := agent.GetScriptsDirectory(orgId)
 	if err := os.MkdirAll(scriptsDir, utils.DefaultDirMod); err != nil {
 		t.Fatalf("failed to create scripts dir: %v", err)
 	}
-	t.Cleanup(func() { _ = os.RemoveAll(scriptsDir) })
 
 	write := func(name string, age time.Duration) string {
 		path := filepath.Join(scriptsDir, name)
