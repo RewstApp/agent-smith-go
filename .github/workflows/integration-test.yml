@@ -145,7 +145,11 @@ jobs:
               # fixed, unlike the old $TMPDIR-based path, so it can be a
               # static matrix value rather than resolved from the log.
               scripts_dir = "/etc/rewst_remote_agent/$orgId/scripts"
-              scripts_dir_owner = 'rewst-it-svc'
+              # The main `test` job's install-agent call does not pass
+              # --service-username (that only happens in the separate
+              # test-service-user job below), so the service here runs as the
+              # platform default account.
+              scripts_dir_owner = 'root'
               uninstall_paths = "/etc/rewst_remote_agent/$orgId`n/usr/local/bin/rewst_remote_agent/$orgId`n/etc/rewst_remote_agent/$orgId/scripts"
               service_user = 'rewst-it-svc'
               service_username_arg = 'rewst-it-svc'
@@ -197,7 +201,11 @@ jobs:
               # fixed, unlike the old $TMPDIR-based path, so it can be a
               # static matrix value rather than resolved from the log.
               scripts_dir = "/Library/Application Support/rewst_remote_agent/$orgId/scripts"
-              scripts_dir_owner = 'rewst-it-svc'
+              # The main `test` job's install-agent call does not pass
+              # --service-username (that only happens in the separate
+              # test-service-user job below), so the service here runs as the
+              # platform default account.
+              scripts_dir_owner = 'root'
               uninstall_paths = "/Library/Application Support/rewst_remote_agent/$orgId`n/usr/local/bin/rewst_remote_agent/$orgId`n/Library/Application Support/rewst_remote_agent/$orgId/scripts"
               service_user = 'rewst-it-svc'
               service_username_arg = 'rewst-it-svc'
