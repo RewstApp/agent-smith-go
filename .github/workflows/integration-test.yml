@@ -141,7 +141,12 @@ jobs:
               verbose_hang_commands = $unixVerboseHang
               success_patterns = "Command completed`nSending postback`nPostback sent"
               no_auto_updates_extra = ''
-              uninstall_paths = "/etc/rewst_remote_agent/$orgId`n/usr/local/bin/rewst_remote_agent/$orgId`n/tmp/rewst_remote_agent/scripts/$orgId"
+              # Moved under the data directory (sc-108848); deterministic and
+              # fixed, unlike the old $TMPDIR-based path, so it can be a
+              # static matrix value rather than resolved from the log.
+              scripts_dir = "/etc/rewst_remote_agent/$orgId/scripts"
+              scripts_dir_owner = 'rewst-it-svc'
+              uninstall_paths = "/etc/rewst_remote_agent/$orgId`n/usr/local/bin/rewst_remote_agent/$orgId`n/etc/rewst_remote_agent/$orgId/scripts"
               service_user = 'rewst-it-svc'
               service_username_arg = 'rewst-it-svc'
               service_identity = 'rewst-it-svc'
@@ -162,6 +167,11 @@ jobs:
               verbose_hang_commands = $winVerboseHang
               success_patterns = "Command completed`nSending postback`nPostback already sent"
               no_auto_updates_extra = '--disable-agent-postback'
+              # Deliberately NOT moved (sc-108848): some customers whitelist
+              # this exact path in their endpoint security software so the
+              # agent's dynamically-written scripts are not flagged/blocked.
+              scripts_dir = "C:\RewstRemoteAgent\scripts\$orgId"
+              scripts_dir_owner = ''
               uninstall_paths = "C:\ProgramData\RewstRemoteAgent\$orgId`nC:\Program Files\RewstRemoteAgent\$orgId`nC:\RewstRemoteAgent\scripts\$orgId"
               service_user = 'rewst-it-svc'
               service_username_arg = '.\rewst-it-svc'
@@ -183,7 +193,12 @@ jobs:
               verbose_hang_commands = $unixVerboseHang
               success_patterns = "Command completed`nSending postback`nPostback sent"
               no_auto_updates_extra = ''
-              uninstall_paths = "/Library/Application Support/rewst_remote_agent/$orgId`n/usr/local/bin/rewst_remote_agent/$orgId`n`$env:TMPDIR/rewst_remote_agent/scripts/$orgId"
+              # Moved under the data directory (sc-108848); deterministic and
+              # fixed, unlike the old $TMPDIR-based path, so it can be a
+              # static matrix value rather than resolved from the log.
+              scripts_dir = "/Library/Application Support/rewst_remote_agent/$orgId/scripts"
+              scripts_dir_owner = 'rewst-it-svc'
+              uninstall_paths = "/Library/Application Support/rewst_remote_agent/$orgId`n/usr/local/bin/rewst_remote_agent/$orgId`n/Library/Application Support/rewst_remote_agent/$orgId/scripts"
               service_user = 'rewst-it-svc'
               service_username_arg = 'rewst-it-svc'
               service_identity = 'rewst-it-svc'
@@ -269,6 +284,20 @@ jobs:
         with:
           log_file: ${{ matrix.log_file }}
           patterns: ${{ matrix.success_patterns }}
+
+      # ---- Scripts directory permissions (sc-108848) ----
+      # The scripts directory is created on demand the first time a command
+      # runs, so this must come after the success command above. On
+      # Linux/macOS it asserts the EnsureSecureDir hardening (mode 0700, owned
+      # by the service account) that replaced the old shared-temp directory;
+      # on Windows, where the directory deliberately did not move, it only
+      # confirms the historical path still exists (see the action's
+      # description for why).
+      - name: Assert scripts directory has hardened permissions
+        uses: ./.github/actions/assert-scripts-dir-permissions
+        with:
+          scripts_dir: ${{ matrix.scripts_dir }}
+          expected_owner: ${{ matrix.scripts_dir_owner }}
 
       - name: Send failing command
         uses: ./.github/actions/send-command

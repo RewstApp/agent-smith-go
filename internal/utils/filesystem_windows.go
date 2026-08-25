@@ -41,12 +41,15 @@ func executableInUse(name string) (bool, error) {
 }
 
 // EnsureSecureDir creates path if it does not exist. Windows has no POSIX
-// mode/ownership bits to re-assert here — the directory's effective access
-// comes from its parent, the agent-owned data directory under ProgramData,
-// which is already restricted to Administrators/SYSTEM by the OS default —
-// so an existing entry is only checked for being a plain directory. A symlink
-// or non-directory entry at path is refused rather than followed or replaced,
-// since MkdirAll never produces one.
+// mode/ownership bits to re-assert here, so an existing entry is only checked
+// for being a plain directory; a symlink or non-directory entry at path is
+// refused rather than followed or replaced, since MkdirAll never produces
+// one. This is deliberately the only check on Windows: the command scripts
+// directory (agent.GetScriptsDirectory) stays at its historical location on
+// this platform rather than moving under the agent-owned data directory the
+// way it did on Linux/macOS — see the comment on that function for why — so
+// there is no ProgramData-inherited ACL to lean on here the way there would
+// be if it had moved.
 func EnsureSecureDir(path string) error {
 	fi, err := os.Lstat(path)
 	if os.IsNotExist(err) {

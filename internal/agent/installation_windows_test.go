@@ -84,7 +84,10 @@ func TestGetScriptsDirectory(t *testing.T) {
 	setEnvVars(t)
 
 	orgId := "org123"
-	expected := filepath.Join(GetDataDirectory(orgId), "scripts")
+	// Deliberately not under GetDataDirectory: some customers have AV/EDR
+	// whitelisting scoped to this exact historical path (see the doc comment
+	// on GetScriptsDirectory), so it must not move.
+	expected := filepath.Join("C:\\", "RewstRemoteAgent", "scripts", orgId)
 
 	result := GetScriptsDirectory(orgId)
 
