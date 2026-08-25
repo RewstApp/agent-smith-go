@@ -666,7 +666,7 @@ jobs:
           LOG_FILE: ${{ matrix.log_file }}
         run: |
           $content = Get-Content $env:LOG_FILE -Raw -ErrorAction SilentlyContinue
-          $found = if ($content) { [regex]::Matches($content, 'Command saved to[^\r\n]*path=(?<p>\S+)') } else { @() }
+          $found = if ($content) { [regex]::Matches($content, 'Command saved to[^\r\n]*path=(?<p>"[^"]*"|\S+)') } else { @() }
           if ($found.Count -eq 0) {
             Write-Error "No 'Command saved to' line in the log; cannot resolve the scripts directory"
             exit 1
@@ -1183,7 +1183,7 @@ jobs:
           # runner's, notably root's private TMPDIR on macOS. Many earlier
           # scenarios have already logged one.
           $content = Get-Content $env:LOG_FILE -Raw -ErrorAction SilentlyContinue
-          $found = if ($content) { [regex]::Matches($content, 'Command saved to[^\r\n]*path=(?<p>\S+)') } else { @() }
+          $found = if ($content) { [regex]::Matches($content, 'Command saved to[^\r\n]*path=(?<p>"[^"]*"|\S+)') } else { @() }
           if ($found.Count -eq 0) {
             Write-Error "No 'Command saved to' line in the log; cannot resolve the scripts directory"
             exit 1
@@ -1618,7 +1618,7 @@ jobs:
           $baseline = [int]$env:BASELINE
           for ($i = 1; $i -le 30; $i++) {
             $content = Get-Content $env:LOG_FILE -Raw -ErrorAction SilentlyContinue
-            $found = if ($content) { [regex]::Matches($content, 'Command saved to[^\r\n]*path=(?<p>\S+)') } else { @() }
+            $found = if ($content) { [regex]::Matches($content, 'Command saved to[^\r\n]*path=(?<p>"[^"]*"|\S+)') } else { @() }
             if ($found.Count -gt $baseline) {
               $path = $found[$found.Count - 1].Groups['p'].Value.Trim('"')
               $dir = Split-Path -Parent $path
