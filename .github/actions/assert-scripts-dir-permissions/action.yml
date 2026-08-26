@@ -1,0 +1,31 @@
+name: Assert scripts directory permissions
+description: >
+  Verify the command scripts directory has the permissions EnsureSecureDir
+  enforces (sc-108848). On Linux/macOS, where the directory moved off shared
+  system temp into the agent-owned data directory, asserts mode 0700 and
+  ownership by the service account so an unprivileged local user cannot
+  pre-plant or reuse it. On Windows, where the directory deliberately stays at
+  its historical location (some customers have AV/EDR whitelisting scoped to
+  it — see the README's "Hardening the Command Scripts Directory" section),
+  only asserts it exists there; there are no POSIX mode/ownership bits to
+  check.
+
+inputs:
+  scripts_dir:
+    description: "Scripts directory to check"
+    required: true
+  expected_owner:
+    description: "Expected owning account (Linux/macOS only; ignored on Windows)"
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Assert scripts directory permissions
+      shell: pwsh
+      env:
+        SCRIPTS_DIR: ${{ inputs.scripts_dir }}
+        EXPECTED_OWNER: ${{ inputs.expected_owner }}
+      run: |
+        & "$env:GITHUB_ACTION_PATH/fixture.ps1" -ScriptsDir $env:SCRIPTS_DIR -ExpectedOwner $env:EXPECTED_OWNER

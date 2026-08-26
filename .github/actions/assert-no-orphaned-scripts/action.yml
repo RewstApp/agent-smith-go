@@ -4,9 +4,10 @@ description: >
   a scenario and verify (mode=assert) afterwards that none were left behind, which
   proves each command exited cleanly enough to run its deferred cleanup. See
   fixture.ps1 for details. The scripts directory belongs to the service account
-  (root / SYSTEM) and on macOS lives under root's own temp directory, so the
-  shared implementation runs elevated: under sudo on Unix, natively on the
-  already-elevated Windows runner.
+  (rewst-it-svc in this workflow; root/SYSTEM in a real install) and, on
+  Linux/macOS, is mode 0700 (see EnsureSecureDir, sc-108848), so the shared
+  implementation runs elevated to list its contents: under sudo on Unix,
+  natively on the already-elevated Windows runner.
 
 inputs:
   mode:

@@ -141,7 +141,16 @@ jobs:
               verbose_hang_commands = $unixVerboseHang
               success_patterns = "Command completed`nSending postback`nPostback sent"
               no_auto_updates_extra = ''
-              uninstall_paths = "/etc/rewst_remote_agent/$orgId`n/usr/local/bin/rewst_remote_agent/$orgId`n/tmp/rewst_remote_agent/scripts/$orgId"
+              # Moved under the data directory (sc-108848); deterministic and
+              # fixed, unlike the old $TMPDIR-based path, so it can be a
+              # static matrix value rather than resolved from the log.
+              scripts_dir = "/etc/rewst_remote_agent/$orgId/scripts"
+              # The main `test` job's install-agent call does not pass
+              # --service-username (that only happens in the separate
+              # test-service-user job below), so the service here runs as the
+              # platform default account.
+              scripts_dir_owner = 'root'
+              uninstall_paths = "/etc/rewst_remote_agent/$orgId`n/usr/local/bin/rewst_remote_agent/$orgId`n/etc/rewst_remote_agent/$orgId/scripts"
               service_user = 'rewst-it-svc'
               service_username_arg = 'rewst-it-svc'
               service_identity = 'rewst-it-svc'
@@ -162,6 +171,11 @@ jobs:
               verbose_hang_commands = $winVerboseHang
               success_patterns = "Command completed`nSending postback`nPostback already sent"
               no_auto_updates_extra = '--disable-agent-postback'
+              # Deliberately NOT moved (sc-108848): some customers whitelist
+              # this exact path in their endpoint security software so the
+              # agent's dynamically-written scripts are not flagged/blocked.
+              scripts_dir = "C:\RewstRemoteAgent\scripts\$orgId"
+              scripts_dir_owner = ''
               uninstall_paths = "C:\ProgramData\RewstRemoteAgent\$orgId`nC:\Program Files\RewstRemoteAgent\$orgId`nC:\RewstRemoteAgent\scripts\$orgId"
               service_user = 'rewst-it-svc'
               service_username_arg = '.\rewst-it-svc'
@@ -183,7 +197,16 @@ jobs:
               verbose_hang_commands = $unixVerboseHang
               success_patterns = "Command completed`nSending postback`nPostback sent"
               no_auto_updates_extra = ''
-              uninstall_paths = "/Library/Application Support/rewst_remote_agent/$orgId`n/usr/local/bin/rewst_remote_agent/$orgId`n`$env:TMPDIR/rewst_remote_agent/scripts/$orgId"
+              # Moved under the data directory (sc-108848); deterministic and
+              # fixed, unlike the old $TMPDIR-based path, so it can be a
+              # static matrix value rather than resolved from the log.
+              scripts_dir = "/Library/Application Support/rewst_remote_agent/$orgId/scripts"
+              # The main `test` job's install-agent call does not pass
+              # --service-username (that only happens in the separate
+              # test-service-user job below), so the service here runs as the
+              # platform default account.
+              scripts_dir_owner = 'root'
+              uninstall_paths = "/Library/Application Support/rewst_remote_agent/$orgId`n/usr/local/bin/rewst_remote_agent/$orgId`n/Library/Application Support/rewst_remote_agent/$orgId/scripts"
               service_user = 'rewst-it-svc'
               service_username_arg = 'rewst-it-svc'
               service_identity = 'rewst-it-svc'
@@ -269,6 +292,20 @@ jobs:
         with:
           log_file: ${{ matrix.log_file }}
           patterns: ${{ matrix.success_patterns }}
+
+      # ---- Scripts directory permissions (sc-108848) ----
+      # The scripts directory is created on demand the first time a command
+      # runs, so this must come after the success command above. On
+      # Linux/macOS it asserts the EnsureSecureDir hardening (mode 0700, owned
+      # by the service account) that replaced the old shared-temp directory;
+      # on Windows, where the directory deliberately did not move, it only
+      # confirms the historical path still exists (see the action's
+      # description for why).
+      - name: Assert scripts directory has hardened permissions
+        uses: ./.github/actions/assert-scripts-dir-permissions
+        with:
+          scripts_dir: ${{ matrix.scripts_dir }}
+          expected_owner: ${{ matrix.scripts_dir_owner }}
 
       - name: Send failing command
         uses: ./.github/actions/send-command
@@ -629,7 +666,7 @@ jobs:
           LOG_FILE: ${{ matrix.log_file }}
         run: |
           $content = Get-Content $env:LOG_FILE -Raw -ErrorAction SilentlyContinue
-          $found = if ($content) { [regex]::Matches($content, 'Command saved to[^\r\n]*path=(?<p>\S+)') } else { @() }
+          $found = if ($content) { [regex]::Matches($content, 'Command saved to[^\r\n]*path=(?<p>"[^"]*"|\S+)') } else { @() }
           if ($found.Count -eq 0) {
             Write-Error "No 'Command saved to' line in the log; cannot resolve the scripts directory"
             exit 1
@@ -1146,7 +1183,7 @@ jobs:
           # runner's, notably root's private TMPDIR on macOS. Many earlier
           # scenarios have already logged one.
           $content = Get-Content $env:LOG_FILE -Raw -ErrorAction SilentlyContinue
-          $found = if ($content) { [regex]::Matches($content, 'Command saved to[^\r\n]*path=(?<p>\S+)') } else { @() }
+          $found = if ($content) { [regex]::Matches($content, 'Command saved to[^\r\n]*path=(?<p>"[^"]*"|\S+)') } else { @() }
           if ($found.Count -eq 0) {
             Write-Error "No 'Command saved to' line in the log; cannot resolve the scripts directory"
             exit 1
@@ -1581,7 +1618,7 @@ jobs:
           $baseline = [int]$env:BASELINE
           for ($i = 1; $i -le 30; $i++) {
             $content = Get-Content $env:LOG_FILE -Raw -ErrorAction SilentlyContinue
-            $found = if ($content) { [regex]::Matches($content, 'Command saved to[^\r\n]*path=(?<p>\S+)') } else { @() }
+            $found = if ($content) { [regex]::Matches($content, 'Command saved to[^\r\n]*path=(?<p>"[^"]*"|\S+)') } else { @() }
             if ($found.Count -gt $baseline) {
               $path = $found[$found.Count - 1].Groups['p'].Value.Trim('"')
               $dir = Split-Path -Parent $path

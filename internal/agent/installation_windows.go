@@ -47,7 +47,32 @@ func GetDataDirectory(orgId string) string {
 	return filepath.Join(programDataDir, fmt.Sprintf("RewstRemoteAgent/%s", orgId))
 }
 
+// GetScriptsDirectory returns the directory command scripts are written to
+// before execution.
+//
+// Unlike Linux and macOS (see GetScriptsDirectory in installation_linux.go /
+// installation_darwin.go), this deliberately stays at its historical location
+// — the root of the system drive, not under the agent's ProgramData data
+// directory — for two reasons. First, some customers have their endpoint
+// security software configured to whitelist exactly this path so the
+// dynamically-written PowerShell scripts the agent executes here are not
+// flagged or blocked as they run; moving it would silently break command
+// execution on those endpoints with no obvious error pointing at the real
+// cause. Second, the vulnerability the Linux/macOS move fixes (sc-108848) —
+// an unprivileged local user pre-creating the directory with permissive
+// ownership before the agent ever runs — depended on a shared, world-writable
+// system temp directory. Windows never routed this path through anything
+// like that: an unprivileged user cannot create a new top-level directory at
+// the system drive root under Windows' default ACLs, so this location was
+// never reachable by that attack to begin with. EnsureSecureDir still runs
+// before every command and refuses a symlink or non-directory planted here,
+// same as on Linux/macOS; see the README's "Hardening the Command Scripts
+// Directory" section.
 func GetScriptsDirectory(orgId string) string {
+	if scriptsDirOverride != nil {
+		return scriptsDirOverride(orgId)
+	}
+
 	// Get program files directory
 	systemDrive := os.Getenv("SYSTEMDRIVE")
 

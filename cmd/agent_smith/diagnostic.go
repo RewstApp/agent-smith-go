@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/RewstApp/agent-smith-go/internal/agent"
+	"github.com/RewstApp/agent-smith-go/internal/utils"
 	"github.com/RewstApp/agent-smith-go/internal/version"
 	"github.com/hashicorp/go-hclog"
 )
@@ -394,12 +395,12 @@ func runTempDirTest(target agentInfo) {
 	// Test creating the scripts directory
 	fmt.Printf("    Scripts directory: %s\n", scriptsDir)
 
-	err := os.MkdirAll(scriptsDir, 0o755)
+	err := utils.EnsureSecureDir(scriptsDir)
 	if err != nil {
 		printResult(false, fmt.Sprintf("Cannot create scripts directory: %v", err))
 		return
 	}
-	printResult(true, "Scripts directory created/exists")
+	printResult(true, "Scripts directory created/exists with hardened permissions")
 
 	// Test writing a temp file
 	testFile := filepath.Join(scriptsDir, "diagnostic-test.tmp")

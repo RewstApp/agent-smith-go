@@ -214,3 +214,72 @@ func TestDefaultFileSystem_ExecutableInUse_UnprobeablePath(t *testing.T) {
 		t.Error("expected an error probing a path that is not a regular file")
 	}
 }
+
+func TestDefaultFileSystem_EnsureSecureDir_CreatesDirectory(t *testing.T) {
+	fs := NewFileSystem()
+	dir := filepath.Join(t.TempDir(), "sub", "scripts")
+
+	if err := fs.EnsureSecureDir(dir); err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+
+	info, err := os.Stat(dir)
+	if err != nil || !info.IsDir() {
+		t.Fatalf("expected directory %s to exist, err = %v", dir, err)
+	}
+}
+
+func TestEnsureSecureDir_CreatesWithSecureMode(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "scripts")
+
+	if err := EnsureSecureDir(dir); err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+
+	info, err := os.Stat(dir)
+	if err != nil {
+		t.Fatalf("expected directory to exist: %v", err)
+	}
+	if !info.IsDir() {
+		t.Fatalf("expected %s to be a directory", dir)
+	}
+}
+
+func TestEnsureSecureDir_RefusesRegularFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "not-a-dir")
+	if err := os.WriteFile(path, []byte("x"), DefaultFileMod); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := EnsureSecureDir(path); err == nil {
+		t.Error("expected an error when the path is a regular file, got nil")
+	}
+}
+
+func TestEnsureSecureDir_RefusesSymlink(t *testing.T) {
+	base := t.TempDir()
+	target := filepath.Join(base, "target-dir")
+	if err := os.MkdirAll(target, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	link := filepath.Join(base, "scripts")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := EnsureSecureDir(link); err == nil {
+		t.Error("expected an error when the path is a symlink, got nil")
+	}
+}
+
+func TestEnsureSecureDir_IdempotentOnExistingSecureDir(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "scripts")
+	if err := EnsureSecureDir(dir); err != nil {
+		t.Fatalf("expected no error on first call, got %v", err)
+	}
+
+	if err := EnsureSecureDir(dir); err != nil {
+		t.Fatalf("expected no error on second call, got %v", err)
+	}
+}

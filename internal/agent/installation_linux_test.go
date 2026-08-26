@@ -3,7 +3,6 @@
 package agent
 
 import (
-	"os"
 	"path/filepath"
 	"testing"
 )
@@ -43,7 +42,7 @@ func TestGetScriptsDirectory(t *testing.T) {
 	setEnvVars(t)
 
 	orgId := "org123"
-	expected := filepath.Join(os.TempDir(), "rewst_remote_agent/scripts", orgId)
+	expected := filepath.Join(GetDataDirectory(orgId), "scripts")
 
 	result := GetScriptsDirectory(orgId)
 
