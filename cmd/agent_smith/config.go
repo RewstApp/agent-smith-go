@@ -151,8 +151,15 @@ func runConfig(params *configContext) error {
 	// service itself will run as when it differs (ServiceUsername) — so a
 	// service configured to run as a different account than the installer is
 	// not locked out of its own config file. No-op on non-Windows.
+	//
+	// Best effort rather than fatal: ServiceUsername may name an account that
+	// does not exist or is not yet resolvable from this installer's context
+	// (e.g. a domain account not yet visible), which icacls cannot grant.
+	// Failing the whole install over that would be worse than the exposure
+	// this is closing — the directory simply keeps its prior (pre-fix)
+	// permissions for now; the next update re-attempts this same lockdown.
 	if err := utils.SecureDataDirectoryACL(dataDir, params.ServiceUsername); err != nil {
-		return fmt.Errorf("failed to secure data directory: %w", err)
+		logger.Warn("Failed to secure data directory ACL", "path", dataDir, "error", err)
 	}
 
 	// Save the configuration file

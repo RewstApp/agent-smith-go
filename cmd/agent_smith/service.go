@@ -136,22 +136,24 @@ func (svc *serviceContext) Execute(
 	// that never goes through install.go/update.go again (e.g. a service that
 	// is just restarted) still gets corrected. This runs only now that
 	// loadConfig has already proven this process can read svc.ConfigFile, so
-	// it never touches permissions on an unvalidated path. The account
-	// granted access is whichever this process is currently running as, which
-	// is by construction the account the service needs — no extra account to
-	// pass through here, unlike the install/update migration which may be
-	// securing the directory ahead of a service account change. Best effort:
-	// a failure here must not prevent an otherwise-healthy agent from
-	// starting.
+	// it never touches permissions on an unvalidated path. Best effort: a
+	// failure here must not prevent an otherwise-healthy agent from starting.
+	//
+	// Deliberately not calling utils.SecureDataDirectoryACL (the Windows ACL
+	// lockdown) here: unlike the install/update migration, this runs with the
+	// agent's own log file already open for writing (logFile above), and
+	// SecureDataDirectoryACL resets ACLs recursively across every file in the
+	// directory via icacls /T — including that open one. Relocking an
+	// actively-open file's ACL from underneath the same process holding it is
+	// what corrupted read/write access to it during integration testing.
+	// EnsureSecureFile targets only the config file, which is not held open
+	// past loadConfig, so it does not carry that risk.
 	dataDir := filepath.Dir(svc.ConfigFile)
 	if err := utils.EnsureSecureDir(dataDir); err != nil {
 		logger.Warn("Failed to secure data directory", "path", dataDir, "error", err)
 	}
 	if err := utils.EnsureSecureFile(svc.ConfigFile); err != nil {
 		logger.Warn("Failed to secure config file", "path", svc.ConfigFile, "error", err)
-	}
-	if err := utils.SecureDataDirectoryACL(dataDir, ""); err != nil {
-		logger.Warn("Failed to secure data directory ACL", "path", dataDir, "error", err)
 	}
 
 	// Configure syslogger if needed
