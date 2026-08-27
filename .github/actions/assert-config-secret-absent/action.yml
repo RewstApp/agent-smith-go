@@ -1,5 +1,9 @@
 name: Assert config secret absent
-description: Assert the service password was not persisted to config.json on disk. No-op when no secret is supplied.
+description: >
+  Assert the service password was not persisted to config.json on disk. No-op
+  when no secret is supplied. Reading config.json requires elevation now that
+  it is written owner-only (sc-108849), so the shared implementation runs
+  under sudo on Unix and natively on the already-elevated Windows runner.
 
 inputs:
   config_dir:
@@ -16,31 +20,27 @@ inputs:
 runs:
   using: composite
   steps:
-    - name: Assert secret absent from config.json
+    - name: Assert secret absent from config.json (Unix)
+      if: runner.os != 'Windows'
+      shell: bash
+      env:
+        CONFIG_DIR: ${{ inputs.config_dir }}
+        ORG_ID: ${{ inputs.org_id }}
+        SECRET: ${{ inputs.secret }}
+      run: |
+        set -euo pipefail
+        # Resolve pwsh up front: sudo resets PATH via secure_path on some runners.
+        pwsh_path="$(command -v pwsh)"
+        sudo --preserve-env=SECRET "$pwsh_path" -NoProfile -File "$GITHUB_ACTION_PATH/assert.ps1" \
+          -ConfigDir "$CONFIG_DIR" \
+          -OrgId "$ORG_ID"
+
+    - name: Assert secret absent from config.json (Windows)
+      if: runner.os == 'Windows'
       shell: pwsh
       env:
         CONFIG_DIR: ${{ inputs.config_dir }}
         ORG_ID: ${{ inputs.org_id }}
         SECRET: ${{ inputs.secret }}
       run: |
-        $ErrorActionPreference = "Stop"
-
-        if ([string]::IsNullOrEmpty($env:SECRET)) {
-          Write-Output "No secret supplied; skipping config.json secret check"
-          exit 0
-        }
-
-        $configPath = Join-Path $env:CONFIG_DIR (Join-Path $env:ORG_ID "config.json")
-        if (-not (Test-Path $configPath)) {
-          Write-Error "config.json not found at $configPath"
-          exit 1
-        }
-
-        $content = Get-Content $configPath -Raw
-        if ($content.Contains($env:SECRET)) {
-          # Avoid echoing the secret itself.
-          Write-Output "::error::Service password was persisted to config.json at $configPath"
-          exit 1
-        }
-
-        Write-Output "Confirmed service password is absent from config.json"
+        & "$env:GITHUB_ACTION_PATH/assert.ps1" -ConfigDir $env:CONFIG_DIR -OrgId $env:ORG_ID

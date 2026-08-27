@@ -145,23 +145,6 @@ func runConfig(params *configContext) error {
 		return fmt.Errorf("failed to create data directory: %w", err)
 	}
 
-	// Windows has no POSIX mode bits for EnsureSecureDir to enforce, so the
-	// data directory's ACL is locked down separately: SYSTEM, Administrators,
-	// whichever account is running this installer, and the account the
-	// service itself will run as when it differs (ServiceUsername) — so a
-	// service configured to run as a different account than the installer is
-	// not locked out of its own config file. No-op on non-Windows.
-	//
-	// Best effort rather than fatal: ServiceUsername may name an account that
-	// does not exist or is not yet resolvable from this installer's context
-	// (e.g. a domain account not yet visible), which icacls cannot grant.
-	// Failing the whole install over that would be worse than the exposure
-	// this is closing — the directory simply keeps its prior (pre-fix)
-	// permissions for now; the next update re-attempts this same lockdown.
-	if err := utils.SecureDataDirectoryACL(dataDir, params.ServiceUsername); err != nil {
-		logger.Warn("Failed to secure data directory ACL", "path", dataDir, "error", err)
-	}
-
 	// Save the configuration file
 	configFilePath := agent.GetConfigFilePath(params.OrgId)
 	configBytes, err := json.MarshalIndent(response.Configuration, "", "  ")
@@ -291,6 +274,32 @@ func runConfig(params *configContext) error {
 				"error", deregErr,
 			)
 		}
+	}
+
+	// Windows has no POSIX mode bits for EnsureSecureDir to enforce, so the
+	// data directory's ACL is locked down separately: SYSTEM, Administrators,
+	// whichever account is running this installer, and the account the
+	// service itself will run as when it differs (ServiceUsername) — so a
+	// service configured to run as a different account than the installer is
+	// not locked out of its own config file. No-op on non-Windows.
+	//
+	// Deliberately runs here rather than right after EnsureSecureDir above:
+	// this resets ACLs recursively across every file in the directory (icacls
+	// /T), and by this point any pre-existing agent process has been
+	// confirmed exited (waitForAgentProcessExit above) — so nothing still
+	// holds the directory's log file open. Doing this before that wait, while
+	// a running agent still had its log open, is what corrupted read/write
+	// access to it during integration testing; see the same reasoning on
+	// service.go's Execute.
+	//
+	// Best effort rather than fatal: ServiceUsername may name an account that
+	// does not exist or is not yet resolvable from this installer's context
+	// (e.g. a domain account not yet visible), which icacls cannot grant.
+	// Failing the whole install over that would be worse than the exposure
+	// this is closing — the directory simply keeps its prior (pre-fix)
+	// permissions for now; the next update re-attempts this same lockdown.
+	if err := utils.SecureDataDirectoryACL(dataDir, params.ServiceUsername); err != nil {
+		logger.Warn("Failed to secure data directory ACL", "path", dataDir, "error", err)
 	}
 
 	logger.Info("Configuration saved to", "path", configFilePath)

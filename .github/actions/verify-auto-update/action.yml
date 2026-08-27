@@ -1,5 +1,10 @@
 name: Verify auto update completed
-description: Assert the agent's log shows the auto updater ran and that the agent is no longer running the integration-test version (v0.0.0-it).
+description: >
+  Assert the agent's log shows the auto updater ran and that the agent is no
+  longer running the integration-test version (v0.0.0-it). Reading the
+  agent's log file requires elevation now that its data directory is locked
+  owner-only (sc-108849), so the shared implementation runs under sudo on
+  Unix and natively on the already-elevated Windows runner.
 
 inputs:
   log_file:
@@ -17,34 +22,31 @@ inputs:
 runs:
   using: composite
   steps:
-    - name: Verify auto update completed
+    - name: Verify auto update completed (Unix)
+      if: runner.os != 'Windows'
+      shell: bash
+      env:
+        LOG_FILE: ${{ inputs.log_file }}
+        WAIT_SECONDS: ${{ inputs.wait_seconds }}
+        IT_VERSION: ${{ inputs.it_version }}
+      run: |
+        set -euo pipefail
+        # Resolve pwsh up front: sudo resets PATH via secure_path on some runners.
+        pwsh_path="$(command -v pwsh)"
+        sudo "$pwsh_path" -NoProfile -File "$GITHUB_ACTION_PATH/verify.ps1" \
+          -LogFile "$LOG_FILE" \
+          -WaitSeconds "$WAIT_SECONDS" \
+          -ItVersion "$IT_VERSION"
+
+    - name: Verify auto update completed (Windows)
+      if: runner.os == 'Windows'
       shell: pwsh
       env:
         LOG_FILE: ${{ inputs.log_file }}
         WAIT_SECONDS: ${{ inputs.wait_seconds }}
         IT_VERSION: ${{ inputs.it_version }}
       run: |
-        Start-Sleep -Seconds ([int]$env:WAIT_SECONDS)
-        if (-not (Test-Path $env:LOG_FILE)) {
-          Write-Error "Log file not found: $env:LOG_FILE"
-          exit 1
-        }
-        $logContent = Get-Content $env:LOG_FILE -Raw
-        Write-Output $logContent
-
-        $failed = $false
-        foreach ($pattern in @("Checking for updates", "Updating agent")) {
-          if ($logContent -notmatch [regex]::Escape($pattern)) {
-            Write-Error "Expected auto update log line not found: $pattern"
-            $failed = $true
-          }
-        }
-
-        $lastStartLine = ($logContent -split "`r?`n" | Where-Object { $_ -match "Agent Smith started" } | Select-Object -Last 1)
-        if ($lastStartLine -and ($lastStartLine -match [regex]::Escape($env:IT_VERSION))) {
-          Write-Error "Agent is still running the integration test version after update: $lastStartLine"
-          $failed = $true
-        }
-
-        if ($failed) { exit 1 }
-        Write-Output "Auto updater integration test passed"
+        & "$env:GITHUB_ACTION_PATH/verify.ps1" `
+          -LogFile $env:LOG_FILE `
+          -WaitSeconds ([int]$env:WAIT_SECONDS) `
+          -ItVersion $env:IT_VERSION
