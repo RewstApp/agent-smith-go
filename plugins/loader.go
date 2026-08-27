@@ -54,9 +54,14 @@ var pluginMap = map[string]plugin.Plugin{
 // nothing has gone wrong.
 type NotifierStats struct {
 	// NotifyFailures counts notifications that could not be delivered to a
-	// plugin, whether because the RPC call failed or because no subprocess was
-	// running at the time.
+	// plugin, whether because the RPC call failed, because it timed out, or
+	// because no subprocess was running at the time.
 	NotifyFailures int64
+	// NotifyTimeouts counts, of NotifyFailures, how many were a plugin accepting
+	// a Notify call and never responding within shared.NotifyTimeout (hung, not
+	// crashed) rather than an error the plugin returned or a broken RPC channel.
+	// Tracked separately so a hang is observable as distinct from a crash.
+	NotifyTimeouts int64
 	// Restarts counts plugin subprocesses successfully relaunched after an exit.
 	Restarts int64
 	// RestartFailures counts relaunch attempts that themselves failed.
@@ -113,6 +118,7 @@ type optionalNotifierWrapper struct {
 	failing bool
 
 	notifyFailures  atomic.Int64
+	notifyTimeouts  atomic.Int64
 	restarts        atomic.Int64
 	restartFailures atomic.Int64
 }
@@ -196,12 +202,20 @@ func (p *optionalNotifierWrapper) Notify(message string) error {
 		return nil
 	}
 
-	// A broken RPC channel means the subprocess is gone or unusable, so drop the
-	// handle and let the next attempt relaunch it. An error the plugin itself
-	// returned is a plugin-side failure: it is counted and logged, but the
-	// subprocess is working and must be left alone.
-	if isTransportError(err) {
+	timedOut := errors.Is(err, shared.ErrNotifyTimeout)
+
+	// A broken RPC channel means the subprocess is gone; a call that never
+	// returned within shared.NotifyTimeout means it is alive but hung. Either way
+	// the handle is unusable, so drop it and let the next attempt relaunch —
+	// dropLocked kills a still-alive hung subprocess rather than leaving it to
+	// wedge every future call. An error the plugin itself returned is a
+	// plugin-side failure: it is counted and logged, but the subprocess is
+	// working and must be left alone.
+	if timedOut || isTransportError(err) {
 		p.mu.Lock()
+		if timedOut {
+			p.notifyTimeouts.Add(1)
+		}
 		// Only discard the handle this call actually used; a concurrent Notify or
 		// health check may already have relaunched the plugin.
 		if p.client == client {
@@ -227,6 +241,7 @@ func (p *optionalNotifierWrapper) CheckHealth() {
 func (p *optionalNotifierWrapper) Stats() NotifierStats {
 	return NotifierStats{
 		NotifyFailures:  p.notifyFailures.Load(),
+		NotifyTimeouts:  p.notifyTimeouts.Load(),
 		Restarts:        p.restarts.Load(),
 		RestartFailures: p.restartFailures.Load(),
 	}
@@ -244,8 +259,10 @@ func (p *optionalNotifierWrapper) restartable() bool {
 //
 // This detects a subprocess that exits or crashes, which is the failure mode
 // that silently killed notification delivery. A plugin whose process is alive
-// but wedged is not detectable this way; it surfaces instead as a failing Notify
-// (counted and logged), which then drops the handle for relaunch.
+// but wedged is not detectable this way; it surfaces instead as a Notify call
+// that times out (see shared.NotifyTimeout), which is counted, logged, and
+// drops the handle for relaunch exactly like a transport error — dropLocked
+// kills the still-alive process rather than leaving it running and unusable.
 func (p *optionalNotifierWrapper) deadLocked() bool {
 	if !p.restartable() {
 		return false
@@ -416,6 +433,7 @@ func (s *notifierSetWrapper) Stats() NotifierStats {
 	for _, notifier := range s.notifiers {
 		pluginStats := notifier.Stats()
 		stats.NotifyFailures += pluginStats.NotifyFailures
+		stats.NotifyTimeouts += pluginStats.NotifyTimeouts
 		stats.Restarts += pluginStats.Restarts
 		stats.RestartFailures += pluginStats.RestartFailures
 	}

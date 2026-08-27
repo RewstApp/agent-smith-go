@@ -721,6 +721,37 @@ Loaded plugins are therefore supervised for the lifetime of the service:
 
 Deployments with no plugins configured are unaffected — no supervision runs.
 
+### Bounded Notification Plugin RPC Calls
+
+The health check above only detects a subprocess that has actually **exited** —
+it reads an in-process exit flag and performs no RPC. A plugin whose process is
+still alive but has deadlocked internally (blocked on a channel that's never
+signaled, stuck on a downstream call) is invisible to it, and the `Notify` RPC
+call itself used to have no deadline: `net/rpc`'s `Call` blocks until a response
+arrives, however long that takes. Since every message and status transition
+calls `Notify` on every loaded plugin, one plugin hanging without crashing could
+silently exhaust the whole worker pool over time — command execution stalling
+fleet-wide with MQTT connectivity still looking perfectly healthy, and no error
+anywhere pointing at the cause.
+
+Every `Notify` call is now bounded by a **10 second** timeout, matching the
+deadline pattern already used for MQTT operations:
+
+- A call that does not return within the timeout is abandoned and treated as a
+  plugin failure — counted and logged once per failure transition, exactly like
+  a crash — rather than blocking the calling worker any longer.
+- The failure is tracked in its own counter, separate from other notify
+  failures, so a hang is observable as distinct from a crash or a plugin-
+  returned error in both the logs and the `Plugin notification health summary`.
+- Because the subprocess is still alive at this point, dropping the handle also
+  **kills it** (the same teardown `Kill` uses), so the next `Notify` or health
+  check relaunches a fresh subprocess on the existing backoff schedule instead
+  of repeatedly timing out against a permanently wedged process.
+
+The timeout is a fixed constant rather than a device config knob: unlike the
+MQTT timeouts, it bounds RPC to a subprocess the host itself launched on the
+same machine, not a network endpoint an operator might need to tune.
+
 ## Build
 Required tools and packages:
 

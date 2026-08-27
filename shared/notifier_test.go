@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/rpc"
 	"testing"
+	"time"
 
 	"github.com/hashicorp/go-plugin"
 )
@@ -259,6 +260,105 @@ func TestNotifierRPC_Notify_Integration_Error(t *testing.T) {
 
 	if err.Error() != expectedErr.Error() {
 		t.Errorf("expected error %q, got %q", expectedErr.Error(), err.Error())
+	}
+}
+
+// hangingNotifier accepts a Notify call and blocks until unblock is closed,
+// modeling a plugin that deadlocks internally without exiting the process.
+type hangingNotifier struct {
+	called  chan struct{}
+	unblock chan struct{}
+}
+
+func newHangingNotifier() *hangingNotifier {
+	return &hangingNotifier{called: make(chan struct{}), unblock: make(chan struct{})}
+}
+
+func (n *hangingNotifier) Notify(message string) error {
+	close(n.called)
+	<-n.unblock
+	return nil
+}
+
+// rpcPipe wires an RPC server for impl to a client over an in-memory pipe, for
+// tests that need a real net/rpc round trip rather than calling Go methods
+// directly.
+func rpcPipe(t *testing.T, impl Notifier) *rpc.Client {
+	t.Helper()
+
+	server := rpc.NewServer()
+	if err := server.RegisterName("Plugin", &NotifierRPCServer{Impl: impl}); err != nil {
+		t.Fatalf("failed to register RPC server: %v", err)
+	}
+
+	clientConn, serverConn := net.Pipe()
+	t.Cleanup(func() { _ = serverConn.Close() })
+	go server.ServeConn(serverConn)
+
+	client := rpc.NewClient(clientConn)
+	t.Cleanup(func() { _ = client.Close() })
+
+	return client
+}
+
+// TestNotifierRPC_Notify_TimesOutOnHungPlugin verifies a plugin that accepts the
+// call and then hangs (without exiting) does not block the caller past the
+// configured timeout, and that the caller gets back ErrNotifyTimeout rather than
+// hanging forever. This is the regression test for the "hung, not crashed"
+// failure mode the health check cannot see.
+func TestNotifierRPC_Notify_TimesOutOnHungPlugin(t *testing.T) {
+	impl := newHangingNotifier()
+	defer close(impl.unblock) // release the still-blocked server goroutine on test exit
+
+	notifier := &NotifierRPC{client: rpcPipe(t, impl), timeout: 50 * time.Millisecond}
+
+	start := time.Now()
+	err := notifier.Notify("hello")
+	elapsed := time.Since(start)
+
+	if !errors.Is(err, ErrNotifyTimeout) {
+		t.Fatalf("expected ErrNotifyTimeout, got %v", err)
+	}
+	if elapsed > 2*time.Second {
+		t.Errorf("Notify was not bounded by the timeout: took %v", elapsed)
+	}
+
+	select {
+	case <-impl.called:
+	default:
+		t.Fatal("expected the plugin's Notify to have actually been invoked")
+	}
+}
+
+// TestNotifierRPC_Notify_FastCallUnaffectedByTimeout verifies a well-behaved
+// plugin under typical latency is not disturbed by the new bounded wait.
+func TestNotifierRPC_Notify_FastCallUnaffectedByTimeout(t *testing.T) {
+	mockImpl := &mockNotifier{}
+	notifier := &NotifierRPC{client: rpcPipe(t, mockImpl), timeout: time.Second}
+
+	if err := notifier.Notify("hello"); err != nil {
+		t.Fatalf("expected no error for a fast-responding plugin, got %v", err)
+	}
+	if !mockImpl.notifyCalled {
+		t.Error("expected Notify to reach the plugin implementation")
+	}
+}
+
+// TestNotifierRPC_Notify_ZeroTimeoutFallsBackToDefault confirms an unset timeout
+// field (the zero value, as produced by NotifierPlugin.Client before this test
+// package overrides it) still bounds the call rather than blocking forever.
+func TestNotifierRPC_Notify_ZeroTimeoutFallsBackToDefault(t *testing.T) {
+	original := NotifyTimeout
+	NotifyTimeout = 50 * time.Millisecond
+	defer func() { NotifyTimeout = original }()
+
+	impl := newHangingNotifier()
+	defer close(impl.unblock)
+
+	notifier := &NotifierRPC{client: rpcPipe(t, impl)}
+
+	if err := notifier.Notify("hello"); !errors.Is(err, ErrNotifyTimeout) {
+		t.Fatalf("expected ErrNotifyTimeout, got %v", err)
 	}
 }
 

@@ -83,7 +83,7 @@ Required tools:
 
 Agent Smith uses a plugin architecture for extensible notifications. Plugins are separate executables that implement the `Notifier` interface via RPC. The system supports loading multiple plugins simultaneously and sends status notifications (AgentStarted, AgentStatus:Online, AgentStatus:Offline, etc.) to all loaded plugins.
 
-Loaded plugins are supervised: a subprocess that exits or crashes is detected (by a periodic health check and on the notification path) and relaunched with backoff, and delivery failures increment counters and are logged once per failure transition. See the README's "Notification Plugin Supervision" section.
+Loaded plugins are supervised: a subprocess that exits or crashes is detected (by a periodic health check and on the notification path) and relaunched with backoff, and delivery failures increment counters and are logged once per failure transition. See the README's "Notification Plugin Supervision" section. The crash-only health check cannot see a plugin that is still alive but has deadlocked internally, so every `Notify` RPC call (`shared.NotifierRPC.Notify`) is additionally bounded by `shared.NotifyTimeout` (10s): a call that never returns is abandoned rather than blocking the calling worker forever, counted separately from other notify failures (`NotifierStats.NotifyTimeouts`) so a hang is distinguishable from a crash, and the still-alive subprocess is killed and relaunched on the existing backoff schedule. See the README's "Bounded Notification Plugin RPC Calls" section.
 
 ### Message Processing Flow
 
