@@ -1,5 +1,10 @@
 name: Validate config
-description: Assert config.json contains the required fields and rewst_org_id matches the expected value. Also exposes device_id as an output.
+description: >
+  Assert config.json contains the required fields and rewst_org_id matches the
+  expected value. Also exposes device_id as an output. Reading config.json
+  requires elevation now that it is written owner-only (sc-108849), so the
+  shared implementation runs under sudo on Unix and natively on the
+  already-elevated Windows runner.
 
 inputs:
   config_dir:
@@ -12,44 +17,35 @@ inputs:
 outputs:
   device_id:
     description: "device_id read from config.json"
-    value: ${{ steps.parse.outputs.device_id }}
+    value: ${{ steps.parse-unix.outputs.device_id || steps.parse-windows.outputs.device_id }}
   azure_iot_hub_host:
     description: "azure_iot_hub_host read from config.json (the MQTT broker host)"
-    value: ${{ steps.parse.outputs.azure_iot_hub_host }}
+    value: ${{ steps.parse-unix.outputs.azure_iot_hub_host || steps.parse-windows.outputs.azure_iot_hub_host }}
 
 runs:
   using: composite
   steps:
-    - name: Parse and validate config.json
-      id: parse
-      shell: pwsh
+    - name: Parse and validate config.json (Unix)
+      if: runner.os != 'Windows'
+      id: parse-unix
+      shell: bash
+      env:
+        CONFIG_DIR: ${{ inputs.config_dir }}
+        ORG_ID: ${{ inputs.org_id }}
       run: |
-        $configPath = "${{ inputs.config_dir }}/${{ inputs.org_id }}/config.json"
-        if (-not (Test-Path $configPath)) {
-          Write-Error "config.json not found at $configPath"
-          exit 1
-        }
-        $config = Get-Content $configPath -Raw | ConvertFrom-Json
+        set -euo pipefail
+        # Resolve pwsh up front: sudo resets PATH via secure_path on some runners.
+        pwsh_path="$(command -v pwsh)"
+        sudo --preserve-env=GITHUB_OUTPUT "$pwsh_path" -NoProfile -File "$GITHUB_ACTION_PATH/validate.ps1" \
+          -ConfigDir "$CONFIG_DIR" \
+          -OrgId "$ORG_ID"
 
-        $required = @("device_id", "rewst_org_id", "rewst_engine_host", "shared_access_key", "azure_iot_hub_host")
-        $failed = $false
-        foreach ($field in $required) {
-          $value = $config.$field
-          if ([string]::IsNullOrWhiteSpace($value)) {
-            Write-Error "Config field '$field' is missing or empty"
-            $failed = $true
-          } else {
-            Write-Output "OK: $field = $value"
-          }
-        }
-
-        if ($config.rewst_org_id -ne "${{ inputs.org_id }}") {
-          Write-Error "rewst_org_id '$($config.rewst_org_id)' does not match expected '${{ inputs.org_id }}'"
-          $failed = $true
-        }
-
-        if ($failed) { exit 1 }
-
-        "device_id=$($config.device_id)" >> $env:GITHUB_OUTPUT
-        "azure_iot_hub_host=$($config.azure_iot_hub_host)" >> $env:GITHUB_OUTPUT
-        Write-Output "All config.json fields validated"
+    - name: Parse and validate config.json (Windows)
+      if: runner.os == 'Windows'
+      id: parse-windows
+      shell: pwsh
+      env:
+        CONFIG_DIR: ${{ inputs.config_dir }}
+        ORG_ID: ${{ inputs.org_id }}
+      run: |
+        & "$env:GITHUB_ACTION_PATH/validate.ps1" -ConfigDir $env:CONFIG_DIR -OrgId $env:ORG_ID

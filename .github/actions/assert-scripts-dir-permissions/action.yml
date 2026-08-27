@@ -8,7 +8,9 @@ description: >
   its historical location (some customers have AV/EDR whitelisting scoped to
   it — see the README's "Hardening the Command Scripts Directory" section),
   only asserts it exists there; there are no POSIX mode/ownership bits to
-  check.
+  check. On Linux/macOS this now requires elevation (sc-108849): the scripts
+  directory's parent, the org's data directory, is itself locked owner-only,
+  so even a metadata-only stat of the scripts directory needs to traverse it.
 
 inputs:
   scripts_dir:
@@ -22,7 +24,22 @@ inputs:
 runs:
   using: composite
   steps:
-    - name: Assert scripts directory permissions
+    - name: Assert scripts directory permissions (Unix)
+      if: runner.os != 'Windows'
+      shell: bash
+      env:
+        SCRIPTS_DIR: ${{ inputs.scripts_dir }}
+        EXPECTED_OWNER: ${{ inputs.expected_owner }}
+      run: |
+        set -euo pipefail
+        # Resolve pwsh up front: sudo resets PATH via secure_path on some runners.
+        pwsh_path="$(command -v pwsh)"
+        sudo "$pwsh_path" -NoProfile -File "$GITHUB_ACTION_PATH/fixture.ps1" \
+          -ScriptsDir "$SCRIPTS_DIR" \
+          -ExpectedOwner "$EXPECTED_OWNER"
+
+    - name: Assert scripts directory permissions (Windows)
+      if: runner.os == 'Windows'
       shell: pwsh
       env:
         SCRIPTS_DIR: ${{ inputs.scripts_dir }}

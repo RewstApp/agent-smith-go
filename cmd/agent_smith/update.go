@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"path/filepath"
 	"runtime"
 
 	"github.com/RewstApp/agent-smith-go/internal/agent"
@@ -152,6 +153,24 @@ func runUpdate(params *updateContext) {
 		return
 	}
 
+	// Migrate the data directory to owner-only permissions for installations
+	// that pre-date this hardening (sc-108849). This runs only after the
+	// config file above was successfully read, so it never touches
+	// permissions on a path this process could not already access. Failures
+	// are logged rather than aborting the update: a permissions migration
+	// hiccup must not be able to take an otherwise-healthy agent offline.
+	dataDir := filepath.Dir(configFilePath)
+	if err := params.FS.EnsureSecureDir(dataDir); err != nil {
+		logger.Warn("Failed to secure data directory", "path", dataDir, "error", err)
+	}
+	// No-op on Linux/macOS, where EnsureSecureDir above already enforced this
+	// via POSIX mode/ownership bits. On Windows, ServiceUsername is passed
+	// through so a service being switched to a different account by this same
+	// update is not locked out of its own config file.
+	if err := utils.SecureDataDirectoryACL(dataDir, params.ServiceUsername); err != nil {
+		logger.Warn("Failed to secure data directory ACL", "path", dataDir, "error", err)
+	}
+
 	device.LoggingLevel = utils.LoggingLevel(params.LoggingLevel)
 	device.UseSyslog = params.UseSyslog
 	device.DisableAgentPostback = params.DisableAgentPostback
@@ -206,8 +225,10 @@ func runUpdate(params *updateContext) {
 	}
 
 	// Written atomically: a config file truncated by a failed write would leave
-	// the service unable to start at all.
-	err = writeFileAtomic(params.FS, configFilePath, configBytes, utils.DefaultFileMod)
+	// the service unable to start at all. SecureFileMode (0600) is what keeps
+	// the SharedAccessKey and GitHub token it contains from being
+	// plaintext-readable by any other local account (sc-108849).
+	err = writeFileAtomic(params.FS, configFilePath, configBytes, utils.SecureFileMode)
 	if err != nil {
 		logger.Error("Failed to save config", "error", err)
 		return

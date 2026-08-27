@@ -330,22 +330,26 @@ jobs:
       # Captured before the real auto-update fires, so the assertions below
       # measure what that update did rather than the restart the IT binary
       # install above already caused.
-      - name: Capture pre-auto-update baseline counts
-        id: autoupdate_baseline
+      - name: Capture pre-auto-update baseline counts (Unix)
+        if: runner.os != 'Windows'
+        id: autoupdate_baseline_unix
+        shell: bash
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+        run: |
+          set -euo pipefail
+          # Resolve pwsh up front: sudo resets PATH via secure_path on some runners.
+          pwsh_path="$(command -v pwsh)"
+          sudo --preserve-env=LOG_FILE,GITHUB_OUTPUT "$pwsh_path" -NoProfile -File "$GITHUB_WORKSPACE/.github/workflows/it-scripts/capture-pre-auto-update-baseline-counts.ps1"
+
+      - name: Capture pre-auto-update baseline counts (Windows)
+        if: runner.os == 'Windows'
+        id: autoupdate_baseline_windows
         shell: pwsh
         env:
           LOG_FILE: ${{ matrix.log_file }}
         run: |
-          $content = Get-Content $env:LOG_FILE -Raw -ErrorAction SilentlyContinue
-          function Get-PatternCount($text, $needle) {
-            if ($text) { ([regex]::Matches($text, [regex]::Escape($needle))).Count } else { 0 }
-          }
-          $started    = Get-PatternCount $content "Service started"
-          $subscribed = Get-PatternCount $content "Subscribed to messages"
-          "started=$started"       >> $env:GITHUB_OUTPUT
-          "subscribed=$subscribed" >> $env:GITHUB_OUTPUT
-          Write-Output "Baseline counts -> started=$started subscribed=$subscribed"
-
+          & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/capture-pre-auto-update-baseline-counts.ps1"
       - name: Wait for auto updater to trigger and update
         uses: ./.github/actions/wait-for-log-line
         with:
@@ -374,51 +378,51 @@ jobs:
       # "Service started" also appears once from installing the IT binary
       # above, and "Subscribed to messages" already has lines from earlier
       # scenarios.
-      - name: Assert the update helper survived to restart the service
+      - name: Assert the update helper survived to restart the service (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+          BASELINE: ${{ (steps.autoupdate_baseline_unix.outputs.started || steps.autoupdate_baseline_windows.outputs.started) }}
+        run: |
+          set -euo pipefail
+          # Resolve pwsh up front: sudo resets PATH via secure_path on some runners.
+          pwsh_path="$(command -v pwsh)"
+          sudo --preserve-env=LOG_FILE,BASELINE "$pwsh_path" -NoProfile -File "$GITHUB_WORKSPACE/.github/workflows/it-scripts/assert-the-update-helper-survived-to-restart-the-service.ps1"
+
+      - name: Assert the update helper survived to restart the service (Windows)
+        if: runner.os == 'Windows'
         shell: pwsh
         env:
           LOG_FILE: ${{ matrix.log_file }}
-          BASELINE: ${{ steps.autoupdate_baseline.outputs.started }}
+          BASELINE: ${{ (steps.autoupdate_baseline_unix.outputs.started || steps.autoupdate_baseline_windows.outputs.started) }}
         run: |
-          $baseline = [int]$env:BASELINE
-          for ($i = 1; $i -le 30; $i++) {
-            $content = Get-Content $env:LOG_FILE -Raw -ErrorAction SilentlyContinue
-            $count = if ($content) { ([regex]::Matches($content, [regex]::Escape("Service started"))).Count } else { 0 }
-            if ($count -gt $baseline) {
-              Write-Output "Update helper restarted the service (count $count > baseline $baseline) after ~$($i * 2)s"
-              exit 0
-            }
-            Start-Sleep -Seconds 2
-          }
-          Write-Output "---- last 60 lines of the agent log ----"
-          Get-Content $env:LOG_FILE -Tail 60 -ErrorAction SilentlyContinue
-          Write-Error "Update helper never logged 'Service started' after the auto-update; it was likely killed mid-update (count stayed at $baseline)"
-          exit 1
-
+          & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/assert-the-update-helper-survived-to-restart-the-service.ps1"
       - name: Check service is active after auto-update
         uses: ./.github/actions/check-service
         with:
           service: ${{ matrix.service }}
 
-      - name: Wait for fresh subscription after auto-update
+      - name: Wait for fresh subscription after auto-update (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+          BASELINE: ${{ (steps.autoupdate_baseline_unix.outputs.subscribed || steps.autoupdate_baseline_windows.outputs.subscribed) }}
+        run: |
+          set -euo pipefail
+          # Resolve pwsh up front: sudo resets PATH via secure_path on some runners.
+          pwsh_path="$(command -v pwsh)"
+          sudo --preserve-env=LOG_FILE,BASELINE "$pwsh_path" -NoProfile -File "$GITHUB_WORKSPACE/.github/workflows/it-scripts/wait-for-fresh-subscription-after-auto-update.ps1"
+
+      - name: Wait for fresh subscription after auto-update (Windows)
+        if: runner.os == 'Windows'
         shell: pwsh
         env:
           LOG_FILE: ${{ matrix.log_file }}
-          BASELINE: ${{ steps.autoupdate_baseline.outputs.subscribed }}
+          BASELINE: ${{ (steps.autoupdate_baseline_unix.outputs.subscribed || steps.autoupdate_baseline_windows.outputs.subscribed) }}
         run: |
-          $baseline = [int]$env:BASELINE
-          for ($i = 1; $i -le 30; $i++) {
-            $content = Get-Content $env:LOG_FILE -Raw -ErrorAction SilentlyContinue
-            $count = if ($content) { ([regex]::Matches($content, [regex]::Escape("Subscribed to messages"))).Count } else { 0 }
-            if ($count -gt $baseline) {
-              Write-Output "Agent resubscribed after auto-update (count $count > baseline $baseline) after ~$($i * 2)s"
-              exit 0
-            }
-            Start-Sleep -Seconds 2
-          }
-          Write-Error "Agent never resubscribed after auto-update (subscribed count stayed at $baseline)"
-          exit 1
-
+          & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/wait-for-fresh-subscription-after-auto-update.ps1"
       - name: Send command after auto-update
         uses: ./.github/actions/send-command
         with:
@@ -523,19 +527,26 @@ jobs:
       # "Subscribed to messages"/"Command completed" lines from earlier cycles
       # (the service has restarted several times by now and the log is not reset
       # while the service holds it open).
-      - name: Capture reconnect baseline counts
-        id: reconnect_baseline
+      - name: Capture reconnect baseline counts (Unix)
+        if: runner.os != 'Windows'
+        id: reconnect_baseline_unix
+        shell: bash
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+        run: |
+          set -euo pipefail
+          # Resolve pwsh up front: sudo resets PATH via secure_path on some runners.
+          pwsh_path="$(command -v pwsh)"
+          sudo --preserve-env=LOG_FILE,GITHUB_OUTPUT "$pwsh_path" -NoProfile -File "$GITHUB_WORKSPACE/.github/workflows/it-scripts/capture-reconnect-baseline-counts.ps1"
+
+      - name: Capture reconnect baseline counts (Windows)
+        if: runner.os == 'Windows'
+        id: reconnect_baseline_windows
         shell: pwsh
         env:
           LOG_FILE: ${{ matrix.log_file }}
         run: |
-          $content = Get-Content $env:LOG_FILE -Raw
-          $subscribed = ([regex]::Matches($content, [regex]::Escape("Subscribed to messages"))).Count
-          $completed  = ([regex]::Matches($content, [regex]::Escape("Command completed"))).Count
-          "subscribed=$subscribed" >> $env:GITHUB_OUTPUT
-          "completed=$completed"   >> $env:GITHUB_OUTPUT
-          Write-Output "Baseline counts -> subscribed=$subscribed completed=$completed"
-
+          & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/capture-reconnect-baseline-counts.ps1"
       - name: Disrupt broker connection
         uses: ./.github/actions/disrupt-connection
         with:
@@ -567,25 +578,26 @@ jobs:
           mode: restore
           host: ${{ steps.config.outputs.azure_iot_hub_host }}
 
-      - name: Wait for fresh subscription after reconnect
+      - name: Wait for fresh subscription after reconnect (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+          BASELINE: ${{ (steps.reconnect_baseline_unix.outputs.subscribed || steps.reconnect_baseline_windows.outputs.subscribed) }}
+        run: |
+          set -euo pipefail
+          # Resolve pwsh up front: sudo resets PATH via secure_path on some runners.
+          pwsh_path="$(command -v pwsh)"
+          sudo --preserve-env=LOG_FILE,BASELINE "$pwsh_path" -NoProfile -File "$GITHUB_WORKSPACE/.github/workflows/it-scripts/wait-for-fresh-subscription-after-reconnect.ps1"
+
+      - name: Wait for fresh subscription after reconnect (Windows)
+        if: runner.os == 'Windows'
         shell: pwsh
         env:
           LOG_FILE: ${{ matrix.log_file }}
-          BASELINE: ${{ steps.reconnect_baseline.outputs.subscribed }}
+          BASELINE: ${{ (steps.reconnect_baseline_unix.outputs.subscribed || steps.reconnect_baseline_windows.outputs.subscribed) }}
         run: |
-          $baseline = [int]$env:BASELINE
-          for ($i = 1; $i -le 60; $i++) {
-            $content = Get-Content $env:LOG_FILE -Raw -ErrorAction SilentlyContinue
-            $count = if ($content) { ([regex]::Matches($content, [regex]::Escape("Subscribed to messages"))).Count } else { 0 }
-            if ($count -gt $baseline) {
-              Write-Output "Agent resubscribed after reconnect (count $count > baseline $baseline) after ~$($i * 2)s"
-              exit 0
-            }
-            Start-Sleep -Seconds 2
-          }
-          Write-Error "Agent did not resubscribe after reconnect (subscribed count stayed at $baseline)"
-          exit 1
-
+          & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/wait-for-fresh-subscription-after-reconnect.ps1"
       - name: Send command after reconnect
         uses: ./.github/actions/send-command
         with:
@@ -593,39 +605,26 @@ jobs:
           device_id: ${{ steps.config.outputs.device_id }}
           commands: ${{ matrix.success_commands }}
 
-      - name: Assert command executed exactly once after reconnect
+      - name: Assert command executed exactly once after reconnect (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+          BASELINE: ${{ (steps.reconnect_baseline_unix.outputs.completed || steps.reconnect_baseline_windows.outputs.completed) }}
+        run: |
+          set -euo pipefail
+          # Resolve pwsh up front: sudo resets PATH via secure_path on some runners.
+          pwsh_path="$(command -v pwsh)"
+          sudo --preserve-env=LOG_FILE,BASELINE "$pwsh_path" -NoProfile -File "$GITHUB_WORKSPACE/.github/workflows/it-scripts/assert-command-executed-exactly-once-after-reconnect.ps1"
+
+      - name: Assert command executed exactly once after reconnect (Windows)
+        if: runner.os == 'Windows'
         shell: pwsh
         env:
           LOG_FILE: ${{ matrix.log_file }}
-          BASELINE: ${{ steps.reconnect_baseline.outputs.completed }}
+          BASELINE: ${{ (steps.reconnect_baseline_unix.outputs.completed || steps.reconnect_baseline_windows.outputs.completed) }}
         run: |
-          $baseline = [int]$env:BASELINE
-          $observed = $baseline
-          # Wait for the post-reconnect command to complete.
-          for ($i = 1; $i -le 30; $i++) {
-            Start-Sleep -Seconds 2
-            $content = Get-Content $env:LOG_FILE -Raw -ErrorAction SilentlyContinue
-            $observed = if ($content) { ([regex]::Matches($content, [regex]::Escape("Command completed"))).Count } else { 0 }
-            if ($observed -gt $baseline) { break }
-          }
-          if (($observed - $baseline) -lt 1) {
-            Write-Error "Post-reconnect command never completed (count stayed at $baseline)"
-            exit 1
-          }
-          # Allow a brief window for any duplicate delivery to surface, then
-          # require the delta to be exactly one - guarding against re-delivery of
-          # the buffered message on a non-clean reconnected session.
-          Start-Sleep -Seconds 10
-          $content = Get-Content $env:LOG_FILE -Raw
-          $final = ([regex]::Matches($content, [regex]::Escape("Command completed"))).Count
-          $delta = $final - $baseline
-          Write-Output "Post-reconnect 'Command completed' delta: $delta (baseline $baseline, final $final)"
-          if ($delta -ne 1) {
-            Write-Error "Expected exactly one post-reconnect 'Command completed', got $delta (duplicate delivery?)"
-            exit 1
-          }
-          Write-Output "Confirmed exactly one post-reconnect command execution"
-
+          & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/assert-command-executed-exactly-once-after-reconnect.ps1"
       # ---- Withheld-SUBACK scenario (sc-106107) ----
       # The reconnection scenario above severs the connection, which keepalive
       # detects and the agent handles as an ordinary reconnect. This one covers
@@ -639,47 +638,53 @@ jobs:
       # off, and recovers on a later cycle once the broker starts acknowledging.
       # Counts are compared as deltas because the log already carries lines from
       # earlier cycles.
-      - name: Capture SUBACK-withheld baseline counts
-        id: suback_baseline
+      - name: Capture SUBACK-withheld baseline counts (Unix)
+        if: runner.os != 'Windows'
+        id: suback_baseline_unix
+        shell: bash
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+        run: |
+          set -euo pipefail
+          # Resolve pwsh up front: sudo resets PATH via secure_path on some runners.
+          pwsh_path="$(command -v pwsh)"
+          sudo --preserve-env=LOG_FILE,GITHUB_OUTPUT "$pwsh_path" -NoProfile -File "$GITHUB_WORKSPACE/.github/workflows/it-scripts/capture-suback-withheld-baseline-counts.ps1"
+
+      - name: Capture SUBACK-withheld baseline counts (Windows)
+        if: runner.os == 'Windows'
+        id: suback_baseline_windows
         shell: pwsh
         env:
           LOG_FILE: ${{ matrix.log_file }}
         run: |
-          $content = Get-Content $env:LOG_FILE -Raw -ErrorAction SilentlyContinue
-          function Get-PatternCount($text, $needle) {
-            if ($text) { ([regex]::Matches($text, [regex]::Escape($needle))).Count } else { 0 }
-          }
-          $subscribed = Get-PatternCount $content "Subscribed to messages"
-          $timedOut   = Get-PatternCount $content "Failed to subscribe: timed out waiting for broker acknowledgement"
-          $backoffs   = Get-PatternCount $content "Reconnecting in"
-          "subscribed=$subscribed" >> $env:GITHUB_OUTPUT
-          "timed_out=$timedOut"    >> $env:GITHUB_OUTPUT
-          "backoffs=$backoffs"     >> $env:GITHUB_OUTPUT
-          Write-Output "Baseline -> subscribed=$subscribed timed_out=$timedOut backoffs=$backoffs"
-
+          & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/capture-suback-withheld-baseline-counts.ps1"
       # Read off a logged path rather than re-deriving the platform path; see the
       # fuller note on the bounded-output scenario's copy of this step.
-      - name: Resolve the scripts directory (SUBACK scenario)
-        id: suback_scripts_dir
+      - name: Resolve the scripts directory (SUBACK scenario) (Unix)
+        if: runner.os != 'Windows'
+        id: suback_scripts_dir_unix
+        shell: bash
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+        run: |
+          set -euo pipefail
+          # Resolve pwsh up front: sudo resets PATH via secure_path on some runners.
+          pwsh_path="$(command -v pwsh)"
+          sudo --preserve-env=LOG_FILE,GITHUB_OUTPUT "$pwsh_path" -NoProfile -File "$GITHUB_WORKSPACE/.github/workflows/it-scripts/resolve-the-scripts-directory-suback-scenario.ps1"
+
+      - name: Resolve the scripts directory (SUBACK scenario) (Windows)
+        if: runner.os == 'Windows'
+        id: suback_scripts_dir_windows
         shell: pwsh
         env:
           LOG_FILE: ${{ matrix.log_file }}
         run: |
-          $content = Get-Content $env:LOG_FILE -Raw -ErrorAction SilentlyContinue
-          $found = if ($content) { [regex]::Matches($content, 'Command saved to[^\r\n]*path=(?<p>"[^"]*"|\S+)') } else { @() }
-          if ($found.Count -eq 0) {
-            Write-Error "No 'Command saved to' line in the log; cannot resolve the scripts directory"
-            exit 1
-          }
-          $dir = Split-Path -Parent $found[$found.Count - 1].Groups['p'].Value.Trim('"')
-          "path=$dir" >> $env:GITHUB_OUTPUT
-          Write-Output "Scripts directory: $dir"
-
+          & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/resolve-the-scripts-directory-suback-scenario.ps1"
       - name: Snapshot temp script files before the withheld-SUBACK scenario
         uses: ./.github/actions/assert-no-orphaned-scripts
         with:
           mode: snapshot
-          scripts_dir: ${{ steps.suback_scripts_dir.outputs.path }}
+          scripts_dir: ${{ (steps.suback_scripts_dir_unix.outputs.path || steps.suback_scripts_dir_windows.outputs.path) }}
 
       - name: Start stub broker withholding SUBACK
         id: stub_broker
@@ -704,180 +709,83 @@ jobs:
           binary: ${{ matrix.binary }}
           args: --update --org-id ${{ vars.IT_ORG_ID }} --mqtt-subscribe-timeout-seconds 10 --github-token ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Assert bounded subscribe failure and growing backoff
-        id: assert_suback_withheld
+      - name: Assert bounded subscribe failure and growing backoff (Unix)
+        if: runner.os != 'Windows'
+        id: assert_suback_withheld_unix
+        shell: bash
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+          BASE_TIMED_OUT: ${{ (steps.suback_baseline_unix.outputs.timed_out || steps.suback_baseline_windows.outputs.timed_out) }}
+          BASE_BACKOFFS: ${{ (steps.suback_baseline_unix.outputs.backoffs || steps.suback_baseline_windows.outputs.backoffs) }}
+          BASE_SUBSCRIBED: ${{ (steps.suback_baseline_unix.outputs.subscribed || steps.suback_baseline_windows.outputs.subscribed) }}
+        run: |
+          set -euo pipefail
+          # Resolve pwsh up front: sudo resets PATH via secure_path on some runners.
+          pwsh_path="$(command -v pwsh)"
+          sudo --preserve-env=LOG_FILE,BASE_TIMED_OUT,BASE_BACKOFFS,BASE_SUBSCRIBED "$pwsh_path" -NoProfile -File "$GITHUB_WORKSPACE/.github/workflows/it-scripts/assert-bounded-subscribe-failure-and-growing-backoff.ps1"
+
+      - name: Assert bounded subscribe failure and growing backoff (Windows)
+        if: runner.os == 'Windows'
+        id: assert_suback_withheld_windows
         shell: pwsh
         env:
           LOG_FILE: ${{ matrix.log_file }}
-          BASE_TIMED_OUT: ${{ steps.suback_baseline.outputs.timed_out }}
-          BASE_BACKOFFS: ${{ steps.suback_baseline.outputs.backoffs }}
-          BASE_SUBSCRIBED: ${{ steps.suback_baseline.outputs.subscribed }}
+          BASE_TIMED_OUT: ${{ (steps.suback_baseline_unix.outputs.timed_out || steps.suback_baseline_windows.outputs.timed_out) }}
+          BASE_BACKOFFS: ${{ (steps.suback_baseline_unix.outputs.backoffs || steps.suback_baseline_windows.outputs.backoffs) }}
+          BASE_SUBSCRIBED: ${{ (steps.suback_baseline_unix.outputs.subscribed || steps.suback_baseline_windows.outputs.subscribed) }}
         run: |
-          $baseTimedOut   = [int]$env:BASE_TIMED_OUT
-          $baseBackoffs   = [int]$env:BASE_BACKOFFS
-          $baseSubscribed = [int]$env:BASE_SUBSCRIBED
-          $needle = "Failed to subscribe: timed out waiting for broker acknowledgement"
-
-          # Two wedged cycles plus their backoff waits take roughly 10+2+10+4s.
-          $content = ""
-          for ($i = 1; $i -le 60; $i++) {
-            $content = Get-Content $env:LOG_FILE -Raw -ErrorAction SilentlyContinue
-            $timedOut = if ($content) { ([regex]::Matches($content, [regex]::Escape($needle))).Count } else { 0 }
-            $backoffs = if ($content) { ([regex]::Matches($content, [regex]::Escape("Reconnecting in"))).Count } else { 0 }
-            if (($timedOut - $baseTimedOut) -ge 2 -and ($backoffs - $baseBackoffs) -ge 2) { break }
-            Start-Sleep -Seconds 2
-          }
-
-          $timedOut = if ($content) { ([regex]::Matches($content, [regex]::Escape($needle))).Count } else { 0 }
-          if (($timedOut - $baseTimedOut) -lt 2) {
-            Write-Error "Expected at least two bounded subscribe timeouts, got $($timedOut - $baseTimedOut)"
-            exit 1
-          }
-          Write-Output "Bounded subscribe timeouts observed: $($timedOut - $baseTimedOut)"
-
-          # The agent must not have subscribed: a withheld SUBACK means no
-          # subscription, and a "Subscribed to messages" line here would mean the
-          # stub broker is not the broker the agent reached.
-          $subscribed = ([regex]::Matches($content, [regex]::Escape("Subscribed to messages"))).Count
-          if ($subscribed -ne $baseSubscribed) {
-            Write-Error "Agent reported a subscription against a broker that withholds SUBACK"
-            exit 1
-          }
-
-          # The backoff must not be cleared by a timed-out subscribe: a throttling
-          # broker needs progressively longer waits, not a tight reconnect loop.
-          # Go renders a duration as concatenated unit components ("4.1s",
-          # "1m4s"), so each component is summed rather than parsed as one number.
-          function ConvertTo-Seconds([string]$value) {
-            $total = 0.0
-            foreach ($m in [regex]::Matches($value, '(?<n>[0-9.]+)(?<u>ms|us|ns|h|m|s)')) {
-              $n = [double]$m.Groups['n'].Value
-              switch ($m.Groups['u'].Value) {
-                'ns' { $total += $n / 1e9 }
-                'us' { $total += $n / 1e6 }
-                'ms' { $total += $n / 1e3 }
-                's'  { $total += $n }
-                'm'  { $total += $n * 60 }
-                'h'  { $total += $n * 3600 }
-              }
-            }
-            return $total
-          }
-
-          $waits = [regex]::Matches($content, 'Reconnecting in: timeout=(?<t>[0-9.a-z]+)') |
-            ForEach-Object { ConvertTo-Seconds $_.Groups['t'].Value }
-          $new = @($waits | Select-Object -Skip $baseBackoffs)
-          if ($new.Count -lt 2) {
-            Write-Error "Expected at least two reconnect waits after the subscribe timeouts, got $($new.Count)"
-            exit 1
-          }
-          Write-Output "Reconnect waits after the subscribe timeouts: $($new -join ', ')"
-          if ($new[1] -le $new[0]) {
-            Write-Error "Reconnect backoff did not grow ($($new[0]) then $($new[1])); a timed-out subscribe must not clear it"
-            exit 1
-          }
-          Write-Output "Confirmed the reconnect backoff grows after a withheld SUBACK"
-
+          & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/assert-bounded-subscribe-failure-and-growing-backoff.ps1"
       # What the agent actually did against the stub is only visible in its own
       # log, and the assertion above deliberately reads counts rather than lines.
       # Dumping the tail on failure makes a fixture problem (never reached the
       # broker at all) distinguishable from a real regression (reached it and
       # blocked) without re-running the job.
-      - name: Dump agent log on withheld-SUBACK failure
-        if: failure() && steps.assert_suback_withheld.outcome == 'failure'
+      - name: Dump agent log on withheld-SUBACK failure (Unix)
+        if: (failure() && (steps.assert_suback_withheld_unix.outcome == 'failure' || steps.assert_suback_withheld_windows.outcome == 'failure')) && runner.os != 'Windows'
+        shell: bash
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+        run: |
+          set -euo pipefail
+          # Resolve pwsh up front: sudo resets PATH via secure_path on some runners.
+          pwsh_path="$(command -v pwsh)"
+          sudo --preserve-env=LOG_FILE "$pwsh_path" -NoProfile -File "$GITHUB_WORKSPACE/.github/workflows/it-scripts/dump-agent-log-on-withheld-suback-failure.ps1"
+
+      - name: Dump agent log on withheld-SUBACK failure (Windows)
+        if: (failure() && (steps.assert_suback_withheld_unix.outcome == 'failure' || steps.assert_suback_withheld_windows.outcome == 'failure')) && runner.os == 'Windows'
         shell: pwsh
         env:
           LOG_FILE: ${{ matrix.log_file }}
         run: |
-          Write-Output "---- last 100 lines of $($env:LOG_FILE) ----"
-          Get-Content $env:LOG_FILE -Tail 100 -ErrorAction SilentlyContinue
-
+          & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/dump-agent-log-on-withheld-suback-failure.ps1"
       # The original defect made this impossible: with the cycle parked in
       # token.Wait() the stop signal was never reached, the platform waited out
       # its stop deadline (30s on the Windows SCM) and force-killed the process.
-      - name: Assert the service stops promptly while wedged on the stub broker
+      - name: Assert the service stops promptly while wedged on the stub broker (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+          SERVICE: ${{ matrix.service }}
+        run: |
+          set -euo pipefail
+          # Resolve pwsh up front: sudo resets PATH via secure_path on some runners.
+          pwsh_path="$(command -v pwsh)"
+          sudo --preserve-env=LOG_FILE,SERVICE "$pwsh_path" -NoProfile -File "$GITHUB_WORKSPACE/.github/workflows/it-scripts/assert-the-service-stops-promptly-while-wedged-on-the-stub-broker.ps1"
+
+      - name: Assert the service stops promptly while wedged on the stub broker (Windows)
+        if: runner.os == 'Windows'
         shell: pwsh
         env:
           LOG_FILE: ${{ matrix.log_file }}
           SERVICE: ${{ matrix.service }}
         run: |
-          function Get-StopCount {
-            $content = Get-Content $env:LOG_FILE -Raw -ErrorAction SilentlyContinue
-            if ($content) { ([regex]::Matches($content, [regex]::Escape("Service stopped"))).Count } else { 0 }
-          }
-
-          # Counted here rather than reusing the scenario-wide baseline: the
-          # --update that pointed the agent at the stub broker restarts the
-          # service, and that restart logs its own "Service stopped". Measured
-          # against the older baseline the delta was already satisfied before this
-          # stop was even issued, so the assertion "passed" in 0.2s without
-          # observing the stop it exists to test.
-          $before = Get-StopCount
-          Write-Output "Service stopped lines before issuing the stop: $before"
-
-          $sw = [System.Diagnostics.Stopwatch]::StartNew()
-
-          if ($IsWindows) {
-            sc.exe stop $env:SERVICE | Out-Null
-          } elseif ($IsLinux) {
-            sudo systemctl stop $env:SERVICE
-          } else {
-            # Bare label, not a "system/<label>" service target. launchctl's
-            # `stop` is a legacy subcommand that resolves a label in the current
-            # domain, so the target form is taken as a literal label, matches
-            # nothing, and exits 3 (ESRCH) without ever signalling the agent.
-            # This mirrors what the agent's own darwinService.Stop does. `stop`
-            # leaves the job loaded, so the later start-service can run it again.
-            sudo launchctl stop $env:SERVICE
-          }
-
-          # launchctl exits non-zero in situations that are not failures here -
-          # the repo's own stop-service action already guards it with `|| true` -
-          # and the pwsh shell ends by exiting with $LASTEXITCODE, which failed
-          # this step on macOS even after the assertion below had passed. Report
-          # the code and clear it; whether the stop was honored is decided by the
-          # agent's log, not by the service manager's exit status.
-          Write-Output "Stop command exit code: $LASTEXITCODE"
-          $global:LASTEXITCODE = 0
-
-          # A clean exit runs the agent's deferred teardown, whose last act is the
-          # "Service stopped" line; a force-kill past the stop deadline never
-          # produces one.
-          $stopped = $false
-          while ($sw.Elapsed.TotalSeconds -lt 30) {
-            if ((Get-StopCount) -gt $before) { $stopped = $true; break }
-            Start-Sleep -Milliseconds 500
-          }
-          $sw.Stop()
-
-          if (-not $stopped) {
-            # Both halves matter when this fails: the agent log says whether the
-            # stop was received and ignored, and the service manager says whether
-            # it was ever delivered.
-            Write-Output "---- last 60 lines of the agent log ----"
-            Get-Content $env:LOG_FILE -Tail 60 -ErrorAction SilentlyContinue
-            Write-Output "---- service manager state ----"
-            if ($IsWindows) {
-              sc.exe query $env:SERVICE
-            } elseif ($IsLinux) {
-              sudo systemctl status $env:SERVICE --no-pager
-            } else {
-              # print, unlike stop, is a modern subcommand and does take the
-              # system/<label> service target.
-              sudo launchctl print "system/$($env:SERVICE)"
-            }
-            $global:LASTEXITCODE = 0
-            Write-Error "Service did not log a clean stop within 30s while wedged on a withholding broker"
-            exit 1
-          }
-          Write-Output "Service stopped cleanly after $([math]::Round($sw.Elapsed.TotalSeconds, 1))s while wedged"
-          exit 0
-
+          & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/assert-the-service-stops-promptly-while-wedged-on-the-stub-broker.ps1"
       - name: Assert no orphaned scripts after the wedged stop
         uses: ./.github/actions/assert-no-orphaned-scripts
         with:
           mode: assert
-          scripts_dir: ${{ steps.suback_scripts_dir.outputs.path }}
+          scripts_dir: ${{ (steps.suback_scripts_dir_unix.outputs.path || steps.suback_scripts_dir_windows.outputs.path) }}
 
       - name: Restart the service against the still-withholding broker
         uses: ./.github/actions/start-service
@@ -899,25 +807,26 @@ jobs:
         with:
           mode: ack
 
-      - name: Assert the agent recovers on a later cycle
+      - name: Assert the agent recovers on a later cycle (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+          BASELINE: ${{ (steps.suback_baseline_unix.outputs.subscribed || steps.suback_baseline_windows.outputs.subscribed) }}
+        run: |
+          set -euo pipefail
+          # Resolve pwsh up front: sudo resets PATH via secure_path on some runners.
+          pwsh_path="$(command -v pwsh)"
+          sudo --preserve-env=LOG_FILE,BASELINE "$pwsh_path" -NoProfile -File "$GITHUB_WORKSPACE/.github/workflows/it-scripts/assert-the-agent-recovers-on-a-later-cycle.ps1"
+
+      - name: Assert the agent recovers on a later cycle (Windows)
+        if: runner.os == 'Windows'
         shell: pwsh
         env:
           LOG_FILE: ${{ matrix.log_file }}
-          BASELINE: ${{ steps.suback_baseline.outputs.subscribed }}
+          BASELINE: ${{ (steps.suback_baseline_unix.outputs.subscribed || steps.suback_baseline_windows.outputs.subscribed) }}
         run: |
-          $baseline = [int]$env:BASELINE
-          for ($i = 1; $i -le 60; $i++) {
-            $content = Get-Content $env:LOG_FILE -Raw -ErrorAction SilentlyContinue
-            $count = if ($content) { ([regex]::Matches($content, [regex]::Escape("Subscribed to messages"))).Count } else { 0 }
-            if ($count -gt $baseline) {
-              Write-Output "Agent subscribed on a later cycle once SUBACK arrived (count $count > baseline $baseline) after ~$($i * 2)s"
-              exit 0
-            }
-            Start-Sleep -Seconds 2
-          }
-          Write-Error "Agent never subscribed after the stub broker started acknowledging"
-          exit 1
-
+          & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/assert-the-agent-recovers-on-a-later-cycle.ps1"
       - name: Restore the real broker host
         if: always() && steps.stub_host.outputs.previous_host != ''
         uses: ./.github/actions/set-broker-host
@@ -968,19 +877,26 @@ jobs:
           max_attempts: "60"
           interval_seconds: "2"
 
-      - name: Capture command-timeout baseline counts
-        id: timeout_baseline
+      - name: Capture command-timeout baseline counts (Unix)
+        if: runner.os != 'Windows'
+        id: timeout_baseline_unix
+        shell: bash
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+        run: |
+          set -euo pipefail
+          # Resolve pwsh up front: sudo resets PATH via secure_path on some runners.
+          pwsh_path="$(command -v pwsh)"
+          sudo --preserve-env=LOG_FILE,GITHUB_OUTPUT "$pwsh_path" -NoProfile -File "$GITHUB_WORKSPACE/.github/workflows/it-scripts/capture-command-timeout-baseline-counts.ps1"
+
+      - name: Capture command-timeout baseline counts (Windows)
+        if: runner.os == 'Windows'
+        id: timeout_baseline_windows
         shell: pwsh
         env:
           LOG_FILE: ${{ matrix.log_file }}
         run: |
-          $content = Get-Content $env:LOG_FILE -Raw -ErrorAction SilentlyContinue
-          $timedOut  = if ($content) { ([regex]::Matches($content, [regex]::Escape("Command timed out"))).Count } else { 0 }
-          $completed = if ($content) { ([regex]::Matches($content, [regex]::Escape("Command completed"))).Count } else { 0 }
-          "timed_out=$timedOut" >> $env:GITHUB_OUTPUT
-          "completed=$completed" >> $env:GITHUB_OUTPUT
-          Write-Output "Baseline counts -> timed_out=$timedOut completed=$completed"
-
+          & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/capture-command-timeout-baseline-counts.ps1"
       - name: Send hanging command
         uses: ./.github/actions/send-command
         with:
@@ -988,25 +904,26 @@ jobs:
           device_id: ${{ steps.config.outputs.device_id }}
           commands: ${{ matrix.timeout_commands }}
 
-      - name: Assert hanging command was killed by the timeout
+      - name: Assert hanging command was killed by the timeout (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+          BASELINE: ${{ (steps.timeout_baseline_unix.outputs.timed_out || steps.timeout_baseline_windows.outputs.timed_out) }}
+        run: |
+          set -euo pipefail
+          # Resolve pwsh up front: sudo resets PATH via secure_path on some runners.
+          pwsh_path="$(command -v pwsh)"
+          sudo --preserve-env=LOG_FILE,BASELINE "$pwsh_path" -NoProfile -File "$GITHUB_WORKSPACE/.github/workflows/it-scripts/assert-hanging-command-was-killed-by-the-timeout.ps1"
+
+      - name: Assert hanging command was killed by the timeout (Windows)
+        if: runner.os == 'Windows'
         shell: pwsh
         env:
           LOG_FILE: ${{ matrix.log_file }}
-          BASELINE: ${{ steps.timeout_baseline.outputs.timed_out }}
+          BASELINE: ${{ (steps.timeout_baseline_unix.outputs.timed_out || steps.timeout_baseline_windows.outputs.timed_out) }}
         run: |
-          $baseline = [int]$env:BASELINE
-          for ($i = 1; $i -le 30; $i++) {
-            Start-Sleep -Seconds 2
-            $content = Get-Content $env:LOG_FILE -Raw -ErrorAction SilentlyContinue
-            $count = if ($content) { ([regex]::Matches($content, [regex]::Escape("Command timed out"))).Count } else { 0 }
-            if ($count -gt $baseline) {
-              Write-Output "Command timed out as expected (count $count > baseline $baseline) after ~$($i * 2)s"
-              exit 0
-            }
-          }
-          Write-Error "Hanging command was not killed by the per-command timeout (count stayed at $baseline)"
-          exit 1
-
+          & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/assert-hanging-command-was-killed-by-the-timeout.ps1"
       - name: Send command after timeout
         uses: ./.github/actions/send-command
         with:
@@ -1014,25 +931,26 @@ jobs:
           device_id: ${{ steps.config.outputs.device_id }}
           commands: ${{ matrix.success_commands }}
 
-      - name: Assert worker pool recovered after timeout
+      - name: Assert worker pool recovered after timeout (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+          BASELINE: ${{ (steps.timeout_baseline_unix.outputs.completed || steps.timeout_baseline_windows.outputs.completed) }}
+        run: |
+          set -euo pipefail
+          # Resolve pwsh up front: sudo resets PATH via secure_path on some runners.
+          pwsh_path="$(command -v pwsh)"
+          sudo --preserve-env=LOG_FILE,BASELINE "$pwsh_path" -NoProfile -File "$GITHUB_WORKSPACE/.github/workflows/it-scripts/assert-worker-pool-recovered-after-timeout.ps1"
+
+      - name: Assert worker pool recovered after timeout (Windows)
+        if: runner.os == 'Windows'
         shell: pwsh
         env:
           LOG_FILE: ${{ matrix.log_file }}
-          BASELINE: ${{ steps.timeout_baseline.outputs.completed }}
+          BASELINE: ${{ (steps.timeout_baseline_unix.outputs.completed || steps.timeout_baseline_windows.outputs.completed) }}
         run: |
-          $baseline = [int]$env:BASELINE
-          for ($i = 1; $i -le 30; $i++) {
-            Start-Sleep -Seconds 2
-            $content = Get-Content $env:LOG_FILE -Raw -ErrorAction SilentlyContinue
-            $count = if ($content) { ([regex]::Matches($content, [regex]::Escape("Command completed"))).Count } else { 0 }
-            if ($count -gt $baseline) {
-              Write-Output "Worker pool recovered; a later command completed (count $count > baseline $baseline)"
-              exit 0
-            }
-          }
-          Write-Error "Worker pool did not process a command after the timeout (count stayed at $baseline)"
-          exit 1
-
+          & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/assert-worker-pool-recovered-after-timeout.ps1"
       # ---- SAS token proactive renewal scenario (sc-103969) ----
       # The integration test binary is built with a short SAS token lifetime
       # (sasTokenLifetimeOverrideStr=90s), so the agent must proactively
@@ -1059,23 +977,26 @@ jobs:
           max_attempts: "60"
           interval_seconds: "2"
 
-      - name: Capture SAS renewal baseline counts
-        id: sas_renewal_baseline
+      - name: Capture SAS renewal baseline counts (Unix)
+        if: runner.os != 'Windows'
+        id: sas_renewal_baseline_unix
+        shell: bash
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+        run: |
+          set -euo pipefail
+          # Resolve pwsh up front: sudo resets PATH via secure_path on some runners.
+          pwsh_path="$(command -v pwsh)"
+          sudo --preserve-env=LOG_FILE,GITHUB_OUTPUT "$pwsh_path" -NoProfile -File "$GITHUB_WORKSPACE/.github/workflows/it-scripts/capture-sas-renewal-baseline-counts.ps1"
+
+      - name: Capture SAS renewal baseline counts (Windows)
+        if: runner.os == 'Windows'
+        id: sas_renewal_baseline_windows
         shell: pwsh
         env:
           LOG_FILE: ${{ matrix.log_file }}
         run: |
-          $content = Get-Content $env:LOG_FILE -Raw -ErrorAction SilentlyContinue
-          $renewed    = if ($content) { ([regex]::Matches($content, [regex]::Escape("Renewing SAS token before expiry"))).Count } else { 0 }
-          $subscribed = if ($content) { ([regex]::Matches($content, [regex]::Escape("Subscribed to messages"))).Count } else { 0 }
-          $lost       = if ($content) { ([regex]::Matches($content, [regex]::Escape("Connection lost"))).Count } else { 0 }
-          $completed  = if ($content) { ([regex]::Matches($content, [regex]::Escape("Command completed"))).Count } else { 0 }
-          "renewed=$renewed"       >> $env:GITHUB_OUTPUT
-          "subscribed=$subscribed" >> $env:GITHUB_OUTPUT
-          "lost=$lost"             >> $env:GITHUB_OUTPUT
-          "completed=$completed"   >> $env:GITHUB_OUTPUT
-          Write-Output "Baseline counts -> renewed=$renewed subscribed=$subscribed lost=$lost completed=$completed"
-
+          & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/capture-sas-renewal-baseline-counts.ps1"
       - name: Wait for proactive SAS token renewal
         uses: ./.github/actions/wait-for-log-line
         with:
@@ -1084,43 +1005,48 @@ jobs:
           max_attempts: "60"
           interval_seconds: "2"
 
-      - name: Assert SAS token renewed and agent resubscribed with fresh token
+      - name: Assert SAS token renewed and agent resubscribed with fresh token (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+          RENEWED_BASELINE: ${{ (steps.sas_renewal_baseline_unix.outputs.renewed || steps.sas_renewal_baseline_windows.outputs.renewed) }}
+          SUBSCRIBED_BASELINE: ${{ (steps.sas_renewal_baseline_unix.outputs.subscribed || steps.sas_renewal_baseline_windows.outputs.subscribed) }}
+        run: |
+          set -euo pipefail
+          # Resolve pwsh up front: sudo resets PATH via secure_path on some runners.
+          pwsh_path="$(command -v pwsh)"
+          sudo --preserve-env=LOG_FILE,RENEWED_BASELINE,SUBSCRIBED_BASELINE "$pwsh_path" -NoProfile -File "$GITHUB_WORKSPACE/.github/workflows/it-scripts/assert-sas-token-renewed-and-agent-resubscribed-with-fresh-token.ps1"
+
+      - name: Assert SAS token renewed and agent resubscribed with fresh token (Windows)
+        if: runner.os == 'Windows'
         shell: pwsh
         env:
           LOG_FILE: ${{ matrix.log_file }}
-          RENEWED_BASELINE: ${{ steps.sas_renewal_baseline.outputs.renewed }}
-          SUBSCRIBED_BASELINE: ${{ steps.sas_renewal_baseline.outputs.subscribed }}
+          RENEWED_BASELINE: ${{ (steps.sas_renewal_baseline_unix.outputs.renewed || steps.sas_renewal_baseline_windows.outputs.renewed) }}
+          SUBSCRIBED_BASELINE: ${{ (steps.sas_renewal_baseline_unix.outputs.subscribed || steps.sas_renewal_baseline_windows.outputs.subscribed) }}
         run: |
-          $renewedBaseline = [int]$env:RENEWED_BASELINE
-          $subscribedBaseline = [int]$env:SUBSCRIBED_BASELINE
-          for ($i = 1; $i -le 60; $i++) {
-            $content = Get-Content $env:LOG_FILE -Raw -ErrorAction SilentlyContinue
-            $renewed    = if ($content) { ([regex]::Matches($content, [regex]::Escape("Renewing SAS token before expiry"))).Count } else { 0 }
-            $subscribed = if ($content) { ([regex]::Matches($content, [regex]::Escape("Subscribed to messages"))).Count } else { 0 }
-            if (($renewed -gt $renewedBaseline) -and ($subscribed -gt $subscribedBaseline)) {
-              Write-Output "SAS token renewed (count $renewed > baseline $renewedBaseline) and agent resubscribed (count $subscribed > baseline $subscribedBaseline) after ~$($i * 2)s"
-              exit 0
-            }
-            Start-Sleep -Seconds 2
-          }
-          Write-Error "Proactive SAS renewal did not fire and resubscribe (renewed stayed <= $renewedBaseline or subscribed stayed <= $subscribedBaseline)"
-          exit 1
+          & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/assert-sas-token-renewed-and-agent-resubscribed-with-fresh-token.ps1"
+      - name: Assert SAS renewal was graceful (no forced disconnect) (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+          LOST_BASELINE: ${{ (steps.sas_renewal_baseline_unix.outputs.lost || steps.sas_renewal_baseline_windows.outputs.lost) }}
+        run: |
+          set -euo pipefail
+          # Resolve pwsh up front: sudo resets PATH via secure_path on some runners.
+          pwsh_path="$(command -v pwsh)"
+          sudo --preserve-env=LOG_FILE,LOST_BASELINE "$pwsh_path" -NoProfile -File "$GITHUB_WORKSPACE/.github/workflows/it-scripts/assert-sas-renewal-was-graceful-no-forced-disconnect.ps1"
 
-      - name: Assert SAS renewal was graceful (no forced disconnect)
+      - name: Assert SAS renewal was graceful (no forced disconnect) (Windows)
+        if: runner.os == 'Windows'
         shell: pwsh
         env:
           LOG_FILE: ${{ matrix.log_file }}
-          LOST_BASELINE: ${{ steps.sas_renewal_baseline.outputs.lost }}
+          LOST_BASELINE: ${{ (steps.sas_renewal_baseline_unix.outputs.lost || steps.sas_renewal_baseline_windows.outputs.lost) }}
         run: |
-          $baseline = [int]$env:LOST_BASELINE
-          $content = Get-Content $env:LOG_FILE -Raw
-          $lost = ([regex]::Matches($content, [regex]::Escape("Connection lost"))).Count
-          if ($lost -gt $baseline) {
-            Write-Error "SAS renewal was not graceful: 'Connection lost' count rose from $baseline to $lost (token expired before renewal fired?)"
-            exit 1
-          }
-          Write-Output "Confirmed graceful renewal: no new 'Connection lost' (count stayed at $baseline)"
-
+          & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/assert-sas-renewal-was-graceful-no-forced-disconnect.ps1"
       - name: Send command after SAS renewal
         uses: ./.github/actions/send-command
         with:
@@ -1128,25 +1054,26 @@ jobs:
           device_id: ${{ steps.config.outputs.device_id }}
           commands: ${{ matrix.success_commands }}
 
-      - name: Assert command delivery continues after SAS renewal
+      - name: Assert command delivery continues after SAS renewal (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+          BASELINE: ${{ (steps.sas_renewal_baseline_unix.outputs.completed || steps.sas_renewal_baseline_windows.outputs.completed) }}
+        run: |
+          set -euo pipefail
+          # Resolve pwsh up front: sudo resets PATH via secure_path on some runners.
+          pwsh_path="$(command -v pwsh)"
+          sudo --preserve-env=LOG_FILE,BASELINE "$pwsh_path" -NoProfile -File "$GITHUB_WORKSPACE/.github/workflows/it-scripts/assert-command-delivery-continues-after-sas-renewal.ps1"
+
+      - name: Assert command delivery continues after SAS renewal (Windows)
+        if: runner.os == 'Windows'
         shell: pwsh
         env:
           LOG_FILE: ${{ matrix.log_file }}
-          BASELINE: ${{ steps.sas_renewal_baseline.outputs.completed }}
+          BASELINE: ${{ (steps.sas_renewal_baseline_unix.outputs.completed || steps.sas_renewal_baseline_windows.outputs.completed) }}
         run: |
-          $baseline = [int]$env:BASELINE
-          for ($i = 1; $i -le 30; $i++) {
-            Start-Sleep -Seconds 2
-            $content = Get-Content $env:LOG_FILE -Raw -ErrorAction SilentlyContinue
-            $count = if ($content) { ([regex]::Matches($content, [regex]::Escape("Command completed"))).Count } else { 0 }
-            if ($count -gt $baseline) {
-              Write-Output "Command delivery continues after renewal (count $count > baseline $baseline)"
-              exit 0
-            }
-          }
-          Write-Error "No command completed after SAS renewal (count stayed at $baseline)"
-          exit 1
-
+          & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/assert-command-delivery-continues-after-sas-renewal.ps1"
       # ---- Bounded command output scenario (sc-106105) ----
       # A command's stdout and stderr used to be buffered whole in memory, so the
       # agent's heap tracked however much a script decided to write and a verbose
@@ -1172,51 +1099,55 @@ jobs:
       # both come from one value computed once per command - but the postback body
       # is never logged, so confirming the workflow's received payload stays a
       # Rewst-side QA step.
-      - name: Resolve the scripts directory
-        id: scripts_dir
+      - name: Resolve the scripts directory (Unix)
+        if: runner.os != 'Windows'
+        id: scripts_dir_unix
+        shell: bash
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+        run: |
+          set -euo pipefail
+          # Resolve pwsh up front: sudo resets PATH via secure_path on some runners.
+          pwsh_path="$(command -v pwsh)"
+          sudo --preserve-env=LOG_FILE,GITHUB_OUTPUT "$pwsh_path" -NoProfile -File "$GITHUB_WORKSPACE/.github/workflows/it-scripts/resolve-the-scripts-directory.ps1"
+
+      - name: Resolve the scripts directory (Windows)
+        if: runner.os == 'Windows'
+        id: scripts_dir_windows
         shell: pwsh
         env:
           LOG_FILE: ${{ matrix.log_file }}
         run: |
-          # Read the directory off a "Command saved to" line rather than
-          # re-deriving the platform path: the service's temp directory is not the
-          # runner's, notably root's private TMPDIR on macOS. Many earlier
-          # scenarios have already logged one.
-          $content = Get-Content $env:LOG_FILE -Raw -ErrorAction SilentlyContinue
-          $found = if ($content) { [regex]::Matches($content, 'Command saved to[^\r\n]*path=(?<p>"[^"]*"|\S+)') } else { @() }
-          if ($found.Count -eq 0) {
-            Write-Error "No 'Command saved to' line in the log; cannot resolve the scripts directory"
-            exit 1
-          }
-          $path = $found[$found.Count - 1].Groups['p'].Value.Trim('"')
-          $dir = Split-Path -Parent $path
-          "path=$dir" >> $env:GITHUB_OUTPUT
-          Write-Output "Scripts directory: $dir"
-
+          & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/resolve-the-scripts-directory.ps1"
       - name: Snapshot temp script files before the output floods
         uses: ./.github/actions/assert-no-orphaned-scripts
         with:
           mode: snapshot
-          scripts_dir: ${{ steps.scripts_dir.outputs.path }}
+          scripts_dir: ${{ (steps.scripts_dir_unix.outputs.path || steps.scripts_dir_windows.outputs.path) }}
 
       # Captured before the update below restarts the service: the restart's own
       # "Subscribed to messages" line must land after this snapshot for the delta
       # wait to mean anything.
-      - name: Capture bounded-output baseline counts
-        id: output_baseline
+      - name: Capture bounded-output baseline counts (Unix)
+        if: runner.os != 'Windows'
+        id: output_baseline_unix
+        shell: bash
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+        run: |
+          set -euo pipefail
+          # Resolve pwsh up front: sudo resets PATH via secure_path on some runners.
+          pwsh_path="$(command -v pwsh)"
+          sudo --preserve-env=LOG_FILE,GITHUB_OUTPUT "$pwsh_path" -NoProfile -File "$GITHUB_WORKSPACE/.github/workflows/it-scripts/capture-bounded-output-baseline-counts.ps1"
+
+      - name: Capture bounded-output baseline counts (Windows)
+        if: runner.os == 'Windows'
+        id: output_baseline_windows
         shell: pwsh
         env:
           LOG_FILE: ${{ matrix.log_file }}
         run: |
-          $content = Get-Content $env:LOG_FILE -Raw -ErrorAction SilentlyContinue
-          $subscribed = if ($content) { ([regex]::Matches($content, [regex]::Escape("Subscribed to messages"))).Count } else { 0 }
-          $truncated  = if ($content) { ([regex]::Matches($content, [regex]::Escape("Command output truncated"))).Count } else { 0 }
-          $completed  = if ($content) { ([regex]::Matches($content, [regex]::Escape("Command completed"))).Count } else { 0 }
-          "subscribed=$subscribed" >> $env:GITHUB_OUTPUT
-          "truncated=$truncated"   >> $env:GITHUB_OUTPUT
-          "completed=$completed"   >> $env:GITHUB_OUTPUT
-          Write-Output "Baseline counts -> subscribed=$subscribed truncated=$truncated completed=$completed"
-
+          & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/capture-bounded-output-baseline-counts.ps1"
       - name: Configure a small output ceiling
         uses: ./.github/actions/run-agent
         with:
@@ -1257,28 +1188,26 @@ jobs:
           # the step's own.
           exit 0
 
-      - name: Wait for fresh subscription after the output ceiling update
+      - name: Wait for fresh subscription after the output ceiling update (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+          BASELINE: ${{ (steps.output_baseline_unix.outputs.subscribed || steps.output_baseline_windows.outputs.subscribed) }}
+        run: |
+          set -euo pipefail
+          # Resolve pwsh up front: sudo resets PATH via secure_path on some runners.
+          pwsh_path="$(command -v pwsh)"
+          sudo --preserve-env=LOG_FILE,BASELINE "$pwsh_path" -NoProfile -File "$GITHUB_WORKSPACE/.github/workflows/it-scripts/wait-for-fresh-subscription-after-the-output-ceiling-update.ps1"
+
+      - name: Wait for fresh subscription after the output ceiling update (Windows)
+        if: runner.os == 'Windows'
         shell: pwsh
         env:
           LOG_FILE: ${{ matrix.log_file }}
-          BASELINE: ${{ steps.output_baseline.outputs.subscribed }}
+          BASELINE: ${{ (steps.output_baseline_unix.outputs.subscribed || steps.output_baseline_windows.outputs.subscribed) }}
         run: |
-          # A delta, not a bare match: the log already carries many "Subscribed to
-          # messages" lines, so only a new one proves the restarted agent is
-          # connected with the new ceiling in effect.
-          $baseline = [int]$env:BASELINE
-          for ($i = 1; $i -le 60; $i++) {
-            $content = Get-Content $env:LOG_FILE -Raw -ErrorAction SilentlyContinue
-            $count = if ($content) { ([regex]::Matches($content, [regex]::Escape("Subscribed to messages"))).Count } else { 0 }
-            if ($count -gt $baseline) {
-              Write-Output "Agent subscribed with the new output ceiling (count $count > baseline $baseline) after ~$($i * 2)s"
-              exit 0
-            }
-            Start-Sleep -Seconds 2
-          }
-          Write-Error "Agent did not subscribe after the output ceiling update (count stayed at $baseline)"
-          exit 1
-
+          & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/wait-for-fresh-subscription-after-the-output-ceiling-update.ps1"
       - name: Send stdout flood command
         uses: ./.github/actions/send-command
         with:
@@ -1291,7 +1220,7 @@ jobs:
         with:
           service: ${{ matrix.service }}
           log_file: ${{ matrix.log_file }}
-          baseline_truncations: ${{ steps.output_baseline.outputs.truncated }}
+          baseline_truncations: ${{ (steps.output_baseline_unix.outputs.truncated || steps.output_baseline_windows.outputs.truncated) }}
           expected_ceiling_bytes: "262144"
           # At least the whole ceiling, since stdout alone floods it. The upper
           # bound carries 4 KiB of headroom rather than being exact because the
@@ -1306,41 +1235,46 @@ jobs:
           min_produced_bytes: "209715200"
           max_rss_mb: "250"
 
-      - name: Assert the flooding command still succeeded
+      - name: Assert the flooding command still succeeded (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+          BASELINE: ${{ (steps.output_baseline_unix.outputs.completed || steps.output_baseline_windows.outputs.completed) }}
+        run: |
+          set -euo pipefail
+          # Resolve pwsh up front: sudo resets PATH via secure_path on some runners.
+          pwsh_path="$(command -v pwsh)"
+          sudo --preserve-env=LOG_FILE,BASELINE "$pwsh_path" -NoProfile -File "$GITHUB_WORKSPACE/.github/workflows/it-scripts/assert-the-flooding-command-still-succeeded.ps1"
+
+      - name: Assert the flooding command still succeeded (Windows)
+        if: runner.os == 'Windows'
         shell: pwsh
         env:
           LOG_FILE: ${{ matrix.log_file }}
-          BASELINE: ${{ steps.output_baseline.outputs.completed }}
+          BASELINE: ${{ (steps.output_baseline_unix.outputs.completed || steps.output_baseline_windows.outputs.completed) }}
         run: |
-          # Being verbose is not a failure: the command runs to completion with the
-          # excess discarded, so it reports "Command completed", not "Command
-          # failed" or "Command timed out".
-          $baseline = [int]$env:BASELINE
-          for ($i = 1; $i -le 30; $i++) {
-            $content = Get-Content $env:LOG_FILE -Raw -ErrorAction SilentlyContinue
-            $count = if ($content) { ([regex]::Matches($content, [regex]::Escape("Command completed"))).Count } else { 0 }
-            if ($count -gt $baseline) {
-              Write-Output "Flooding command completed normally (count $count > baseline $baseline)"
-              exit 0
-            }
-            Start-Sleep -Seconds 2
-          }
-          Write-Error "The flooding command never completed (count stayed at $baseline): it was killed for being verbose"
-          exit 1
+          & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/assert-the-flooding-command-still-succeeded.ps1"
+      - name: Capture small-output baseline counts (Unix)
+        if: runner.os != 'Windows'
+        id: small_output_baseline_unix
+        shell: bash
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+        run: |
+          set -euo pipefail
+          # Resolve pwsh up front: sudo resets PATH via secure_path on some runners.
+          pwsh_path="$(command -v pwsh)"
+          sudo --preserve-env=LOG_FILE,GITHUB_OUTPUT "$pwsh_path" -NoProfile -File "$GITHUB_WORKSPACE/.github/workflows/it-scripts/capture-small-output-baseline-counts.ps1"
 
-      - name: Capture small-output baseline counts
-        id: small_output_baseline
+      - name: Capture small-output baseline counts (Windows)
+        if: runner.os == 'Windows'
+        id: small_output_baseline_windows
         shell: pwsh
         env:
           LOG_FILE: ${{ matrix.log_file }}
         run: |
-          $content = Get-Content $env:LOG_FILE -Raw -ErrorAction SilentlyContinue
-          $truncated = if ($content) { ([regex]::Matches($content, [regex]::Escape("Command output truncated"))).Count } else { 0 }
-          $completed = if ($content) { ([regex]::Matches($content, [regex]::Escape("Command completed"))).Count } else { 0 }
-          "truncated=$truncated" >> $env:GITHUB_OUTPUT
-          "completed=$completed" >> $env:GITHUB_OUTPUT
-          Write-Output "Baseline counts -> truncated=$truncated completed=$completed"
-
+          & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/capture-small-output-baseline-counts.ps1"
       - name: Send ordinary command after the flood
         uses: ./.github/actions/send-command
         with:
@@ -1348,50 +1282,48 @@ jobs:
           device_id: ${{ steps.config.outputs.device_id }}
           commands: ${{ matrix.success_commands }}
 
-      - name: Assert output below the ceiling is untouched and the worker recovered
+      - name: Assert output below the ceiling is untouched and the worker recovered (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+          COMPLETED_BASELINE: ${{ (steps.small_output_baseline_unix.outputs.completed || steps.small_output_baseline_windows.outputs.completed) }}
+          TRUNCATED_BASELINE: ${{ (steps.small_output_baseline_unix.outputs.truncated || steps.small_output_baseline_windows.outputs.truncated) }}
+        run: |
+          set -euo pipefail
+          # Resolve pwsh up front: sudo resets PATH via secure_path on some runners.
+          pwsh_path="$(command -v pwsh)"
+          sudo --preserve-env=LOG_FILE,COMPLETED_BASELINE,TRUNCATED_BASELINE "$pwsh_path" -NoProfile -File "$GITHUB_WORKSPACE/.github/workflows/it-scripts/assert-output-below-the-ceiling-is-untouched-and-the-worker-recovered.ps1"
+
+      - name: Assert output below the ceiling is untouched and the worker recovered (Windows)
+        if: runner.os == 'Windows'
         shell: pwsh
         env:
           LOG_FILE: ${{ matrix.log_file }}
-          COMPLETED_BASELINE: ${{ steps.small_output_baseline.outputs.completed }}
-          TRUNCATED_BASELINE: ${{ steps.small_output_baseline.outputs.truncated }}
+          COMPLETED_BASELINE: ${{ (steps.small_output_baseline_unix.outputs.completed || steps.small_output_baseline_windows.outputs.completed) }}
+          TRUNCATED_BASELINE: ${{ (steps.small_output_baseline_unix.outputs.truncated || steps.small_output_baseline_windows.outputs.truncated) }}
         run: |
-          # Two things at once: the worker the flood used was released (a later
-          # command completes), and a command whose output fits under the ceiling
-          # is not flagged - the bound only engages on the output that exceeds it.
-          $completedBaseline = [int]$env:COMPLETED_BASELINE
-          $truncatedBaseline = [int]$env:TRUNCATED_BASELINE
-          $completed = $completedBaseline
-          for ($i = 1; $i -le 30; $i++) {
-            Start-Sleep -Seconds 2
-            $content = Get-Content $env:LOG_FILE -Raw -ErrorAction SilentlyContinue
-            $completed = if ($content) { ([regex]::Matches($content, [regex]::Escape("Command completed"))).Count } else { 0 }
-            if ($completed -gt $completedBaseline) { break }
-          }
-          if ($completed -le $completedBaseline) {
-            Write-Error "No command completed after the flood (count stayed at $completedBaseline): the worker was not released"
-            exit 1
-          }
-          Write-Output "Worker released; a later command completed (count $completed > baseline $completedBaseline)"
+          & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/assert-output-below-the-ceiling-is-untouched-and-the-worker-recovered.ps1"
+      - name: Capture stderr-flood baseline counts (Unix)
+        if: runner.os != 'Windows'
+        id: stderr_flood_baseline_unix
+        shell: bash
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+        run: |
+          set -euo pipefail
+          # Resolve pwsh up front: sudo resets PATH via secure_path on some runners.
+          pwsh_path="$(command -v pwsh)"
+          sudo --preserve-env=LOG_FILE,GITHUB_OUTPUT "$pwsh_path" -NoProfile -File "$GITHUB_WORKSPACE/.github/workflows/it-scripts/capture-stderr-flood-baseline-counts.ps1"
 
-          $content = Get-Content $env:LOG_FILE -Raw
-          $truncated = ([regex]::Matches($content, [regex]::Escape("Command output truncated"))).Count
-          if ($truncated -ne $truncatedBaseline) {
-            Write-Error "A small-output command was flagged as truncated (count rose from $truncatedBaseline to $truncated)"
-            exit 1
-          }
-          Write-Output "Confirmed small-output command was not truncated (count stayed at $truncatedBaseline)"
-
-      - name: Capture stderr-flood baseline counts
-        id: stderr_flood_baseline
+      - name: Capture stderr-flood baseline counts (Windows)
+        if: runner.os == 'Windows'
+        id: stderr_flood_baseline_windows
         shell: pwsh
         env:
           LOG_FILE: ${{ matrix.log_file }}
         run: |
-          $content = Get-Content $env:LOG_FILE -Raw -ErrorAction SilentlyContinue
-          $truncated = if ($content) { ([regex]::Matches($content, [regex]::Escape("Command output truncated"))).Count } else { 0 }
-          "truncated=$truncated" >> $env:GITHUB_OUTPUT
-          Write-Output "Baseline counts -> truncated=$truncated"
-
+          & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/capture-stderr-flood-baseline-counts.ps1"
       - name: Send stderr flood command
         uses: ./.github/actions/send-command
         with:
@@ -1404,7 +1336,7 @@ jobs:
         with:
           service: ${{ matrix.service }}
           log_file: ${{ matrix.log_file }}
-          baseline_truncations: ${{ steps.stderr_flood_baseline.outputs.truncated }}
+          baseline_truncations: ${{ (steps.stderr_flood_baseline_unix.outputs.truncated || steps.stderr_flood_baseline_windows.outputs.truncated) }}
           expected_ceiling_bytes: "262144"
           # Above the ceiling on purpose: the script floods stderr to its full
           # ceiling AND writes a short stdout line, so the kept total can only
@@ -1420,48 +1352,52 @@ jobs:
 
       # Captured before the update below restarts the service, for the same
       # reason as the bounded-output baseline.
-      - name: Capture timeout-composition baseline counts
-        id: compose_baseline
+      - name: Capture timeout-composition baseline counts (Unix)
+        if: runner.os != 'Windows'
+        id: compose_baseline_unix
+        shell: bash
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+        run: |
+          set -euo pipefail
+          # Resolve pwsh up front: sudo resets PATH via secure_path on some runners.
+          pwsh_path="$(command -v pwsh)"
+          sudo --preserve-env=LOG_FILE,GITHUB_OUTPUT "$pwsh_path" -NoProfile -File "$GITHUB_WORKSPACE/.github/workflows/it-scripts/capture-timeout-composition-baseline-counts.ps1"
+
+      - name: Capture timeout-composition baseline counts (Windows)
+        if: runner.os == 'Windows'
+        id: compose_baseline_windows
         shell: pwsh
         env:
           LOG_FILE: ${{ matrix.log_file }}
         run: |
-          $content = Get-Content $env:LOG_FILE -Raw -ErrorAction SilentlyContinue
-          $subscribed = if ($content) { ([regex]::Matches($content, [regex]::Escape("Subscribed to messages"))).Count } else { 0 }
-          $truncated  = if ($content) { ([regex]::Matches($content, [regex]::Escape("Command output truncated"))).Count } else { 0 }
-          $timedOut   = if ($content) { ([regex]::Matches($content, [regex]::Escape("Command timed out"))).Count } else { 0 }
-          $completed  = if ($content) { ([regex]::Matches($content, [regex]::Escape("Command completed"))).Count } else { 0 }
-          "subscribed=$subscribed" >> $env:GITHUB_OUTPUT
-          "truncated=$truncated"   >> $env:GITHUB_OUTPUT
-          "timed_out=$timedOut"    >> $env:GITHUB_OUTPUT
-          "completed=$completed"   >> $env:GITHUB_OUTPUT
-          Write-Output "Baseline counts -> subscribed=$subscribed truncated=$truncated timed_out=$timedOut completed=$completed"
-
+          & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/capture-timeout-composition-baseline-counts.ps1"
       - name: Shorten the command timeout for the composition check
         uses: ./.github/actions/run-agent
         with:
           binary: ${{ matrix.binary }}
           args: --update --org-id ${{ vars.IT_ORG_ID }} --no-auto-updates --max-output-bytes 262144 --command-timeout-seconds 30 --github-token ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Wait for fresh subscription after the timeout update
+      - name: Wait for fresh subscription after the timeout update (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+          BASELINE: ${{ (steps.compose_baseline_unix.outputs.subscribed || steps.compose_baseline_windows.outputs.subscribed) }}
+        run: |
+          set -euo pipefail
+          # Resolve pwsh up front: sudo resets PATH via secure_path on some runners.
+          pwsh_path="$(command -v pwsh)"
+          sudo --preserve-env=LOG_FILE,BASELINE "$pwsh_path" -NoProfile -File "$GITHUB_WORKSPACE/.github/workflows/it-scripts/wait-for-fresh-subscription-after-the-timeout-update.ps1"
+
+      - name: Wait for fresh subscription after the timeout update (Windows)
+        if: runner.os == 'Windows'
         shell: pwsh
         env:
           LOG_FILE: ${{ matrix.log_file }}
-          BASELINE: ${{ steps.compose_baseline.outputs.subscribed }}
+          BASELINE: ${{ (steps.compose_baseline_unix.outputs.subscribed || steps.compose_baseline_windows.outputs.subscribed) }}
         run: |
-          $baseline = [int]$env:BASELINE
-          for ($i = 1; $i -le 60; $i++) {
-            $content = Get-Content $env:LOG_FILE -Raw -ErrorAction SilentlyContinue
-            $count = if ($content) { ([regex]::Matches($content, [regex]::Escape("Subscribed to messages"))).Count } else { 0 }
-            if ($count -gt $baseline) {
-              Write-Output "Agent subscribed with the short timeout (count $count > baseline $baseline) after ~$($i * 2)s"
-              exit 0
-            }
-            Start-Sleep -Seconds 2
-          }
-          Write-Error "Agent did not subscribe after the timeout update (count stayed at $baseline)"
-          exit 1
-
+          & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/wait-for-fresh-subscription-after-the-timeout-update.ps1"
       - name: Send verbose command that then hangs
         uses: ./.github/actions/send-command
         with:
@@ -1474,7 +1410,7 @@ jobs:
         with:
           service: ${{ matrix.service }}
           log_file: ${{ matrix.log_file }}
-          baseline_truncations: ${{ steps.compose_baseline.outputs.truncated }}
+          baseline_truncations: ${{ (steps.compose_baseline_unix.outputs.truncated || steps.compose_baseline_windows.outputs.truncated) }}
           expected_ceiling_bytes: "262144"
           # Same headroom as the other floods: stdout fills the ceiling on its
           # own, and anything the shell adds on either stream is incidental.
@@ -1488,27 +1424,26 @@ jobs:
           # cmd.WaitDelay can hold Run for up to 10s more after that.
           max_attempts: "120"
 
-      - name: Assert the hanging command also timed out and released its worker
+      - name: Assert the hanging command also timed out and released its worker (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+          TIMED_OUT_BASELINE: ${{ (steps.compose_baseline_unix.outputs.timed_out || steps.compose_baseline_windows.outputs.timed_out) }}
+        run: |
+          set -euo pipefail
+          # Resolve pwsh up front: sudo resets PATH via secure_path on some runners.
+          pwsh_path="$(command -v pwsh)"
+          sudo --preserve-env=LOG_FILE,TIMED_OUT_BASELINE "$pwsh_path" -NoProfile -File "$GITHUB_WORKSPACE/.github/workflows/it-scripts/assert-the-hanging-command-also-timed-out-and-released-its-worker.ps1"
+
+      - name: Assert the hanging command also timed out and released its worker (Windows)
+        if: runner.os == 'Windows'
         shell: pwsh
         env:
           LOG_FILE: ${{ matrix.log_file }}
-          TIMED_OUT_BASELINE: ${{ steps.compose_baseline.outputs.timed_out }}
+          TIMED_OUT_BASELINE: ${{ (steps.compose_baseline_unix.outputs.timed_out || steps.compose_baseline_windows.outputs.timed_out) }}
         run: |
-          # The two bounds compose: the same command is reported as truncated
-          # (asserted above) and as timed out, neither masking the other.
-          $baseline = [int]$env:TIMED_OUT_BASELINE
-          for ($i = 1; $i -le 30; $i++) {
-            $content = Get-Content $env:LOG_FILE -Raw -ErrorAction SilentlyContinue
-            $count = if ($content) { ([regex]::Matches($content, [regex]::Escape("Command timed out"))).Count } else { 0 }
-            if ($count -gt $baseline) {
-              Write-Output "Verbose hanging command was killed by the timeout (count $count > baseline $baseline) after ~$($i * 2)s"
-              exit 0
-            }
-            Start-Sleep -Seconds 2
-          }
-          Write-Error "Verbose hanging command was not killed by the per-command timeout (count stayed at $baseline)"
-          exit 1
-
+          & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/assert-the-hanging-command-also-timed-out-and-released-its-worker.ps1"
       - name: Send command after the verbose timeout
         uses: ./.github/actions/send-command
         with:
@@ -1516,30 +1451,31 @@ jobs:
           device_id: ${{ steps.config.outputs.device_id }}
           commands: ${{ matrix.success_commands }}
 
-      - name: Assert the worker recovered after the verbose timeout
+      - name: Assert the worker recovered after the verbose timeout (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+          BASELINE: ${{ (steps.compose_baseline_unix.outputs.completed || steps.compose_baseline_windows.outputs.completed) }}
+        run: |
+          set -euo pipefail
+          # Resolve pwsh up front: sudo resets PATH via secure_path on some runners.
+          pwsh_path="$(command -v pwsh)"
+          sudo --preserve-env=LOG_FILE,BASELINE "$pwsh_path" -NoProfile -File "$GITHUB_WORKSPACE/.github/workflows/it-scripts/assert-the-worker-recovered-after-the-verbose-timeout.ps1"
+
+      - name: Assert the worker recovered after the verbose timeout (Windows)
+        if: runner.os == 'Windows'
         shell: pwsh
         env:
           LOG_FILE: ${{ matrix.log_file }}
-          BASELINE: ${{ steps.compose_baseline.outputs.completed }}
+          BASELINE: ${{ (steps.compose_baseline_unix.outputs.completed || steps.compose_baseline_windows.outputs.completed) }}
         run: |
-          $baseline = [int]$env:BASELINE
-          for ($i = 1; $i -le 30; $i++) {
-            Start-Sleep -Seconds 2
-            $content = Get-Content $env:LOG_FILE -Raw -ErrorAction SilentlyContinue
-            $count = if ($content) { ([regex]::Matches($content, [regex]::Escape("Command completed"))).Count } else { 0 }
-            if ($count -gt $baseline) {
-              Write-Output "Worker recovered after the verbose timeout (count $count > baseline $baseline)"
-              exit 0
-            }
-          }
-          Write-Error "No command completed after the verbose timeout (count stayed at $baseline)"
-          exit 1
-
+          & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/assert-the-worker-recovered-after-the-verbose-timeout.ps1"
       - name: Assert the output floods left no orphaned script files
         uses: ./.github/actions/assert-no-orphaned-scripts
         with:
           mode: assert
-          scripts_dir: ${{ steps.scripts_dir.outputs.path }}
+          scripts_dir: ${{ (steps.scripts_dir_unix.outputs.path || steps.scripts_dir_windows.outputs.path) }}
 
       # ---- Stale script file sweep scenario (sc-103967) ----
       # A command interrupted by an abrupt kill (force-stop, OOM kill, power
@@ -1556,47 +1492,52 @@ jobs:
       # earlier scenario, the 30s auto-updater, or the IT binary's 90s SAS
       # lifetime. Each of those tears the command down gracefully, and graceful
       # teardown DOES run the cleanup, leaving no stranded file to sweep.
-      - name: Capture sweep scenario baseline counts
-        id: sweep_baseline
+      - name: Capture sweep scenario baseline counts (Unix)
+        if: runner.os != 'Windows'
+        id: sweep_baseline_unix
+        shell: bash
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+        run: |
+          set -euo pipefail
+          # Resolve pwsh up front: sudo resets PATH via secure_path on some runners.
+          pwsh_path="$(command -v pwsh)"
+          sudo --preserve-env=LOG_FILE,GITHUB_OUTPUT "$pwsh_path" -NoProfile -File "$GITHUB_WORKSPACE/.github/workflows/it-scripts/capture-sweep-scenario-baseline-counts.ps1"
+
+      - name: Capture sweep scenario baseline counts (Windows)
+        if: runner.os == 'Windows'
+        id: sweep_baseline_windows
         shell: pwsh
         env:
           LOG_FILE: ${{ matrix.log_file }}
         run: |
-          $content = Get-Content $env:LOG_FILE -Raw -ErrorAction SilentlyContinue
-          $subscribed = if ($content) { ([regex]::Matches($content, [regex]::Escape("Subscribed to messages"))).Count } else { 0 }
-          $saved      = if ($content) { ([regex]::Matches($content, [regex]::Escape("Command saved to"))).Count } else { 0 }
-          "subscribed=$subscribed" >> $env:GITHUB_OUTPUT
-          "saved=$saved"           >> $env:GITHUB_OUTPUT
-          Write-Output "Baseline counts -> subscribed=$subscribed saved=$saved"
-
+          & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/capture-sweep-scenario-baseline-counts.ps1"
       - name: Install release binary for the sweep scenario
         uses: ./.github/actions/run-agent
         with:
           binary: ${{ matrix.binary }}
           args: --update --org-id ${{ vars.IT_ORG_ID }} --no-auto-updates ${{ matrix.no_auto_updates_extra }} --command-timeout-seconds 600 --github-token ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Wait for fresh subscription before the sweep scenario
+      - name: Wait for fresh subscription before the sweep scenario (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+          BASELINE: ${{ (steps.sweep_baseline_unix.outputs.subscribed || steps.sweep_baseline_windows.outputs.subscribed) }}
+        run: |
+          set -euo pipefail
+          # Resolve pwsh up front: sudo resets PATH via secure_path on some runners.
+          pwsh_path="$(command -v pwsh)"
+          sudo --preserve-env=LOG_FILE,BASELINE "$pwsh_path" -NoProfile -File "$GITHUB_WORKSPACE/.github/workflows/it-scripts/wait-for-fresh-subscription-before-the-sweep-scenario.ps1"
+
+      - name: Wait for fresh subscription before the sweep scenario (Windows)
+        if: runner.os == 'Windows'
         shell: pwsh
         env:
           LOG_FILE: ${{ matrix.log_file }}
-          BASELINE: ${{ steps.sweep_baseline.outputs.subscribed }}
+          BASELINE: ${{ (steps.sweep_baseline_unix.outputs.subscribed || steps.sweep_baseline_windows.outputs.subscribed) }}
         run: |
-          # A delta, not a bare match: the log already carries many "Subscribed to
-          # messages" lines from earlier scenarios, so only a new one proves the
-          # restarted agent is connected and ready to receive the command.
-          $baseline = [int]$env:BASELINE
-          for ($i = 1; $i -le 60; $i++) {
-            $content = Get-Content $env:LOG_FILE -Raw -ErrorAction SilentlyContinue
-            $count = if ($content) { ([regex]::Matches($content, [regex]::Escape("Subscribed to messages"))).Count } else { 0 }
-            if ($count -gt $baseline) {
-              Write-Output "Agent subscribed after the sweep-scenario install (count $count > baseline $baseline) after ~$($i * 2)s"
-              exit 0
-            }
-            Start-Sleep -Seconds 2
-          }
-          Write-Error "Agent did not subscribe after the sweep-scenario install (count stayed at $baseline)"
-          exit 1
-
+          & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/wait-for-fresh-subscription-before-the-sweep-scenario.ps1"
       - name: Send long-running command
         uses: ./.github/actions/send-command
         with:
@@ -1604,34 +1545,28 @@ jobs:
           device_id: ${{ steps.config.outputs.device_id }}
           commands: ${{ matrix.sweep_commands }}
 
-      - name: Capture the in-flight script file path
-        id: inflight_script
+      - name: Capture the in-flight script file path (Unix)
+        if: runner.os != 'Windows'
+        id: inflight_script_unix
+        shell: bash
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+          BASELINE: ${{ (steps.sweep_baseline_unix.outputs.saved || steps.sweep_baseline_windows.outputs.saved) }}
+        run: |
+          set -euo pipefail
+          # Resolve pwsh up front: sudo resets PATH via secure_path on some runners.
+          pwsh_path="$(command -v pwsh)"
+          sudo --preserve-env=LOG_FILE,BASELINE,GITHUB_OUTPUT "$pwsh_path" -NoProfile -File "$GITHUB_WORKSPACE/.github/workflows/it-scripts/capture-the-in-flight-script-file-path.ps1"
+
+      - name: Capture the in-flight script file path (Windows)
+        if: runner.os == 'Windows'
+        id: inflight_script_windows
         shell: pwsh
         env:
           LOG_FILE: ${{ matrix.log_file }}
-          BASELINE: ${{ steps.sweep_baseline.outputs.saved }}
+          BASELINE: ${{ (steps.sweep_baseline_unix.outputs.saved || steps.sweep_baseline_windows.outputs.saved) }}
         run: |
-          # The agent logs the temp file it wrote the command to, so read the path
-          # (and the scripts directory) straight from the log instead of
-          # re-deriving the platform path - the service's temp directory is not
-          # the runner's, notably root's private TMPDIR on macOS.
-          $baseline = [int]$env:BASELINE
-          for ($i = 1; $i -le 30; $i++) {
-            $content = Get-Content $env:LOG_FILE -Raw -ErrorAction SilentlyContinue
-            $found = if ($content) { [regex]::Matches($content, 'Command saved to[^\r\n]*path=(?<p>"[^"]*"|\S+)') } else { @() }
-            if ($found.Count -gt $baseline) {
-              $path = $found[$found.Count - 1].Groups['p'].Value.Trim('"')
-              $dir = Split-Path -Parent $path
-              "path=$path" >> $env:GITHUB_OUTPUT
-              "scripts_dir=$dir" >> $env:GITHUB_OUTPUT
-              Write-Output "In-flight script file: $path (scripts directory $dir)"
-              exit 0
-            }
-            Start-Sleep -Seconds 2
-          }
-          Write-Error "Agent never logged a script file for the long-running command (count stayed at $baseline)"
-          exit 1
-
+          & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/capture-the-in-flight-script-file-path.ps1"
       - name: Force-kill the agent mid-command
         uses: ./.github/actions/kill-service
         with:
@@ -1641,51 +1576,61 @@ jobs:
         uses: ./.github/actions/script-sweep-fixture
         with:
           mode: seed
-          scripts_dir: ${{ steps.inflight_script.outputs.scripts_dir }}
-          orphan_path: ${{ steps.inflight_script.outputs.path }}
+          scripts_dir: ${{ (steps.inflight_script_unix.outputs.scripts_dir || steps.inflight_script_windows.outputs.scripts_dir) }}
+          orphan_path: ${{ (steps.inflight_script_unix.outputs.path || steps.inflight_script_windows.outputs.path) }}
 
-      - name: Capture sweep log baseline count
-        id: sweep_log_baseline
+      - name: Capture sweep log baseline count (Unix)
+        if: runner.os != 'Windows'
+        id: sweep_log_baseline_unix
+        shell: bash
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+        run: |
+          set -euo pipefail
+          # Resolve pwsh up front: sudo resets PATH via secure_path on some runners.
+          pwsh_path="$(command -v pwsh)"
+          sudo --preserve-env=LOG_FILE,GITHUB_OUTPUT "$pwsh_path" -NoProfile -File "$GITHUB_WORKSPACE/.github/workflows/it-scripts/capture-sweep-log-baseline-count.ps1"
+
+      - name: Capture sweep log baseline count (Windows)
+        if: runner.os == 'Windows'
+        id: sweep_log_baseline_windows
         shell: pwsh
         env:
           LOG_FILE: ${{ matrix.log_file }}
         run: |
-          $content = Get-Content $env:LOG_FILE -Raw -ErrorAction SilentlyContinue
-          $swept = if ($content) { ([regex]::Matches($content, [regex]::Escape("Swept stale script files"))).Count } else { 0 }
-          "swept=$swept" >> $env:GITHUB_OUTPUT
-          Write-Output "Baseline counts -> swept=$swept"
-
+          & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/capture-sweep-log-baseline-count.ps1"
       - name: Restart agent to trigger the startup sweep
         uses: ./.github/actions/run-agent
         with:
           binary: ${{ matrix.binary }}
           args: --update --org-id ${{ vars.IT_ORG_ID }} --no-auto-updates ${{ matrix.no_auto_updates_extra }} --github-token ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Wait for and assert the startup sweep was logged
+      - name: Wait for and assert the startup sweep was logged (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+          BASELINE: ${{ (steps.sweep_log_baseline_unix.outputs.swept || steps.sweep_log_baseline_windows.outputs.swept) }}
+        run: |
+          set -euo pipefail
+          # Resolve pwsh up front: sudo resets PATH via secure_path on some runners.
+          pwsh_path="$(command -v pwsh)"
+          sudo --preserve-env=LOG_FILE,BASELINE "$pwsh_path" -NoProfile -File "$GITHUB_WORKSPACE/.github/workflows/it-scripts/wait-for-and-assert-the-startup-sweep-was-logged.ps1"
+
+      - name: Wait for and assert the startup sweep was logged (Windows)
+        if: runner.os == 'Windows'
         shell: pwsh
         env:
           LOG_FILE: ${{ matrix.log_file }}
-          BASELINE: ${{ steps.sweep_log_baseline.outputs.swept }}
+          BASELINE: ${{ (steps.sweep_log_baseline_unix.outputs.swept || steps.sweep_log_baseline_windows.outputs.swept) }}
         run: |
-          $baseline = [int]$env:BASELINE
-          for ($i = 1; $i -le 60; $i++) {
-            $content = Get-Content $env:LOG_FILE -Raw -ErrorAction SilentlyContinue
-            $swept = if ($content) { ([regex]::Matches($content, [regex]::Escape("Swept stale script files"))).Count } else { 0 }
-            if ($swept -gt $baseline) {
-              Write-Output "Startup sweep logged (count $swept > baseline $baseline) after ~$($i * 2)s"
-              exit 0
-            }
-            Start-Sleep -Seconds 2
-          }
-          Write-Error "Startup sweep was never logged (count stayed at $baseline)"
-          exit 1
-
+          & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/wait-for-and-assert-the-startup-sweep-was-logged.ps1"
       - name: Assert stale script files swept and live files untouched
         uses: ./.github/actions/script-sweep-fixture
         with:
           mode: assert
-          scripts_dir: ${{ steps.inflight_script.outputs.scripts_dir }}
-          orphan_path: ${{ steps.inflight_script.outputs.path }}
+          scripts_dir: ${{ (steps.inflight_script_unix.outputs.scripts_dir || steps.inflight_script_windows.outputs.scripts_dir) }}
+          orphan_path: ${{ (steps.inflight_script_unix.outputs.path || steps.inflight_script_windows.outputs.path) }}
 
       # ---- Downloaded installer sweep scenario (sc-106111) ----
       # Every auto-update downloads a full agent binary and executes it as the
@@ -1715,44 +1660,52 @@ jobs:
           mode: seed
           updates_dir: ${{ matrix.config_dir }}/${{ vars.IT_ORG_ID }}/updates
 
-      - name: Capture installer sweep log baseline count
-        id: installer_sweep_baseline
+      - name: Capture installer sweep log baseline count (Unix)
+        if: runner.os != 'Windows'
+        id: installer_sweep_baseline_unix
+        shell: bash
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+        run: |
+          set -euo pipefail
+          # Resolve pwsh up front: sudo resets PATH via secure_path on some runners.
+          pwsh_path="$(command -v pwsh)"
+          sudo --preserve-env=LOG_FILE,GITHUB_OUTPUT "$pwsh_path" -NoProfile -File "$GITHUB_WORKSPACE/.github/workflows/it-scripts/capture-installer-sweep-log-baseline-count.ps1"
+
+      - name: Capture installer sweep log baseline count (Windows)
+        if: runner.os == 'Windows'
+        id: installer_sweep_baseline_windows
         shell: pwsh
         env:
           LOG_FILE: ${{ matrix.log_file }}
         run: |
-          $content = Get-Content $env:LOG_FILE -Raw -ErrorAction SilentlyContinue
-          $swept = if ($content) { ([regex]::Matches($content, [regex]::Escape("Swept stale installer files"))).Count } else { 0 }
-          "swept=$swept" >> $env:GITHUB_OUTPUT
-          Write-Output "Baseline counts -> swept=$swept"
-
+          & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/capture-installer-sweep-log-baseline-count.ps1"
       - name: Restart agent to trigger the installer sweep
         uses: ./.github/actions/run-agent
         with:
           binary: ${{ matrix.binary }}
           args: --update --org-id ${{ vars.IT_ORG_ID }} --no-auto-updates ${{ matrix.no_auto_updates_extra }} --github-token ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Wait for and assert the installer sweep was logged
+      - name: Wait for and assert the installer sweep was logged (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+          BASELINE: ${{ (steps.installer_sweep_baseline_unix.outputs.swept || steps.installer_sweep_baseline_windows.outputs.swept) }}
+        run: |
+          set -euo pipefail
+          # Resolve pwsh up front: sudo resets PATH via secure_path on some runners.
+          pwsh_path="$(command -v pwsh)"
+          sudo --preserve-env=LOG_FILE,BASELINE "$pwsh_path" -NoProfile -File "$GITHUB_WORKSPACE/.github/workflows/it-scripts/wait-for-and-assert-the-installer-sweep-was-logged.ps1"
+
+      - name: Wait for and assert the installer sweep was logged (Windows)
+        if: runner.os == 'Windows'
         shell: pwsh
         env:
           LOG_FILE: ${{ matrix.log_file }}
-          BASELINE: ${{ steps.installer_sweep_baseline.outputs.swept }}
+          BASELINE: ${{ (steps.installer_sweep_baseline_unix.outputs.swept || steps.installer_sweep_baseline_windows.outputs.swept) }}
         run: |
-          $baseline = [int]$env:BASELINE
-          for ($i = 1; $i -le 60; $i++) {
-            $content = Get-Content $env:LOG_FILE -Raw -ErrorAction SilentlyContinue
-            $swept = if ($content) { ([regex]::Matches($content, [regex]::Escape("Swept stale installer files"))).Count } else { 0 }
-            if ($swept -gt $baseline) {
-              Write-Output "Installer sweep logged (count $swept > baseline $baseline) after ~$($i * 2)s"
-              exit 0
-            }
-            Start-Sleep -Seconds 2
-          }
-          Write-Output "---- last 40 log lines ----"
-          Get-Content $env:LOG_FILE -Tail 40 -ErrorAction SilentlyContinue
-          Write-Error "Installer sweep was never logged (count stayed at $baseline)"
-          exit 1
-
+          & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/wait-for-and-assert-the-installer-sweep-was-logged.ps1"
       - name: Assert stale installers swept and live files untouched
         uses: ./.github/actions/installer-sweep-fixture
         with:
@@ -1786,19 +1739,26 @@ jobs:
         with:
           mode: start
 
-      - name: Capture auto-update retry baseline counts
-        id: retry_baseline
+      - name: Capture auto-update retry baseline counts (Unix)
+        if: runner.os != 'Windows'
+        id: retry_baseline_unix
+        shell: bash
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+        run: |
+          set -euo pipefail
+          # Resolve pwsh up front: sudo resets PATH via secure_path on some runners.
+          pwsh_path="$(command -v pwsh)"
+          sudo --preserve-env=LOG_FILE,GITHUB_OUTPUT "$pwsh_path" -NoProfile -File "$GITHUB_WORKSPACE/.github/workflows/it-scripts/capture-auto-update-retry-baseline-counts.ps1"
+
+      - name: Capture auto-update retry baseline counts (Windows)
+        if: runner.os == 'Windows'
+        id: retry_baseline_windows
         shell: pwsh
         env:
           LOG_FILE: ${{ matrix.log_file }}
         run: |
-          $content = Get-Content $env:LOG_FILE -Raw -ErrorAction SilentlyContinue
-          $retrying  = if ($content) { ([regex]::Matches($content, [regex]::Escape("Retrying update"))).Count } else { 0 }
-          $succeeded = if ($content) { ([regex]::Matches($content, [regex]::Escape("Update succeeded on retry"))).Count } else { 0 }
-          "retrying=$retrying"   >> $env:GITHUB_OUTPUT
-          "succeeded=$succeeded" >> $env:GITHUB_OUTPUT
-          Write-Output "Baseline counts -> retrying=$retrying succeeded=$succeeded"
-
+          & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/capture-auto-update-retry-baseline-counts.ps1"
       # Written before the install, because the updater reads the override when a
       # service cycle constructs it - a file written afterwards would not be seen
       # until the next restart, and the agent would spend the scenario updating
@@ -1817,31 +1777,26 @@ jobs:
           binary: ${{ matrix.it_binary }}
           args: --update --org-id ${{ vars.IT_ORG_ID }} --github-token ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Wait for the update retry schedule to run
+      - name: Wait for the update retry schedule to run (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+          BASELINE: ${{ (steps.retry_baseline_unix.outputs.retrying || steps.retry_baseline_windows.outputs.retrying) }}
+        run: |
+          set -euo pipefail
+          # Resolve pwsh up front: sudo resets PATH via secure_path on some runners.
+          pwsh_path="$(command -v pwsh)"
+          sudo --preserve-env=LOG_FILE,BASELINE "$pwsh_path" -NoProfile -File "$GITHUB_WORKSPACE/.github/workflows/it-scripts/wait-for-the-update-retry-schedule-to-run.ps1"
+
+      - name: Wait for the update retry schedule to run (Windows)
+        if: runner.os == 'Windows'
         shell: pwsh
         env:
           LOG_FILE: ${{ matrix.log_file }}
-          BASELINE: ${{ steps.retry_baseline.outputs.retrying }}
+          BASELINE: ${{ (steps.retry_baseline_unix.outputs.retrying || steps.retry_baseline_windows.outputs.retrying) }}
         run: |
-          # The first check fires 30s after the service starts, then the schedule
-          # is roughly 2s, 4s, 7.5s, 7.5s... Four new lines put two slots at the
-          # ceiling, which is what the jitter assertion below needs to tell a
-          # jittered schedule from one that is merely capped, and still leave two
-          # more slots (~15s) for the recovery flip to land in, so the flip cannot
-          # race the end of the retry budget.
-          $baseline = [int]$env:BASELINE
-          for ($i = 1; $i -le 150; $i++) {
-            $content = Get-Content $env:LOG_FILE -Raw -ErrorAction SilentlyContinue
-            $count = if ($content) { ([regex]::Matches($content, [regex]::Escape("Retrying update"))).Count } else { 0 }
-            if (($count - $baseline) -ge 4) {
-              Write-Output "Observed $($count - $baseline) update retries after ~${i}s"
-              exit 0
-            }
-            Start-Sleep -Seconds 1
-          }
-          Write-Error "The agent never retried the update against the failing release endpoint"
-          exit 1
-
+          & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/wait-for-the-update-retry-schedule-to-run.ps1"
       # Flipped mid-sequence - the fixture re-reads its mode per request - so the
       # recovery is the agent's own next retry, not a restart.
       - name: Serve a valid release payload mid-sequence
@@ -1849,279 +1804,136 @@ jobs:
         with:
           mode: ok
 
-      - name: Assert the update succeeds on a retry
+      - name: Assert the update succeeds on a retry (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+          BASELINE: ${{ (steps.retry_baseline_unix.outputs.succeeded || steps.retry_baseline_windows.outputs.succeeded) }}
+        run: |
+          set -euo pipefail
+          # Resolve pwsh up front: sudo resets PATH via secure_path on some runners.
+          pwsh_path="$(command -v pwsh)"
+          sudo --preserve-env=LOG_FILE,BASELINE "$pwsh_path" -NoProfile -File "$GITHUB_WORKSPACE/.github/workflows/it-scripts/assert-the-update-succeeds-on-a-retry.ps1"
+
+      - name: Assert the update succeeds on a retry (Windows)
+        if: runner.os == 'Windows'
         shell: pwsh
         env:
           LOG_FILE: ${{ matrix.log_file }}
-          BASELINE: ${{ steps.retry_baseline.outputs.succeeded }}
+          BASELINE: ${{ (steps.retry_baseline_unix.outputs.succeeded || steps.retry_baseline_windows.outputs.succeeded) }}
         run: |
-          # The fixture serves the running agent's own version as tag_name, so a
-          # recovered check ends at "No updates available" and the retry is seen
-          # succeeding without downloading or executing anything - the recovery is
-          # what is under test here, not the installer.
-          $baseline = [int]$env:BASELINE
-          for ($i = 1; $i -le 60; $i++) {
-            $content = Get-Content $env:LOG_FILE -Raw -ErrorAction SilentlyContinue
-            $count = if ($content) { ([regex]::Matches($content, [regex]::Escape("Update succeeded on retry"))).Count } else { 0 }
-            if ($count -gt $baseline) {
-              Write-Output "Update succeeded on a retry after ~$($i * 2)s (count $count > baseline $baseline)"
-              exit 0
-            }
-            Start-Sleep -Seconds 2
-          }
+          & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/assert-the-update-succeeds-on-a-retry.ps1"
+      - name: Assert the retry schedule is capped, jittered and never immediate (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+          BASELINE: ${{ (steps.retry_baseline_unix.outputs.retrying || steps.retry_baseline_windows.outputs.retrying) }}
+        run: |
+          set -euo pipefail
+          # Resolve pwsh up front: sudo resets PATH via secure_path on some runners.
+          pwsh_path="$(command -v pwsh)"
+          sudo --preserve-env=LOG_FILE,BASELINE "$pwsh_path" -NoProfile -File "$GITHUB_WORKSPACE/.github/workflows/it-scripts/assert-the-retry-schedule-is-capped-jittered-and-never-immediate.ps1"
 
-          # Separates a real regression from a flip that landed after the budget
-          # was already spent, which would leave the next check succeeding on its
-          # first try and logging no retry at all.
-          $content = Get-Content $env:LOG_FILE -Raw -ErrorAction SilentlyContinue
-          if ($content -and $content.Contains("All retries exhausted")) {
-            Write-Output "Note: the log records an exhausted retry budget; the recovery flip may have landed after the last slot"
-          }
-          Write-Output "---- last 40 log lines ----"
-          Get-Content $env:LOG_FILE -Tail 40 -ErrorAction SilentlyContinue
-          Write-Error "The agent never logged a successful update retry after the endpoint recovered"
-          exit 1
-
-      - name: Assert the retry schedule is capped, jittered and never immediate
+      - name: Assert the retry schedule is capped, jittered and never immediate (Windows)
+        if: runner.os == 'Windows'
         shell: pwsh
         env:
           LOG_FILE: ${{ matrix.log_file }}
-          BASELINE: ${{ steps.retry_baseline.outputs.retrying }}
+          BASELINE: ${{ (steps.retry_baseline_unix.outputs.retrying || steps.retry_baseline_windows.outputs.retrying) }}
         run: |
-          # The cap the integration build lands on: a quarter of its 30s check
-          # interval, which is below the absolute 1h ceiling a released build uses.
-          $cap = 7.5
-          $baseline = [int]$env:BASELINE
-          $failures = @()
-
-          function ConvertTo-Seconds([string]$value) {
-            # Go renders a duration as concatenated unit components ("4.1s",
-            # "1m4s"), and a negative one with a leading '-'. The sign is read
-            # separately because the overflow this scenario guards against
-            # produced exactly that negative value, and summing the components
-            # alone would report it as positive.
-            $sign = if ($value.StartsWith('-')) { -1.0 } else { 1.0 }
-            $total = 0.0
-            foreach ($m in [regex]::Matches($value, '(?<n>[0-9.]+)(?<u>ms|us|ns|h|m|s)')) {
-              $n = [double]$m.Groups['n'].Value
-              switch ($m.Groups['u'].Value) {
-                'ns' { $total += $n / 1e9 }
-                'us' { $total += $n / 1e6 }
-                'ms' { $total += $n / 1e3 }
-                's'  { $total += $n }
-                'm'  { $total += $n * 60 }
-                'h'  { $total += $n * 3600 }
-              }
-            }
-            return $sign * $total
-          }
-
-          $lines = @(Get-Content $env:LOG_FILE -ErrorAction SilentlyContinue |
-            Where-Object { $_ -match 'Retrying update' } |
-            Select-Object -Skip $baseline)
-
-          $slots = @()
-          foreach ($line in $lines) {
-            # hclog writes "<timestamp> [INFO]  agent_smith: Retrying update: attempt=N backoff=D".
-            # The timestamp is a fixed-width local time followed by its offset, so
-            # the first 23 characters parse without worrying about the offset form.
-            $m = [regex]::Match($line, '^(?<ts>\S{23}).*Retrying update: attempt=(?<attempt>\d+) backoff=(?<backoff>\S+)')
-            if (-not $m.Success) {
-              $failures += "could not parse a retry line: $line"
-              continue
-            }
-            $stamp = $null
-            try {
-              $stamp = [datetime]::ParseExact(
-                $m.Groups['ts'].Value,
-                'yyyy-MM-ddTHH:mm:ss.fff',
-                [Globalization.CultureInfo]::InvariantCulture)
-            } catch {
-              $failures += "could not parse the timestamp of: $line"
-            }
-            $slots += [pscustomobject]@{
-              Attempt = [int]$m.Groups['attempt'].Value
-              Backoff = ConvertTo-Seconds $m.Groups['backoff'].Value
-              Time    = $stamp
-            }
-          }
-
-          if ($slots.Count -lt 3) {
-            Write-Error "Expected at least three retry slots to inspect, got $($slots.Count)"
-            exit 1
-          }
-
-          # The timestamp table the ticket asks for: every slot, what it waited,
-          # and how long actually elapsed before the next one arrived.
-          Write-Output "---- observed update retry schedule ----"
-          for ($i = 0; $i -lt $slots.Count; $i++) {
-            $gap = ''
-            if ($i -lt $slots.Count - 1 -and $slots[$i].Time -and $slots[$i + 1].Time) {
-              $gap = [math]::Round(($slots[$i + 1].Time - $slots[$i].Time).TotalSeconds, 3)
-            }
-            Write-Output ("attempt={0} backoff={1}s elapsed_to_next={2}" -f $slots[$i].Attempt, [math]::Round($slots[$i].Backoff, 3), $gap)
-          }
-
-          foreach ($slot in $slots) {
-            # A zero or negative slot is the overflow busy-spin: time.After fires
-            # immediately and the loop issues requests as fast as it can.
-            if ($slot.Backoff -le 0) {
-              $failures += "attempt $($slot.Attempt): backoff $($slot.Backoff)s is not strictly positive"
-            }
-            # The tolerance covers the millisecond rendering, not the cap itself.
-            if ($slot.Backoff -gt ($cap + 0.05)) {
-              $failures += "attempt $($slot.Attempt): backoff $($slot.Backoff)s exceeds the ${cap}s cap"
-            }
-          }
-
-          # Jitter: a fixed schedule repeats the same values bit for bit.
-          $distinct = @($slots | ForEach-Object { [math]::Round($_.Backoff, 3) } | Select-Object -Unique)
-          if ($distinct.Count -lt 2) {
-            $failures += "every retry slot was $($distinct -join ', ')s - the schedule is not jittered"
-          }
-          # Distinct values alone are weak evidence, because the doubling produces
-          # distinct values on its own until it reaches the ceiling. The slots that
-          # do reach it are the discriminator: an unjittered schedule pins every
-          # one of them to exactly the cap, while jitter spreads them across the
-          # band below it. Skipped when the sequence was cut short by the recovery
-          # flip before two slots got that far.
-          $nearCap = @($slots | Where-Object { $_.Backoff -ge ($cap * 0.75) })
-          if ($nearCap.Count -ge 2) {
-            $distinctNearCap = @($nearCap | ForEach-Object { [math]::Round($_.Backoff, 3) } | Select-Object -Unique)
-            if ($distinctNearCap.Count -lt 2) {
-              $failures += "the capped slots all measured $($distinctNearCap -join ', ')s - the jitter is not being applied"
-            }
-          }
-
-          # Growth: the schedule still doubles up to the cap rather than being flat.
-          $maxBackoff = ($slots | Measure-Object -Property Backoff -Maximum).Maximum
-          if ($maxBackoff -le $slots[0].Backoff) {
-            $failures += "the schedule never grew (first $($slots[0].Backoff)s, largest ${maxBackoff}s)"
-          }
-
-          # Spacing: consecutive slots of one sequence must be separated by at
-          # least the wait that was logged. Pairs that are not consecutive attempts
-          # belong to different retry sequences and are skipped.
-          for ($i = 0; $i -lt $slots.Count - 1; $i++) {
-            if ($slots[$i + 1].Attempt -ne $slots[$i].Attempt + 1) { continue }
-            if (-not $slots[$i].Time -or -not $slots[$i + 1].Time) { continue }
-            $gap = ($slots[$i + 1].Time - $slots[$i].Time).TotalSeconds
-            if ($gap -lt 1) {
-              $failures += "attempts $($slots[$i].Attempt) and $($slots[$i + 1].Attempt) arrived ${gap}s apart - back to back"
-            }
-            if ($gap -lt ($slots[$i].Backoff * 0.8)) {
-              $failures += "attempt $($slots[$i].Attempt) logged a $($slots[$i].Backoff)s backoff but the next retry came after ${gap}s"
-            }
-          }
-
-          if ($failures.Count -gt 0) {
-            $failures | ForEach-Object { Write-Output "FAIL: $_" }
-            Write-Error "the update retry schedule is not capped, jittered and spaced as expected"
-            exit 1
-          }
-          Write-Output "Retry schedule bounded by ${cap}s, jittered across $($distinct.Count) distinct values, and never served back to back"
-          exit 0
-
+          & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/assert-the-retry-schedule-is-capped-jittered-and-never-immediate.ps1"
       - name: Fail the release endpoint again for the stop check
         uses: ./.github/actions/stub-release
         with:
           mode: fail
 
-      - name: Capture stop-during-backoff baseline counts
-        id: retry_stop_baseline
+      - name: Capture stop-during-backoff baseline counts (Unix)
+        if: runner.os != 'Windows'
+        id: retry_stop_baseline_unix
+        shell: bash
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+        run: |
+          set -euo pipefail
+          # Resolve pwsh up front: sudo resets PATH via secure_path on some runners.
+          pwsh_path="$(command -v pwsh)"
+          sudo --preserve-env=LOG_FILE,GITHUB_OUTPUT "$pwsh_path" -NoProfile -File "$GITHUB_WORKSPACE/.github/workflows/it-scripts/capture-stop-during-backoff-baseline-counts.ps1"
+
+      - name: Capture stop-during-backoff baseline counts (Windows)
+        if: runner.os == 'Windows'
+        id: retry_stop_baseline_windows
         shell: pwsh
         env:
           LOG_FILE: ${{ matrix.log_file }}
         run: |
-          $content = Get-Content $env:LOG_FILE -Raw -ErrorAction SilentlyContinue
-          $retrying = if ($content) { ([regex]::Matches($content, [regex]::Escape("Retrying update"))).Count } else { 0 }
-          $stopped  = if ($content) { ([regex]::Matches($content, [regex]::Escape("Auto updater stopped"))).Count } else { 0 }
-          "retrying=$retrying" >> $env:GITHUB_OUTPUT
-          "stopped=$stopped"   >> $env:GITHUB_OUTPUT
-          Write-Output "Baseline counts -> retrying=$retrying stopped=$stopped"
+          & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/capture-stop-during-backoff-baseline-counts.ps1"
+      - name: Wait for a fresh backoff to be entered (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+          BASELINE: ${{ (steps.retry_stop_baseline_unix.outputs.retrying || steps.retry_stop_baseline_windows.outputs.retrying) }}
+        run: |
+          set -euo pipefail
+          # Resolve pwsh up front: sudo resets PATH via secure_path on some runners.
+          pwsh_path="$(command -v pwsh)"
+          sudo --preserve-env=LOG_FILE,BASELINE "$pwsh_path" -NoProfile -File "$GITHUB_WORKSPACE/.github/workflows/it-scripts/wait-for-a-fresh-backoff-to-be-entered.ps1"
 
-      - name: Wait for a fresh backoff to be entered
+      - name: Wait for a fresh backoff to be entered (Windows)
+        if: runner.os == 'Windows'
         shell: pwsh
         env:
           LOG_FILE: ${{ matrix.log_file }}
-          BASELINE: ${{ steps.retry_stop_baseline.outputs.retrying }}
+          BASELINE: ${{ (steps.retry_stop_baseline_unix.outputs.retrying || steps.retry_stop_baseline_windows.outputs.retrying) }}
         run: |
-          $baseline = [int]$env:BASELINE
-          for ($i = 1; $i -le 90; $i++) {
-            $content = Get-Content $env:LOG_FILE -Raw -ErrorAction SilentlyContinue
-            $count = if ($content) { ([regex]::Matches($content, [regex]::Escape("Retrying update"))).Count } else { 0 }
-            if ($count -gt $baseline) {
-              Write-Output "Agent is in a retry backoff again after ~${i}s"
-              exit 0
-            }
-            Start-Sleep -Seconds 1
-          }
-          Write-Error "The agent never entered a retry backoff after the endpoint was failed again"
-          exit 1
+          & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/wait-for-a-fresh-backoff-to-be-entered.ps1"
+      - name: Assert a service stop during a backoff is prompt (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+          SERVICE: ${{ matrix.service }}
+          BASELINE: ${{ (steps.retry_stop_baseline_unix.outputs.stopped || steps.retry_stop_baseline_windows.outputs.stopped) }}
+        run: |
+          set -euo pipefail
+          # Resolve pwsh up front: sudo resets PATH via secure_path on some runners.
+          pwsh_path="$(command -v pwsh)"
+          sudo --preserve-env=LOG_FILE,SERVICE,BASELINE "$pwsh_path" -NoProfile -File "$GITHUB_WORKSPACE/.github/workflows/it-scripts/assert-a-service-stop-during-a-backoff-is-prompt.ps1"
 
-      - name: Assert a service stop during a backoff is prompt
+      - name: Assert a service stop during a backoff is prompt (Windows)
+        if: runner.os == 'Windows'
         shell: pwsh
         env:
           LOG_FILE: ${{ matrix.log_file }}
           SERVICE: ${{ matrix.service }}
-          BASELINE: ${{ steps.retry_stop_baseline.outputs.stopped }}
+          BASELINE: ${{ (steps.retry_stop_baseline_unix.outputs.stopped || steps.retry_stop_baseline_windows.outputs.stopped) }}
         run: |
-          # The agent has just entered a backoff with most of its 6-slot budget
-          # left (~30s of waiting at the 7.5s cap). A stop that has to wait out
-          # the pending slot - or worse, the whole budget - delays every caller of
-          # Stop(): the installer, an upgrade, and an uninstall.
-          $baseline = [int]$env:BASELINE
-          $sw = [System.Diagnostics.Stopwatch]::StartNew()
-          if ($IsWindows) {
-            sc.exe stop $env:SERVICE | Out-Null
-          } elseif ($IsLinux) {
-            sudo systemctl stop $env:SERVICE
-          } else {
-            # Bare label, not "system/<label>": stop is a legacy launchctl
-            # subcommand that resolves a label in the current domain, and a
-            # service-target form is read as a literal label that matches nothing.
-            sudo launchctl stop $env:SERVICE
-          }
-          # The service managers disagree about exit status for a stop that was
-          # delivered; the verdict here comes from the agent's own log.
-          $global:LASTEXITCODE = 0
-
-          for ($i = 1; $i -le 60; $i++) {
-            $content = Get-Content $env:LOG_FILE -Raw -ErrorAction SilentlyContinue
-            $count = if ($content) { ([regex]::Matches($content, [regex]::Escape("Auto updater stopped"))).Count } else { 0 }
-            if ($count -gt $baseline) {
-              $sw.Stop()
-              $elapsed = [math]::Round($sw.Elapsed.TotalSeconds, 1)
-              if ($sw.Elapsed.TotalSeconds -gt 20) {
-                Write-Error "The auto updater stopped only after ${elapsed}s, long enough to have waited out its retry schedule"
-                exit 1
-              }
-              Write-Output "Auto updater stopped ${elapsed}s after the stop was issued, mid-backoff"
-              exit 0
-            }
-            Start-Sleep -Milliseconds 500
-          }
-          $sw.Stop()
-          Write-Output "---- last 40 log lines ----"
-          Get-Content $env:LOG_FILE -Tail 40 -ErrorAction SilentlyContinue
-          Write-Error "The auto updater never logged a stop after the service was stopped mid-backoff"
-          exit 1
-
+          & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/assert-a-service-stop-during-a-backoff-is-prompt.ps1"
       # The restore steps run under always() so a failed assertion above cannot
       # leave the rest of the job running an agent that points at a stub release
       # endpoint (or leave the service stopped for the scenarios that follow).
-      - name: Capture restore baseline counts
-        if: always()
-        id: retry_restore_baseline
+      - name: Capture restore baseline counts (Unix)
+        if: (always()) && runner.os != 'Windows'
+        id: retry_restore_baseline_unix
+        shell: bash
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+        run: |
+          set -euo pipefail
+          # Resolve pwsh up front: sudo resets PATH via secure_path on some runners.
+          pwsh_path="$(command -v pwsh)"
+          sudo --preserve-env=LOG_FILE,GITHUB_OUTPUT "$pwsh_path" -NoProfile -File "$GITHUB_WORKSPACE/.github/workflows/it-scripts/capture-restore-baseline-counts.ps1"
+
+      - name: Capture restore baseline counts (Windows)
+        if: (always()) && runner.os == 'Windows'
+        id: retry_restore_baseline_windows
         shell: pwsh
         env:
           LOG_FILE: ${{ matrix.log_file }}
         run: |
-          $content = Get-Content $env:LOG_FILE -Raw -ErrorAction SilentlyContinue
-          $subscribed = if ($content) { ([regex]::Matches($content, [regex]::Escape("Subscribed to messages"))).Count } else { 0 }
-          "subscribed=$subscribed" >> $env:GITHUB_OUTPUT
-          Write-Output "Baseline counts -> subscribed=$subscribed"
-
+          & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/capture-restore-baseline-counts.ps1"
       - name: Clear the release url override
         if: always()
         uses: ./.github/actions/set-release-url
@@ -2143,26 +1955,26 @@ jobs:
           binary: ${{ matrix.binary }}
           args: --update --org-id ${{ vars.IT_ORG_ID }} --no-auto-updates ${{ matrix.no_auto_updates_extra }} --github-token ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Wait for resubscription after the retry scenario
-        if: always()
+      - name: Wait for resubscription after the retry scenario (Unix)
+        if: (always()) && runner.os != 'Windows'
+        shell: bash
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+          BASELINE: ${{ (steps.retry_restore_baseline_unix.outputs.subscribed || steps.retry_restore_baseline_windows.outputs.subscribed) }}
+        run: |
+          set -euo pipefail
+          # Resolve pwsh up front: sudo resets PATH via secure_path on some runners.
+          pwsh_path="$(command -v pwsh)"
+          sudo --preserve-env=LOG_FILE,BASELINE "$pwsh_path" -NoProfile -File "$GITHUB_WORKSPACE/.github/workflows/it-scripts/wait-for-resubscription-after-the-retry-scenario.ps1"
+
+      - name: Wait for resubscription after the retry scenario (Windows)
+        if: (always()) && runner.os == 'Windows'
         shell: pwsh
         env:
           LOG_FILE: ${{ matrix.log_file }}
-          BASELINE: ${{ steps.retry_restore_baseline.outputs.subscribed }}
+          BASELINE: ${{ (steps.retry_restore_baseline_unix.outputs.subscribed || steps.retry_restore_baseline_windows.outputs.subscribed) }}
         run: |
-          $baseline = [int]$env:BASELINE
-          for ($i = 1; $i -le 60; $i++) {
-            $content = Get-Content $env:LOG_FILE -Raw -ErrorAction SilentlyContinue
-            $count = if ($content) { ([regex]::Matches($content, [regex]::Escape("Subscribed to messages"))).Count } else { 0 }
-            if ($count -gt $baseline) {
-              Write-Output "Agent resubscribed after the retry scenario (count $count > baseline $baseline) after ~$($i * 2)s"
-              exit 0
-            }
-            Start-Sleep -Seconds 2
-          }
-          Write-Error "Agent never resubscribed after the retry scenario"
-          exit 1
-
+          & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/wait-for-resubscription-after-the-retry-scenario.ps1"
       # ---- Wedged Windows service stop scenario (sc-106108) ----
       # windowsService.Stop() polled the service state every 250ms in an
       # unbounded loop, so a service that never reached Stopped hung its caller

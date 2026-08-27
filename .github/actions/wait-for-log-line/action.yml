@@ -1,5 +1,11 @@
 name: Wait for log line
-description: Poll a log file until it contains the supplied pattern or the attempt budget is exhausted. Does not fail if the pattern never appears - asserting presence is the caller's job.
+description: >
+  Poll a log file until it contains the supplied pattern or the attempt
+  budget is exhausted. Does not fail if the pattern never appears - asserting
+  presence is the caller's job. Reading the agent's log file requires
+  elevation now that its data directory is locked owner-only (sc-108849), so
+  the shared implementation runs under sudo on Unix and natively on the
+  already-elevated Windows runner.
 
 inputs:
   log_file:
@@ -20,7 +26,26 @@ inputs:
 runs:
   using: composite
   steps:
-    - name: Wait for log line
+    - name: Wait for log line (Unix)
+      if: runner.os != 'Windows'
+      shell: bash
+      env:
+        LOG_FILE: ${{ inputs.log_file }}
+        PATTERN: ${{ inputs.pattern }}
+        MAX_ATTEMPTS: ${{ inputs.max_attempts }}
+        INTERVAL: ${{ inputs.interval_seconds }}
+      run: |
+        set -euo pipefail
+        # Resolve pwsh up front: sudo resets PATH via secure_path on some runners.
+        pwsh_path="$(command -v pwsh)"
+        sudo "$pwsh_path" -NoProfile -File "$GITHUB_ACTION_PATH/wait.ps1" \
+          -LogFile "$LOG_FILE" \
+          -Pattern "$PATTERN" \
+          -MaxAttempts "$MAX_ATTEMPTS" \
+          -IntervalSeconds "$INTERVAL"
+
+    - name: Wait for log line (Windows)
+      if: runner.os == 'Windows'
       shell: pwsh
       env:
         LOG_FILE: ${{ inputs.log_file }}
@@ -28,15 +53,8 @@ runs:
         MAX_ATTEMPTS: ${{ inputs.max_attempts }}
         INTERVAL: ${{ inputs.interval_seconds }}
       run: |
-        $maxAttempts = [int]$env:MAX_ATTEMPTS
-        $interval = [int]$env:INTERVAL
-        Write-Output "Waiting for '$env:PATTERN' in $env:LOG_FILE (up to $maxAttempts attempts, $interval s interval)..."
-        for ($i = 1; $i -le $maxAttempts; $i++) {
-          $logContent = Get-Content $env:LOG_FILE -Raw -ErrorAction SilentlyContinue
-          if ($logContent -and ($logContent -match [regex]::Escape($env:PATTERN))) {
-            Write-Output "Pattern '$env:PATTERN' found after $i attempt(s) (~$($i * $interval)s)"
-            exit 0
-          }
-          Start-Sleep -Seconds $interval
-        }
-        Write-Output "Pattern '$env:PATTERN' did not appear within $maxAttempts attempts; downstream assertions will surface the failure"
+        & "$env:GITHUB_ACTION_PATH/wait.ps1" `
+          -LogFile $env:LOG_FILE `
+          -Pattern $env:PATTERN `
+          -MaxAttempts ([int]$env:MAX_ATTEMPTS) `
+          -IntervalSeconds ([int]$env:INTERVAL)

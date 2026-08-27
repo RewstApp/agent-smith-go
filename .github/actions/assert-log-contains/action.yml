@@ -1,5 +1,10 @@
 name: Assert log contains
-description: Assert that a log file contains every supplied pattern (substring match). Optionally sleeps before reading the log.
+description: >
+  Assert that a log file contains every supplied pattern (substring match).
+  Optionally sleeps before reading the log. Reading the agent's log file
+  requires elevation now that its data directory is locked owner-only
+  (sc-108849), so the shared implementation runs under sudo on Unix and
+  natively on the already-elevated Windows runner.
 
 inputs:
   log_file:
@@ -20,7 +25,26 @@ inputs:
 runs:
   using: composite
   steps:
-    - name: Assert log contains
+    - name: Assert log contains (Unix)
+      if: runner.os != 'Windows'
+      shell: bash
+      env:
+        LOG_FILE: ${{ inputs.log_file }}
+        PATTERNS: ${{ inputs.patterns }}
+        WAIT_SECONDS: ${{ inputs.wait_seconds }}
+        SUBSCRIBED: ${{ inputs.subscribed_topic_qos }}
+      run: |
+        set -euo pipefail
+        # Resolve pwsh up front: sudo resets PATH via secure_path on some runners.
+        pwsh_path="$(command -v pwsh)"
+        sudo "$pwsh_path" -NoProfile -File "$GITHUB_ACTION_PATH/assert.ps1" \
+          -LogFile "$LOG_FILE" \
+          -Patterns "$PATTERNS" \
+          -WaitSeconds "$WAIT_SECONDS" \
+          -SubscribedTopicQos "$SUBSCRIBED"
+
+    - name: Assert log contains (Windows)
+      if: runner.os == 'Windows'
       shell: pwsh
       env:
         LOG_FILE: ${{ inputs.log_file }}
@@ -28,43 +52,8 @@ runs:
         WAIT_SECONDS: ${{ inputs.wait_seconds }}
         SUBSCRIBED: ${{ inputs.subscribed_topic_qos }}
       run: |
-        if ([int]$env:WAIT_SECONDS -gt 0) {
-          Start-Sleep -Seconds ([int]$env:WAIT_SECONDS)
-        }
-
-        if (-not (Test-Path $env:LOG_FILE)) {
-          Write-Error "Log file not found: $env:LOG_FILE"
-          exit 1
-        }
-        $logContent = Get-Content $env:LOG_FILE -Raw
-        Write-Output $logContent
-
-        $patternList = $env:PATTERNS -split "`r?`n" | Where-Object { $_ -and $_.Trim() }
-        $failed = $false
-        foreach ($pattern in $patternList) {
-          if ($logContent -notmatch [regex]::Escape($pattern)) {
-            Write-Error "Expected log line not found: $pattern"
-            $failed = $true
-          } else {
-            Write-Output "OK: found '$pattern'"
-          }
-        }
-
-        if ($env:SUBSCRIBED -eq "true") {
-          $subscribedLine = ($logContent -split "`r?`n" | Where-Object { $_ -match "Subscribed to messages" } | Select-Object -First 1)
-          if (-not $subscribedLine) {
-            Write-Error "Expected 'Subscribed to messages' not found in logs"
-            $failed = $true
-          } else {
-            foreach ($token in @("topic=", "qos=")) {
-              if ($subscribedLine -notmatch [regex]::Escape($token)) {
-                Write-Error "Expected '$token' not found in 'Subscribed to messages' log line"
-                $failed = $true
-              }
-            }
-            Write-Output "Subscribed messages log: $subscribedLine"
-          }
-        }
-
-        if ($failed) { exit 1 }
-        Write-Output "All expected log patterns found"
+        & "$env:GITHUB_ACTION_PATH/assert.ps1" `
+          -LogFile $env:LOG_FILE `
+          -Patterns $env:PATTERNS `
+          -WaitSeconds ([int]$env:WAIT_SECONDS) `
+          -SubscribedTopicQos $env:SUBSCRIBED

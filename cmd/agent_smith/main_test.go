@@ -69,15 +69,16 @@ func (mock *mockDomainInfoProvider) EntraDomain(context.Context) (*string, error
 }
 
 type mockFileSystem struct {
-	executableFunc      func() (string, error)
-	readFileFunc        func(name string) ([]byte, error)
-	writeFileFunc       func(name string, data []byte, perm os.FileMode) error
-	mkdirAllFunc        func(path string) error
-	removeAllFunc       func(path string) error
-	renameFunc          func(oldPath string, newPath string) error
-	removeFunc          func(name string) error
-	executableInUseFunc func(name string) (bool, error)
-	ensureSecureDirFunc func(path string) error
+	executableFunc       func() (string, error)
+	readFileFunc         func(name string) ([]byte, error)
+	writeFileFunc        func(name string, data []byte, perm os.FileMode) error
+	mkdirAllFunc         func(path string) error
+	removeAllFunc        func(path string) error
+	renameFunc           func(oldPath string, newPath string) error
+	removeFunc           func(name string) error
+	executableInUseFunc  func(name string) (bool, error)
+	ensureSecureDirFunc  func(path string) error
+	ensureSecureFileFunc func(path string) error
 }
 
 func (m *mockFileSystem) Executable() (string, error) {
@@ -129,6 +130,13 @@ func (m *mockFileSystem) EnsureSecureDir(path string) error {
 		return nil
 	}
 	return m.ensureSecureDirFunc(path)
+}
+
+func (m *mockFileSystem) EnsureSecureFile(path string) error {
+	if m.ensureSecureFileFunc == nil {
+		return nil
+	}
+	return m.ensureSecureFileFunc(path)
 }
 
 type mockService struct {
