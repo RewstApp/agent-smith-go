@@ -1,5 +1,11 @@
 name: Assert uninstalled
-description: Assert that the supplied list of paths no longer exists. Each line is treated as one path. Pwsh-style environment variables (e.g. $env:TMPDIR) are expanded before checking.
+description: >
+  Assert that the supplied list of paths no longer exists. Each line is
+  treated as one path. Pwsh-style environment variables (e.g. $env:TMPDIR)
+  are expanded before checking. Checking these paths requires elevation now
+  that the agent's data directory is locked owner-only (sc-108849), so the
+  shared implementation runs under sudo on Unix and natively on the
+  already-elevated Windows runner.
 
 inputs:
   paths:
@@ -9,21 +15,21 @@ inputs:
 runs:
   using: composite
   steps:
-    - name: Assert uninstalled
+    - name: Assert uninstalled (Unix)
+      if: runner.os != 'Windows'
+      shell: bash
+      env:
+        PATHS: ${{ inputs.paths }}
+      run: |
+        set -euo pipefail
+        # Resolve pwsh up front: sudo resets PATH via secure_path on some runners.
+        pwsh_path="$(command -v pwsh)"
+        sudo --preserve-env=PATHS "$pwsh_path" -NoProfile -File "$GITHUB_ACTION_PATH/assert.ps1"
+
+    - name: Assert uninstalled (Windows)
+      if: runner.os == 'Windows'
       shell: pwsh
       env:
         PATHS: ${{ inputs.paths }}
       run: |
-        $pathList = $env:PATHS -split "`r?`n" | Where-Object { $_ -and $_.Trim() }
-        $failed = $false
-        foreach ($path in $pathList) {
-          $expanded = $ExecutionContext.InvokeCommand.ExpandString($path).Trim()
-          if (Test-Path -Path $expanded) {
-            Write-Error "Path still exists: $expanded"
-            $failed = $true
-          } else {
-            Write-Output "OK: $expanded is gone"
-          }
-        }
-        if ($failed) { exit 1 }
-        Write-Output "All directories have been deleted"
+        & "$env:GITHUB_ACTION_PATH/assert.ps1"
