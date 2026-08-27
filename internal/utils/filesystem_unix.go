@@ -89,3 +89,64 @@ func EnsureSecureDir(path string) error {
 
 	return nil
 }
+
+// EnsureSecureFile brings path in line with SecureFileMode and the current
+// process's effective uid, the file-level counterpart to EnsureSecureDir. It
+// is how an installation's config file — written world-readable (0o644)
+// before this hardening exposed the device's Azure IoT Hub SharedAccessKey
+// and GitHub token to any local account — gets corrected on the next update
+// or service start instead of only protecting files written after the fix
+// (sc-108849).
+//
+// A path that does not exist is not an error: nothing has been written yet,
+// and the write path (writeFileAtomic) already writes with SecureFileMode. A
+// symlink is refused rather than followed, for the same reason
+// EnsureSecureDir refuses one: Chmod/Chown follow symlinks, so silently
+// applying them here would act on whatever an attacker's symlink points at
+// instead of the config file itself.
+func EnsureSecureFile(path string) error {
+	fi, err := os.Lstat(path)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("failed to stat %s: %w", path, err)
+	}
+
+	if fi.Mode()&os.ModeSymlink != 0 || !fi.Mode().IsRegular() {
+		return fmt.Errorf("refusing to use %s: exists and is not a plain file", path)
+	}
+
+	stat, ok := fi.Sys().(*syscall.Stat_t)
+	if !ok {
+		return fmt.Errorf("failed to read ownership of %s", path)
+	}
+
+	euid := uint32(os.Geteuid())
+	if stat.Uid != euid {
+		if err := os.Chown(path, int(euid), os.Getegid()); err != nil {
+			return fmt.Errorf(
+				"refusing to use %s: owned by uid %d instead of %d, and could not reclaim it: %w",
+				path, stat.Uid, euid, err,
+			)
+		}
+	}
+
+	if fi.Mode().Perm() != SecureFileMode {
+		if err := os.Chmod(path, SecureFileMode); err != nil {
+			return fmt.Errorf("failed to fix permissions on %s: %w", path, err)
+		}
+	}
+
+	return nil
+}
+
+// SecureDataDirectoryACL is a no-op on Linux/macOS: EnsureSecureDir and
+// EnsureSecureFile already enforce SecureDirMode/SecureFileMode via POSIX
+// mode/ownership bits on this platform, which is what the equivalent
+// Windows ACL lockdown (filesystem_windows.go) exists to provide where those
+// bits don't apply. It exists here only so callers in cmd/agent_smith can
+// invoke it unconditionally without a build tag of their own.
+func SecureDataDirectoryACL(path string, extraAccount string) error {
+	return nil
+}

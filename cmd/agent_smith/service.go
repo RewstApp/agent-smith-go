@@ -131,6 +131,29 @@ func (svc *serviceContext) Execute(
 
 	logger := utils.ConfigureLogger("agent_smith", logFile, device.LoggingLevel)
 
+	// Migrate the data directory and config file to owner-only permissions for
+	// installations that pre-date this hardening (sc-108849), so an endpoint
+	// that never goes through install.go/update.go again (e.g. a service that
+	// is just restarted) still gets corrected. This runs only now that
+	// loadConfig has already proven this process can read svc.ConfigFile, so
+	// it never touches permissions on an unvalidated path. The account
+	// granted access is whichever this process is currently running as, which
+	// is by construction the account the service needs — no extra account to
+	// pass through here, unlike the install/update migration which may be
+	// securing the directory ahead of a service account change. Best effort:
+	// a failure here must not prevent an otherwise-healthy agent from
+	// starting.
+	dataDir := filepath.Dir(svc.ConfigFile)
+	if err := utils.EnsureSecureDir(dataDir); err != nil {
+		logger.Warn("Failed to secure data directory", "path", dataDir, "error", err)
+	}
+	if err := utils.EnsureSecureFile(svc.ConfigFile); err != nil {
+		logger.Warn("Failed to secure config file", "path", svc.ConfigFile, "error", err)
+	}
+	if err := utils.SecureDataDirectoryACL(dataDir, ""); err != nil {
+		logger.Warn("Failed to secure data directory ACL", "path", dataDir, "error", err)
+	}
+
 	// Configure syslogger if needed
 	if device.UseSyslog {
 		sysLogger, err := syslog.New(svc.Name(), logFile)

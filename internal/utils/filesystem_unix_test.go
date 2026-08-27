@@ -29,3 +29,25 @@ func TestEnsureSecureDir_FixesPermissiveExistingDir(t *testing.T) {
 		t.Errorf("expected mode to be corrected to %o, got %o", SecureDirMode, got)
 	}
 }
+
+func TestEnsureSecureFile_FixesPermissiveExistingFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+
+	// Simulate a config file written before this hardening (sc-108849), where
+	// DefaultFileMod (0o644) left it readable by any local account.
+	if err := os.WriteFile(path, []byte(`{"shared_access_key":"secret"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := EnsureSecureFile(path); err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("expected file to still exist: %v", err)
+	}
+	if got := info.Mode().Perm(); got != SecureFileMode {
+		t.Errorf("expected mode to be corrected to %o, got %o", SecureFileMode, got)
+	}
+}

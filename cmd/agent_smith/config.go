@@ -135,11 +135,24 @@ func runConfig(params *configContext) error {
 	response.Configuration.SasTokenLifetimeHours = tuningPtr(params.Tuning.SasTokenLifetimeHours)
 	response.Configuration.MaxOutputBytes = tuningPtr(params.Tuning.MaxOutputBytes)
 
-	// Create the data directory
+	// Create the data directory. EnsureSecureDir (rather than a bare MkdirAll)
+	// is what locks it to 0700 on Linux/macOS on both a fresh install and a
+	// reinstall over an existing, previously world-readable installation
+	// (sc-108849).
 	dataDir := agent.GetDataDirectory(params.OrgId)
-	err = params.FS.MkdirAll(dataDir)
+	err = params.FS.EnsureSecureDir(dataDir)
 	if err != nil {
 		return fmt.Errorf("failed to create data directory: %w", err)
+	}
+
+	// Windows has no POSIX mode bits for EnsureSecureDir to enforce, so the
+	// data directory's ACL is locked down separately: SYSTEM, Administrators,
+	// whichever account is running this installer, and the account the
+	// service itself will run as when it differs (ServiceUsername) — so a
+	// service configured to run as a different account than the installer is
+	// not locked out of its own config file. No-op on non-Windows.
+	if err := utils.SecureDataDirectoryACL(dataDir, params.ServiceUsername); err != nil {
+		return fmt.Errorf("failed to secure data directory: %w", err)
 	}
 
 	// Save the configuration file
@@ -153,8 +166,18 @@ func runConfig(params *configContext) error {
 	logger.Info("Received configuration", "configuration", string(configBytes))
 
 	// Written atomically so a failed write cannot leave a truncated config file
-	// that the service is then unable to start from.
-	err = writeFileAtomic(params.FS, configFilePath, configBytes, utils.DefaultFileMod)
+	// that the service is then unable to start from. SecureFileMode (0600
+	// rather than the world-readable DefaultFileMod) is what keeps the Azure
+	// IoT Hub SharedAccessKey and GitHub token it contains from being
+	// plaintext-readable by any other local account (sc-108849). On Windows,
+	// the file is not separately re-ACL'd here (unlike the service-start
+	// migration in service.go): a freshly created file inherits the data
+	// directory's ACL, which SecureDataDirectoryACL above already granted to
+	// ServiceUsername when the service runs as an account other than the one
+	// performing this install — an explicit per-file EnsureSecureFile call
+	// would strip that inherited grant and lock the service out of its own
+	// config file.
+	err = writeFileAtomic(params.FS, configFilePath, configBytes, utils.SecureFileMode)
 	if err != nil {
 		return fmt.Errorf("failed to save config: %w", err)
 	}

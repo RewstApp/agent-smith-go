@@ -224,13 +224,13 @@ func TestRunConfig_InvalidJSONResponse(t *testing.T) {
 	}
 }
 
-func TestRunConfig_MkdirAllDataDirFails(t *testing.T) {
+func TestRunConfig_EnsureSecureDirDataDirFails(t *testing.T) {
 	srv := newConfigServer(t, http.StatusOK, validConfigResponseBody("test-org"))
 	defer srv.Close()
 
 	params := newBaseConfigParams(srv.URL)
 	params.FS = &mockFileSystem{
-		mkdirAllFunc: func(string) error { return errors.New("mkdir failed") },
+		ensureSecureDirFunc: func(string) error { return errors.New("mkdir failed") },
 	}
 
 	err := runConfig(params)
@@ -345,15 +345,12 @@ func TestRunConfig_MkdirAllProgramDirFails(t *testing.T) {
 	defer srv.Close()
 
 	params := newBaseConfigParams(srv.URL)
-	mkdirCount := 0
 	params.FS = &mockFileSystem{
-		mkdirAllFunc: func(string) error {
-			mkdirCount++
-			if mkdirCount == 2 {
-				return errors.New("mkdir failed")
-			}
-			return nil
-		},
+		// The data directory is created via EnsureSecureDir, not MkdirAll (see
+		// TestRunConfig_EnsureSecureDirDataDirFails); MkdirAll's only remaining
+		// caller on this path is the program directory, so failing it
+		// unconditionally exercises exactly that.
+		mkdirAllFunc:  func(string) error { return errors.New("mkdir failed") },
 		writeFileFunc: func(string, []byte, os.FileMode) error { return nil },
 	}
 

@@ -15,6 +15,13 @@ const (
 	// directory (see agent.GetScriptsDirectory). It is tighter than
 	// DefaultDirMod: nothing but the agent itself ever needs to see inside.
 	SecureDirMode os.FileMode = 0o700
+
+	// SecureFileMode is enforced by EnsureSecureFile on files that must not be
+	// readable or writable by any local account other than the one the agent
+	// runs as — currently the device config file, which holds the Azure IoT
+	// Hub SharedAccessKey and GitHub token in plaintext (sc-108849). It is the
+	// file-level counterpart to SecureDirMode.
+	SecureFileMode os.FileMode = 0o600
 )
 
 type FileSystem interface {
@@ -49,6 +56,17 @@ type FileSystem interface {
 	// detected and corrected, or the call fails loud, rather than being reused
 	// with whatever ownership/mode it happens to carry.
 	EnsureSecureDir(path string) error
+	// EnsureSecureFile brings path in line with SecureFileMode (and, on
+	// platforms with POSIX ownership, the agent's own uid) every time it is
+	// called, not only when the file is written. It is the file-level
+	// counterpart to EnsureSecureDir: the mechanism by which an installation
+	// whose config file was written world-readable before this hardening gets
+	// corrected on the next update or service start rather than requiring a
+	// reinstall.
+	//
+	// A path that does not exist is not an error: nothing has been written yet,
+	// and the write path already writes with SecureFileMode from the start.
+	EnsureSecureFile(path string) error
 }
 
 type defaultFileSystem struct{}
@@ -87,6 +105,10 @@ func (*defaultFileSystem) ExecutableInUse(name string) (bool, error) {
 
 func (*defaultFileSystem) EnsureSecureDir(path string) error {
 	return EnsureSecureDir(path)
+}
+
+func (*defaultFileSystem) EnsureSecureFile(path string) error {
+	return EnsureSecureFile(path)
 }
 
 func NewFileSystem() FileSystem {

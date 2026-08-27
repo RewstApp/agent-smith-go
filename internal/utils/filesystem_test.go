@@ -283,3 +283,70 @@ func TestEnsureSecureDir_IdempotentOnExistingSecureDir(t *testing.T) {
 		t.Fatalf("expected no error on second call, got %v", err)
 	}
 }
+
+func TestDefaultFileSystem_EnsureSecureFile_MissingPathIsNotAnError(t *testing.T) {
+	fs := NewFileSystem()
+	path := filepath.Join(t.TempDir(), "config.json")
+
+	// Nothing has been written yet: the write path creates it with
+	// SecureFileMode from the start, so a missing file is not an error here.
+	if err := fs.EnsureSecureFile(path); err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("expected EnsureSecureFile not to create the file, stat returned %v", err)
+	}
+}
+
+func TestEnsureSecureFile_CreatesNothingWhenMissing(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+
+	if err := EnsureSecureFile(path); err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("expected no file to exist, stat returned %v", err)
+	}
+}
+
+func TestEnsureSecureFile_RefusesSymlink(t *testing.T) {
+	base := t.TempDir()
+	target := filepath.Join(base, "target-file")
+	if err := os.WriteFile(target, []byte("secret"), DefaultFileMod); err != nil {
+		t.Fatal(err)
+	}
+
+	link := filepath.Join(base, "config.json")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := EnsureSecureFile(link); err == nil {
+		t.Error("expected an error when the path is a symlink, got nil")
+	}
+}
+
+func TestEnsureSecureFile_RefusesDirectory(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "not-a-file")
+	if err := os.MkdirAll(dir, DefaultDirMod); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := EnsureSecureFile(dir); err == nil {
+		t.Error("expected an error when the path is a directory, got nil")
+	}
+}
+
+func TestEnsureSecureFile_IdempotentOnExistingSecureFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte("{}"), SecureFileMode); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := EnsureSecureFile(path); err != nil {
+		t.Fatalf("expected no error on first call, got %v", err)
+	}
+	if err := EnsureSecureFile(path); err != nil {
+		t.Fatalf("expected no error on second call, got %v", err)
+	}
+}
