@@ -659,7 +659,10 @@ func TestOptionalNotifierWrapper_Notify_TimeoutLoggedDistinctlyFromCrash(t *test
 		t.Errorf("expected NotifyFailures=2 after a second failure, got %d", stats.NotifyFailures)
 	}
 	if stats.NotifyTimeouts != 1 {
-		t.Errorf("expected NotifyTimeouts to stay at 1 after a non-timeout failure, got %d", stats.NotifyTimeouts)
+		t.Errorf(
+			"expected NotifyTimeouts to stay at 1 after a non-timeout failure, got %d",
+			stats.NotifyTimeouts,
+		)
 	}
 }
 
@@ -1102,7 +1105,11 @@ func TestLoadNotifer_NotifyRecoversFromHungPlugin(t *testing.T) {
 			deliveredNotifications(t, notifyLog),
 		)
 	}
-	if got := deliveredNotifications(t, notifyLog); len(got) != 1 || got[0] != "AgentStatus:Online" {
+	if got := deliveredNotifications(
+		t,
+		notifyLog,
+	); len(got) != 1 ||
+		got[0] != "AgentStatus:Online" {
 		t.Errorf("expected [AgentStatus:Online] delivered, got %v", got)
 	}
 }

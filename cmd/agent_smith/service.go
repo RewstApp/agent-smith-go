@@ -239,6 +239,7 @@ func (svc *serviceContext) Execute(
 			logger.Warn(
 				"Plugin notification health summary",
 				"notify_failures", stats.NotifyFailures,
+				"notify_timeouts", stats.NotifyTimeouts,
 				"plugin_restarts", stats.Restarts,
 				"restart_failures", stats.RestartFailures,
 			)

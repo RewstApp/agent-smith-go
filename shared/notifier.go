@@ -104,10 +104,17 @@ func (c *NotifierRPC) Notify(message string) error {
 
 	call := c.client.Go("Plugin.Notify", args, &reply, make(chan *rpc.Call, 1))
 
+	// Notify fires on every message and status transition, so on the common fast
+	// path (call.Done wins) the timer must be stopped rather than left to fire
+	// (and be garbage collected) up to timeout later; time.After would leak a
+	// live runtime timer per call until then.
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+
 	select {
 	case <-call.Done:
 		return call.Error
-	case <-time.After(timeout):
+	case <-timer.C:
 		return ErrNotifyTimeout
 	}
 }
