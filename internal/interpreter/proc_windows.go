@@ -96,7 +96,7 @@ func configureProcessGroup(cmd *exec.Cmd) processTree {
 			if err != nil {
 				return err
 			}
-			defer windows.CloseHandle(handle)
+			defer func() { _ = windows.CloseHandle(handle) }()
 			return windows.AssignProcessToJobObject(job, handle)
 		},
 		release: closeJob,

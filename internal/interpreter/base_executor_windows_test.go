@@ -39,7 +39,10 @@ func TestBaseExecutor_CommandTimeout_KillsChildProcess(t *testing.T) {
 	executor := NewPowershellExecutor()
 
 	logger := hclog.NewNullLogger()
-	timeout := 1
+	// Long enough for Start-Process to actually launch a whole nested
+	// powershell.exe and write the pid file before the timeout fires; 1s was
+	// flaky in CI because that startup alone can take close to a second.
+	timeout := 5
 	device := agent.Device{RewstOrgId: "test-org-windows-child", CommandTimeoutSeconds: &timeout}
 
 	pidFile := filepath.Join(t.TempDir(), "child.pid")
@@ -63,12 +66,12 @@ func TestBaseExecutor_CommandTimeout_KillsChildProcess(t *testing.T) {
 
 	select {
 	case <-done:
-	case <-time.After(20 * time.Second):
+	case <-time.After(30 * time.Second):
 		t.Fatal("Execute did not return; command was not killed by timeout")
 	}
 
 	// The child's pid is written before the hang, so it must be present by
-	// the time Execute (killed at ~1s) returns.
+	// the time Execute (killed at ~5s) returns.
 	pidBytes, err := os.ReadFile(pidFile)
 	if err != nil {
 		t.Fatalf("failed to read child pid file: %v", err)
