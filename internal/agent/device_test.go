@@ -33,24 +33,20 @@ func TestResolvedWorkerCount(t *testing.T) {
 
 func TestResolvedCommandTimeout(t *testing.T) {
 	tests := []struct {
-		name     string
-		value    *int
-		expectOk bool
-		expectD  time.Duration
+		name    string
+		value   *int
+		expectD time.Duration
 	}{
-		{"unset is unbounded", nil, false, 0},
-		{"zero is unbounded", intPtr(0), false, 0},
-		{"negative is unbounded", intPtr(-30), false, 0},
-		{"positive override honored", intPtr(45), true, 45 * time.Second},
+		{"unset falls back to default", nil, DefaultCommandTimeout},
+		{"zero falls back to default", intPtr(0), DefaultCommandTimeout},
+		{"negative falls back to default", intPtr(-30), DefaultCommandTimeout},
+		{"positive override honored", intPtr(45), 45 * time.Second},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			d := Device{CommandTimeoutSeconds: tt.value}
-			got, ok := d.ResolvedCommandTimeout()
-			if ok != tt.expectOk {
-				t.Errorf("ResolvedCommandTimeout() ok = %v, want %v", ok, tt.expectOk)
-			}
+			got := d.ResolvedCommandTimeout()
 			if got != tt.expectD {
 				t.Errorf("ResolvedCommandTimeout() = %v, want %v", got, tt.expectD)
 			}

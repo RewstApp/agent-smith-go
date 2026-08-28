@@ -113,7 +113,7 @@ func bindTuningFlags(fs *flag.FlagSet, t *tuningFlags) {
 		&t.CommandTimeoutSeconds,
 		"command-timeout-seconds",
 		tuningFlagUnset,
-		"Per-command execution timeout in seconds; unset means unbounded (positive integer)",
+		"Per-command execution timeout in seconds; unset falls back to the default (30 minutes) (positive integer)",
 	)
 	fs.IntVar(
 		&t.SasTokenLifetimeHours,

@@ -160,14 +160,16 @@ func TestBaseExecutor_CommandTimeout_FastCommandUnaffected(t *testing.T) {
 	}
 }
 
-func TestBaseExecutor_CommandTimeout_UnboundedByDefault(t *testing.T) {
+func TestBaseExecutor_CommandTimeout_DefaultAppliesWhenUnconfigured(t *testing.T) {
 	executor := newBashExecutor()
 
 	logger := hclog.New(&hclog.LoggerOptions{Output: &bytes.Buffer{}, Level: hclog.Error})
-	// No CommandTimeoutSeconds set: execution is unbounded (historical behavior).
-	device := agent.Device{RewstOrgId: "test-org-unbounded"}
+	// No CommandTimeoutSeconds set: the agent falls back to
+	// agent.DefaultCommandTimeout (30 minutes), which does not affect a fast
+	// command like this one.
+	device := agent.Device{RewstOrgId: "test-org-default-timeout"}
 
-	msg := Message{PostId: "test:unbounded", Commands: encodeCommand("sleep 1; echo done")}
+	msg := Message{PostId: "test:default-timeout", Commands: encodeCommand("sleep 1; echo done")}
 	resultJSON := executor.Execute(context.Background(), &msg, device, logger, nil, nil)
 
 	var r result
@@ -175,7 +177,7 @@ func TestBaseExecutor_CommandTimeout_UnboundedByDefault(t *testing.T) {
 		t.Fatalf("failed to unmarshal result: %v", err)
 	}
 	if r.TimedOut {
-		t.Errorf("command should not be timed out when no timeout is configured: %s", resultJSON)
+		t.Errorf("command should not be timed out under the default timeout: %s", resultJSON)
 	}
 	if !strings.Contains(r.Output, "done") {
 		t.Errorf("expected command output to contain 'done', got %q", r.Output)
