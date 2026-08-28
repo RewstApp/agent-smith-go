@@ -2,12 +2,15 @@ package agent
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -15,6 +18,46 @@ import (
 	"github.com/RewstApp/agent-smith-go/internal/version"
 	"github.com/hashicorp/go-hclog"
 )
+
+// testChecksumAssetName is the sidecar name Download expects alongside
+// testAssetFileName (see checksumAssetSuffix).
+const testChecksumAssetName = testAssetFileName + ".sha256"
+
+// checksumSidecarBody renders content the way .github/workflows/sign.yml's
+// `Get-FileHash | Format-List` step does, which is what fetchChecksumDigest
+// parses.
+func checksumSidecarBody(content []byte) string {
+	sum := sha256.Sum256(content)
+	return fmt.Sprintf(
+		"Algorithm : SHA256\nHash      : %s\nPath      : /irrelevant\n",
+		strings.ToUpper(hex.EncodeToString(sum[:])),
+	)
+}
+
+// newChecksumServer stands up an httptest server that serves the sidecar
+// checksum for content at any path, matching what a real release's checksum
+// asset URL would return.
+func newChecksumServer(t *testing.T, content []byte) *httptest.Server {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(checksumSidecarBody(content)))
+	}))
+	t.Cleanup(server.Close)
+	return server
+}
+
+// releaseWithChecksum builds a Release whose single binary asset is served by
+// assetURL and whose matching checksum sidecar is served by checksumURL, the
+// shape Download requires to succeed.
+func releaseWithChecksum(tagName, assetURL, checksumURL string) Release {
+	return Release{
+		TagName: tagName,
+		Assets: []Asset{
+			{Id: 1, Name: testAssetFileName, Url: assetURL},
+			{Id: 2, Name: testChecksumAssetName, Url: checksumURL},
+		},
+	}
+}
 
 func newTestDevice() *Device {
 	return &Device{
@@ -241,10 +284,13 @@ func TestDownload_Success(t *testing.T) {
 		_, _ = w.Write(fileContent)
 	}))
 	defer server.Close()
+	checksumServer := newChecksumServer(t, fileContent)
 
 	updater := newTestUpdater(t, newTestDevice(), "", nil)
 
-	path, err := updater.Download(context.Background(), Asset{Url: server.URL})
+	asset := Asset{Name: testAssetFileName, Url: server.URL}
+	release := releaseWithChecksum("v99.0.0", server.URL, checksumServer.URL)
+	path, err := updater.Download(context.Background(), release, asset)
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
@@ -279,15 +325,19 @@ func TestDownload_Success(t *testing.T) {
 // The updates directory is created on demand, because a fresh install has never
 // downloaded an update and nothing else creates it.
 func TestDownload_CreatesMissingUpdatesDirectory(t *testing.T) {
+	fileContent := []byte("fake binary content")
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte("fake binary content"))
+		_, _ = w.Write(fileContent)
 	}))
 	defer server.Close()
+	checksumServer := newChecksumServer(t, fileContent)
 
 	u := newTestUpdater(t, newTestDevice(), "", nil)
 	u.updatesDir = filepath.Join(u.updatesDir, "does-not-exist-yet", "updates")
 
-	path, err := u.Download(context.Background(), Asset{Url: server.URL})
+	asset := Asset{Name: testAssetFileName, Url: server.URL}
+	release := releaseWithChecksum("v99.0.0", server.URL, checksumServer.URL)
+	path, err := u.Download(context.Background(), release, asset)
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
@@ -313,7 +363,7 @@ func TestDownload_UncreatableUpdatesDirectoryFails(t *testing.T) {
 	}
 	u.updatesDir = filepath.Join(blocker, "updates")
 
-	path, err := u.Download(context.Background(), Asset{Url: server.URL})
+	path, err := u.Download(context.Background(), Release{}, Asset{Url: server.URL})
 	if err == nil {
 		t.Fatal("expected an error when the updates directory cannot be created, got nil")
 	}
@@ -325,7 +375,11 @@ func TestDownload_UncreatableUpdatesDirectoryFails(t *testing.T) {
 func TestDownload_HttpError(t *testing.T) {
 	updater := newTestUpdater(t, newTestDevice(), "", nil)
 
-	_, err := updater.Download(context.Background(), Asset{Url: "http://invalid.invalid.invalid"})
+	_, err := updater.Download(
+		context.Background(),
+		Release{},
+		Asset{Url: "http://invalid.invalid.invalid"},
+	)
 
 	if err == nil {
 		t.Fatal("expected error, got nil")
@@ -346,7 +400,7 @@ func TestDownload_ChmodFailure(t *testing.T) {
 		return fmt.Errorf("chmod not supported on this filesystem")
 	}
 
-	path, err := u.Download(context.Background(), Asset{Url: server.URL})
+	path, err := u.Download(context.Background(), Release{}, Asset{Url: server.URL})
 
 	if err == nil {
 		t.Fatal("expected error from chmod failure, got nil")
@@ -378,10 +432,275 @@ func TestDownload_NonOkStatus(t *testing.T) {
 
 	updater := newTestUpdater(t, newTestDevice(), "", nil)
 
-	_, err := updater.Download(context.Background(), Asset{Url: server.URL})
+	_, err := updater.Download(context.Background(), Release{}, Asset{Url: server.URL})
 
 	if err == nil {
 		t.Fatal("expected error for non-OK status")
+	}
+}
+
+// A tampered or corrupted download must never be handed to Update — this is
+// the core assertion of sc-108851.
+func TestDownload_ChecksumMismatchRejectsInstaller(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("tampered binary content"))
+	}))
+	defer server.Close()
+	// The checksum sidecar is computed over different bytes than the server
+	// actually returns, simulating a corrupted-but-200-OK download or a
+	// tampered release asset.
+	checksumServer := newChecksumServer(t, []byte("original binary content"))
+
+	u := newTestUpdater(t, newTestDevice(), "", nil)
+
+	asset := Asset{Name: testAssetFileName, Url: server.URL}
+	release := releaseWithChecksum("v99.0.0", server.URL, checksumServer.URL)
+	path, err := u.Download(context.Background(), release, asset)
+
+	if err == nil {
+		t.Fatal("expected checksum mismatch error, got nil")
+	}
+	if path != "" {
+		t.Errorf("expected empty path on checksum mismatch, got %s", path)
+	}
+
+	entries, readErr := os.ReadDir(u.updatesDir)
+	if readErr != nil {
+		t.Fatalf("failed to read updates dir: %v", readErr)
+	}
+	if len(entries) != 0 {
+		t.Errorf("expected the rejected installer to be cleaned up, found %d entries", len(entries))
+	}
+}
+
+// A release that omits the checksum sidecar entirely must fail closed rather
+// than installing the binary unverified.
+func TestDownload_MissingChecksumAssetFails(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("fake binary content"))
+	}))
+	defer server.Close()
+
+	u := newTestUpdater(t, newTestDevice(), "", nil)
+
+	asset := Asset{Name: testAssetFileName, Url: server.URL}
+	release := Release{TagName: "v99.0.0", Assets: []Asset{asset}}
+	path, err := u.Download(context.Background(), release, asset)
+
+	if err == nil {
+		t.Fatal("expected error for missing checksum asset, got nil")
+	}
+	if path != "" {
+		t.Errorf("expected empty path on error, got %s", path)
+	}
+}
+
+// A checksum asset that fails to download must also fail closed.
+func TestDownload_ChecksumFetchErrorFails(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("fake binary content"))
+	}))
+	defer server.Close()
+
+	u := newTestUpdater(t, newTestDevice(), "", nil)
+
+	asset := Asset{Name: testAssetFileName, Url: server.URL}
+	release := releaseWithChecksum("v99.0.0", server.URL, "http://invalid.invalid.invalid")
+	path, err := u.Download(context.Background(), release, asset)
+
+	if err == nil {
+		t.Fatal("expected error for unfetchable checksum asset, got nil")
+	}
+	if path != "" {
+		t.Errorf("expected empty path on error, got %s", path)
+	}
+}
+
+// A malformed checksum sidecar (not the expected Get-FileHash Format-List
+// rendering) must also fail closed rather than skip verification.
+func TestDownload_MalformedChecksumFails(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("fake binary content"))
+	}))
+	defer server.Close()
+	checksumServer := httptest.NewServer(http.HandlerFunc(
+		func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write([]byte("not a checksum file"))
+		},
+	))
+	defer checksumServer.Close()
+
+	u := newTestUpdater(t, newTestDevice(), "", nil)
+
+	asset := Asset{Name: testAssetFileName, Url: server.URL}
+	release := releaseWithChecksum("v99.0.0", server.URL, checksumServer.URL)
+	path, err := u.Download(context.Background(), release, asset)
+
+	if err == nil {
+		t.Fatal("expected error for malformed checksum file, got nil")
+	}
+	if path != "" {
+		t.Errorf("expected empty path on error, got %s", path)
+	}
+}
+
+// An installer larger than maxInstallerDownloadSize must be rejected rather
+// than filling the updates directory (and the volume under it).
+func TestDownload_OversizedInstallerFails(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		buf := make([]byte, 64*1024)
+		var written int64
+		for written <= maxInstallerDownloadSize {
+			n, err := w.Write(buf)
+			written += int64(n)
+			if err != nil {
+				return
+			}
+		}
+	}))
+	defer server.Close()
+
+	u := newTestUpdater(t, newTestDevice(), "", nil)
+
+	asset := Asset{Name: testAssetFileName, Url: server.URL}
+	release := Release{TagName: "v99.0.0", Assets: []Asset{asset}}
+	path, err := u.Download(context.Background(), release, asset)
+
+	if err == nil {
+		t.Fatal("expected error for oversized download, got nil")
+	}
+	if path != "" {
+		t.Errorf("expected empty path on error, got %s", path)
+	}
+
+	entries, readErr := os.ReadDir(u.updatesDir)
+	if readErr != nil {
+		t.Fatalf("failed to read updates dir: %v", readErr)
+	}
+	if len(entries) != 0 {
+		t.Errorf("expected the oversized download to be cleaned up, found %d entries", len(entries))
+	}
+}
+
+func TestIsNewerVersion(t *testing.T) {
+	tests := []struct {
+		name    string
+		current string
+		latest  string
+		want    bool
+		wantErr bool
+	}{
+		{name: "patch newer", current: "v1.2.3", latest: "v1.2.4", want: true},
+		{name: "minor newer", current: "v1.2.3", latest: "v1.3.0", want: true},
+		{name: "major newer", current: "v1.2.3", latest: "v2.0.0", want: true},
+		{name: "equal versions", current: "v1.2.3", latest: "v1.2.3", want: false},
+		// The bug this guards against: a release feed pointed at (or
+		// mistakenly republishing) an older tag must never be treated as an
+		// update to install.
+		{name: "older patch", current: "v1.2.4", latest: "v1.2.3", want: false},
+		{name: "older major", current: "v2.0.0", latest: "v1.9.9", want: false},
+		{name: "missing v prefix tolerated", current: "1.2.3", latest: "1.2.4", want: true},
+		{name: "prerelease suffix ignored", current: "v1.2.3", latest: "v1.2.4-rc.1", want: true},
+		{name: "malformed current", current: "not-a-version", latest: "v1.2.3", wantErr: true},
+		{name: "malformed latest", current: "v1.2.3", latest: "not-a-version", wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := isNewerVersion(tt.current, tt.latest)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf(
+						"expected error for current=%s latest=%s, got nil",
+						tt.current, tt.latest,
+					)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("expected no error, got %v", err)
+			}
+			if got != tt.want {
+				t.Errorf(
+					"isNewerVersion(%s, %s) = %v, want %v",
+					tt.current, tt.latest, got, tt.want,
+				)
+			}
+		})
+	}
+}
+
+// A release tag that fails to parse must abort the update rather than
+// silently skip it or silently treat it as newer.
+func TestRun_UnparsableLatestVersionFails(t *testing.T) {
+	release := Release{TagName: "not-a-version"}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		err := json.NewEncoder(w).Encode(release)
+		if err != nil {
+			t.Fatalf("expected no error, got %v", err)
+		}
+	}))
+	defer server.Close()
+
+	logger := hclog.NewNullLogger()
+	device := newTestDevice()
+	updater := NewUpdater(logger, device, server.URL, "", nil)
+
+	err := updater.Run(context.Background())
+
+	if err == nil {
+		t.Fatal("expected error for unparsable latest version")
+	}
+}
+
+// A release tag older than the running version must not trigger a downgrade.
+func TestRun_OlderTagDoesNotDowngrade(t *testing.T) {
+	var downloadCalled bool
+	downloadServer := httptest.NewServer(http.HandlerFunc(
+		func(w http.ResponseWriter, r *http.Request) {
+			downloadCalled = true
+			_, _ = w.Write([]byte("fake binary"))
+		},
+	))
+	defer downloadServer.Close()
+
+	// Point an "older" release at a version guaranteed to be below whatever
+	// version.Version resolves to in this build (the unset placeholder
+	// "0.0.0" in a plain `go test` run, or a real semver in a built binary).
+	release := Release{
+		TagName: "v0.0.0",
+		Assets:  []Asset{{Id: 1, Name: testAssetFileName, Url: downloadServer.URL}},
+	}
+
+	releaseServer := httptest.NewServer(http.HandlerFunc(
+		func(w http.ResponseWriter, r *http.Request) {
+			err := json.NewEncoder(w).Encode(release)
+			if err != nil {
+				t.Fatalf("expected no error, got %v", err)
+			}
+		},
+	))
+	defer releaseServer.Close()
+
+	logger := hclog.NewNullLogger()
+	device := newTestDevice()
+	updater := NewUpdater(logger, device, releaseServer.URL, "", nil)
+
+	isNewer, err := isNewerVersion(version.Version, release.TagName)
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if isNewer {
+		t.Skip("v0.0.0 is not older than the version this build resolves to; nothing to assert")
+	}
+
+	err = updater.Run(context.Background())
+	if err != nil {
+		t.Fatalf("expected no error (no update available), got %v", err)
+	}
+	if downloadCalled {
+		t.Error("expected Download not to be called for a non-newer release tag")
 	}
 }
 
@@ -393,7 +712,7 @@ type mockUpdater struct {
 	checkFn    func() (Release, error)
 	updateFn   func(string) error
 	selectFn   func(Release) (Asset, error)
-	downloadFn func(Asset) (string, error)
+	downloadFn func(Release, Asset) (string, error)
 }
 
 func (m *mockUpdater) Run(ctx context.Context) error {
@@ -425,9 +744,9 @@ func (m *mockUpdater) SelectAsset(release Release) (Asset, error) {
 	return Asset{}, nil
 }
 
-func (m *mockUpdater) Download(ctx context.Context, asset Asset) (string, error) {
+func (m *mockUpdater) Download(ctx context.Context, release Release, asset Asset) (string, error) {
 	if m.downloadFn != nil {
-		return m.downloadFn(asset)
+		return m.downloadFn(release, asset)
 	}
 	return "", nil
 }
@@ -640,21 +959,28 @@ func TestRun_FullUpdateFlow(t *testing.T) {
 		return nil
 	}
 
+	binaryContent := []byte("fake binary")
+
 	// Serve the release check endpoint
 	release := Release{
 		TagName: "v99.0.0",
-		Assets:  []Asset{{Id: 1, Name: testAssetFileName, Url: "PLACEHOLDER"}},
+		Assets: []Asset{
+			{Id: 1, Name: testAssetFileName, Url: "PLACEHOLDER"},
+			{Id: 2, Name: testChecksumAssetName, Url: "PLACEHOLDER"},
+		},
 	}
 
 	// Serve the binary download endpoint
 	downloadServer := httptest.NewServer(
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			_, _ = w.Write([]byte("fake binary"))
+			_, _ = w.Write(binaryContent)
 		}),
 	)
 	defer downloadServer.Close()
+	checksumServer := newChecksumServer(t, binaryContent)
 
 	release.Assets[0].Url = downloadServer.URL
+	release.Assets[1].Url = checksumServer.URL
 
 	releaseServer := httptest.NewServer(
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -748,17 +1074,16 @@ func TestRun_UpdateCommandError(t *testing.T) {
 		return fmt.Errorf("command failed")
 	}
 
+	binaryContent := []byte("fake binary")
 	downloadServer := httptest.NewServer(
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			_, _ = w.Write([]byte("fake binary"))
+			_, _ = w.Write(binaryContent)
 		}),
 	)
 	defer downloadServer.Close()
+	checksumServer := newChecksumServer(t, binaryContent)
 
-	release := Release{
-		TagName: "v99.0.0",
-		Assets:  []Asset{{Id: 1, Name: testAssetFileName, Url: downloadServer.URL}},
-	}
+	release := releaseWithChecksum("v99.0.0", downloadServer.URL, checksumServer.URL)
 
 	releaseServer := httptest.NewServer(
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -860,7 +1185,7 @@ func TestDownload_Timeout(t *testing.T) {
 	u := newTestUpdater(t, newTestDevice(), "", nil)
 	u.downloadClient = &http.Client{Timeout: 50 * time.Millisecond}
 
-	_, err := u.Download(context.Background(), Asset{Url: server.URL})
+	_, err := u.Download(context.Background(), Release{}, Asset{Url: server.URL})
 
 	if err == nil {
 		t.Fatal("expected timeout error, got nil")
@@ -926,7 +1251,7 @@ func TestDownload_ContextCancelled(t *testing.T) {
 	}()
 
 	start := time.Now()
-	_, err := u.Download(ctx, Asset{Url: server.URL})
+	_, err := u.Download(ctx, Release{}, Asset{Url: server.URL})
 	elapsed := time.Since(start)
 
 	if err == nil {
