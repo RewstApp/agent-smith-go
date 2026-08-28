@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/RewstApp/agent-smith-go/internal/agent"
+	"github.com/RewstApp/agent-smith-go/shared"
 	"github.com/hashicorp/go-hclog"
 )
 
@@ -590,6 +591,81 @@ func TestOptionalNotifierWrapper_Notify_PluginErrorKeepsHandle(t *testing.T) {
 	}
 }
 
+// TestOptionalNotifierWrapper_Notify_TimeoutDropsHandleAndCounts verifies a
+// Notify call that times out (the "hung, not exited" case the crash-only health
+// check cannot see) is treated like a broken transport: the handle is dropped so
+// the next attempt relaunches the subprocess, and the timeout is counted both as
+// a general failure and, distinctly, as a timeout.
+func TestOptionalNotifierWrapper_Notify_TimeoutDropsHandleAndCounts(t *testing.T) {
+	mock := &mockNotifier{notifyErr: shared.ErrNotifyTimeout}
+	wrapper := &optionalNotifierWrapper{plugin: mock, name: "test"}
+
+	if err := wrapper.Notify("hello"); !errors.Is(err, shared.ErrNotifyTimeout) {
+		t.Fatalf("expected ErrNotifyTimeout, got %v", err)
+	}
+
+	if wrapper.plugin != nil {
+		t.Error("expected the plugin handle to be dropped after a timeout")
+	}
+
+	stats := wrapper.Stats()
+	if stats.NotifyFailures != 1 {
+		t.Errorf("expected 1 notify failure, got %d", stats.NotifyFailures)
+	}
+	if stats.NotifyTimeouts != 1 {
+		t.Errorf("expected 1 notify timeout, got %d", stats.NotifyTimeouts)
+	}
+}
+
+// TestOptionalNotifierWrapper_Notify_TimeoutLoggedDistinctlyFromCrash verifies a
+// timeout and a crash produce distinguishable failure log lines and counters, so
+// QA and on-call can tell the two failure modes apart.
+func TestOptionalNotifierWrapper_Notify_TimeoutLoggedDistinctlyFromCrash(t *testing.T) {
+	logBuf := &bytes.Buffer{}
+	mock := &mockNotifier{notifyErr: shared.ErrNotifyTimeout}
+	wrapper := &optionalNotifierWrapper{
+		plugin: mock,
+		name:   "test",
+		logger: newBufferedLogger(logBuf),
+	}
+
+	if err := wrapper.Notify("hello"); err == nil {
+		t.Fatal("expected the timeout to be returned")
+	}
+
+	logged := logBuf.String()
+	if !strings.Contains(logged, "RPC call timed out") {
+		t.Errorf("expected the timeout error text in the failure log, got %q", logged)
+	}
+
+	stats := wrapper.Stats()
+	if stats.NotifyFailures != 1 || stats.NotifyTimeouts != 1 {
+		t.Errorf(
+			"expected NotifyFailures=1 and NotifyTimeouts=1 for a timeout, got %+v",
+			stats,
+		)
+	}
+
+	// A crash (transport error) is counted as a general failure but must not move
+	// the timeout-specific counter.
+	mock.notifyErr = rpc.ErrShutdown
+	wrapper.plugin = mock
+	if err := wrapper.Notify("hello"); err == nil {
+		t.Fatal("expected the crash to be returned")
+	}
+
+	stats = wrapper.Stats()
+	if stats.NotifyFailures != 2 {
+		t.Errorf("expected NotifyFailures=2 after a second failure, got %d", stats.NotifyFailures)
+	}
+	if stats.NotifyTimeouts != 1 {
+		t.Errorf(
+			"expected NotifyTimeouts to stay at 1 after a non-timeout failure, got %d",
+			stats.NotifyTimeouts,
+		)
+	}
+}
+
 // TestOptionalNotifierWrapper_Notify_LogsOncePerFailureTransition verifies the
 // counter increments on every failure while the log stays quiet until the plugin
 // recovers, so a persistently broken plugin cannot flood the agent log.
@@ -976,6 +1052,65 @@ func TestLoadNotifer_NotifyRestartsCrashedPlugin(t *testing.T) {
 			"expected the notification to be delivered by the relaunched plugin, got %v",
 			deliveredNotifications(t, notifyLog),
 		)
+	}
+}
+
+// TestLoadNotifer_NotifyRecoversFromHungPlugin is the end-to-end regression test
+// for the "hung, not exited" failure mode: a real plugin subprocess that accepts
+// the Notify call and then blocks forever without exiting must not block the
+// calling worker past shared.NotifyTimeout, and the still-alive subprocess must
+// be killed and relaunched rather than left running and permanently wedged —
+// which is exactly what the existing crash-only health check could not detect.
+func TestLoadNotifer_NotifyRecoversFromHungPlugin(t *testing.T) {
+	original := shared.NotifyTimeout
+	shared.NotifyTimeout = 200 * time.Millisecond
+	defer func() { shared.NotifyTimeout = original }()
+
+	wrapper, _, notifyLog := loadTestNotifier(t)
+
+	start := time.Now()
+	err := wrapper.Notify("HANG_FOREVER")
+	elapsed := time.Since(start)
+
+	if !errors.Is(err, shared.ErrNotifyTimeout) {
+		t.Fatalf("expected ErrNotifyTimeout from a hung plugin, got %v", err)
+	}
+	// Bounded by NotifyTimeout plus go-plugin's own 2s graceful-kill grace period;
+	// 5x that margin comfortably rules out "actually blocked forever".
+	if elapsed > 5*time.Second {
+		t.Errorf("Notify was not bounded by the timeout: took %v", elapsed)
+	}
+
+	if got := wrapper.Stats().NotifyTimeouts; got != 1 {
+		t.Errorf("expected 1 notify timeout counted, got %d", got)
+	}
+
+	// The hung subprocess was killed as part of dropping the handle; the next
+	// Notify must relaunch it and resume delivery rather than calling a dead
+	// client forever.
+	if err := wrapper.Notify("AgentStatus:Online"); err != nil {
+		t.Fatalf("expected the relaunched plugin to deliver, got %v", err)
+	}
+
+	if got := wrapper.Stats().Restarts; got != 1 {
+		t.Errorf("expected the hung plugin to be restarted once, got %d", got)
+	}
+
+	delivered := waitFor(t, 5*time.Second, func() bool {
+		return len(deliveredNotifications(t, notifyLog)) == 1
+	})
+	if !delivered {
+		t.Fatalf(
+			"expected the notification to be delivered by the relaunched plugin, got %v",
+			deliveredNotifications(t, notifyLog),
+		)
+	}
+	if got := deliveredNotifications(
+		t,
+		notifyLog,
+	); len(got) != 1 ||
+		got[0] != "AgentStatus:Online" {
+		t.Errorf("expected [AgentStatus:Online] delivered, got %v", got)
 	}
 }
 

@@ -2,7 +2,9 @@
 // to exercise real subprocess crash and restart handling. Every notification it
 // receives is appended to the file named by the AGENT_SMITH_TEST_NOTIFY_LOG
 // environment variable, so a test can assert that delivery survives the plugin
-// process being killed and relaunched.
+// process being killed and relaunched. A message equal to hangMessage instead
+// blocks forever without exiting, modeling a plugin that deadlocks internally,
+// so a test can exercise the RPC timeout / "hung, not exited" recovery path.
 //
 // It lives under testdata so it is skipped by ./... build and vet patterns; the
 // test builds it explicitly by path.
@@ -20,11 +22,20 @@ import (
 // the environment because the host launches plugins with a fixed argument list.
 const notifyLogEnvVar = "AGENT_SMITH_TEST_NOTIFY_LOG"
 
+// hangMessage is the sentinel message that makes Notify block forever instead of
+// returning. Tests exercising the hang path must send exactly this string; it is
+// duplicated (not imported) in the test file since it lives in package main.
+const hangMessage = "HANG_FOREVER"
+
 type fileNotifier struct {
 	path string
 }
 
 func (n *fileNotifier) Notify(message string) error {
+	if message == hangMessage {
+		select {} // block forever without exiting, never reaching the file write
+	}
+
 	file, err := os.OpenFile(n.path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {
 		return err
