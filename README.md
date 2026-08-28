@@ -619,6 +619,39 @@ process group, which is enough to escape that teardown. Linux's cgroup-based
 `KillMode` is inherited across `fork()` and untouched by `setsid()`, so the
 same call that protects the helper on macOS does not protect it on Linux.
 
+### Verified, Version-Gated Auto-Updates
+
+Every auto-update downloads a full agent binary and executes it as the
+installer, so two questions have to be answered before that binary is trusted:
+is it actually the release the agent asked for, and is it actually newer than
+what is already running? Neither was checked before.
+
+- **Checksum verification.** The release pipeline (`.github/workflows/sign.yml`)
+  already computes a SHA-256 hash for every signed binary and publishes it as a
+  `<binary-name>.sha256` asset alongside the binary in the same GitHub release,
+  but nothing consumed it. `Download` now hashes the installer as it streams to
+  disk, fetches the matching checksum asset, and aborts — removing the temp file
+  it already cleans up on any other download failure — if the two don't match.
+  A release missing its checksum asset, or a checksum asset that itself fails to
+  download or doesn't parse, fails the same way: verification is required, not
+  best-effort, so a corrupted-but-200-OK download, a tampered release asset, or
+  a broken release job can never be executed.
+- **Newer-than, not not-equal.** `Run` used to update whenever the latest tag
+  differed from the running version at all. That also updates on an *older*
+  tag — a release process mistake that republishes or points the check
+  endpoint at a stale release would silently downgrade the whole fleet. The
+  comparison is now a proper semantic version check (`isNewerVersion`): an
+  update proceeds only when the latest release's `MAJOR.MINOR.PATCH` is greater
+  than the running version's, and a tag that fails to parse aborts the check
+  with an error instead of being guessed at in either direction.
+- **A size ceiling on the download.** `Download` bounds the installer to 200 MiB
+  regardless of the `Content-Length` header (which can be absent or wrong) —
+  generous headroom over the compiled binary's actual size, so a legitimate
+  release is never at risk, while a misbehaving or compromised release endpoint
+  cannot fill the updates directory, and the volume under it, by serving an
+  oversized or endless body. `downloadTimeout` already bounds how long the
+  request runs; this bounds how many bytes it can deliver in that time.
+
 ### Capped and Jittered Auto-Update Retries
 
 When an update check or download fails, the agent retries on an exponential

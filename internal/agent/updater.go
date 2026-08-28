@@ -2,12 +2,15 @@ package agent
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -32,7 +35,7 @@ type Updater interface {
 	Check(ctx context.Context) (Release, error)
 	Update(updaterExecutablePath string) error
 	SelectAsset(release Release) (Asset, error)
-	Download(ctx context.Context, asset Asset) (string, error)
+	Download(ctx context.Context, release Release, asset Asset) (string, error)
 	Run(ctx context.Context) error
 }
 
@@ -184,6 +187,28 @@ const (
 	// holds executable agent binaries. Ignored on Windows, where the directory
 	// inherits the ACL of the data directory it is created under.
 	updatesDirMod os.FileMode = 0o700
+
+	// maxInstallerDownloadSize bounds how many bytes Download will accept for the
+	// installer binary. Agent Smith's compiled binaries are tens of megabytes;
+	// this ceiling is generous headroom above that so a legitimate release is
+	// never at risk, while a misbehaving or compromised release endpoint cannot
+	// fill the updates directory (and the volume under it) by serving an
+	// oversized or endless body — downloadTimeout bounds how long the request
+	// runs but not how many bytes a slow-but-still-connected sender can push in
+	// that window.
+	maxInstallerDownloadSize int64 = 200 * 1024 * 1024
+
+	// checksumAssetSuffix is appended to a binary asset's name to find its
+	// published checksum sidecar in the same release, e.g.
+	// "rewst_agent_config.linux.bin.sha256" alongside
+	// "rewst_agent_config.linux.bin". See .github/workflows/sign.yml, which
+	// computes and uploads this file for every release asset.
+	checksumAssetSuffix = ".sha256"
+
+	// maxChecksumFileSize bounds how many bytes Download will read for a
+	// checksum sidecar file. The published files are a few lines of text; this
+	// is generous headroom while still preventing an unbounded read.
+	maxChecksumFileSize int64 = 4096
 )
 
 type defaultUpdater struct {
@@ -293,7 +318,11 @@ func (u *defaultUpdater) Update(updaterExecutablePath string) error {
 	return u.runCommand(updaterExecutablePath, args)
 }
 
-func (u *defaultUpdater) Download(ctx context.Context, asset Asset) (string, error) {
+func (u *defaultUpdater) Download(
+	ctx context.Context,
+	release Release,
+	asset Asset,
+) (string, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, asset.Url, nil)
 	if err != nil {
 		return "", err
@@ -345,16 +374,138 @@ func (u *defaultUpdater) Download(ctx context.Context, asset Asset) (string, err
 		}
 	}()
 
-	_, err = io.Copy(file, resp.Body)
+	hasher := sha256.New()
+	written, err := io.Copy(
+		io.MultiWriter(file, hasher),
+		io.LimitReader(resp.Body, maxInstallerDownloadSize+1),
+	)
 	if err != nil {
 		return "", err
+	}
+	if written > maxInstallerDownloadSize {
+		return "", fmt.Errorf(
+			"installer download for %s exceeds maximum allowed size of %d bytes",
+			asset.Name, maxInstallerDownloadSize,
+		)
 	}
 	if err = u.chmod(file.Name(), utils.DefaultExecutableFileMod); err != nil {
 		return "", fmt.Errorf("failed to set executable permission on installer: %w", err)
 	}
 
+	// The download is not trusted until its bytes are verified against the
+	// checksum published alongside it in the same release: a corrupted-but-200
+	// download, a MITM'd release asset, or a compromised release process would
+	// otherwise be written to disk, marked executable, and handed straight to
+	// Update() with nothing having looked at its contents. A missing checksum
+	// asset fails closed rather than falling back to running the binary
+	// unverified.
+	checksumAsset, err := findChecksumAsset(release, asset)
+	if err != nil {
+		return "", fmt.Errorf("failed to verify installer for %s: %w", asset.Name, err)
+	}
+	expectedDigest, err := u.fetchChecksumDigest(ctx, checksumAsset)
+	if err != nil {
+		return "", fmt.Errorf("failed to fetch checksum for %s: %w", asset.Name, err)
+	}
+	actualDigest := hex.EncodeToString(hasher.Sum(nil))
+	if !strings.EqualFold(actualDigest, expectedDigest) {
+		return "", fmt.Errorf(
+			"checksum mismatch for %s: expected %s, got %s",
+			asset.Name, expectedDigest, actualDigest,
+		)
+	}
+
 	success = true
 	return file.Name(), nil
+}
+
+// findChecksumAsset returns the checksum sidecar asset published alongside
+// asset in the same release (see checksumAssetSuffix). It fails closed —
+// callers must not fall back to installing asset unverified — when a release
+// omits the sidecar for whatever asset it does publish.
+func findChecksumAsset(release Release, asset Asset) (Asset, error) {
+	want := asset.Name + checksumAssetSuffix
+	for _, a := range release.Assets {
+		if a.Name == want {
+			return a, nil
+		}
+	}
+	return Asset{}, fmt.Errorf("no checksum asset named %s found in release", want)
+}
+
+// fetchChecksumDigest downloads and parses the SHA-256 checksum sidecar
+// published by .github/workflows/sign.yml, whose content is the PowerShell
+// `Get-FileHash | Format-List` rendering:
+//
+//	Algorithm : SHA256
+//	Hash      : <64 hex chars>
+//	Path      : <path on the runner that produced it>
+//
+// Only the Hash field is meaningful here; Algorithm and Path are not
+// validated since the file name convention already ties the sidecar to a
+// specific asset and algorithm.
+func (u *defaultUpdater) fetchChecksumDigest(
+	ctx context.Context,
+	checksumAsset Asset,
+) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, checksumAsset.Url, nil)
+	if err != nil {
+		return "", err
+	}
+
+	req.Header.Add("Accept", "application/octet-stream")
+	if u.githubToken != "" {
+		req.Header.Set("Authorization", "Bearer "+u.githubToken)
+	}
+
+	resp, err := u.downloadClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer func() {
+		_ = resp.Body.Close()
+	}()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("checksum download failed with status code: %d", resp.StatusCode)
+	}
+
+	content, err := io.ReadAll(io.LimitReader(resp.Body, maxChecksumFileSize+1))
+	if err != nil {
+		return "", err
+	}
+	if int64(len(content)) > maxChecksumFileSize {
+		return "", fmt.Errorf(
+			"checksum file exceeds maximum allowed size of %d bytes", maxChecksumFileSize,
+		)
+	}
+
+	return parseSha256ChecksumHash(content)
+}
+
+// parseSha256ChecksumHash extracts the Hash field from a
+// `Get-FileHash | Format-List` rendering (see fetchChecksumDigest) and
+// returns it lowercased for a case-insensitive comparison against the
+// lowercase hex hex.EncodeToString produces.
+func parseSha256ChecksumHash(content []byte) (string, error) {
+	for _, line := range strings.Split(string(content), "\n") {
+		key, value, found := strings.Cut(line, ":")
+		if !found || strings.TrimSpace(key) != "Hash" {
+			continue
+		}
+
+		hash := strings.ToLower(strings.TrimSpace(value))
+		if len(hash) != sha256.Size*2 {
+			continue
+		}
+		if _, err := hex.DecodeString(hash); err != nil {
+			continue
+		}
+
+		return hash, nil
+	}
+
+	return "", fmt.Errorf("no valid SHA-256 hash found in checksum file")
 }
 
 func (u *defaultUpdater) Run(ctx context.Context) error {
@@ -365,7 +516,12 @@ func (u *defaultUpdater) Run(ctx context.Context) error {
 
 	u.logger.Info("Latest release", "tag_name", latestRelease.TagName)
 
-	if latestRelease.TagName == version.Version {
+	isNewer, err := isNewerVersion(version.Version, latestRelease.TagName)
+	if err != nil {
+		return fmt.Errorf("failed to compare current version %q against latest release %q: %w",
+			version.Version, latestRelease.TagName, err)
+	}
+	if !isNewer {
 		u.logger.Info("No updates available")
 		return nil
 	}
@@ -377,12 +533,67 @@ func (u *defaultUpdater) Run(ctx context.Context) error {
 		return err
 	}
 
-	executablePath, err := u.Download(ctx, applicableAsset)
+	executablePath, err := u.Download(ctx, latestRelease, applicableAsset)
 	if err != nil {
 		return err
 	}
 
 	return u.Update(executablePath)
+}
+
+// isNewerVersion reports whether latest is a semantically newer version than
+// current. Both are expected in the tag_format .cz.toml produces
+// ("vMAJOR.MINOR.PATCH", optionally with a prerelease/build suffix that is
+// ignored for comparison purposes). Comparing tags for inequality rather than
+// "newer than" let a release process mistake — republishing an older tag as
+// the one the check endpoint returns, or a test/staging feed pointed at a
+// stale release — silently downgrade the whole fleet; comparing for equality
+// with no ordering at all would do the same for a genuinely older tag. An
+// unparseable version is reported as an error instead of guessed at, so a
+// malformed tag can neither be silently skipped nor silently treated as newer.
+func isNewerVersion(current, latest string) (bool, error) {
+	c, err := parseSemver(current)
+	if err != nil {
+		return false, fmt.Errorf("invalid current version %q: %w", current, err)
+	}
+	l, err := parseSemver(latest)
+	if err != nil {
+		return false, fmt.Errorf("invalid latest version %q: %w", latest, err)
+	}
+
+	for i := range c {
+		if l[i] != c[i] {
+			return l[i] > c[i], nil
+		}
+	}
+	return false, nil
+}
+
+// parseSemver parses the numeric MAJOR.MINOR.PATCH components of a version
+// string, tolerating an optional leading "v" and discarding any
+// prerelease/build metadata suffix (introduced by "-" or "+").
+func parseSemver(v string) ([3]int, error) {
+	var parts [3]int
+
+	v = strings.TrimPrefix(v, "v")
+	if i := strings.IndexAny(v, "-+"); i >= 0 {
+		v = v[:i]
+	}
+
+	segments := strings.Split(v, ".")
+	if len(segments) != 3 {
+		return parts, fmt.Errorf("expected MAJOR.MINOR.PATCH, got %q", v)
+	}
+
+	for i, segment := range segments {
+		n, err := strconv.Atoi(segment)
+		if err != nil || n < 0 {
+			return parts, fmt.Errorf("invalid numeric component %q", segment)
+		}
+		parts[i] = n
+	}
+
+	return parts, nil
 }
 
 type AutoUpdateRunner struct {
