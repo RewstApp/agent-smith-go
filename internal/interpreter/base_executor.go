@@ -263,8 +263,10 @@ func (e *baseExecutor) Execute(
 		if assignErr := tree.Assign(); assignErr != nil {
 			logger.Warn(
 				"Failed to fully isolate command process tree; child processes may survive a timeout",
-				"message_id", message.PostId,
-				"error", assignErr,
+				"message_id",
+				message.PostId,
+				"error",
+				assignErr,
 			)
 		}
 		err = cmd.Wait()
