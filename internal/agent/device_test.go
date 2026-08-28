@@ -95,7 +95,11 @@ func TestResolvedCommandTimeoutOverride(t *testing.T) {
 	// An empty override (production build) uses normal resolution.
 	defaultCommandTimeoutOverrideStr = ""
 	if got := unconfigured.ResolvedCommandTimeout(); got != DefaultCommandTimeout {
-		t.Errorf("with empty override, ResolvedCommandTimeout() = %v, want %v", got, DefaultCommandTimeout)
+		t.Errorf(
+			"with empty override, ResolvedCommandTimeout() = %v, want %v",
+			got,
+			DefaultCommandTimeout,
+		)
 	}
 }
 

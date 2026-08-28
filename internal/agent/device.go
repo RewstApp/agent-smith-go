@@ -191,8 +191,8 @@ func (d Device) ResolvedCommandTimeout() time.Duration {
 	if d.CommandTimeoutSeconds != nil && *d.CommandTimeoutSeconds > 0 {
 		return time.Duration(*d.CommandTimeoutSeconds) * time.Second
 	}
-	if defaultCommandTimeoutOverrideStr != "" {
-		if timeout, err := time.ParseDuration(defaultCommandTimeoutOverrideStr); err == nil && timeout > 0 {
+	if override := defaultCommandTimeoutOverrideStr; override != "" {
+		if timeout, err := time.ParseDuration(override); err == nil && timeout > 0 {
 			return timeout
 		}
 	}
