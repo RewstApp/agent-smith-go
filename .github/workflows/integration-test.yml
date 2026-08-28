@@ -857,7 +857,110 @@ jobs:
           max_attempts: "60"
           interval_seconds: "2"
 
+      # ---- Default command execution timeout scenario (sc-108852) ----
+      # command_timeout_seconds has not been touched anywhere earlier in this job
+      # (the explicit-timeout scenario right below is the first place that
+      # configures it), so this proves the timeout applies out of the box rather
+      # than only when an operator opts in. The IT binary is built with
+      # defaultCommandTimeoutOverrideStr=5s (see scripts/build_integration_test.ps1)
+      # so the production 30-minute default can be exercised in seconds; that
+      # override only ever replaces the fallback constant and stops applying the
+      # moment command_timeout_seconds is configured, which the following
+      # scenario (still on this same device) proves separately.
+      # --no-auto-updates keeps this binary running for the scenario's duration.
+      - name: Install IT binary to exercise the default command timeout
+        uses: ./.github/actions/run-agent
+        with:
+          binary: ${{ matrix.it_binary }}
+          args: --update --org-id ${{ vars.IT_ORG_ID }} --no-auto-updates ${{ matrix.no_auto_updates_extra }} --github-token ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Wait for fresh subscription after default-timeout binary install
+        uses: ./.github/actions/wait-for-log-line
+        with:
+          log_file: ${{ matrix.log_file }}
+          pattern: Subscribed to messages
+          max_attempts: "60"
+          interval_seconds: "2"
+
+      - name: Capture default-command-timeout baseline counts (Unix)
+        if: runner.os != 'Windows'
+        id: default_timeout_baseline_unix
+        shell: bash
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+        run: |
+          set -euo pipefail
+          # Resolve pwsh up front: sudo resets PATH via secure_path on some runners.
+          pwsh_path="$(command -v pwsh)"
+          sudo --preserve-env=LOG_FILE,GITHUB_OUTPUT "$pwsh_path" -NoProfile -File "$GITHUB_WORKSPACE/.github/workflows/it-scripts/capture-command-timeout-baseline-counts.ps1"
+
+      - name: Capture default-command-timeout baseline counts (Windows)
+        if: runner.os == 'Windows'
+        id: default_timeout_baseline_windows
+        shell: pwsh
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+        run: |
+          & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/capture-command-timeout-baseline-counts.ps1"
+      - name: Send hanging command with no command_timeout_seconds configured
+        uses: ./.github/actions/send-command
+        with:
+          trigger_url: ${{ vars.IT_SEND_COMMAND_TRIGGER_URL }}
+          device_id: ${{ steps.config.outputs.device_id }}
+          commands: ${{ matrix.timeout_commands }}
+
+      - name: Assert hanging command was killed by the default timeout (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+          BASELINE: ${{ (steps.default_timeout_baseline_unix.outputs.timed_out || steps.default_timeout_baseline_windows.outputs.timed_out) }}
+        run: |
+          set -euo pipefail
+          # Resolve pwsh up front: sudo resets PATH via secure_path on some runners.
+          pwsh_path="$(command -v pwsh)"
+          sudo --preserve-env=LOG_FILE,BASELINE "$pwsh_path" -NoProfile -File "$GITHUB_WORKSPACE/.github/workflows/it-scripts/assert-hanging-command-was-killed-by-the-timeout.ps1"
+
+      - name: Assert hanging command was killed by the default timeout (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+          BASELINE: ${{ (steps.default_timeout_baseline_unix.outputs.timed_out || steps.default_timeout_baseline_windows.outputs.timed_out) }}
+        run: |
+          & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/assert-hanging-command-was-killed-by-the-timeout.ps1"
+      - name: Send command after default timeout
+        uses: ./.github/actions/send-command
+        with:
+          trigger_url: ${{ vars.IT_SEND_COMMAND_TRIGGER_URL }}
+          device_id: ${{ steps.config.outputs.device_id }}
+          commands: ${{ matrix.success_commands }}
+
+      - name: Assert worker pool recovered after default timeout (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+          BASELINE: ${{ (steps.default_timeout_baseline_unix.outputs.completed || steps.default_timeout_baseline_windows.outputs.completed) }}
+        run: |
+          set -euo pipefail
+          # Resolve pwsh up front: sudo resets PATH via secure_path on some runners.
+          pwsh_path="$(command -v pwsh)"
+          sudo --preserve-env=LOG_FILE,BASELINE "$pwsh_path" -NoProfile -File "$GITHUB_WORKSPACE/.github/workflows/it-scripts/assert-worker-pool-recovered-after-timeout.ps1"
+
+      - name: Assert worker pool recovered after default timeout (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+          BASELINE: ${{ (steps.default_timeout_baseline_unix.outputs.completed || steps.default_timeout_baseline_windows.outputs.completed) }}
+        run: |
+          & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/assert-worker-pool-recovered-after-timeout.ps1"
       # ---- Per-command execution timeout scenario (sc-103835) ----
+      # Reinstalls matrix.binary below with an explicit command_timeout_seconds,
+      # which is the first place in this job that field is ever configured -
+      # proving the explicit override still works, and still takes precedence
+      # over the default exercised above, on this very same device.
       # Configure a short per-command timeout, dispatch a script that sleeps well
       # beyond it, and confirm the agent kills the command (logging a timeout) and
       # that a subsequent ordinary command still completes - i.e. the worker pool

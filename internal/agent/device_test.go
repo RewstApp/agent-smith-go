@@ -33,28 +33,73 @@ func TestResolvedWorkerCount(t *testing.T) {
 
 func TestResolvedCommandTimeout(t *testing.T) {
 	tests := []struct {
-		name     string
-		value    *int
-		expectOk bool
-		expectD  time.Duration
+		name    string
+		value   *int
+		expectD time.Duration
 	}{
-		{"unset is unbounded", nil, false, 0},
-		{"zero is unbounded", intPtr(0), false, 0},
-		{"negative is unbounded", intPtr(-30), false, 0},
-		{"positive override honored", intPtr(45), true, 45 * time.Second},
+		{"unset falls back to default", nil, DefaultCommandTimeout},
+		{"zero falls back to default", intPtr(0), DefaultCommandTimeout},
+		{"negative falls back to default", intPtr(-30), DefaultCommandTimeout},
+		{"positive override honored", intPtr(45), 45 * time.Second},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			d := Device{CommandTimeoutSeconds: tt.value}
-			got, ok := d.ResolvedCommandTimeout()
-			if ok != tt.expectOk {
-				t.Errorf("ResolvedCommandTimeout() ok = %v, want %v", ok, tt.expectOk)
-			}
+			got := d.ResolvedCommandTimeout()
 			if got != tt.expectD {
 				t.Errorf("ResolvedCommandTimeout() = %v, want %v", got, tt.expectD)
 			}
 		})
+	}
+}
+
+// TestResolvedCommandTimeoutOverride verifies the ldflags-injected override
+// (used only by the integration test binary) shrinks the default fallback
+// timeout, but — unlike sasTokenLifetimeOverrideStr — never overrides an
+// explicit per-device command_timeout_seconds.
+func TestResolvedCommandTimeoutOverride(t *testing.T) {
+	orig := defaultCommandTimeoutOverrideStr
+	t.Cleanup(func() { defaultCommandTimeoutOverrideStr = orig })
+
+	// A valid override replaces the default when unconfigured.
+	defaultCommandTimeoutOverrideStr = "5s"
+	unconfigured := Device{}
+	if got := unconfigured.ResolvedCommandTimeout(); got != 5*time.Second {
+		t.Errorf("with override set, ResolvedCommandTimeout() = %v, want %v", got, 5*time.Second)
+	}
+
+	// An explicit per-device value still wins over the override.
+	configured := Device{CommandTimeoutSeconds: intPtr(45)}
+	if got := configured.ResolvedCommandTimeout(); got != 45*time.Second {
+		t.Errorf(
+			"with override set but timeout configured, ResolvedCommandTimeout() = %v, want %v",
+			got,
+			45*time.Second,
+		)
+	}
+
+	// An invalid or non-positive override is ignored, falling back to the default.
+	for _, bad := range []string{"not-a-duration", "0s", "-5s"} {
+		defaultCommandTimeoutOverrideStr = bad
+		if got := unconfigured.ResolvedCommandTimeout(); got != DefaultCommandTimeout {
+			t.Errorf(
+				"with invalid override %q, ResolvedCommandTimeout() = %v, want %v",
+				bad,
+				got,
+				DefaultCommandTimeout,
+			)
+		}
+	}
+
+	// An empty override (production build) uses normal resolution.
+	defaultCommandTimeoutOverrideStr = ""
+	if got := unconfigured.ResolvedCommandTimeout(); got != DefaultCommandTimeout {
+		t.Errorf(
+			"with empty override, ResolvedCommandTimeout() = %v, want %v",
+			got,
+			DefaultCommandTimeout,
+		)
 	}
 }
 

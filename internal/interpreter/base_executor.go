@@ -231,17 +231,12 @@ func (e *baseExecutor) Execute(
 	stdoutBuf := newBoundedWriter(maxOutputBytes)
 	stderrBuf := newBoundedWriter(maxOutputBytes)
 
-	// Bound the command to the configured per-command timeout when one is set, so
-	// a hung or interactive script (infinite loop, blocked on stdin, stuck network
+	// Bound the command to the configured (or default) per-command timeout, so a
+	// hung or interactive script (infinite loop, blocked on stdin, stuck network
 	// call) is killed after the deadline instead of permanently occupying its
-	// worker. When no timeout is configured, execCtx is the unmodified per-cycle
-	// ctx and the command remains unbounded (historical behavior).
-	execCtx := ctx
-	if timeout, ok := device.ResolvedCommandTimeout(); ok {
-		var cancel context.CancelFunc
-		execCtx, cancel = context.WithTimeout(ctx, timeout)
-		defer cancel()
-	}
+	// worker.
+	execCtx, cancel := context.WithTimeout(ctx, device.ResolvedCommandTimeout())
+	defer cancel()
 
 	// #nosec G204
 	cmd := exec.CommandContext(execCtx, e.Shell, e.BuildExecuteFileArgs(tempfile.Name())...)
@@ -285,7 +280,7 @@ func (e *baseExecutor) Execute(
 		// still live means the timeout fired (not a service stop / reconnect,
 		// which cancels the parent ctx instead).
 		if errors.Is(execCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil {
-			timeout, _ := device.ResolvedCommandTimeout()
+			timeout := device.ResolvedCommandTimeout()
 			logger.Error(
 				"Command timed out",
 				"message_id",

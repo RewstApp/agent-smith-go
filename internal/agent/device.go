@@ -54,13 +54,15 @@ type Device struct {
 	// exponential backoff between postback attempts, in seconds. When unset (or
 	// non-positive) the agent falls back to DefaultPostbackBaseRetryBackoff.
 	PostbackBaseRetryBackoffSeconds *int `json:"postback_base_retry_backoff_seconds,omitempty"`
-	// CommandTimeoutSeconds optionally bounds how long a single received command
-	// is allowed to run before it is killed. When unset (or non-positive) command
-	// execution is unbounded, preserving the historical behavior. Setting a
-	// positive value protects the worker pool from a hung or interactive script
-	// (infinite loop, blocked on stdin, stuck network call) permanently consuming
-	// a worker: the command is cancelled once the deadline elapses even if the
-	// MQTT connection stays up.
+	// CommandTimeoutSeconds optionally overrides how long a single received
+	// command is allowed to run before it is killed. When unset (or
+	// non-positive) the agent falls back to DefaultCommandTimeout rather than
+	// running commands unbounded, so a hung or interactive script (infinite
+	// loop, blocked on stdin, stuck network call) can no longer permanently
+	// consume a worker out of the box: the command is cancelled once the
+	// deadline elapses even if the MQTT connection stays up. Raise it for
+	// workflows with legitimately long-running commands, or lower it to fail
+	// faster.
 	CommandTimeoutSeconds *int `json:"command_timeout_seconds,omitempty"`
 	// MaxOutputBytes optionally overrides how many bytes of a single command's
 	// output the agent keeps, applied independently to stdout and stderr. When
@@ -116,6 +118,16 @@ const (
 	// the agent to a small constant multiple of it instead of tracking however
 	// much the script decides to write.
 	DefaultMaxOutputBytes = 10 * 1024 * 1024
+	// DefaultCommandTimeout bounds how long a single received command may run
+	// when CommandTimeoutSeconds is not configured. Without a default, a hung
+	// command (infinite loop, blocked on stdin, stuck network call) occupies its
+	// worker forever, and a small fixed worker pool with back-pressure (rather
+	// than dropping messages) means a handful of hangs — or one buggy workflow
+	// that repeats the same hanging command — can silently stall all command
+	// execution on the device. 30 minutes is generous enough to not affect
+	// legitimate long-running commands (installers, large file operations)
+	// while still guaranteeing every worker is eventually reclaimed.
+	DefaultCommandTimeout = 30 * time.Minute
 )
 
 // ResolvedWorkerCount returns the number of command-execution workers to start,
@@ -158,15 +170,33 @@ func (d Device) ResolvedPostbackBaseRetryBackoff() time.Duration {
 	return DefaultPostbackBaseRetryBackoff
 }
 
-// ResolvedCommandTimeout returns the per-command execution timeout and whether
-// one is configured. It reports ok=false when CommandTimeoutSeconds is unset or
-// non-positive, in which case command execution is unbounded (historical
-// behavior); otherwise it returns the configured duration with ok=true.
-func (d Device) ResolvedCommandTimeout() (time.Duration, bool) {
+// defaultCommandTimeoutOverrideStr is overridable via -ldflags for integration
+// testing. When set to a valid, positive Go duration it replaces
+// DefaultCommandTimeout — the fallback used only when CommandTimeoutSeconds is
+// not configured — so the "hung command killed by the default timeout"
+// scenario can be exercised in seconds instead of the production 30 minutes.
+// Unlike sasTokenLifetimeOverrideStr, it never applies once
+// CommandTimeoutSeconds is explicitly configured: an explicit value always
+// takes precedence, so the override can only shrink the default, never mask
+// real explicit-configuration behavior. It is empty in production builds.
+// Example: -ldflags "-X github.com/RewstApp/agent-smith-go/internal/agent.defaultCommandTimeoutOverrideStr=5s"
+var defaultCommandTimeoutOverrideStr = ""
+
+// ResolvedCommandTimeout returns the per-command execution timeout, honoring
+// the per-device override when set to a positive value and falling back to
+// DefaultCommandTimeout (or its ldflags-injected integration-test override)
+// otherwise. It is always positive, so command execution is never unbounded by
+// default.
+func (d Device) ResolvedCommandTimeout() time.Duration {
 	if d.CommandTimeoutSeconds != nil && *d.CommandTimeoutSeconds > 0 {
-		return time.Duration(*d.CommandTimeoutSeconds) * time.Second, true
+		return time.Duration(*d.CommandTimeoutSeconds) * time.Second
 	}
-	return 0, false
+	if override := defaultCommandTimeoutOverrideStr; override != "" {
+		if timeout, err := time.ParseDuration(override); err == nil && timeout > 0 {
+			return timeout
+		}
+	}
+	return DefaultCommandTimeout
 }
 
 // ResolvedMaxOutputBytes returns the per-stream ceiling on captured command

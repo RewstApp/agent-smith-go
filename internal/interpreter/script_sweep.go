@@ -24,9 +24,9 @@ const (
 	// startup sweep reclaims it. Execute always removes its own script file on
 	// every exit path, so anything left behind belongs to a run that was killed
 	// abruptly (SIGKILL, service force-stop, power loss, OOM). The threshold is
-	// deliberately generous — commands are unbounded unless
-	// command_timeout_seconds is configured, so a file this old cannot plausibly
-	// belong to a command another agent process is still executing.
+	// deliberately generous — far above agent.DefaultCommandTimeout (or any
+	// reasonable command_timeout_seconds override) — so a file this old cannot
+	// plausibly belong to a command another agent process is still executing.
 	DefaultStaleScriptAge = 24 * time.Hour
 )
 
