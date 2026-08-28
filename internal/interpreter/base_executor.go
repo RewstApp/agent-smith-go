@@ -245,17 +245,39 @@ func (e *baseExecutor) Execute(
 	cmd.Env = os.Environ()
 	cmd.Env = append(cmd.Env, fmt.Sprintf("AGENT_SMITH_VERSION=%s", version.Version[1:]))
 
-	// Kill the whole process group on cancellation (see configureProcessGroup) so
-	// a shell that spawned children is fully torn down, and bound how long Run may
-	// block on output pipes afterward. Because stdout/stderr are in-memory writers
-	// (not *os.File), the runtime copies them through a pipe a killed child can
-	// still hold open; WaitDelay guarantees Run returns and the worker is released
-	// even then. This only takes effect when the context is cancelled, so commands
-	// that finish on their own are unaffected.
-	configureProcessGroup(cmd)
+	// Kill the whole descendant tree on cancellation (a process group on Unix, a
+	// job object on Windows — see configureProcessGroup) so a shell that spawned
+	// children is fully torn down, and bound how long Wait may block on output
+	// pipes afterward. Because stdout/stderr are in-memory writers (not
+	// *os.File), the runtime copies them through a pipe a killed child can still
+	// hold open; WaitDelay guarantees Wait returns and the worker is released
+	// even then. This only takes effect when the context is cancelled, so
+	// commands that finish on their own are unaffected.
+	tree := configureProcessGroup(cmd)
 	cmd.WaitDelay = commandWaitDelay
 
-	err = cmd.Run()
+	// Split Run into Start+Wait so the Windows job-object assignment (tree.Assign)
+	// can happen as soon as the process exists, minimizing the window in which a
+	// very fast child could be spawned before it is captured by the job.
+	if err = cmd.Start(); err == nil {
+		if assignErr := tree.Assign(); assignErr != nil {
+			logger.Warn(
+				"Failed to fully isolate command process tree; child processes may survive a timeout",
+				"message_id",
+				message.PostId,
+				"error",
+				assignErr,
+			)
+		}
+		err = cmd.Wait()
+	}
+	if releaseErr := tree.Release(); releaseErr != nil {
+		logger.Warn(
+			"Failed to release command process tree resources",
+			"message_id", message.PostId,
+			"error", releaseErr,
+		)
+	}
 
 	// Report discarded output once per command — never per write — and before any
 	// result is built, so every return path below carries the same signal.

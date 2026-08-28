@@ -124,6 +124,17 @@ jobs:
           $unixVerboseStderr = '"echo keep-stdout; yes e | head -c 209715200 >&2"'
           $unixVerboseHang = '"yes x | head -c 209715200; sleep 60"'
 
+          # Windows-only descendant-tree kill scenario (sc-108853). Spawns a
+          # detached child via Start-Process tagged with a distinctive, unlikely
+          # to collide sleep duration (91743s) used purely as a process-list
+          # marker, then hangs the parent itself well past the configured
+          # command timeout. Single quotes (doubled to escape them inside this
+          # single-quoted literal) stand in for the nested double quotes
+          # Start-Process's -ArgumentList would otherwise need, keeping the
+          # payload double-quote- and backslash-free like the verbose scripts
+          # above.
+          $winChildProcessHang = '"Start-Process -FilePath powershell -ArgumentList ''-NoProfile'',''-Command'',''Start-Sleep -Seconds 91743'' -WindowStyle Hidden; Start-Sleep -Seconds 30"'
+
           $entries = @(
             [ordered]@{
               os = 'ubuntu-latest'
@@ -169,6 +180,7 @@ jobs:
               verbose_commands = $winVerbose
               verbose_stderr_commands = $winVerboseStderr
               verbose_hang_commands = $winVerboseHang
+              child_process_hang_commands = $winChildProcessHang
               success_patterns = "Command completed`nSending postback`nPostback already sent"
               no_auto_updates_extra = '--disable-agent-postback'
               # Deliberately NOT moved (sc-108848): some customers whitelist
@@ -1052,6 +1064,111 @@ jobs:
         env:
           LOG_FILE: ${{ matrix.log_file }}
           BASELINE: ${{ (steps.timeout_baseline_unix.outputs.completed || steps.timeout_baseline_windows.outputs.completed) }}
+        run: |
+          & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/assert-worker-pool-recovered-after-timeout.ps1"
+      # ---- Windows job-object descendant-tree kill scenario (sc-108853) ----
+      # Windows-only: Unix's process-group kill (verified implicitly by every
+      # timeout scenario above, since bash's child there is itself part of the
+      # killed group) has no equivalent on Windows. Before this fix, killing a
+      # hung PowerShell command only terminated the shell process itself;
+      # anything it spawned via Start-Process (an installer, a stuck helper)
+      # was reparented and kept running on the endpoint after the worker was
+      # released. The runner IS the endpoint the agent is installed on, so the
+      # spawned child's survival is checked directly against the machine's
+      # process list (by a distinctive command-line marker) rather than
+      # through agent output, which the kill may cut off mid-line anyway.
+      #
+      # Reinstalls with its own, longer command timeout rather than reusing
+      # the 5s left over from the scenario above: this device's PowerShell
+      # profile has been carrying the "profile noise" injected earlier in
+      # this job (every command run since loads it), and that load time plus
+      # actually spawning a nested powershell.exe left too little headroom
+      # in 5s for the child to reliably start before the parent was killed.
+      - name: Enable a longer command timeout for the child-process scenario
+        if: matrix.os == 'windows-latest'
+        uses: ./.github/actions/run-agent
+        with:
+          binary: ${{ matrix.binary }}
+          args: --update --org-id ${{ vars.IT_ORG_ID }} --command-timeout-seconds 15 --github-token ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Wait for fresh subscription after child-process-scenario timeout update
+        if: matrix.os == 'windows-latest'
+        uses: ./.github/actions/wait-for-log-line
+        with:
+          log_file: ${{ matrix.log_file }}
+          pattern: Subscribed to messages
+          max_attempts: "60"
+          interval_seconds: "2"
+
+      - name: Capture child-process-kill baseline counts
+        if: matrix.os == 'windows-latest'
+        id: child_process_kill_baseline
+        shell: pwsh
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+        run: |
+          & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/capture-command-timeout-baseline-counts.ps1"
+
+      # send-command (the composite action used everywhere else in this file)
+      # blocks until the device's postback round-trips back - confirmed by the
+      # first attempt at this scenario, where that call alone took ~11-25s for
+      # a 5-15s configured timeout. For every other scenario that is fine
+      # because they only ever inspect the agent's log afterward, but here it
+      # means the full timeout+kill cycle has already completed by the time a
+      # following step could check the child's *live* process state - too
+      # late to distinguish "job object correctly killed it" from "it never
+      # spawned at all", which is exactly the distinction this scenario needs
+      # to make. So the same curl call is sent in the background here, polled
+      # for the child appearing while it (and the parent's timeout) are still
+      # running, and only then waited on for its own completion.
+      - name: Send command that spawns a child process and hangs, then wait for it to start
+        if: matrix.os == 'windows-latest'
+        shell: bash
+        env:
+          TRIGGER_URL: ${{ vars.IT_SEND_COMMAND_TRIGGER_URL }}
+          DEVICE_ID: ${{ steps.config.outputs.device_id }}
+          COMMANDS: ${{ matrix.child_process_hang_commands }}
+        run: |
+          set -euo pipefail
+          curl --location "$TRIGGER_URL" \
+            --form "device_id=\"$DEVICE_ID\"" \
+            --form "commands=$COMMANDS" > "$RUNNER_TEMP/child-scenario-response.json" &
+          curl_pid=$!
+
+          pwsh -NoProfile -File "$GITHUB_WORKSPACE/.github/workflows/it-scripts/wait-for-child-process-to-start.ps1"
+
+          wait "$curl_pid"
+          cat "$RUNNER_TEMP/child-scenario-response.json"
+
+      - name: Assert hanging parent command was killed by the timeout (child-process scenario)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+          BASELINE: ${{ steps.child_process_kill_baseline.outputs.timed_out }}
+        run: |
+          & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/assert-hanging-command-was-killed-by-the-timeout.ps1"
+
+      - name: Assert the child process did not survive the timeout kill
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/assert-child-process-terminated.ps1"
+
+      - name: Send command after child-process scenario
+        if: matrix.os == 'windows-latest'
+        uses: ./.github/actions/send-command
+        with:
+          trigger_url: ${{ vars.IT_SEND_COMMAND_TRIGGER_URL }}
+          device_id: ${{ steps.config.outputs.device_id }}
+          commands: ${{ matrix.success_commands }}
+
+      - name: Assert worker pool recovered after child-process scenario
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+          BASELINE: ${{ steps.child_process_kill_baseline.outputs.completed }}
         run: |
           & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/assert-worker-pool-recovered-after-timeout.ps1"
       # ---- SAS token proactive renewal scenario (sc-103969) ----
