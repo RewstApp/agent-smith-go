@@ -238,6 +238,22 @@ legitimately long-running commands. Example snippet:
 }
 ```
 
+#### Killing the Full Process Tree on Windows
+
+Killing a command's process on timeout or cancellation must also kill whatever
+that command spawned — a `Start-Process` call, an installer, a stuck helper —
+or the child is reparented and keeps running on the endpoint after the
+worker is released, leaking a process per hang. On Unix this is handled by
+placing the shell in its own process group and killing the group
+(`internal/interpreter/proc_unix.go`); Windows has no process-group
+equivalent, so the same guarantee is provided with a **job object**
+(`internal/interpreter/proc_windows.go`): the shell process is assigned to a
+job created with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, and closing the job's
+handle — which cancellation now does instead of a plain `Process.Kill` —
+terminates every process still assigned to it, direct or descendant. The job
+handle is released once the command finishes either way, so a command that
+completes normally leaks no handle.
+
 #### Bounding per-command output size
 
 A command's `stdout` and `stderr` are each captured through a **bounded writer**,

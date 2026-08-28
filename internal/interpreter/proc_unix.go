@@ -17,7 +17,7 @@ import (
 // stdout/stderr pipe — keeps cmd.Wait blocked. That would leave the worker
 // wedged exactly as the timeout is meant to prevent. Killing the whole group
 // tears down the descendant tree so the pipe closes and Wait returns.
-func configureProcessGroup(cmd *exec.Cmd) {
+func configureProcessGroup(cmd *exec.Cmd) processTree {
 	if cmd.SysProcAttr == nil {
 		cmd.SysProcAttr = &syscall.SysProcAttr{}
 	}
@@ -29,4 +29,5 @@ func configureProcessGroup(cmd *exec.Cmd) {
 		// A negative pid targets the entire process group led by the shell.
 		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 	}
+	return processTree{}
 }
