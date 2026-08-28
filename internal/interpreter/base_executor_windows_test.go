@@ -49,10 +49,12 @@ func TestBaseExecutor_CommandTimeout_KillsChildProcess(t *testing.T) {
 
 	// Spawn a detached long-lived child, record its pid, then hang well past
 	// the command timeout so the parent shell is killed while the child is
-	// still alive.
+	// still alive. File.WriteAllText (not Out-File, which Windows PowerShell
+	// 5.1 writes as UTF-16LE with a BOM) keeps the pid file plain ASCII so it
+	// parses with a simple Atoi below.
 	script := fmt.Sprintf(
 		"$p = Start-Process -FilePath 'powershell' -ArgumentList '-NoProfile','-Command','Start-Sleep -Seconds 60' -WindowStyle Hidden -PassThru; "+
-			"$p.Id | Out-File -FilePath '%s'; "+
+			"[System.IO.File]::WriteAllText('%s', \"$($p.Id)\"); "+
 			"Start-Sleep -Seconds 30",
 		pidFile,
 	)
