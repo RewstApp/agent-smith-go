@@ -1073,11 +1073,33 @@ jobs:
       # hung PowerShell command only terminated the shell process itself;
       # anything it spawned via Start-Process (an installer, a stuck helper)
       # was reparented and kept running on the endpoint after the worker was
-      # released. command_timeout_seconds is still 5s from the scenario above,
-      # on this same device. The runner IS the endpoint the agent is installed
-      # on, so the spawned child's survival is checked directly against the
-      # machine's process list (by a distinctive command-line marker) rather
-      # than through agent output, which the kill may cut off mid-line anyway.
+      # released. The runner IS the endpoint the agent is installed on, so the
+      # spawned child's survival is checked directly against the machine's
+      # process list (by a distinctive command-line marker) rather than
+      # through agent output, which the kill may cut off mid-line anyway.
+      #
+      # Reinstalls with its own, longer command timeout rather than reusing
+      # the 5s left over from the scenario above: this device's PowerShell
+      # profile has been carrying the "profile noise" injected earlier in
+      # this job (every command run since loads it), and that load time plus
+      # actually spawning a nested powershell.exe left too little headroom
+      # in 5s for the child to reliably start before the parent was killed.
+      - name: Enable a longer command timeout for the child-process scenario
+        if: matrix.os == 'windows-latest'
+        uses: ./.github/actions/run-agent
+        with:
+          binary: ${{ matrix.binary }}
+          args: --update --org-id ${{ vars.IT_ORG_ID }} --command-timeout-seconds 15 --github-token ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Wait for fresh subscription after child-process-scenario timeout update
+        if: matrix.os == 'windows-latest'
+        uses: ./.github/actions/wait-for-log-line
+        with:
+          log_file: ${{ matrix.log_file }}
+          pattern: Subscribed to messages
+          max_attempts: "60"
+          interval_seconds: "2"
+
       - name: Capture child-process-kill baseline counts
         if: matrix.os == 'windows-latest'
         id: child_process_kill_baseline
