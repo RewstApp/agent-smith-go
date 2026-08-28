@@ -26,6 +26,11 @@
 #   (see .github/actions/set-release-url) so the retry schedule can be driven by
 #   an endpoint that fails on demand. Released builds leave this empty and never
 #   look for the file, so their update source stays fixed at build time
+# - defaultCommandTimeoutOverrideStr overridden to 5s, so the "hung command
+#   killed by the default per-command timeout" scenario (sc-108852) can be
+#   exercised in seconds instead of the production 30 minutes. It only replaces
+#   the fallback used when command_timeout_seconds is left unconfigured; it
+#   never applies once a device explicitly configures the field.
 
 $env:GOARCH = "amd64"
 
@@ -37,7 +42,8 @@ $sasTokenLifetimeFlag = "-X github.com/RewstApp/agent-smith-go/internal/agent.sa
 $stopTimeoutFlag = "-X github.com/RewstApp/agent-smith-go/internal/service.stopTimeoutOverrideStr=25s"
 $exitTimeoutFlag = "-X main.exitTimeoutOverrideStr=25s"
 $releaseUrlOverrideFlag = "-X github.com/RewstApp/agent-smith-go/internal/agent.releaseUrlOverrideFileStr=release_url_override"
-$ldflags = "-w -s $versionFlag $intervalFlag $baseBackoffFlag $maxRetriesFlag $sasTokenLifetimeFlag $stopTimeoutFlag $exitTimeoutFlag $releaseUrlOverrideFlag"
+$defaultCommandTimeoutFlag = "-X github.com/RewstApp/agent-smith-go/internal/agent.defaultCommandTimeoutOverrideStr=5s"
+$ldflags = "-w -s $versionFlag $intervalFlag $baseBackoffFlag $maxRetriesFlag $sasTokenLifetimeFlag $stopTimeoutFlag $exitTimeoutFlag $releaseUrlOverrideFlag $defaultCommandTimeoutFlag"
 
 if ($IsWindows) {
     $buildOutput = "./dist/rewst_agent_config.win.it.exe"

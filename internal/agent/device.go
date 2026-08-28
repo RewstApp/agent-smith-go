@@ -170,13 +170,31 @@ func (d Device) ResolvedPostbackBaseRetryBackoff() time.Duration {
 	return DefaultPostbackBaseRetryBackoff
 }
 
+// defaultCommandTimeoutOverrideStr is overridable via -ldflags for integration
+// testing. When set to a valid, positive Go duration it replaces
+// DefaultCommandTimeout — the fallback used only when CommandTimeoutSeconds is
+// not configured — so the "hung command killed by the default timeout"
+// scenario can be exercised in seconds instead of the production 30 minutes.
+// Unlike sasTokenLifetimeOverrideStr, it never applies once
+// CommandTimeoutSeconds is explicitly configured: an explicit value always
+// takes precedence, so the override can only shrink the default, never mask
+// real explicit-configuration behavior. It is empty in production builds.
+// Example: -ldflags "-X github.com/RewstApp/agent-smith-go/internal/agent.defaultCommandTimeoutOverrideStr=5s"
+var defaultCommandTimeoutOverrideStr = ""
+
 // ResolvedCommandTimeout returns the per-command execution timeout, honoring
 // the per-device override when set to a positive value and falling back to
-// DefaultCommandTimeout otherwise. It is always positive, so command execution
-// is never unbounded by default.
+// DefaultCommandTimeout (or its ldflags-injected integration-test override)
+// otherwise. It is always positive, so command execution is never unbounded by
+// default.
 func (d Device) ResolvedCommandTimeout() time.Duration {
 	if d.CommandTimeoutSeconds != nil && *d.CommandTimeoutSeconds > 0 {
 		return time.Duration(*d.CommandTimeoutSeconds) * time.Second
+	}
+	if defaultCommandTimeoutOverrideStr != "" {
+		if timeout, err := time.ParseDuration(defaultCommandTimeoutOverrideStr); err == nil && timeout > 0 {
+			return timeout
+		}
 	}
 	return DefaultCommandTimeout
 }

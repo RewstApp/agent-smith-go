@@ -54,6 +54,51 @@ func TestResolvedCommandTimeout(t *testing.T) {
 	}
 }
 
+// TestResolvedCommandTimeoutOverride verifies the ldflags-injected override
+// (used only by the integration test binary) shrinks the default fallback
+// timeout, but — unlike sasTokenLifetimeOverrideStr — never overrides an
+// explicit per-device command_timeout_seconds.
+func TestResolvedCommandTimeoutOverride(t *testing.T) {
+	orig := defaultCommandTimeoutOverrideStr
+	t.Cleanup(func() { defaultCommandTimeoutOverrideStr = orig })
+
+	// A valid override replaces the default when unconfigured.
+	defaultCommandTimeoutOverrideStr = "5s"
+	unconfigured := Device{}
+	if got := unconfigured.ResolvedCommandTimeout(); got != 5*time.Second {
+		t.Errorf("with override set, ResolvedCommandTimeout() = %v, want %v", got, 5*time.Second)
+	}
+
+	// An explicit per-device value still wins over the override.
+	configured := Device{CommandTimeoutSeconds: intPtr(45)}
+	if got := configured.ResolvedCommandTimeout(); got != 45*time.Second {
+		t.Errorf(
+			"with override set but timeout configured, ResolvedCommandTimeout() = %v, want %v",
+			got,
+			45*time.Second,
+		)
+	}
+
+	// An invalid or non-positive override is ignored, falling back to the default.
+	for _, bad := range []string{"not-a-duration", "0s", "-5s"} {
+		defaultCommandTimeoutOverrideStr = bad
+		if got := unconfigured.ResolvedCommandTimeout(); got != DefaultCommandTimeout {
+			t.Errorf(
+				"with invalid override %q, ResolvedCommandTimeout() = %v, want %v",
+				bad,
+				got,
+				DefaultCommandTimeout,
+			)
+		}
+	}
+
+	// An empty override (production build) uses normal resolution.
+	defaultCommandTimeoutOverrideStr = ""
+	if got := unconfigured.ResolvedCommandTimeout(); got != DefaultCommandTimeout {
+		t.Errorf("with empty override, ResolvedCommandTimeout() = %v, want %v", got, DefaultCommandTimeout)
+	}
+}
+
 func TestResolvedMessageQueueSize(t *testing.T) {
 	tests := []struct {
 		name   string
