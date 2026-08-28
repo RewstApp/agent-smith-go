@@ -1109,19 +1109,36 @@ jobs:
         run: |
           & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/capture-command-timeout-baseline-counts.ps1"
 
-      - name: Send command that spawns a child process and hangs
+      # send-command (the composite action used everywhere else in this file)
+      # blocks until the device's postback round-trips back - confirmed by the
+      # first attempt at this scenario, where that call alone took ~11-25s for
+      # a 5-15s configured timeout. For every other scenario that is fine
+      # because they only ever inspect the agent's log afterward, but here it
+      # means the full timeout+kill cycle has already completed by the time a
+      # following step could check the child's *live* process state - too
+      # late to distinguish "job object correctly killed it" from "it never
+      # spawned at all", which is exactly the distinction this scenario needs
+      # to make. So the same curl call is sent in the background here, polled
+      # for the child appearing while it (and the parent's timeout) are still
+      # running, and only then waited on for its own completion.
+      - name: Send command that spawns a child process and hangs, then wait for it to start
         if: matrix.os == 'windows-latest'
-        uses: ./.github/actions/send-command
-        with:
-          trigger_url: ${{ vars.IT_SEND_COMMAND_TRIGGER_URL }}
-          device_id: ${{ steps.config.outputs.device_id }}
-          commands: ${{ matrix.child_process_hang_commands }}
-
-      - name: Wait for the child process to start
-        if: matrix.os == 'windows-latest'
-        shell: pwsh
+        shell: bash
+        env:
+          TRIGGER_URL: ${{ vars.IT_SEND_COMMAND_TRIGGER_URL }}
+          DEVICE_ID: ${{ steps.config.outputs.device_id }}
+          COMMANDS: ${{ matrix.child_process_hang_commands }}
         run: |
-          & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/wait-for-child-process-to-start.ps1"
+          set -euo pipefail
+          curl --location "$TRIGGER_URL" \
+            --form "device_id=\"$DEVICE_ID\"" \
+            --form "commands=$COMMANDS" > "$RUNNER_TEMP/child-scenario-response.json" &
+          curl_pid=$!
+
+          pwsh -NoProfile -File "$GITHUB_WORKSPACE/.github/workflows/it-scripts/wait-for-child-process-to-start.ps1"
+
+          wait "$curl_pid"
+          cat "$RUNNER_TEMP/child-scenario-response.json"
 
       - name: Assert hanging parent command was killed by the timeout (child-process scenario)
         if: matrix.os == 'windows-latest'
