@@ -6,7 +6,7 @@ import (
 )
 
 func TestNewUpdateContext(t *testing.T) {
-	orgId := "test123"
+	orgId := "43fb08b0-92cf-462a-924d-0b6be7a43a48"
 
 	result, _ := newUpdateContext([]string{"--org-id", orgId, "--update"}, nil, nil, nil, nil)
 
@@ -118,6 +118,7 @@ func TestNewUpdateContext(t *testing.T) {
 	}{
 		{[]string{"--org-id", orgId}, "missing update"},
 		{[]string{"--update"}, "missing org-id"},
+		{[]string{"--org-id", "../../Windows/System32", "--update"}, "invalid org-id"},
 		{[]string{"--=update"}, "bad flag syntax"},
 		{
 			[]string{"--org-id", orgId, "--update", "--logging-level", "invalid"},

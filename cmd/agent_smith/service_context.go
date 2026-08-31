@@ -76,6 +76,10 @@ func newServiceContext(
 		return nil, fmt.Errorf("missing org-id")
 	}
 
+	if !isValidOrgId(params.OrgId) {
+		return nil, fmt.Errorf("invalid org-id")
+	}
+
 	if params.ConfigFile == "" {
 		return nil, fmt.Errorf("missing config-file")
 	}

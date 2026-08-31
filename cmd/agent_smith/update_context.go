@@ -97,6 +97,10 @@ func newUpdateContext(
 		return nil, fmt.Errorf("missing org-id")
 	}
 
+	if !isValidOrgId(params.OrgId) {
+		return nil, fmt.Errorf("invalid org-id")
+	}
+
 	if !params.Update {
 		return nil, fmt.Errorf("missing update")
 	}

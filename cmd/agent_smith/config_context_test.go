@@ -6,7 +6,7 @@ import (
 )
 
 func TestNewConfigContext(t *testing.T) {
-	orgId := "test123"
+	orgId := "43fb08b0-92cf-462a-924d-0b6be7a43a48"
 	configUrl := "https://config.url/"
 	configSecret := "secret123"
 
@@ -163,6 +163,14 @@ func TestNewConfigContext(t *testing.T) {
 		message string
 	}{
 		{[]string{"--config-url", configUrl, "--config-secret", configSecret}, "missing org-id"},
+		{
+			[]string{
+				"--org-id", "../../Windows/System32",
+				"--config-url", configUrl,
+				"--config-secret", configSecret,
+			},
+			"invalid org-id",
+		},
 		{[]string{"--org-id", orgId, "--config-secret", configSecret}, "missing config-url"},
 		{[]string{"--org-id", orgId, "--config-url", configUrl}, "missing config-secret"},
 		{[]string{"--=uninstall"}, "bad flag syntax"},

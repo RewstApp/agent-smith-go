@@ -255,6 +255,10 @@ func newConfigContext(
 		return nil, fmt.Errorf("missing org-id")
 	}
 
+	if !isValidOrgId(params.OrgId) {
+		return nil, fmt.Errorf("invalid org-id")
+	}
+
 	if params.ConfigUrl == "" {
 		return nil, fmt.Errorf("missing config-url")
 	}

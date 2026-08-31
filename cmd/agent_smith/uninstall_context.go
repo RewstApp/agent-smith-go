@@ -51,6 +51,10 @@ func newUninstallContext(
 		return nil, fmt.Errorf("missing org-id")
 	}
 
+	if !isValidOrgId(params.OrgId) {
+		return nil, fmt.Errorf("invalid org-id")
+	}
+
 	if !params.Uninstall {
 		return nil, fmt.Errorf("missing uninstall")
 	}

@@ -6,7 +6,7 @@ import (
 )
 
 func TestNewUninstallContext(t *testing.T) {
-	orgId := "test123"
+	orgId := "43fb08b0-92cf-462a-924d-0b6be7a43a48"
 	result, _ := newUninstallContext([]string{"--org-id", orgId, "--uninstall"}, nil, nil)
 
 	if result.OrgId != orgId {
@@ -23,6 +23,7 @@ func TestNewUninstallContext(t *testing.T) {
 	}{
 		{[]string{"--org-id", orgId}, "missing uninstall"},
 		{[]string{"--uninstall"}, "missing org-id"},
+		{[]string{"--org-id", "../../Windows/System32", "--uninstall"}, "invalid org-id"},
 		{[]string{"--=uninstall"}, "bad flag syntax"},
 	}
 
