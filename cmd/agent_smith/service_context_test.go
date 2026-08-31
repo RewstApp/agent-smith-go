@@ -43,7 +43,14 @@ func TestNewServiceContext(t *testing.T) {
 	}{
 		{[]string{"--config-file", configFile, "--log-file", logFile}, "missing org-id"},
 		{
-			[]string{"--org-id", "../../Windows/System32", "--config-file", configFile, "--log-file", logFile},
+			[]string{
+				"--org-id",
+				"../../Windows/System32",
+				"--config-file",
+				configFile,
+				"--log-file",
+				logFile,
+			},
 			"invalid org-id",
 		},
 		{[]string{"--org-id", orgId, "--config-file", configFile}, "missing log-file"},
