@@ -191,8 +191,13 @@ func TestReportUsageModeErrors(t *testing.T) {
 		wantErr string
 	}{
 		{
-			name:    "config missing secret",
-			args:    []string{"--org-id", "x", "--config-url", "https://x"},
+			name: "config missing secret",
+			args: []string{
+				"--org-id",
+				"43fb08b0-92cf-462a-924d-0b6be7a43a48",
+				"--config-url",
+				"https://x",
+			},
 			mode:    "config",
 			wantErr: "missing config-secret",
 		},
@@ -200,7 +205,7 @@ func TestReportUsageModeErrors(t *testing.T) {
 			name: "config invalid mqtt-qos",
 			args: []string{
 				"--org-id",
-				"x",
+				"43fb08b0-92cf-462a-924d-0b6be7a43a48",
 				"--config-url",
 				"https://x",
 				"--config-secret",
@@ -215,7 +220,7 @@ func TestReportUsageModeErrors(t *testing.T) {
 			name: "config invalid logging-level",
 			args: []string{
 				"--org-id",
-				"x",
+				"43fb08b0-92cf-462a-924d-0b6be7a43a48",
 				"--config-url",
 				"https://x",
 				"--config-secret",
@@ -227,14 +232,25 @@ func TestReportUsageModeErrors(t *testing.T) {
 			wantErr: "invalid logging-level",
 		},
 		{
-			name:    "service missing log-file",
-			args:    []string{"--org-id", "x", "--config-file", "/etc/x"},
+			name: "service missing log-file",
+			args: []string{
+				"--org-id",
+				"43fb08b0-92cf-462a-924d-0b6be7a43a48",
+				"--config-file",
+				"/etc/x",
+			},
 			mode:    "service",
 			wantErr: "missing log-file",
 		},
 		{
-			name:    "update invalid mqtt-qos",
-			args:    []string{"--org-id", "x", "--update", "--mqtt-qos", "5"},
+			name: "update invalid mqtt-qos",
+			args: []string{
+				"--org-id",
+				"43fb08b0-92cf-462a-924d-0b6be7a43a48",
+				"--update",
+				"--mqtt-qos",
+				"5",
+			},
 			mode:    "update",
 			wantErr: "invalid mqtt-qos: must be 0 or 1",
 		},
