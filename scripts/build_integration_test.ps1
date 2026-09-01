@@ -31,6 +31,13 @@
 #   exercised in seconds instead of the production 30 minutes. It only replaces
 #   the fallback used when command_timeout_seconds is left unconfigured; it
 #   never applies once a device explicitly configures the field.
+# - launchctlTimeoutOverrideStr (macOS) and systemctlTimeoutOverrideStr (Linux)
+#   overridden to 5s, and hostCommandTimeoutOverrideStr (Windows) overridden to
+#   5s, so a wedged launchctl/systemctl/sc/dsregcmd/WMI call (sc-108855) aborts
+#   in seconds instead of the production 5 minutes (service commands) or 30
+#   seconds (host-info commands). Each symbol only exists in its own platform's
+#   build; -X against a missing symbol is ignored, so all three flags are
+#   harmless on the other two platforms.
 
 $env:GOARCH = "amd64"
 
@@ -43,7 +50,10 @@ $stopTimeoutFlag = "-X github.com/RewstApp/agent-smith-go/internal/service.stopT
 $exitTimeoutFlag = "-X main.exitTimeoutOverrideStr=25s"
 $releaseUrlOverrideFlag = "-X github.com/RewstApp/agent-smith-go/internal/agent.releaseUrlOverrideFileStr=release_url_override"
 $defaultCommandTimeoutFlag = "-X github.com/RewstApp/agent-smith-go/internal/agent.defaultCommandTimeoutOverrideStr=5s"
-$ldflags = "-w -s $versionFlag $intervalFlag $baseBackoffFlag $maxRetriesFlag $sasTokenLifetimeFlag $stopTimeoutFlag $exitTimeoutFlag $releaseUrlOverrideFlag $defaultCommandTimeoutFlag"
+$launchctlTimeoutFlag = "-X github.com/RewstApp/agent-smith-go/internal/service.launchctlTimeoutOverrideStr=5s"
+$systemctlTimeoutFlag = "-X github.com/RewstApp/agent-smith-go/internal/service.systemctlTimeoutOverrideStr=5s"
+$hostCommandTimeoutFlag = "-X github.com/RewstApp/agent-smith-go/internal/agent.hostCommandTimeoutOverrideStr=5s"
+$ldflags = "-w -s $versionFlag $intervalFlag $baseBackoffFlag $maxRetriesFlag $sasTokenLifetimeFlag $stopTimeoutFlag $exitTimeoutFlag $releaseUrlOverrideFlag $defaultCommandTimeoutFlag $launchctlTimeoutFlag $systemctlTimeoutFlag $hostCommandTimeoutFlag"
 
 if ($IsWindows) {
     $buildOutput = "./dist/rewst_agent_config.win.it.exe"

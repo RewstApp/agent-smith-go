@@ -80,7 +80,7 @@ func (*linuxDefaultDomainInfoProvider) IsADDomainController(context.Context) (bo
 	return false, nil
 }
 
-func (*linuxDefaultDomainInfoProvider) IsEntraConnectServer() (bool, error) {
+func (*linuxDefaultDomainInfoProvider) IsEntraConnectServer(context.Context) (bool, error) {
 	return false, nil
 }
 

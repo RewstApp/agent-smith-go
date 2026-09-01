@@ -3,26 +3,74 @@
 package service
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/RewstApp/agent-smith-go/internal/utils"
 )
+
+// launchctlTimeout bounds every launchctl invocation the agent shells out to
+// (load, start, stop, unload, print). These are one-shot commands, not the
+// polled wait Windows' Stop() performs, but launchd can still wedge - a stuck
+// daemon, a corrupted launchd state, a known real-world failure mode - and an
+// unbounded exec.Command would then hang install, update, uninstall and
+// config indefinitely: the same failure class already fixed for the Windows
+// service Stop() wait. Five minutes matches serviceStopTimeout: generous
+// enough to never cut off a legitimate stop, short enough that a wedged
+// launchctl call fails with an actionable error in the same run rather than
+// hanging forever.
+const launchctlTimeout = 5 * time.Minute
+
+// launchctlTimeoutOverrideStr is overridable via -ldflags for integration
+// testing, the same mechanism stopTimeoutOverrideStr uses for the Windows
+// service stop wait. Empty in production builds.
+var launchctlTimeoutOverrideStr = ""
+
+func resolveLaunchctlTimeout() time.Duration {
+	if launchctlTimeoutOverrideStr != "" {
+		if d, err := time.ParseDuration(launchctlTimeoutOverrideStr); err == nil && d > 0 {
+			return d
+		}
+	}
+	return launchctlTimeout
+}
 
 type launchCtl interface {
 	Run(args ...string) ([]byte, error)
 	PlistFilePath(name string) string
 }
 
-type defaultLaunchCtl struct{}
+type defaultLaunchCtl struct {
+	// binary is the executable Run invokes. Empty selects "launchctl"; tests
+	// point it at a fixture to exercise the timeout without depending on the
+	// real launchd.
+	binary string
+}
 
 func (d *defaultLaunchCtl) Run(args ...string) ([]byte, error) {
-	cmd := exec.Command("launchctl", args...)
+	binary := d.binary
+	if binary == "" {
+		binary = "launchctl"
+	}
+
+	timeout := resolveLaunchctlTimeout()
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, binary, args...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			return nil, fmt.Errorf(
+				"launchctl %s timed out after %s: %s",
+				strings.Join(args, " "), timeout, out,
+			)
+		}
 		return nil, fmt.Errorf("%s", out)
 	}
 

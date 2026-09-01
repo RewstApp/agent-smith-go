@@ -41,7 +41,7 @@ type SystemInfoProvider interface {
 type DomainInfoProvider interface {
 	ADDomain(ctx context.Context) (*string, error)
 	IsADDomainController(ctx context.Context) (bool, error)
-	IsEntraConnectServer() (bool, error)
+	IsEntraConnectServer(ctx context.Context) (bool, error)
 	EntraDomain(ctx context.Context) (*string, error)
 }
 
@@ -88,7 +88,7 @@ func NewHostInfo(
 		logger.Warn("Could not retrieve AD Domain Controller", "error", err)
 	}
 
-	isEntraConnectServer, err := domain.IsEntraConnectServer()
+	isEntraConnectServer, err := domain.IsEntraConnectServer(ctx)
 	if err != nil {
 		logger.Warn("Could not retrieve Entra Connect Server", "error", err)
 	}

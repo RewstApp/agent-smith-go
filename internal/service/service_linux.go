@@ -3,26 +3,74 @@
 package service
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/RewstApp/agent-smith-go/internal/utils"
 )
+
+// systemctlTimeout bounds every systemctl invocation the agent shells out to
+// (start, stop, enable, disable, is-active, is-enabled, daemon-reload). These
+// are one-shot commands, not the polled wait Windows' Stop() performs, but
+// systemctl can still wedge - a D-Bus stall is a known real-world failure
+// mode - and an unbounded exec.Command would then hang install, update,
+// uninstall and config indefinitely: the same failure class already fixed for
+// the Windows service Stop() wait. Five minutes matches serviceStopTimeout:
+// generous enough to never cut off a legitimate stop, short enough that a
+// wedged systemctl call fails with an actionable error in the same run rather
+// than hanging forever.
+const systemctlTimeout = 5 * time.Minute
+
+// systemctlTimeoutOverrideStr is overridable via -ldflags for integration
+// testing, the same mechanism stopTimeoutOverrideStr uses for the Windows
+// service stop wait. Empty in production builds.
+var systemctlTimeoutOverrideStr = ""
+
+func resolveSystemctlTimeout() time.Duration {
+	if systemctlTimeoutOverrideStr != "" {
+		if d, err := time.ParseDuration(systemctlTimeoutOverrideStr); err == nil && d > 0 {
+			return d
+		}
+	}
+	return systemctlTimeout
+}
 
 type systemCtl interface {
 	Run(args ...string) error
 	ServiceConfigFilePath(name string) string
 }
 
-type defaultSystemCtl struct{}
+type defaultSystemCtl struct {
+	// binary is the executable Run invokes. Empty selects "systemctl"; tests
+	// point it at a fixture to exercise the timeout without depending on the
+	// real systemd.
+	binary string
+}
 
 func (s *defaultSystemCtl) Run(args ...string) error {
-	cmd := exec.Command("systemctl", args...)
+	binary := s.binary
+	if binary == "" {
+		binary = "systemctl"
+	}
+
+	timeout := resolveSystemctlTimeout()
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, binary, args...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			return fmt.Errorf(
+				"systemctl %s timed out after %s: %s",
+				strings.Join(args, " "), timeout, out,
+			)
+		}
 		return fmt.Errorf("%s", out)
 	}
 

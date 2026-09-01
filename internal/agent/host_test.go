@@ -62,7 +62,7 @@ func (mock *mockDomainInfoProvider) IsADDomainController(context.Context) (bool,
 	return mock.isAdDomainController, mock.isAdDomainControllerErr
 }
 
-func (mock *mockDomainInfoProvider) IsEntraConnectServer() (bool, error) {
+func (mock *mockDomainInfoProvider) IsEntraConnectServer(context.Context) (bool, error) {
 	return mock.isEntraConnectServer, mock.isEntraConnectServerErr
 }
 

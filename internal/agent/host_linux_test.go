@@ -108,7 +108,7 @@ func TestLinuxDefaultDomainInfoProvider_IsADDomainController(t *testing.T) {
 
 func TestLinuxDefaultDomainInfoProvider_IsEntraConnectServer(t *testing.T) {
 	domain := &linuxDefaultDomainInfoProvider{}
-	_, err := domain.IsEntraConnectServer()
+	_, err := domain.IsEntraConnectServer(context.Background())
 	if err != nil {
 		t.Errorf("expected no error, got %v", err)
 	}

@@ -9,6 +9,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestWindowsDefaultSystemInfoProvider_MACAddress_NoInterface(t *testing.T) {
@@ -101,6 +102,37 @@ func TestWindowsDefaultDomainInfoProvider_ADDomain(t *testing.T) {
 	_, err := domain.ADDomain(context.Background())
 	if err != nil {
 		t.Errorf("expected no error, got %v", err)
+	}
+}
+
+func TestDefaultPSRunner_TimesOutOnHungScript(t *testing.T) {
+	orig := hostCommandTimeoutOverrideStr
+	hostCommandTimeoutOverrideStr = "200ms"
+	t.Cleanup(func() { hostCommandTimeoutOverrideStr = orig })
+
+	start := time.Now()
+	done := make(chan struct{})
+	var err error
+	go func() {
+		_, err = defaultPSRunner(context.Background(), "Start-Sleep -Seconds 30")
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("defaultPSRunner did not return; the hung script was not killed by the timeout")
+	}
+
+	elapsed := time.Since(start)
+	if elapsed > 5*time.Second {
+		t.Errorf("defaultPSRunner took %v to be killed; expected roughly the overridden 200ms timeout", elapsed)
+	}
+	if err == nil {
+		t.Fatal("expected a timeout error, got nil")
+	}
+	if !strings.Contains(err.Error(), "timed out") {
+		t.Errorf("expected error to mention timeout, got %q", err.Error())
 	}
 }
 
@@ -221,9 +253,34 @@ func TestWindowsDefaultDomainInfoProvider_IsADDomainController_ProfileNoise(t *t
 
 func TestWindowsDefaultDomainInfoProvider_IsEntraConnectServer(t *testing.T) {
 	domain := &windowsDefaultDomainInfoProvider{psRunner: defaultPSRunner}
-	_, err := domain.IsEntraConnectServer()
+	_, err := domain.IsEntraConnectServer(context.Background())
 	if err != nil {
 		t.Errorf("expected no error, got %v", err)
+	}
+}
+
+func TestWindowsDefaultDomainInfoProvider_IsEntraConnectServer_TimesOutOnHungQuery(t *testing.T) {
+	orig := hostCommandTimeoutOverrideStr
+	hostCommandTimeoutOverrideStr = "50ms"
+	t.Cleanup(func() { hostCommandTimeoutOverrideStr = orig })
+
+	domain := &windowsDefaultDomainInfoProvider{psRunner: defaultPSRunner}
+
+	start := time.Now()
+	found, err := domain.IsEntraConnectServer(context.Background())
+	elapsed := time.Since(start)
+
+	// A hung "sc query" is indistinguishable from "service not found" here (both
+	// just fail the query for that name), so the bounded call must still return
+	// promptly rather than hang - it is not expected to surface an error.
+	if err != nil {
+		t.Errorf("expected no error, got %v", err)
+	}
+	if found {
+		t.Error("expected false when no Entra Connect service is installed")
+	}
+	if elapsed > 5*time.Second {
+		t.Errorf("IsEntraConnectServer took %v; expected each query bounded by the overridden timeout", elapsed)
 	}
 }
 
@@ -232,6 +289,28 @@ func TestWindowsDefaultDomainInfoProvider_EntraDomain(t *testing.T) {
 	_, err := domain.EntraDomain(context.Background())
 	if err != nil {
 		t.Errorf("expected no error, got %v", err)
+	}
+}
+
+func TestResolveHostCommandTimeout(t *testing.T) {
+	orig := hostCommandTimeoutOverrideStr
+	t.Cleanup(func() { hostCommandTimeoutOverrideStr = orig })
+
+	hostCommandTimeoutOverrideStr = ""
+	if got := resolveHostCommandTimeout(); got != hostCommandTimeout {
+		t.Errorf("expected default %v, got %v", hostCommandTimeout, got)
+	}
+
+	hostCommandTimeoutOverrideStr = "5s"
+	if got := resolveHostCommandTimeout(); got != 5*time.Second {
+		t.Errorf("expected overridden 5s, got %v", got)
+	}
+
+	for _, bad := range []string{"not-a-duration", "-5s", "0s"} {
+		hostCommandTimeoutOverrideStr = bad
+		if got := resolveHostCommandTimeout(); got != hostCommandTimeout {
+			t.Errorf("expected default for invalid override %q, got %v", bad, got)
+		}
 	}
 }
 
