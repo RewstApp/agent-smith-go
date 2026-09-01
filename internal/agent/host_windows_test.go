@@ -126,7 +126,7 @@ func TestDefaultPSRunner_TimesOutOnHungScript(t *testing.T) {
 
 	elapsed := time.Since(start)
 	if elapsed > 5*time.Second {
-		t.Errorf("defaultPSRunner took %v to be killed; expected roughly the overridden 200ms timeout", elapsed)
+		t.Errorf("defaultPSRunner took %v to be killed; expected roughly 200ms", elapsed)
 	}
 	if err == nil {
 		t.Fatal("expected a timeout error, got nil")
@@ -280,7 +280,7 @@ func TestWindowsDefaultDomainInfoProvider_IsEntraConnectServer_TimesOutOnHungQue
 		t.Error("expected false when no Entra Connect service is installed")
 	}
 	if elapsed > 5*time.Second {
-		t.Errorf("IsEntraConnectServer took %v; expected each query bounded by the overridden timeout", elapsed)
+		t.Errorf("IsEntraConnectServer took %v; expected each query to be bounded", elapsed)
 	}
 }
 
