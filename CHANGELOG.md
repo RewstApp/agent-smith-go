@@ -1,3 +1,15 @@
+## v1.5.4 (2026-09-01)
+
+### Fix
+
+- [sc-112186] Validate --org-id format in config, update, uninstall, and service modes (#111)
+- [sc-108853] Use a Windows job object to kill a command's full process tree (#110)
+- [sc-108852] Give command execution a default, non-zero timeout (#109)
+- [sc-108851] Verify auto-update installer integrity and require a newer version before installing (#108)
+- [sc-108850] Bound notification plugin Notify RPC calls with a timeout (#107)
+- [sc-108849] Lock device config file and data directory to owner-only permissions (#106)
+- [sc-108848] Stop command scripts landing in a shared, world-writable temp dir (#105)
+
 ## v1.5.3 (2026-08-21)
 
 ### Fix
