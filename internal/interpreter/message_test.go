@@ -190,6 +190,7 @@ func (m *mockDomainInfoProvider) ADDomain(context.Context) (*string, error) { re
 func (m *mockDomainInfoProvider) IsADDomainController(context.Context) (bool, error) {
 	return false, nil
 }
+
 func (m *mockDomainInfoProvider) IsEntraConnectServer(context.Context) (bool, error) {
 	return false, nil
 }
