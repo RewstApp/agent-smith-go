@@ -80,7 +80,7 @@ func (*darwinDefaultDomainInfoProvider) IsADDomainController(context.Context) (b
 	return false, nil
 }
 
-func (*darwinDefaultDomainInfoProvider) IsEntraConnectServer() (bool, error) {
+func (*darwinDefaultDomainInfoProvider) IsEntraConnectServer(context.Context) (bool, error) {
 	return false, nil
 }
 

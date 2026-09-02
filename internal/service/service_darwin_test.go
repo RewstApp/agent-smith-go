@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // mockLaunchCtl
@@ -43,6 +44,78 @@ func (m *mockLaunchCtl) PlistFilePath(name string) string {
 func newTempPlistPath(t *testing.T) string {
 	t.Helper()
 	return filepath.Join(t.TempDir(), "test.plist")
+}
+
+// defaultLaunchCtl tests (real exec.Command, not the mock)
+
+func TestResolveLaunchctlTimeout(t *testing.T) {
+	orig := launchctlTimeoutOverrideStr
+	t.Cleanup(func() { launchctlTimeoutOverrideStr = orig })
+
+	launchctlTimeoutOverrideStr = ""
+	if got := resolveLaunchctlTimeout(); got != launchctlTimeout {
+		t.Errorf("expected default %v, got %v", launchctlTimeout, got)
+	}
+
+	launchctlTimeoutOverrideStr = "25s"
+	if got := resolveLaunchctlTimeout(); got != 25*time.Second {
+		t.Errorf("expected overridden 25s, got %v", got)
+	}
+
+	for _, bad := range []string{"not-a-duration", "-5s", "0s"} {
+		launchctlTimeoutOverrideStr = bad
+		if got := resolveLaunchctlTimeout(); got != launchctlTimeout {
+			t.Errorf("expected default for invalid override %q, got %v", bad, got)
+		}
+	}
+}
+
+func TestDefaultLaunchCtl_Run_Success(t *testing.T) {
+	d := &defaultLaunchCtl{binary: "/bin/echo"}
+
+	out, err := d.Run("hello")
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if !strings.Contains(string(out), "hello") {
+		t.Errorf("expected output to contain 'hello', got %q", out)
+	}
+}
+
+func TestDefaultLaunchCtl_Run_TimesOutOnHungCommand(t *testing.T) {
+	orig := launchctlTimeoutOverrideStr
+	launchctlTimeoutOverrideStr = "200ms"
+	t.Cleanup(func() { launchctlTimeoutOverrideStr = orig })
+
+	d := &defaultLaunchCtl{binary: "/bin/sleep"}
+
+	start := time.Now()
+	done := make(chan struct{})
+	var err error
+	go func() {
+		_, err = d.Run("30")
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Run did not return; the hung command was not killed by the timeout")
+	}
+
+	elapsed := time.Since(start)
+	if elapsed > 5*time.Second {
+		t.Errorf("Run took %v to be killed; expected roughly the overridden 200ms timeout", elapsed)
+	}
+	if err == nil {
+		t.Fatal("expected a timeout error, got nil")
+	}
+	if !strings.Contains(err.Error(), "timed out") {
+		t.Errorf("expected error to mention timeout, got %q", err.Error())
+	}
+	if !strings.Contains(err.Error(), "30") {
+		t.Errorf("expected error to name the command args, got %q", err.Error())
+	}
 }
 
 // darwinService tests

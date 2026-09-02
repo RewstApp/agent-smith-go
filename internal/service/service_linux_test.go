@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // mockSystemCtl
@@ -39,6 +40,74 @@ func (m *mockSystemCtl) ServiceConfigFilePath(name string) string {
 func newTempConfigPath(t *testing.T) string {
 	t.Helper()
 	return filepath.Join(t.TempDir(), "test.service")
+}
+
+// defaultSystemCtl tests (real exec.Command, not the mock)
+
+func TestResolveSystemctlTimeout(t *testing.T) {
+	orig := systemctlTimeoutOverrideStr
+	t.Cleanup(func() { systemctlTimeoutOverrideStr = orig })
+
+	systemctlTimeoutOverrideStr = ""
+	if got := resolveSystemctlTimeout(); got != systemctlTimeout {
+		t.Errorf("expected default %v, got %v", systemctlTimeout, got)
+	}
+
+	systemctlTimeoutOverrideStr = "25s"
+	if got := resolveSystemctlTimeout(); got != 25*time.Second {
+		t.Errorf("expected overridden 25s, got %v", got)
+	}
+
+	for _, bad := range []string{"not-a-duration", "-5s", "0s"} {
+		systemctlTimeoutOverrideStr = bad
+		if got := resolveSystemctlTimeout(); got != systemctlTimeout {
+			t.Errorf("expected default for invalid override %q, got %v", bad, got)
+		}
+	}
+}
+
+func TestDefaultSystemCtl_Run_Success(t *testing.T) {
+	s := &defaultSystemCtl{binary: "/bin/echo"}
+
+	if err := s.Run("hello"); err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+}
+
+func TestDefaultSystemCtl_Run_TimesOutOnHungCommand(t *testing.T) {
+	orig := systemctlTimeoutOverrideStr
+	systemctlTimeoutOverrideStr = "200ms"
+	t.Cleanup(func() { systemctlTimeoutOverrideStr = orig })
+
+	s := &defaultSystemCtl{binary: "/bin/sleep"}
+
+	start := time.Now()
+	done := make(chan struct{})
+	var err error
+	go func() {
+		err = s.Run("30")
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Run did not return; the hung command was not killed by the timeout")
+	}
+
+	elapsed := time.Since(start)
+	if elapsed > 5*time.Second {
+		t.Errorf("Run took %v to be killed; expected roughly the overridden 200ms timeout", elapsed)
+	}
+	if err == nil {
+		t.Fatal("expected a timeout error, got nil")
+	}
+	if !strings.Contains(err.Error(), "timed out") {
+		t.Errorf("expected error to mention timeout, got %q", err.Error())
+	}
+	if !strings.Contains(err.Error(), "30") {
+		t.Errorf("expected error to name the command args, got %q", err.Error())
+	}
 }
 
 // linuxService tests

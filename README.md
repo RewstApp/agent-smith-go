@@ -560,6 +560,49 @@ Recovery is the ordinary one: end the wedged agent process, start the service, a
 re-run the update or uninstall. Linux and macOS are unaffected — their service
 implementations do not use this polling loop.
 
+### Bounded Service and Host-Info Shell-Outs (macOS, Linux, Windows)
+
+The Windows service `Stop()` wait above bounds one path to a wedged OS-level
+tool. Several adjacent shell-outs used to have no bound at all: `launchctl` on
+macOS, `systemctl` on Linux, and `sc query` / `dsregcmd` / the WMI queries
+PowerShell issues on Windows host-info gathering. A D-Bus stall, launchd in a
+bad state, or a broken WMI repository — a known real-world failure mode,
+especially on domain controllers — blocked install, update, uninstall and
+config generation indefinitely, the same failure class already fixed for
+`Stop()`, just left open here.
+
+Every one of these commands is now run with `exec.CommandContext` under a
+bounded, documented timeout:
+
+- **macOS** (`internal/service/service_darwin.go`): every `launchctl`
+  invocation (`load`, `start`, `stop`, `unload`, `print`) is bounded by
+  `launchctlTimeout`, **5 minutes** — the same bound as the Windows service
+  stop wait, generous enough to never cut off a legitimate stop.
+- **Linux** (`internal/service/service_linux.go`): every `systemctl`
+  invocation (`start`, `stop`, `enable`, `disable`, `is-active`, `is-enabled`,
+  `daemon-reload`) is bounded by `systemctlTimeout`, also **5 minutes**.
+- **Windows** (`internal/agent/host_windows.go`): the WMI queries behind
+  `ADDomain`/`IsADDomainController`, the `sc query` calls behind
+  `IsEntraConnectServer`, and the `dsregcmd /status` call behind `EntraDomain`
+  are each bounded by `hostCommandTimeout`, **30 seconds** — these normally
+  complete in well under a second, and the caller-supplied context passed in
+  from `config.go`/`update.go` carries no deadline of its own, so the bound has
+  to be enforced internally rather than relied on from the caller.
+
+A command that exceeds its bound is killed and returns an error naming the
+command and its arguments (for example `systemctl stop rewst_agent_smith_<org>
+timed out after 5m0s: ...`), which callers treat the same as any other failure
+from that command — an install/update/uninstall aborts without writing or
+deleting anything, and host-info gathering logs the field as unavailable
+(`NewHostInfo` already warns per-field and continues) rather than blocking the
+rest of the flow.
+
+All three timeouts are overridable via `-ldflags` for integration testing —
+`service.launchctlTimeoutOverrideStr`, `service.systemctlTimeoutOverrideStr`,
+and `agent.hostCommandTimeoutOverrideStr` — the same mechanism
+`stopTimeoutOverrideStr` uses for the Windows service stop wait, so a wedged
+command can be observed aborting in seconds rather than the production bound.
+
 ### Waiting for the Old Agent Process to Exit
 
 Stopping the service is not the same as the old agent process being gone. Install,
