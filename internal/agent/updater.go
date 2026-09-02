@@ -428,10 +428,18 @@ func parseAssetDigest(asset Asset) (string, error) {
 
 	hash = strings.ToLower(hash)
 	if len(hash) != sha256.Size*2 {
-		return "", fmt.Errorf("release asset %s has a malformed digest %q", asset.Name, asset.Digest)
+		return "", fmt.Errorf(
+			"release asset %s has a malformed digest %q",
+			asset.Name,
+			asset.Digest,
+		)
 	}
 	if _, err := hex.DecodeString(hash); err != nil {
-		return "", fmt.Errorf("release asset %s has a malformed digest %q", asset.Name, asset.Digest)
+		return "", fmt.Errorf(
+			"release asset %s has a malformed digest %q",
+			asset.Name,
+			asset.Digest,
+		)
 	}
 
 	return hash, nil
