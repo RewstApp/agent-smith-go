@@ -241,8 +241,8 @@ func TestDarwinService_Delete(t *testing.T) {
 		t.Fatalf("expected no error, got %v", err)
 	}
 	if len(mock.runCalls) != 1 || mock.runCalls[0][0] != "unload" ||
-		mock.runCalls[0][1] != "test-svc" {
-		t.Errorf("expected Run(unload, test-svc), got %v", mock.runCalls)
+		mock.runCalls[0][1] != tmpFile {
+		t.Errorf("expected Run(unload, %s), got %v", tmpFile, mock.runCalls)
 	}
 	if _, err := os.Stat(tmpFile); !os.IsNotExist(err) {
 		t.Error("expected plist file to be removed")

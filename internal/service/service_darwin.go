@@ -115,7 +115,7 @@ func (svc *darwinService) Stop() error {
 }
 
 func (svc *darwinService) Delete() error {
-	_, err := svc.system.Run("unload", svc.name)
+	_, err := svc.system.Run("unload", svc.serviceFilePath())
 	if err != nil {
 		return err
 	}
