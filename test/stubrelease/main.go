@@ -24,11 +24,23 @@
 // answered in, so the log doubles as the arrival-time record the scenario uses
 // to show that retries arrive spread out rather than back to back.
 //
-// The release payload it serves carries -tag as tag_name and no assets. The
-// scenario sets -tag to the running agent's own version, so a successful check
-// ends at "No updates available" and the retry is seen succeeding without the
-// agent downloading and executing anything - the recovery is what is under test,
-// not the installer.
+// The release payload it serves carries -tag as tag_name and, by default, no
+// assets - the retry-backoff scenario sets -tag to the running agent's own
+// version, so a successful check ends at "No updates available" and the
+// retry is seen succeeding without the agent downloading and executing
+// anything.
+//
+// -asset-name and -asset-digest instead drive the digest-verification
+// scenarios (sc-112402): when -asset-name is set, the payload carries one
+// asset by that name whose download URL is this same fixture's /download
+// endpoint (arbitrary fixed content - Download's digest check runs before
+// anything is handed to Update(), so a scenario driving a rejection never
+// risks executing it), and whose "digest" field is -asset-digest verbatim,
+// or omitted entirely when -asset-digest is empty. That lets one scenario
+// serve a well-formed but mismatched digest (rejected as tampered) and
+// another omit it altogether (rejected as missing), exercising the fail-closed
+// paths a real GitHub outage - unlike a real release - cannot be made to
+// produce on demand.
 //
 // It sits behind the `integration` build tag so it stays out of
 // `go test ./...`: as an untested CI fixture its statements would otherwise
@@ -66,6 +78,12 @@ const (
 	writeTimeout = 10 * time.Second
 )
 
+// assetContent is the fixed body served at /download when -asset-name is set.
+// Its bytes are arbitrary and never need to hash to anything in particular:
+// every scenario that serves an asset is driving Download to reject it before
+// the bytes would ever be handed to Update().
+const assetContent = "stub installer content\n"
+
 func main() {
 	listen := flag.String("listen", "127.0.0.1:8765", "address to listen on")
 	modeFile := flag.String(
@@ -80,6 +98,19 @@ func main() {
 		"v0.0.0-it",
 		"tag_name to report in the release payload; set to the running agent's "+
 			"own version so a successful check ends at \"No updates available\"",
+	)
+	assetName := flag.String(
+		"asset-name",
+		"",
+		"name of the release asset to serve, matching the platform's expected "+
+			"suffix (e.g. rewst_agent_config.linux.bin); empty serves no assets",
+	)
+	assetDigest := flag.String(
+		"asset-digest",
+		"",
+		"digest field value for the asset (\"sha256:<hex>\"); empty omits the "+
+			"field to simulate a release GitHub never computed a digest for. "+
+			"Ignored when -asset-name is empty.",
 	)
 	logPath := flag.String("log", "", "path to write this endpoint's log to (defaults to stderr)")
 	flag.Parse()
@@ -101,7 +132,10 @@ func main() {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		handle(w, r, *modeFile, *tag)
+		handle(w, r, *modeFile, *tag, *listen, *assetName, *assetDigest)
+	})
+	mux.HandleFunc("/download", func(w http.ResponseWriter, r *http.Request) {
+		handleDownload(w, r)
 	})
 
 	server := &http.Server{
@@ -125,7 +159,11 @@ func main() {
 // handle answers a single request according to the current mode, logging the
 // arrival time either way. The mode is read per request so the harness can
 // recover the endpoint in the middle of a retry sequence.
-func handle(w http.ResponseWriter, r *http.Request, modeFile string, tag string) {
+func handle(
+	w http.ResponseWriter,
+	r *http.Request,
+	modeFile, tag, listen, assetName, assetDigest string,
+) {
 	ok := currentModeIsOk(modeFile)
 	// Millisecond precision, because the point of the log is the spacing between
 	// arrivals: a busy-spinning retry loop would show requests in the same
@@ -138,10 +176,23 @@ func handle(w http.ResponseWriter, r *http.Request, modeFile string, tag string)
 		return
 	}
 
+	assets := []any{}
+	if assetName != "" {
+		asset := map[string]any{
+			"id":   1,
+			"name": assetName,
+			"url":  fmt.Sprintf("http://%s/download", listen),
+		}
+		if assetDigest != "" {
+			asset["digest"] = assetDigest
+		}
+		assets = append(assets, asset)
+	}
+
 	release := map[string]any{
 		"id":       1,
 		"tag_name": tag,
-		"assets":   []any{},
+		"assets":   assets,
 	}
 	body, err := json.Marshal(release)
 	if err != nil {
@@ -152,10 +203,26 @@ func handle(w http.ResponseWriter, r *http.Request, modeFile string, tag string)
 		return
 	}
 
-	log.Printf("%s %s %s -> 200 (mode=ok, tag=%s)", arrived, r.Method, r.URL.Path, tag)
+	log.Printf(
+		"%s %s %s -> 200 (mode=ok, tag=%s, asset=%q, digest=%q)",
+		arrived, r.Method, r.URL.Path, tag, assetName, assetDigest,
+	)
 	w.Header().Set("Content-Type", "application/json")
 	if _, err := w.Write(body); err != nil {
 		log.Printf("%s failed to write release payload: %v", arrived, err)
+	}
+}
+
+// handleDownload serves the fixed asset body every /download request, mirroring
+// the "Accept: application/octet-stream" download a real release asset URL
+// returns. It never fails on its own; the scenarios that drive a rejection do
+// so through the release payload's digest, not this endpoint.
+func handleDownload(w http.ResponseWriter, r *http.Request) {
+	arrived := time.Now().Format("2006-01-02T15:04:05.000Z07:00")
+	log.Printf("%s %s %s -> 200 (asset download)", arrived, r.Method, r.URL.Path)
+	w.Header().Set("Content-Type", "application/octet-stream")
+	if _, err := w.Write([]byte(assetContent)); err != nil {
+		log.Printf("%s failed to write asset content: %v", arrived, err)
 	}
 }
 

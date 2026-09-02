@@ -25,6 +25,15 @@ description: >
   idempotent and tolerant of missing state, so an always() cleanup step can run
   it even if start never completed.
 
+  asset_name and asset_digest (fixed for the endpoint's lifetime, set only at
+  mode=start) additionally drive the digest-verification scenarios (sc-112402):
+  set asset_name to serve one release asset - downloadable from this same
+  fixture - and asset_digest to control what the payload's "digest" field says
+  about it, so a scenario can serve a well-formed but mismatched digest (a
+  tampered asset) or omit the field altogether (a release GitHub never computed
+  one for), and confirm the agent rejects both rather than installing an
+  unverified binary.
+
 inputs:
   mode:
     description: "start, ok, fail, or stop"
@@ -44,6 +53,21 @@ inputs:
       recovery is observed without the agent downloading and executing anything.
     required: false
     default: "v0.0.0-it"
+  asset_name:
+    description: >
+      Name of a release asset to serve (e.g. rewst_agent_config.linux.bin,
+      matching the platform's expected suffix). Empty serves no assets, the
+      original retry-scenario behavior. Only takes effect at mode=start.
+    required: false
+    default: ""
+  asset_digest:
+    description: >
+      digest field value for the asset ("sha256:<hex>"). Empty omits the field
+      to simulate a release GitHub never computed a digest for; a well-formed
+      but incorrect value simulates a tampered asset. Ignored when asset_name
+      is empty. Only takes effect at mode=start.
+    required: false
+    default: ""
 
 outputs:
   url:
@@ -89,6 +113,8 @@ runs:
         HOST: ${{ inputs.host }}
         PORT: ${{ inputs.port }}
         TAG: ${{ inputs.tag }}
+        ASSET_NAME: ${{ inputs.asset_name }}
+        ASSET_DIGEST: ${{ inputs.asset_digest }}
       run: |
         set -euo pipefail
         printf 'fail' > "$MODE_FILE"
@@ -103,6 +129,8 @@ runs:
           -listen "$HOST:$PORT" \
           -mode-file "$MODE_FILE" \
           -tag "$TAG" \
+          -asset-name "$ASSET_NAME" \
+          -asset-digest "$ASSET_DIGEST" \
           -log "$LOG_FILE" > /dev/null 2>&1 &
         echo $! > "$PID_FILE"
         echo "Stub release endpoint started (pid $(cat "$PID_FILE"))"
@@ -118,6 +146,8 @@ runs:
         HOST: ${{ inputs.host }}
         PORT: ${{ inputs.port }}
         TAG: ${{ inputs.tag }}
+        ASSET_NAME: ${{ inputs.asset_name }}
+        ASSET_DIGEST: ${{ inputs.asset_digest }}
       run: |
         $ErrorActionPreference = 'Stop'
         Set-Content -Path $env:MODE_FILE -Value 'fail' -NoNewline
@@ -139,6 +169,8 @@ runs:
           "-listen", "`"$($env:HOST):$($env:PORT)`"",
           "-mode-file", "`"$($env:MODE_FILE)`"",
           "-tag", $env:TAG,
+          "-asset-name", "`"$($env:ASSET_NAME)`"",
+          "-asset-digest", "`"$($env:ASSET_DIGEST)`"",
           "-log", "`"$($env:LOG_FILE)`""
         ) -join ' '
         $created = Invoke-CimMethod -ClassName Win32_Process -MethodName Create `

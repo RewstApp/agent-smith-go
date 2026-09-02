@@ -2195,6 +2195,149 @@ jobs:
           BASELINE: ${{ (steps.retry_restore_baseline_unix.outputs.subscribed || steps.retry_restore_baseline_windows.outputs.subscribed) }}
         run: |
           & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/wait-for-resubscription-after-the-retry-scenario.ps1"
+      # ---- Digest-verification auto-update rejection scenarios (sc-112402) ----
+      # Download now verifies a downloaded installer against the SHA-256 digest
+      # GitHub's Releases API reports for the asset (Asset.Digest) rather than a
+      # hand-published .sha256 sidecar file. The happy path is already exercised
+      # for free by the "Wait for auto updater to trigger and update" scenario
+      # near the top of this job, which checks the real releases API and so gets
+      # a real GitHub-computed digest; a real release cannot be made to serve a
+      # tampered or missing one on demand, so these two scenarios instead point
+      # the agent at test/stubrelease - extended (sc-112402) to optionally serve
+      # one downloadable asset with a controllable digest - and confirm Download
+      # rejects it before anything is handed to Update(). The asset's bytes are
+      # never executed even on a bug in this rejection: they are arbitrary fixed
+      # content, not a real installer.
+      - name: Start stub release endpoint (tampered digest)
+        id: stub_release_tampered_digest
+        uses: ./.github/actions/stub-release
+        with:
+          mode: start
+          asset_name: ${{ matrix.binary }}
+          # Well-formed (64 hex chars) but not the digest of anything this
+          # fixture serves - simulates a corrupted-but-200-OK download or a
+          # tampered release asset, as distinct from the missing-digest
+          # scenario below.
+          asset_digest: "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+
+      - name: Point the agent at the stub release endpoint (tampered digest)
+        uses: ./.github/actions/set-release-url
+        with:
+          mode: set
+          config_dir: ${{ matrix.config_dir }}
+          org_id: ${{ vars.IT_ORG_ID }}
+          url: ${{ steps.stub_release_tampered_digest.outputs.url }}
+
+      - name: Serve the tampered-digest release payload
+        uses: ./.github/actions/stub-release
+        with:
+          mode: ok
+
+      - name: Install integration test binary with auto-updates on (tampered digest)
+        uses: ./.github/actions/run-agent
+        with:
+          binary: ${{ matrix.it_binary }}
+          args: --update --org-id ${{ vars.IT_ORG_ID }} --github-token ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Wait for the tampered installer to be rejected
+        uses: ./.github/actions/wait-for-log-line
+        with:
+          log_file: ${{ matrix.log_file }}
+          pattern: "checksum mismatch for"
+
+      - name: Assert the tampered installer was rejected rather than installed
+        uses: ./.github/actions/assert-log-contains
+        with:
+          log_file: ${{ matrix.log_file }}
+          patterns: |
+            checksum mismatch for
+            Update failed, starting retry backoff
+
+      - name: Clear the release url override (tampered digest)
+        if: always()
+        uses: ./.github/actions/set-release-url
+        with:
+          mode: clear
+          config_dir: ${{ matrix.config_dir }}
+          org_id: ${{ vars.IT_ORG_ID }}
+
+      - name: Stop stub release endpoint (tampered digest)
+        if: always()
+        uses: ./.github/actions/stub-release
+        with:
+          mode: stop
+
+      - name: Reinstall the release binary after the tampered-digest scenario
+        if: always()
+        uses: ./.github/actions/run-agent
+        with:
+          binary: ${{ matrix.binary }}
+          args: --update --org-id ${{ vars.IT_ORG_ID }} --no-auto-updates ${{ matrix.no_auto_updates_extra }} --github-token ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Start stub release endpoint (missing digest)
+        id: stub_release_missing_digest
+        uses: ./.github/actions/stub-release
+        with:
+          mode: start
+          asset_name: ${{ matrix.binary }}
+          # asset_digest deliberately omitted (default ""): the payload's asset
+          # carries no "digest" field at all, simulating a release GitHub never
+          # computed one for.
+
+      - name: Point the agent at the stub release endpoint (missing digest)
+        uses: ./.github/actions/set-release-url
+        with:
+          mode: set
+          config_dir: ${{ matrix.config_dir }}
+          org_id: ${{ vars.IT_ORG_ID }}
+          url: ${{ steps.stub_release_missing_digest.outputs.url }}
+
+      - name: Serve the missing-digest release payload
+        uses: ./.github/actions/stub-release
+        with:
+          mode: ok
+
+      - name: Install integration test binary with auto-updates on (missing digest)
+        uses: ./.github/actions/run-agent
+        with:
+          binary: ${{ matrix.it_binary }}
+          args: --update --org-id ${{ vars.IT_ORG_ID }} --github-token ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Wait for the missing-digest installer to be rejected
+        uses: ./.github/actions/wait-for-log-line
+        with:
+          log_file: ${{ matrix.log_file }}
+          pattern: "failed to verify installer for"
+
+      - name: Assert the missing-digest installer was rejected rather than installed
+        uses: ./.github/actions/assert-log-contains
+        with:
+          log_file: ${{ matrix.log_file }}
+          patterns: |
+            failed to verify installer for
+            no usable sha256 digest
+            Update failed, starting retry backoff
+
+      - name: Clear the release url override (missing digest)
+        if: always()
+        uses: ./.github/actions/set-release-url
+        with:
+          mode: clear
+          config_dir: ${{ matrix.config_dir }}
+          org_id: ${{ vars.IT_ORG_ID }}
+
+      - name: Stop stub release endpoint (missing digest)
+        if: always()
+        uses: ./.github/actions/stub-release
+        with:
+          mode: stop
+
+      - name: Reinstall the release binary after the missing-digest scenario
+        if: always()
+        uses: ./.github/actions/run-agent
+        with:
+          binary: ${{ matrix.binary }}
+          args: --update --org-id ${{ vars.IT_ORG_ID }} --no-auto-updates ${{ matrix.no_auto_updates_extra }} --github-token ${{ secrets.GITHUB_TOKEN }}
       # ---- Wedged Windows service stop scenario (sc-106108) ----
       # windowsService.Stop() polled the service state every 250ms in an
       # unbounded loop, so a service that never reached Stopped hung its caller
