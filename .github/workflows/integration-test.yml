@@ -2213,6 +2213,11 @@ jobs:
         uses: ./.github/actions/stub-release
         with:
           mode: start
+          # Must be newer than the IT binary's own v0.0.0-it (the fixture's
+          # own default tag, chosen so the retry-backoff scenario above does
+          # NOT trigger a download) - otherwise isNewerVersion sees no update
+          # and Download, the code under test here, is never reached.
+          tag: "v99.0.0"
           asset_name: ${{ matrix.binary }}
           # Well-formed (64 hex chars) but not the digest of anything this
           # fixture serves - simulates a corrupted-but-200-OK download or a
@@ -2279,6 +2284,9 @@ jobs:
         uses: ./.github/actions/stub-release
         with:
           mode: start
+          # See the tampered-digest scenario above for why this must be newer
+          # than the IT binary's own v0.0.0-it.
+          tag: "v99.0.0"
           asset_name: ${{ matrix.binary }}
           # asset_digest deliberately omitted (default ""): the payload's asset
           # carries no "digest" field at all, simulating a release GitHub never
