@@ -27,16 +27,12 @@ jobs:
           pipx install commitizen
           pipx upgrade commitizen
 
-      - name: Bump version, generate changelog, and push
+      - name: Bump version and tag
         run: |
           git config --local user.email "automated_builds@rewst.io"
           git config --local user.name "Rewst GitHub Actions"
           NEXT_VERSION=$(cz bump --yes --get-next)
-          cz changelog --incremental --unreleased-version "v$NEXT_VERSION" --file-name CHANGELOG.md
-          git add CHANGELOG.md
-          git diff --cached --quiet || git commit -m "docs: update changelog for v$NEXT_VERSION"
           git tag "v$NEXT_VERSION"
-          git push origin HEAD:main
           git push --tags
 
   build:
@@ -88,7 +84,8 @@ jobs:
       - name: Generate release notes
         run: |
           VERSION="${{ steps.extract_version.outputs.version }}"
-          awk -v ver="## $VERSION" 'p && /^## /{ exit } $0 ~ ver{ p=1 } p' CHANGELOG.md > release_notes.md
+          cz changelog --dry-run > full_changelog.md
+          awk -v ver="## $VERSION" 'p && /^## /{ exit } $0 ~ ver{ p=1 } p' full_changelog.md > release_notes.md
 
       - name: Download windows signed assets
         uses: actions/download-artifact@v8
