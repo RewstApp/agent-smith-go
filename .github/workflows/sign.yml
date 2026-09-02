@@ -53,6 +53,17 @@ jobs:
           New-Item -ItemType Directory -Force -Path ./signed
           Copy-Item -Path ./dist/* -Destination ./signed
 
+      # Retained as a migration safety net even though internal/agent/updater.go
+      # now verifies installers against the digest GitHub's Releases API
+      # returns natively for each asset (Asset.Digest, "sha256:<hex>") rather
+      # than this sidecar. An agent built before that change is still running
+      # in the field and will keep looking for `<binary-name>.sha256` in every
+      # release it checks until it updates past this change; dropping the
+      # sidecar immediately would strand any such agent's auto-update
+      # permanently (fail-closed on every future release, forever) instead of
+      # a single missed check. See README "Verified, Version-Gated
+      # Auto-Updates". Safe to remove once fleet telemetry confirms no agent
+      # older than this change is still checking in.
       - name: Compute file hash
         shell: pwsh
         run: |

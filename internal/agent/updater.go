@@ -23,6 +23,10 @@ type Asset struct {
 	Id   int    `json:"id"`
 	Name string `json:"name"`
 	Url  string `json:"url"`
+	// Digest is the SHA-256 digest GitHub's Releases API computed itself from
+	// the asset's bytes when it was uploaded, formatted "sha256:<64 hex
+	// chars>". See parseAssetDigest, which is what actually consumes it.
+	Digest string `json:"digest"`
 }
 
 type Release struct {
@@ -35,7 +39,7 @@ type Updater interface {
 	Check(ctx context.Context) (Release, error)
 	Update(updaterExecutablePath string) error
 	SelectAsset(release Release) (Asset, error)
-	Download(ctx context.Context, release Release, asset Asset) (string, error)
+	Download(ctx context.Context, asset Asset) (string, error)
 	Run(ctx context.Context) error
 }
 
@@ -198,17 +202,10 @@ const (
 	// that window.
 	maxInstallerDownloadSize int64 = 200 * 1024 * 1024
 
-	// checksumAssetSuffix is appended to a binary asset's name to find its
-	// published checksum sidecar in the same release, e.g.
-	// "rewst_agent_config.linux.bin.sha256" alongside
-	// "rewst_agent_config.linux.bin". See .github/workflows/sign.yml, which
-	// computes and uploads this file for every release asset.
-	checksumAssetSuffix = ".sha256"
-
-	// maxChecksumFileSize bounds how many bytes Download will read for a
-	// checksum sidecar file. The published files are a few lines of text; this
-	// is generous headroom while still preventing an unbounded read.
-	maxChecksumFileSize int64 = 4096
+	// assetDigestPrefix is the algorithm prefix GitHub's Releases API uses on
+	// an asset's digest field, e.g. "sha256:<64 hex chars>". See
+	// parseAssetDigest.
+	assetDigestPrefix = "sha256:"
 )
 
 type defaultUpdater struct {
@@ -320,7 +317,6 @@ func (u *defaultUpdater) Update(updaterExecutablePath string) error {
 
 func (u *defaultUpdater) Download(
 	ctx context.Context,
-	release Release,
 	asset Asset,
 ) (string, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, asset.Url, nil)
@@ -393,19 +389,15 @@ func (u *defaultUpdater) Download(
 	}
 
 	// The download is not trusted until its bytes are verified against the
-	// checksum published alongside it in the same release: a corrupted-but-200
-	// download, a MITM'd release asset, or a compromised release process would
-	// otherwise be written to disk, marked executable, and handed straight to
-	// Update() with nothing having looked at its contents. A missing checksum
-	// asset fails closed rather than falling back to running the binary
-	// unverified.
-	checksumAsset, err := findChecksumAsset(release, asset)
+	// SHA-256 digest GitHub's own Releases API computed for this asset when it
+	// was uploaded: a corrupted-but-200 download, a MITM'd release asset, or a
+	// compromised release process would otherwise be written to disk, marked
+	// executable, and handed straight to Update() with nothing having looked at
+	// its contents. A missing or malformed digest fails closed rather than
+	// falling back to running the binary unverified.
+	expectedDigest, err := parseAssetDigest(asset)
 	if err != nil {
 		return "", fmt.Errorf("failed to verify installer for %s: %w", asset.Name, err)
-	}
-	expectedDigest, err := u.fetchChecksumDigest(ctx, checksumAsset)
-	if err != nil {
-		return "", fmt.Errorf("failed to fetch checksum for %s: %w", asset.Name, err)
 	}
 	actualDigest := hex.EncodeToString(hasher.Sum(nil))
 	if !strings.EqualFold(actualDigest, expectedDigest) {
@@ -419,93 +411,30 @@ func (u *defaultUpdater) Download(
 	return file.Name(), nil
 }
 
-// findChecksumAsset returns the checksum sidecar asset published alongside
-// asset in the same release (see checksumAssetSuffix). It fails closed —
-// callers must not fall back to installing asset unverified — when a release
-// omits the sidecar for whatever asset it does publish.
-func findChecksumAsset(release Release, asset Asset) (Asset, error) {
-	want := asset.Name + checksumAssetSuffix
-	for _, a := range release.Assets {
-		if a.Name == want {
-			return a, nil
-		}
-	}
-	return Asset{}, fmt.Errorf("no checksum asset named %s found in release", want)
-}
-
-// fetchChecksumDigest downloads and parses the SHA-256 checksum sidecar
-// published by .github/workflows/sign.yml, whose content is the PowerShell
-// `Get-FileHash | Format-List` rendering:
-//
-//	Algorithm : SHA256
-//	Hash      : <64 hex chars>
-//	Path      : <path on the runner that produced it>
-//
-// Only the Hash field is meaningful here; Algorithm and Path are not
-// validated since the file name convention already ties the sidecar to a
-// specific asset and algorithm.
-func (u *defaultUpdater) fetchChecksumDigest(
-	ctx context.Context,
-	checksumAsset Asset,
-) (string, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, checksumAsset.Url, nil)
-	if err != nil {
-		return "", err
+// parseAssetDigest extracts and validates the SHA-256 hex digest GitHub
+// computed for asset when it received the upload (asset.Digest, format
+// "sha256:<64 hex chars>" — see the GitHub Releases API's asset object). It
+// fails closed — callers must not fall back to installing asset unverified —
+// when the digest is missing, uses an algorithm other than sha256, or isn't a
+// well-formed 64-character hex string. The returned hash is lowercased for a
+// case-insensitive comparison against the lowercase hex hex.EncodeToString
+// produces.
+func parseAssetDigest(asset Asset) (string, error) {
+	hash, found := strings.CutPrefix(asset.Digest, assetDigestPrefix)
+	if !found {
+		return "", fmt.Errorf("release asset %s has no usable sha256 digest (got %q)",
+			asset.Name, asset.Digest)
 	}
 
-	req.Header.Add("Accept", "application/octet-stream")
-	if u.githubToken != "" {
-		req.Header.Set("Authorization", "Bearer "+u.githubToken)
+	hash = strings.ToLower(hash)
+	if len(hash) != sha256.Size*2 {
+		return "", fmt.Errorf("release asset %s has a malformed digest %q", asset.Name, asset.Digest)
+	}
+	if _, err := hex.DecodeString(hash); err != nil {
+		return "", fmt.Errorf("release asset %s has a malformed digest %q", asset.Name, asset.Digest)
 	}
 
-	resp, err := u.downloadClient.Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer func() {
-		_ = resp.Body.Close()
-	}()
-
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("checksum download failed with status code: %d", resp.StatusCode)
-	}
-
-	content, err := io.ReadAll(io.LimitReader(resp.Body, maxChecksumFileSize+1))
-	if err != nil {
-		return "", err
-	}
-	if int64(len(content)) > maxChecksumFileSize {
-		return "", fmt.Errorf(
-			"checksum file exceeds maximum allowed size of %d bytes", maxChecksumFileSize,
-		)
-	}
-
-	return parseSha256ChecksumHash(content)
-}
-
-// parseSha256ChecksumHash extracts the Hash field from a
-// `Get-FileHash | Format-List` rendering (see fetchChecksumDigest) and
-// returns it lowercased for a case-insensitive comparison against the
-// lowercase hex hex.EncodeToString produces.
-func parseSha256ChecksumHash(content []byte) (string, error) {
-	for _, line := range strings.Split(string(content), "\n") {
-		key, value, found := strings.Cut(line, ":")
-		if !found || strings.TrimSpace(key) != "Hash" {
-			continue
-		}
-
-		hash := strings.ToLower(strings.TrimSpace(value))
-		if len(hash) != sha256.Size*2 {
-			continue
-		}
-		if _, err := hex.DecodeString(hash); err != nil {
-			continue
-		}
-
-		return hash, nil
-	}
-
-	return "", fmt.Errorf("no valid SHA-256 hash found in checksum file")
+	return hash, nil
 }
 
 func (u *defaultUpdater) Run(ctx context.Context) error {
@@ -533,7 +462,7 @@ func (u *defaultUpdater) Run(ctx context.Context) error {
 		return err
 	}
 
-	executablePath, err := u.Download(ctx, latestRelease, applicableAsset)
+	executablePath, err := u.Download(ctx, applicableAsset)
 	if err != nil {
 		return err
 	}

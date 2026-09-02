@@ -685,16 +685,22 @@ installer, so two questions have to be answered before that binary is trusted:
 is it actually the release the agent asked for, and is it actually newer than
 what is already running? Neither was checked before.
 
-- **Checksum verification.** The release pipeline (`.github/workflows/sign.yml`)
-  already computes a SHA-256 hash for every signed binary and publishes it as a
-  `<binary-name>.sha256` asset alongside the binary in the same GitHub release,
-  but nothing consumed it. `Download` now hashes the installer as it streams to
-  disk, fetches the matching checksum asset, and aborts — removing the temp file
-  it already cleans up on any other download failure — if the two don't match.
-  A release missing its checksum asset, or a checksum asset that itself fails to
-  download or doesn't parse, fails the same way: verification is required, not
+- **Checksum verification.** `Download` hashes the installer as it streams to
+  disk and aborts — removing the temp file it already cleans up on any other
+  download failure — unless the hash matches the SHA-256 digest GitHub's
+  Releases API returns natively for that asset (`Asset.Digest`, format
+  `sha256:<hex>`): GitHub computes this itself, server-side, from the bytes it
+  received when the release was published, so there is nothing our own release
+  job has to compute or upload alongside the binary. A missing digest, one
+  using an algorithm other than sha256, or one that isn't a well-formed
+  64-character hex string fails the same way: verification is required, not
   best-effort, so a corrupted-but-200-OK download, a tampered release asset, or
-  a broken release job can never be executed.
+  a broken release job can never be executed. (An earlier version of this
+  mechanism instead published a hand-computed `<binary-name>.sha256` sidecar
+  asset per binary — `.github/workflows/sign.yml` still emits it for now as a
+  safety net for agents built before this change, which keep expecting it on
+  every future release until they themselves update, but nothing in the
+  current agent reads it.)
 - **Newer-than, not not-equal.** `Run` used to update whenever the latest tag
   differed from the running version at all. That also updates on an *older*
   tag — a release process mistake that republishes or points the check
