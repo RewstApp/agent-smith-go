@@ -1,0 +1,193 @@
+name: Locked file in an installed directory
+description: >
+  Hold an exclusive handle open on a file inside one of the agent's installed
+  directories, so a RemoveAll of that directory fails the way it does in the
+  field (sc-108857) - an AV scanner mid-scan, or a stale handle from a process
+  that touched the installation - while the other installed directories stay
+  removable.
+
+  Windows only, because that is the only platform where the failure exists: an
+  open handle without FILE_SHARE_DELETE makes the unlink itself fail, whereas on
+  Linux and macOS an open handle does not block unlink at all, so there is no
+  equivalent fixture to build. The platform-independent half of the fix (every
+  directory attempted, every failed path reported) is covered by the unit tests
+  in cmd/agent_smith/uninstall_test.go on all three platforms.
+
+  The handle is deliberately taken on a file the fixture creates itself, never on
+  the agent executable: holding the executable open would instead make the
+  uninstall's process-exit wait conclude the old agent is still running and abort
+  before removing anything, which is a different scenario (see the wedged-service
+  action and the README's "Waiting for the Old Agent Process to Exit").
+
+  mode=lock creates the file, launches the holder detached, and verifies the
+  handle actually refuses a delete before returning, so a fixture that failed to
+  start fails here rather than as a mystifying "the uninstall removed
+  everything" assertion later. mode=release drops the handle and removes the
+  directory the uninstall left behind, the way an operator would given the path
+  it named; it is idempotent and tolerant of missing state, so an always()
+  cleanup step can run it even when the lock never took.
+
+inputs:
+  mode:
+    description: "lock or release"
+    required: true
+  path:
+    description: >
+      Directory to make unremovable. The lock file is created inside it. Only
+      used by mode=lock; mode=release reads the path back from its state file.
+    required: false
+    default: ""
+  remove_directory:
+    description: >
+      Whether mode=release also removes the directory the uninstall left behind.
+      "true" finishes the cleanup an operator would do by hand; "false" only
+      drops the handle, for a scenario that asserts on the leftover afterwards.
+    required: false
+    default: "true"
+
+runs:
+  using: composite
+  steps:
+    - name: Resolve working paths
+      id: paths
+      shell: pwsh
+      env:
+        RUNNER_TEMP_DIR: ${{ runner.temp }}
+      run: |
+        $ErrorActionPreference = 'Stop'
+        if (-not $IsWindows) {
+          throw "the locked-file action is Windows-only"
+        }
+        $workdir = Join-Path $env:RUNNER_TEMP_DIR 'locked-file'
+        New-Item -ItemType Directory -Force -Path $workdir | Out-Null
+        "workdir=$workdir"                               >> $env:GITHUB_OUTPUT
+        "ready_file=$(Join-Path $workdir 'ready')"       >> $env:GITHUB_OUTPUT
+        "release_file=$(Join-Path $workdir 'release')"   >> $env:GITHUB_OUTPUT
+        "state_file=$(Join-Path $workdir 'locked-dir')"  >> $env:GITHUB_OUTPUT
+        "pid_file=$(Join-Path $workdir 'holder.pid')"    >> $env:GITHUB_OUTPUT
+        "log_file=$(Join-Path $workdir 'holder.log')"    >> $env:GITHUB_OUTPUT
+
+    - name: Take the handle
+      if: inputs.mode == 'lock'
+      shell: pwsh
+      env:
+        TARGET_DIR: ${{ inputs.path }}
+        READY_FILE: ${{ steps.paths.outputs.ready_file }}
+        RELEASE_FILE: ${{ steps.paths.outputs.release_file }}
+        STATE_FILE: ${{ steps.paths.outputs.state_file }}
+        PID_FILE: ${{ steps.paths.outputs.pid_file }}
+        LOG_FILE: ${{ steps.paths.outputs.log_file }}
+      run: |
+        $ErrorActionPreference = 'Stop'
+
+        if (-not $env:TARGET_DIR) { throw "mode=lock requires a path" }
+        if (-not (Test-Path -LiteralPath $env:TARGET_DIR)) {
+          throw "target directory does not exist: $($env:TARGET_DIR)"
+        }
+
+        Remove-Item -LiteralPath $env:READY_FILE, $env:RELEASE_FILE, $env:LOG_FILE `
+          -ErrorAction SilentlyContinue
+
+        # A file the fixture owns, named for what it stands in for. It is not the
+        # agent executable on purpose - see the action description.
+        $lockFile = Join-Path $env:TARGET_DIR 'av-scan-in-progress.tmp'
+        Set-Content -LiteralPath $lockFile -Value 'held open by the sc-108857 fixture' -NoNewline
+        Set-Content -LiteralPath $env:STATE_FILE -Value $env:TARGET_DIR -NoNewline
+
+        # Launched through WMI rather than Start-Process, for the reason the stub
+        # release endpoint documents: a process started from a step shares that
+        # step's console and job object and is reaped when the step ends, which
+        # here would drop the handle before the uninstall ever runs.
+        $holder = Join-Path $env:GITHUB_ACTION_PATH 'holder.ps1'
+        # Resolved to a full path: the WMI provider host launches the holder with
+        # its own environment, so PATH lookups there are not this step's PATH.
+        $pwsh = (Get-Command pwsh).Source
+        $arguments = @(
+          "`"$pwsh`"", '-NoProfile', '-File', "`"$holder`"",
+          '-LockFile', "`"$lockFile`"",
+          '-ReadyFile', "`"$($env:READY_FILE)`"",
+          '-ReleaseFile', "`"$($env:RELEASE_FILE)`"",
+          '-LogFile', "`"$($env:LOG_FILE)`""
+        ) -join ' '
+        $created = Invoke-CimMethod -ClassName Win32_Process -MethodName Create `
+          -Arguments @{ CommandLine = $arguments }
+        if ($created.ReturnValue -ne 0) {
+          throw "Win32_Process.Create failed with return value $($created.ReturnValue)"
+        }
+        Set-Content -LiteralPath $env:PID_FILE -Value $created.ProcessId -NoNewline
+        Write-Output "Holder launched (pid $($created.ProcessId)) for $lockFile"
+
+        for ($i = 1; $i -le 30; $i++) {
+          if (Test-Path -LiteralPath $env:READY_FILE) { break }
+          Start-Sleep -Seconds 1
+        }
+        if (-not (Test-Path -LiteralPath $env:READY_FILE)) {
+          if (Test-Path -LiteralPath $env:LOG_FILE) { Get-Content -LiteralPath $env:LOG_FILE }
+          throw "the holder never reported its handle open on $lockFile"
+        }
+
+        # Prove the handle actually blocks a delete before a scenario depends on
+        # it: a handle that turned out to be shareable would otherwise surface as
+        # the uninstall succeeding and the assertion failing for the wrong reason.
+        # The refusal is judged by the file still being there rather than by the
+        # exception type, which varies between sharing and access violations.
+        $refusal = ''
+        try {
+          Remove-Item -LiteralPath $lockFile -Force -ErrorAction Stop
+        } catch {
+          $refusal = $_.Exception.Message
+        }
+        if (-not (Test-Path -LiteralPath $lockFile)) {
+          throw "the lock file was deletable while the handle was held: $lockFile"
+        }
+        Write-Output "Lock confirmed on $lockFile (delete refused: $refusal)"
+
+    - name: Release the handle
+      if: inputs.mode == 'release'
+      shell: pwsh
+      env:
+        RELEASE_FILE: ${{ steps.paths.outputs.release_file }}
+        STATE_FILE: ${{ steps.paths.outputs.state_file }}
+        PID_FILE: ${{ steps.paths.outputs.pid_file }}
+        LOG_FILE: ${{ steps.paths.outputs.log_file }}
+        REMOVE_DIRECTORY: ${{ inputs.remove_directory }}
+      run: |
+        $ErrorActionPreference = 'Stop'
+
+        if (-not (Test-Path -LiteralPath $env:STATE_FILE)) {
+          Write-Output "No locked-file state to release"
+          exit 0
+        }
+
+        Set-Content -LiteralPath $env:RELEASE_FILE -Value 'release' -NoNewline
+
+        if (Test-Path -LiteralPath $env:PID_FILE) {
+          $holderPid = (Get-Content -LiteralPath $env:PID_FILE -Raw).Trim()
+          for ($i = 1; $i -le 30; $i++) {
+            if (-not (Get-Process -Id $holderPid -ErrorAction SilentlyContinue)) { break }
+            Start-Sleep -Seconds 1
+          }
+          # The holder exits on its own once the release file appears; killing it
+          # is the fallback for one that wedged, since a surviving handle would
+          # leave the directory unremovable for the rest of the job.
+          if (Get-Process -Id $holderPid -ErrorAction SilentlyContinue) {
+            Write-Output "Holder $holderPid did not exit on release; killing it"
+            Stop-Process -Id $holderPid -Force -ErrorAction SilentlyContinue
+          }
+        }
+
+        if (Test-Path -LiteralPath $env:LOG_FILE) {
+          Write-Output "Holder log follows:"
+          Get-Content -LiteralPath $env:LOG_FILE -ErrorAction SilentlyContinue
+        }
+
+        # Finish the cleanup the uninstall could not: the directory it named is
+        # removable again, which is exactly what an operator does with the path
+        # from the "Uninstall incomplete" log line.
+        $target = (Get-Content -LiteralPath $env:STATE_FILE -Raw).Trim()
+        if ($env:REMOVE_DIRECTORY -eq 'true' -and $target -and (Test-Path -LiteralPath $target)) {
+          Remove-Item -LiteralPath $target -Recurse -Force
+          Write-Output "Removed the leftover directory $target"
+        }
+
+        Remove-Item -LiteralPath $env:STATE_FILE -ErrorAction SilentlyContinue

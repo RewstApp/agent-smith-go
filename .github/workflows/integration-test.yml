@@ -188,6 +188,10 @@ jobs:
               # agent's dynamically-written scripts are not flagged/blocked.
               scripts_dir = "C:\RewstRemoteAgent\scripts\$orgId"
               scripts_dir_owner = ''
+              # Windows-only: the only field consumed by the locked-directory
+              # uninstall scenario (sc-108857), which has no equivalent on the
+              # other platforms - see the locked-file action.
+              program_dir = "C:\Program Files\RewstRemoteAgent\$orgId"
               uninstall_paths = "C:\ProgramData\RewstRemoteAgent\$orgId`nC:\Program Files\RewstRemoteAgent\$orgId`nC:\RewstRemoteAgent\scripts\$orgId"
               service_user = 'rewst-it-svc'
               service_username_arg = '.\rewst-it-svc'
@@ -2644,12 +2648,58 @@ jobs:
           Write-Output "Post-recovery update completed normally"
           exit 0
 
+      # sc-108857: a file locked inside one installed directory must not stop the
+      # others from being removed. This is the terminal uninstall on Windows -
+      # it deletes the service registration and the data and scripts
+      # directories - so the clean uninstall below runs on the other platforms,
+      # and Windows keeps its clean-path coverage in the test-service-user job.
+      # Windows-only because an open handle only blocks unlink there; see the
+      # locked-file action.
+      - name: Lock a file in the program directory
+        if: matrix.os == 'windows-latest'
+        uses: ./.github/actions/locked-file
+        with:
+          mode: lock
+          path: ${{ matrix.program_dir }}
+
+      - name: Assert the uninstall continues past the locked directory
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        env:
+          # The production binary, not the integration build: this scenario
+          # needs no shortened deadlines, and a healthy stop and process exit
+          # should be given the real ones rather than a tighter bound that could
+          # abort the uninstall on a slow runner.
+          BINARY: ${{ matrix.binary }}
+          ORG_ID: ${{ vars.IT_ORG_ID }}
+          SERVICE: ${{ matrix.service }}
+          LOCKED_DIR: ${{ matrix.program_dir }}
+          # The two directories that must still be removed, spelled with the
+          # separator the agent logs them with so the log assertions match.
+          REMOVED_DIRS: |
+            ${{ matrix.config_dir }}\${{ vars.IT_ORG_ID }}
+            ${{ matrix.scripts_dir }}
+        run: |
+          & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/assert-uninstall-continues-past-a-locked-directory.ps1"
+
+      # always(), because a handle left open would make the directory
+      # unremovable for the rest of the job - including the assertion below.
+      - name: Release the locked file
+        if: always() && matrix.os == 'windows-latest'
+        uses: ./.github/actions/locked-file
+        with:
+          mode: release
+
       - name: Uninstall agent
+        if: matrix.os != 'windows-latest'
         uses: ./.github/actions/run-agent
         with:
           binary: ${{ matrix.binary }}
           args: --uninstall --org-id ${{ vars.IT_ORG_ID }}
 
+      # Runs on every platform: on Windows this is the state left by the locked
+      # scenario plus the by-hand removal of the one directory it named, which
+      # is the operator's path back to a clean endpoint.
       - name: Check deleted directories
         uses: ./.github/actions/assert-uninstalled
         with:

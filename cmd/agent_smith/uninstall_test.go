@@ -2,8 +2,13 @@ package main
 
 import (
 	"errors"
+	"io"
+	"slices"
 	"testing"
 	"time"
+
+	"github.com/RewstApp/agent-smith-go/internal/agent"
+	"github.com/RewstApp/agent-smith-go/internal/utils"
 )
 
 func newUninstallTestFS() *mockFileSystem {
@@ -189,69 +194,127 @@ func TestRunUninstall_WaitsForExitBeforeRemoving(t *testing.T) {
 
 // ── post-delete tests ─────────────────────────────────────────────────────────
 
-func TestRunUninstall_RemoveAllDataDirFails(t *testing.T) {
+// A single directory that cannot be removed — the locked file an AV scanner or
+// a stale Windows handle leaves behind — must not abort the cleanup. The
+// remaining directories are attempted anyway, and every path that survived is
+// named so an operator can finish the job by hand.
+func TestRunUninstall_RemoveAllFails_RemovesTheOtherDirectories(t *testing.T) {
 	t.Parallel()
 
-	params := &uninstallContext{
-		OrgId:    "test-org",
-		exitWait: stubExitWait(),
-		ServiceManager: &mockServiceManager{
-			openService: &mockService{isActive: false},
-		},
-		FS: &mockFileSystem{
-			removeAllFunc: func(string) error { return errors.New("remove failed") },
-		},
-	}
+	dataDir := agent.GetDataDirectory("test-org")
+	programDir := agent.GetProgramDirectory("test-org")
+	scriptsDir := agent.GetScriptsDirectory("test-org")
 
-	runUninstall(params)
+	for _, tt := range []struct {
+		name   string
+		locked string
+	}{
+		{"data directory locked", dataDir},
+		{"program directory locked", programDir},
+		{"scripts directory locked", scriptsDir},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			var attempted, removed []string
+			params := &uninstallContext{
+				OrgId:    "test-org",
+				exitWait: stubExitWait(),
+				ServiceManager: &mockServiceManager{
+					openService: &mockService{isActive: false},
+				},
+				FS: &mockFileSystem{
+					removeAllFunc: func(path string) error {
+						attempted = append(attempted, path)
+						if path == tt.locked {
+							return errors.New("remove failed: file in use")
+						}
+						removed = append(removed, path)
+						return nil
+					},
+				},
+			}
+
+			runUninstall(params)
+
+			// Every directory is attempted regardless of which one failed.
+			wantAttempted := []string{dataDir, programDir, scriptsDir}
+			if !slices.Equal(attempted, wantAttempted) {
+				t.Errorf("attempted %v, want %v", attempted, wantAttempted)
+			}
+
+			// The directories that could be removed still are.
+			for _, dir := range wantAttempted {
+				if dir == tt.locked {
+					continue
+				}
+				if !slices.Contains(removed, dir) {
+					t.Errorf("expected %s to be removed despite %s failing", dir, tt.locked)
+				}
+			}
+		})
+	}
 }
 
-func TestRunUninstall_RemoveAllProgramDirFails(t *testing.T) {
+// The report has to name the specific paths that survived, not just that
+// something failed.
+func TestRemoveInstallationDirectories_ReportsEveryFailedPath(t *testing.T) {
 	t.Parallel()
 
-	call := 0
-	params := &uninstallContext{
-		OrgId:    "test-org",
-		exitWait: stubExitWait(),
-		ServiceManager: &mockServiceManager{
-			openService: &mockService{isActive: false},
-		},
-		FS: &mockFileSystem{
-			removeAllFunc: func(string) error {
-				call++
-				if call == 2 {
-					return errors.New("remove failed")
-				}
-				return nil
-			},
+	logger := utils.ConfigureLogger("test", io.Discard, utils.Default)
+	dataDir := agent.GetDataDirectory("test-org")
+	scriptsDir := agent.GetScriptsDirectory("test-org")
+
+	fs := &mockFileSystem{
+		removeAllFunc: func(path string) error {
+			if path == dataDir || path == scriptsDir {
+				return errors.New("remove failed: file in use")
+			}
+			return nil
 		},
 	}
 
-	runUninstall(params)
+	failed, attempted := removeInstallationDirectories(logger, fs, "test-org")
+
+	if attempted != 3 {
+		t.Errorf("attempted %d directories, want 3", attempted)
+	}
+	want := []string{dataDir, scriptsDir}
+	if !slices.Equal(failed, want) {
+		t.Errorf("reported failed paths %v, want %v", failed, want)
+	}
 }
 
-func TestRunUninstall_RemoveAllScriptsDirFails(t *testing.T) {
+// A normal uninstall still removes everything and reports no failures.
+func TestRemoveInstallationDirectories_Success(t *testing.T) {
 	t.Parallel()
 
-	call := 0
-	params := &uninstallContext{
-		OrgId:    "test-org",
-		exitWait: stubExitWait(),
-		ServiceManager: &mockServiceManager{
-			openService: &mockService{isActive: false},
-		},
-		FS: &mockFileSystem{
-			removeAllFunc: func(string) error {
-				call++
-				if call == 3 {
-					return errors.New("remove failed")
-				}
-				return nil
-			},
+	logger := utils.ConfigureLogger("test", io.Discard, utils.Default)
+
+	var removed []string
+	fs := &mockFileSystem{
+		removeAllFunc: func(path string) error {
+			removed = append(removed, path)
+			return nil
 		},
 	}
 
-	runUninstall(params)
+	failed, attempted := removeInstallationDirectories(logger, fs, "test-org")
+
+	if len(failed) != 0 {
+		t.Errorf("expected no failed paths, got %v", failed)
+	}
+	if attempted != 3 {
+		t.Errorf("attempted %d directories, want 3", attempted)
+	}
+	want := []string{
+		agent.GetDataDirectory("test-org"),
+		agent.GetProgramDirectory("test-org"),
+		agent.GetScriptsDirectory("test-org"),
+	}
+	if !slices.Equal(removed, want) {
+		t.Errorf("removed %v, want %v", removed, want)
+	}
 }
 
 func TestRunUninstall_Success(t *testing.T) {
