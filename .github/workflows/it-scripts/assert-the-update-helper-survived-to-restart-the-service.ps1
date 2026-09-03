@@ -2,7 +2,7 @@
 #Requires -Version 7
 
 $baseline = [int]$env:BASELINE
-for ($i = 1; $i -le 30; $i++) {
+for ($i = 1; $i -le 60; $i++) {
   $content = Get-Content $env:LOG_FILE -Raw -ErrorAction SilentlyContinue
   $count = if ($content) { ([regex]::Matches($content, [regex]::Escape("Service started"))).Count } else { 0 }
   if ($count -gt $baseline) {

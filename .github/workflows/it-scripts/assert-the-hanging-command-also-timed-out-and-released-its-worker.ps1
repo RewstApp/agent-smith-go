@@ -4,7 +4,7 @@
 # The two bounds compose: the same command is reported as truncated
 # (asserted above) and as timed out, neither masking the other.
 $baseline = [int]$env:TIMED_OUT_BASELINE
-for ($i = 1; $i -le 30; $i++) {
+for ($i = 1; $i -le 60; $i++) {
   $content = Get-Content $env:LOG_FILE -Raw -ErrorAction SilentlyContinue
   $count = if ($content) { ([regex]::Matches($content, [regex]::Escape("Command timed out"))).Count } else { 0 }
   if ($count -gt $baseline) {

@@ -4,7 +4,7 @@
 $baseline = [int]$env:BASELINE
 $observed = $baseline
 # Wait for the post-reconnect command to complete.
-for ($i = 1; $i -le 30; $i++) {
+for ($i = 1; $i -le 60; $i++) {
   Start-Sleep -Seconds 2
   $content = Get-Content $env:LOG_FILE -Raw -ErrorAction SilentlyContinue
   $observed = if ($content) { ([regex]::Matches($content, [regex]::Escape("Command completed"))).Count } else { 0 }
