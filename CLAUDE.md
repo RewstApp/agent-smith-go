@@ -61,7 +61,13 @@ Required tools:
   leave an endpoint offline. The agent executable and config file are written to a
   temp file and atomically renamed into place, so a failed write leaves the
   previous file byte-identical. See the README's "Waiting for the Old Agent
-  Process to Exit" section. On Linux, the `--update` helper that performs this
+  Process to Exit" section. Once the uninstall path reaches the point of deleting
+  installed files, it removes the data, program and scripts directories
+  independently (`removeInstallationDirectories`) rather than aborting on the
+  first `RemoveAll` failure, and reports every path that could not be removed —
+  a single locked file (AV scan, stale Windows handle) no longer orphans the
+  directories behind it with the service registration already gone. See the
+  README's "Completing Uninstall When a Directory Cannot Be Removed" section. On Linux, the `--update` helper that performs this
   flow is launched in its own transient systemd scope
   (`cmd/agent_smith/run_command_linux.go`, `systemd-run --scope --collect`)
   rather than as a plain child of the running service, so it is never a member

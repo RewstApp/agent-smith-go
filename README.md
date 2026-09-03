@@ -152,7 +152,11 @@ To remove Agent Smith from your system:
 ./rewst_agent_config --org-id YOUR_ORG_ID --uninstall
 ```
 
-This will stop the service, remove configuration files, and clean up system service registrations.
+This will stop the service, remove configuration files, and clean up system
+service registrations. If a directory cannot be removed — a file held open by an
+AV scanner, for example — the remaining directories are still removed and the
+paths that survived are named in the log (see "Completing Uninstall When a
+Directory Cannot Be Removed" below).
 
 ## Features
 
@@ -649,6 +653,36 @@ temporary file in the destination directory, then renamed into place, the same
 pattern the postback spool uses. An interrupted or failed write therefore leaves
 the previous file byte-identical rather than truncated: the endpoint keeps running
 the old agent instead of a binary that cannot start.
+
+### Completing Uninstall When a Directory Cannot Be Removed
+
+Uninstall removes three directories: the org's data directory, its program
+directory, and its scripts directory. It used to remove them sequentially and
+return on the first `RemoveAll` failure, after the service registration had
+already been deleted. A single locked file — an AV scanner mid-scan, a stale
+open handle on Windows, both routine during uninstall — therefore orphaned every
+directory behind the one that failed, potentially tens of megabytes, with no
+service registration left to retry the uninstall cleanly through.
+
+Every directory is now attempted **independently**:
+
+- A failure on one directory is logged with its path and the removal moves on to
+  the next, so the directories that *can* be removed always are.
+- The failures are reported together at the end, at `Error`, **naming every path
+  that survived** (`failed_directories`, plus `failed_count` of
+  `attempted_count`), so whoever picks up the cleanup does not have to guess
+  which directories were reached. A clean uninstall logs `Uninstall completed`.
+- The order stays data, program, scripts. On Linux and macOS the scripts
+  directory lives *inside* the data directory, so removing the data directory
+  normally takes it along and the later attempt is a no-op (`RemoveAll` on a
+  missing path succeeds); when the data directory removal fails, that separate
+  attempt is a second, narrower chance to reclaim the scripts underneath it.
+
+This applies only to removing the installed files. Everything before that — a
+service that will not stop, an agent process that will not exit, a registration
+that cannot be deleted — still aborts the uninstall with nothing removed, since
+those failures mean the agent may still be running (see "Waiting for the Old
+Agent Process to Exit" above).
 
 ### Surviving Its Own systemd Stop (Linux)
 
