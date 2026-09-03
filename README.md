@@ -684,6 +684,19 @@ that cannot be deleted — still aborts the uninstall with nothing removed, sinc
 those failures mean the agent may still be running (see "Waiting for the Old
 Agent Process to Exit" above).
 
+The integration suite exercises this end to end on Windows: a fixture holds an
+exclusive handle (no `FILE_SHARE_DELETE`) on a file it plants inside the program
+directory, then runs a real uninstall against a real installed service and
+asserts the data and scripts directories are gone, the registration is gone, the
+program directory is still there, and the summary line names it. Windows only,
+because that is the only platform where the failure exists — an open handle does
+not block `unlink` on Linux or macOS, so there is no equivalent fixture to build;
+the platform-independent half (every directory attempted, every failed path
+reported) is covered by unit tests on all three. The handle is taken on a planted
+file rather than on the agent executable on purpose: holding the executable open
+would make the process-exit wait conclude the old agent is still running and
+abort before removing anything, which is the different scenario above.
+
 ### Surviving Its Own systemd Stop (Linux)
 
 The `--update` helper that an auto-update spawns has to stop the running
