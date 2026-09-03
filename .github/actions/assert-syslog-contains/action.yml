@@ -9,9 +9,13 @@ inputs:
     description: "Substring that must appear in the syslog entries"
     required: true
   wait_seconds:
-    description: "Seconds to sleep before reading the syslog"
+    description: "Seconds between poll attempts"
     required: false
-    default: "15"
+    default: "2"
+  max_attempts:
+    description: "Maximum number of poll attempts"
+    required: false
+    default: "60"
 
 runs:
   using: composite
@@ -23,17 +27,28 @@ runs:
         SERVICE: ${{ inputs.service }}
         PATTERN: ${{ inputs.pattern }}
         WAIT_SECONDS: ${{ inputs.wait_seconds }}
+        MAX_ATTEMPTS: ${{ inputs.max_attempts }}
       run: |
-        sleep "$WAIT_SECONDS"
-        entries=$(journalctl -t "$SERVICE" --no-pager 2>/dev/null || sudo grep "$SERVICE" /var/log/syslog 2>/dev/null || sudo grep "$SERVICE" /var/log/messages 2>/dev/null || true)
+        set -uo pipefail
+        for ((i = 1; i <= MAX_ATTEMPTS; i++)); do
+          entries=$(journalctl -t "$SERVICE" --no-pager 2>/dev/null || sudo grep "$SERVICE" /var/log/syslog 2>/dev/null || sudo grep "$SERVICE" /var/log/messages 2>/dev/null || true)
+          if echo "$entries" | grep -qF "$PATTERN"; then
+            echo "$entries"
+            echo "Found '$PATTERN' in syslog after ~$((i * WAIT_SECONDS))s"
+            exit 0
+          fi
+          sleep "$WAIT_SECONDS"
+        done
         echo "$entries"
+        echo "ERROR: Expected '$PATTERN' entry not found in syslog"
+        exit 1
 
-        if ! echo "$entries" | grep -qF "$PATTERN"; then
-          echo "ERROR: Expected '$PATTERN' entry not found in syslog"
-          exit 1
-        fi
-        echo "Found '$PATTERN' in syslog"
-
+    # Get-WinEvent throws a terminating error - not an empty result - when a
+    # query matches zero events, so a single-shot call (as this used to be)
+    # fails outright the instant the Application log hasn't caught up with the
+    # agent's own log yet, with no chance to retry. -ErrorAction
+    # SilentlyContinue turns that into "no events yet" so the loop can keep
+    # polling instead of failing on the first attempt.
     - name: Assert syslog contains (Windows)
       if: runner.os == 'Windows'
       shell: pwsh
@@ -41,18 +56,25 @@ runs:
         SERVICE: ${{ inputs.service }}
         PATTERN: ${{ inputs.pattern }}
         WAIT_SECONDS: ${{ inputs.wait_seconds }}
+        MAX_ATTEMPTS: ${{ inputs.max_attempts }}
       run: |
-        Start-Sleep -Seconds ([int]$env:WAIT_SECONDS)
-        $events = Get-WinEvent -LogName Application -FilterXPath "*[System[Provider[@Name='$env:SERVICE']]]"
-        Write-Output "Found $($events.Count) event(s)"
-        $events | ForEach-Object { Write-Output $_.Message }
-
-        $matched = $events | Where-Object { $_.Message -match [regex]::Escape($env:PATTERN) }
-        if (-not $matched) {
-          Write-Error "Expected '$env:PATTERN' entry not found in Windows Event Log"
-          exit 1
+        $maxAttempts = [int]$env:MAX_ATTEMPTS
+        $waitSeconds = [int]$env:WAIT_SECONDS
+        for ($i = 1; $i -le $maxAttempts; $i++) {
+          $events = Get-WinEvent -LogName Application `
+            -FilterXPath "*[System[Provider[@Name='$env:SERVICE']]]" `
+            -ErrorAction SilentlyContinue
+          $matched = $events | Where-Object { $_.Message -match [regex]::Escape($env:PATTERN) }
+          if ($matched) {
+            Write-Output "Found $($events.Count) event(s)"
+            $events | ForEach-Object { Write-Output $_.Message }
+            Write-Output "Found '$env:PATTERN' in Windows Event Log after ~$($i * $waitSeconds)s"
+            exit 0
+          }
+          Start-Sleep -Seconds $waitSeconds
         }
-        Write-Output "Found '$env:PATTERN' in Windows Event Log"
+        Write-Error "Expected '$env:PATTERN' entry not found in Windows Event Log"
+        exit 1
 
     - name: Assert syslog contains (macOS)
       if: runner.os == 'macOS'
@@ -60,13 +82,18 @@ runs:
       env:
         PATTERN: ${{ inputs.pattern }}
         WAIT_SECONDS: ${{ inputs.wait_seconds }}
+        MAX_ATTEMPTS: ${{ inputs.max_attempts }}
       run: |
-        sleep "$WAIT_SECONDS"
-        entries=$(log show --predicate 'processImagePath contains "logger"' --info --last 5m 2>/dev/null || true)
+        set -uo pipefail
+        for ((i = 1; i <= MAX_ATTEMPTS; i++)); do
+          entries=$(log show --predicate 'processImagePath contains "logger"' --info --last 5m 2>/dev/null || true)
+          if echo "$entries" | grep -qF "$PATTERN"; then
+            echo "$entries"
+            echo "Found '$PATTERN' in syslog after ~$((i * WAIT_SECONDS))s"
+            exit 0
+          fi
+          sleep "$WAIT_SECONDS"
+        done
         echo "$entries"
-
-        if ! echo "$entries" | grep -qF "$PATTERN"; then
-          echo "ERROR: Expected '$PATTERN' entry not found in syslog"
-          exit 1
-        fi
-        echo "Found '$PATTERN' in syslog"
+        echo "ERROR: Expected '$PATTERN' entry not found in syslog"
+        exit 1

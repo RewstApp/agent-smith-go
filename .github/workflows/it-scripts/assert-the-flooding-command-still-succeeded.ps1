@@ -5,7 +5,7 @@
 # excess discarded, so it reports "Command completed", not "Command
 # failed" or "Command timed out".
 $baseline = [int]$env:BASELINE
-for ($i = 1; $i -le 30; $i++) {
+for ($i = 1; $i -le 60; $i++) {
   $content = Get-Content $env:LOG_FILE -Raw -ErrorAction SilentlyContinue
   $count = if ($content) { ([regex]::Matches($content, [regex]::Escape("Command completed"))).Count } else { 0 }
   if ($count -gt $baseline) {

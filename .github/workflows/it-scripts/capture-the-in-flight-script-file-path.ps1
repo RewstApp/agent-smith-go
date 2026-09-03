@@ -6,7 +6,7 @@
 # re-deriving the platform path - the service's temp directory is not
 # the runner's, notably root's private TMPDIR on macOS.
 $baseline = [int]$env:BASELINE
-for ($i = 1; $i -le 30; $i++) {
+for ($i = 1; $i -le 60; $i++) {
   $content = Get-Content $env:LOG_FILE -Raw -ErrorAction SilentlyContinue
   $found = if ($content) { [regex]::Matches($content, 'Command saved to[^\r\n]*path=(?<p>"[^"]*"|\S+)') } else { @() }
   if ($found.Count -gt $baseline) {
