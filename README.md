@@ -764,6 +764,33 @@ what is already running? Neither was checked before.
   oversized or endless body. `downloadTimeout` already bounds how long the
   request runs; this bounds how many bytes it can deliver in that time.
 
+### Bounded Config-Fetch Response
+
+The auto-update download is not the only response body the agent buffers in
+memory. Config mode's install-time `POST` to `--config-url` reads the Rewst
+config endpoint's reply the same way, and it gets the same treatment: the body
+is read through an `io.LimitReader` bounded to **10 MiB**
+(`maxConfigResponseSize`, `cmd/agent_smith/config_context.go`), and a response
+that runs past the ceiling aborts the install with
+`configuration response exceeds maximum allowed size of <n> bytes` rather than
+parsing the prefix that arrived.
+
+The ceiling is deliberately enormous relative to what a legitimate reply looks
+like — a single small JSON object holding a device id, two hostnames, a key and
+a handful of tuning fields, on the order of a kilobyte — so no real
+configuration is ever at risk, while still sitting far below a size that could
+put memory pressure on the machine being installed. `configHTTPTimeout` (5
+minutes) already bounds how long the request may run, but a slow-but-steady
+sender can still deliver an effectively unbounded body inside that window, so a
+compromised, misconfigured or DNS-hijacked config endpoint — or a proxy or
+middlebox on the path to it — could otherwise drive unbounded allocation on the
+client during install. Unlike the auto-update path this runs once, at install
+time, rather than repeating on a schedule; the bound costs nothing either way.
+
+Rejection happens before the body is unmarshalled, so a truncated payload can
+never be partially applied: the install fails with the size error and the
+existing installation, if any, is left untouched.
+
 ### Capped and Jittered Auto-Update Retries
 
 When an update check or download fails, the agent retries on an exponential

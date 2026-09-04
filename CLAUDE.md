@@ -51,6 +51,15 @@ Required tools:
   - Service mode: `--config-file --log-file --org-id` 
   - Uninstall mode: `--uninstall --org-id`
 
+  Config mode reads the config endpoint's response body through an
+  `io.LimitReader` capped at `maxConfigResponseSize` (10 MiB,
+  `cmd/agent_smith/config_context.go`) and aborts the install when a response
+  runs past it, rather than parsing a truncated prefix — `configHTTPTimeout`
+  bounds how long the request runs but not how many bytes a slow-but-connected
+  sender can push in that window. This mirrors `maxInstallerDownloadSize` on the
+  auto-update download path. See the README's "Bounded Config-Fetch Response"
+  section.
+
   The install, update and uninstall paths never assume the old agent process has
   exited: after stopping the service they wait (bounded, 2 minutes, documented)
   for real exit signals — the service manager no longer reporting the service

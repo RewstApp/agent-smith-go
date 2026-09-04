@@ -661,3 +661,56 @@ func TestRunConfig_HTTPTimeout(t *testing.T) {
 		t.Errorf("expected 'failed to execute http request' error, got %v", err)
 	}
 }
+
+// TestRunConfig_OversizedResponseRejected covers the size ceiling on the
+// config-fetch response body: configHTTPTimeout bounds how long the request may
+// run, not how many bytes it may deliver, so the body is read through a
+// LimitReader and anything over maxConfigResponseSize aborts the install.
+func TestRunConfig_OversizedResponseRejected(t *testing.T) {
+	// Stream past the ceiling in chunks rather than allocating one oversized
+	// buffer, the way a hostile endpoint trickling a body would.
+	chunk := strings.Repeat("a", 64*1024)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		for written := int64(0); written <= maxConfigResponseSize; written += int64(len(chunk)) {
+			if _, err := w.Write([]byte(chunk)); err != nil {
+				return
+			}
+		}
+	}))
+	defer srv.Close()
+
+	params := newBaseConfigParams(srv.URL)
+
+	err := runConfig(params)
+
+	if err == nil || !strings.Contains(err.Error(), "exceeds maximum allowed size") {
+		t.Fatalf("expected oversized response error, got %v", err)
+	}
+	// The fetch must abort before anything is written, rather than parsing a
+	// truncated prefix of the body.
+	if strings.Contains(err.Error(), "failed to parse response") {
+		t.Errorf("expected rejection before parsing, got %v", err)
+	}
+}
+
+// TestRunConfig_ResponseAtSizeLimitAccepted pins the boundary: a body exactly at
+// the ceiling is still read in full, so the limit reader's extra byte is only
+// ever used to detect an overrun.
+func TestRunConfig_ResponseAtSizeLimitAccepted(t *testing.T) {
+	body := validConfigResponseBody("test-org")
+	// Pad with JSON whitespace so the payload is exactly maxConfigResponseSize
+	// bytes and still parses.
+	padding := int(maxConfigResponseSize) - len(body)
+	if padding < 0 {
+		t.Fatalf("valid config body (%d bytes) already exceeds the ceiling", len(body))
+	}
+	srv := newConfigServer(t, http.StatusOK, body+strings.Repeat(" ", padding))
+	defer srv.Close()
+
+	params := newBaseConfigParams(srv.URL)
+
+	if err := runConfig(params); err != nil {
+		t.Errorf("expected config at the size limit to succeed, got %v", err)
+	}
+}

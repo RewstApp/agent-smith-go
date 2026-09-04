@@ -89,9 +89,22 @@ func runConfig(params *configContext) error {
 	}
 	logger.Info("Successfully fetched configuration", "status_code", res.StatusCode)
 
-	bodyBytes, err := io.ReadAll(res.Body)
+	// Read through a bounded reader rather than a bare io.ReadAll: the endpoint
+	// is trusted to be Rewst, but a compromised, misconfigured or hijacked one
+	// could otherwise stream an unbounded body into memory for the whole
+	// configHTTPTimeout window. One byte over the ceiling is enough to tell a
+	// legitimate payload from an oversized one, and the fetch is aborted rather
+	// than parsing whatever prefix arrived — a truncated body would either fail
+	// to parse or, worse, parse into a partial configuration.
+	bodyBytes, err := io.ReadAll(io.LimitReader(res.Body, maxConfigResponseSize+1))
 	if err != nil {
 		return fmt.Errorf("failed to read response: %w", err)
+	}
+	if int64(len(bodyBytes)) > maxConfigResponseSize {
+		return fmt.Errorf(
+			"configuration response exceeds maximum allowed size of %d bytes",
+			maxConfigResponseSize,
+		)
 	}
 
 	// Parse the fetch configuration response
