@@ -14,6 +14,21 @@ import (
 
 const configHTTPTimeout = 5 * time.Minute
 
+// maxConfigResponseSize bounds how many bytes runConfig will read from the
+// config endpoint's response before giving up. A legitimate configuration
+// payload is a single small JSON object — a device id, two hostnames, a key and
+// a handful of tuning fields, on the order of a kilobyte — so this ceiling is
+// four orders of magnitude of headroom above anything real, while still being
+// far below a size that could put memory pressure on the machine being
+// installed. configHTTPTimeout bounds how long the request may run but not how
+// many bytes a slow-but-still-connected sender can push in that window, so a
+// compromised, misconfigured or DNS-hijacked config endpoint (or a middlebox on
+// the path to it) could otherwise stream an effectively unbounded body straight
+// into io.ReadAll. This mirrors maxInstallerDownloadSize in
+// internal/agent/updater.go, which closes the same gap on the auto-update
+// download path.
+const maxConfigResponseSize int64 = 10 * 1024 * 1024
+
 // tuningFlagUnset is the sentinel default for the optional integer tuning flags
 // (e.g. --worker-count). It mirrors the --mqtt-qos sentinel pattern: the value
 // is only applied to the configuration when the operator explicitly provides a
