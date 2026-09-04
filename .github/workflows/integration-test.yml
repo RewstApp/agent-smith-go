@@ -2816,3 +2816,184 @@ jobs:
         uses: ./.github/actions/remove-service-user
         with:
           username: ${{ matrix.service_user }}
+
+  # ---- Config-fetch response size ceiling (sc-112405) ----
+  # Config mode read the config endpoint's POST response with a bare
+  # io.ReadAll. configHTTPTimeout (5 minutes) bounded the request in time but
+  # not in bytes, so a compromised, misconfigured or DNS-hijacked endpoint - or
+  # a proxy on the path to it - could answer 200 and stream an effectively
+  # unbounded body straight into memory during install. The body is now read
+  # through an io.LimitReader capped at maxConfigResponseSize (10 MiB); see the
+  # README's "Bounded Config-Fetch Response" section.
+  #
+  # Its own job rather than a scenario inside `test`: both legs run config mode,
+  # which writes the config file, replaces the installed binary and re-registers
+  # the service - so running them on the runner `test` uses would tear down the
+  # installation every one of its later scenarios depends on. A separate job
+  # gets a clean machine, does its own install and uninstall, and needs no live
+  # Azure IoT Hub: the endpoint under test is the config endpoint, and it is
+  # stubbed.
+  test-config-response-cap:
+    permissions:
+      contents: read
+    needs: [build, set-matrix]
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.set-matrix.outputs.matrix) }}
+    runs-on: ${{ matrix.os }}
+    env:
+      # 10 MiB, matching maxConfigResponseSize in cmd/agent_smith/config_context.go.
+      # Spelled in bytes because that is how the agent's error reports it.
+      MAX_CONFIG_RESPONSE_BYTES: "10485760"
+      # 1 GiB on offer - two orders of magnitude past the ceiling, so a bounded
+      # read and an unbounded one are nowhere near each other in the byte count
+      # the endpoint reports.
+      OVERSIZED_BYTES: "1073741824"
+      # What the endpoint is allowed to have delivered before the agent hung up:
+      # the 10 MiB ceiling plus generous room for bytes the socket buffers had
+      # already accepted (a loopback exchange measured ~12.6 MiB), and still 16x
+      # below the body on offer.
+      MAX_BYTES_READ: "67108864"
+      # The stub answers on loopback and checks nothing, so this stands in for
+      # IT_CONFIG_SECRET rather than exposing it to a fixture.
+      STUB_CONFIG_SECRET: "stub-config-secret"
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      # Downloaded here rather than through the install-agent action, which
+      # would fetch the same artifacts a second time: this job drives config
+      # mode directly, since the oversized leg expects it to fail.
+      - name: Download compiled binary
+        uses: actions/download-artifact@v8
+        with:
+          name: ${{ matrix.os }}
+          path: ./dist
+
+      - name: Make binary executable
+        if: runner.os != 'Windows'
+        shell: bash
+        run: chmod +x "./dist/${{ matrix.binary }}"
+
+      # Starts in oversized mode, so the failing leg runs against the endpoint
+      # as launched.
+      - name: Start stub config endpoint
+        id: stub_config
+        uses: ./.github/actions/stub-config
+        with:
+          mode: start
+          org_id: ${{ vars.IT_ORG_ID }}
+          oversized_bytes: ${{ env.OVERSIZED_BYTES }}
+
+      - name: Assert the oversized config response is rejected
+        shell: pwsh
+        env:
+          # The production binary, not the integration build: nothing here
+          # depends on a shortened deadline, and the point of the timing
+          # assertion is that the real 5-minute configHTTPTimeout was never what
+          # ended the read.
+          BINARY: ${{ matrix.binary }}
+          ORG_ID: ${{ vars.IT_ORG_ID }}
+          CONFIG_URL: ${{ steps.stub_config.outputs.url }}
+          CONFIG_SECRET: ${{ env.STUB_CONFIG_SECRET }}
+          MAX_BYTES: ${{ env.MAX_CONFIG_RESPONSE_BYTES }}
+          # Far below configHTTPTimeout's 300s, far above the seconds the host
+          # info gathering ahead of the fetch costs even on a slow runner.
+          MAX_ELAPSED_SECONDS: "120"
+        run: |
+          & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/assert-the-oversized-config-response-is-rejected.ps1"
+
+      - name: Assert the oversized response was not read whole
+        shell: pwsh
+        env:
+          STUB_LOG: ${{ steps.stub_config.outputs.log_file }}
+          MAX_BYTES_READ: ${{ env.MAX_BYTES_READ }}
+          TOTAL_BYTES: ${{ env.OVERSIZED_BYTES }}
+        run: |
+          & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/assert-the-oversized-response-was-not-read-whole.ps1"
+
+      # A rejected fetch must leave the machine untouched, not half-installed:
+      # the abort happens before the data directory is created, so none of the
+      # paths a real install creates should exist.
+      - name: Assert nothing was installed by the rejected fetch
+        uses: ./.github/actions/assert-uninstalled
+        with:
+          paths: ${{ matrix.uninstall_paths }}
+
+      # ---- Control leg: a legitimate payload still installs ----
+      # A ceiling that also rejected real configurations would satisfy every
+      # assertion above and break every install, so the same endpoint now serves
+      # the small valid config an install actually gets (a couple of hundred
+      # bytes - four orders of magnitude under the ceiling).
+      - name: Serve a valid configuration
+        uses: ./.github/actions/stub-config
+        with:
+          mode: ok
+
+      - name: Install agent against the valid configuration
+        uses: ./.github/actions/run-agent
+        with:
+          binary: ${{ matrix.binary }}
+          args: >-
+            --config-url ${{ steps.stub_config.outputs.url }}
+            --config-secret ${{ env.STUB_CONFIG_SECRET }}
+            --org-id ${{ vars.IT_ORG_ID }}
+            --no-auto-updates
+
+      - name: Check service
+        uses: ./.github/actions/check-service
+        with:
+          service: ${{ matrix.service }}
+
+      - name: Validate config and get device id
+        id: validate_config
+        uses: ./.github/actions/validate-config
+        with:
+          config_dir: ${{ matrix.config_dir }}
+          org_id: ${{ vars.IT_ORG_ID }}
+
+      # The device id proves the written config is the one the endpoint served,
+      # read in full and intact - not a truncated or otherwise mangled body that
+      # happened to satisfy the required-fields check.
+      - name: Assert the served configuration was written intact
+        shell: pwsh
+        env:
+          DEVICE_ID: ${{ steps.validate_config.outputs.device_id }}
+          HUB_HOST: ${{ steps.validate_config.outputs.azure_iot_hub_host }}
+        run: |
+          $failures = @()
+          if ($env:DEVICE_ID -ne 'stub-device-id') {
+            $failures += "device_id is '$($env:DEVICE_ID)', not the served 'stub-device-id'"
+          }
+          if ($env:HUB_HOST -ne 'hub.invalid') {
+            $failures += "azure_iot_hub_host is '$($env:HUB_HOST)', not the served 'hub.invalid'"
+          }
+          if ($failures.Count -gt 0) {
+            $failures | ForEach-Object { Write-Output "FAIL: $_" }
+            Write-Error "the installed config does not match what the endpoint served"
+            exit 1
+          }
+          Write-Output "The installed config matches the served payload"
+
+      # No always(): on a runner this job owns and discards, leaving a failed
+      # install in place is better than an uninstall of something that was never
+      # installed reporting a second, unrelated failure over the real one.
+      - name: Uninstall agent
+        uses: ./.github/actions/run-agent
+        with:
+          binary: ${{ matrix.binary }}
+          args: --uninstall --org-id ${{ vars.IT_ORG_ID }}
+
+      - name: Check deleted directories
+        uses: ./.github/actions/assert-uninstalled
+        with:
+          paths: ${{ matrix.uninstall_paths }}
+
+      # always(), because the endpoint's request log is the byte-count record
+      # this scenario is read from - it has to be reported on a failure most of
+      # all.
+      - name: Stop stub config endpoint
+        if: always()
+        uses: ./.github/actions/stub-config
+        with:
+          mode: stop
