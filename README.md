@@ -601,6 +601,38 @@ deleting anything, and host-info gathering logs the field as unavailable
 (`NewHostInfo` already warns per-field and continues) rather than blocking the
 rest of the flow.
 
+`IsEntraConnectServer` is the one host-info field that shells out more than
+once: it probes four candidate service names in sequence. Each probe was
+originally given its own fresh `hostCommandTimeout`, which made the bound on
+the *field* four times the documented bound — two minutes against a wedged
+Service Control Manager — and, worse, a probe killed by its deadline was
+treated exactly like a probe that came back "service does not exist", so the
+check moved on to the next name and ultimately returned `false` with no error.
+A timeout was silently reported as "this host is not an Entra Connect server".
+
+Both are fixed:
+
+- **One shared budget for the whole check.** `IsEntraConnectServer` derives a
+  single `hostCommandTimeout` context up front and runs all four `sc query`
+  calls under it, so the field is bounded by 30 seconds no matter how many
+  names are probed.
+- **A timeout aborts the check with an error.** A failed probe with the shared
+  budget expired (or the caller canceled) says nothing about whether the
+  service exists, and every remaining name would fail the same way, so the
+  check returns an error naming the service and the bound
+  (`sc query "ADSync" timed out after 30s: ...`) instead of a made-up `false`.
+  `NewHostInfo` logs it as an unavailable field and keeps the rest of the host
+  info, the same as any other per-field failure.
+
+This bound matters on the `get_installation` path in particular. That request
+is handled by a worker out of the small MQTT command-processing pool, and it is
+*not* covered by the per-command execution timeout described in "Bounding
+per-command execution time" — that bound applies to the interpreter's own
+command execution, not to host-info gathering. Before this fix a wedged SCM
+occupied the worker for as long as it stayed wedged; with enough concurrent
+`get_installation` requests that degrades or stalls command execution on the
+device, the same failure the per-command timeout was introduced to prevent.
+
 All three timeouts are overridable via `-ldflags` for integration testing —
 `service.launchctlTimeoutOverrideStr`, `service.systemctlTimeoutOverrideStr`,
 and `agent.hostCommandTimeoutOverrideStr` — the same mechanism
