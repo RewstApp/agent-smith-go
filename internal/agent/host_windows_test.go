@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/hashicorp/go-hclog"
 )
 
 func TestWindowsDefaultSystemInfoProvider_MACAddress_NoInterface(t *testing.T) {
@@ -252,35 +254,255 @@ func TestWindowsDefaultDomainInfoProvider_IsADDomainController_ProfileNoise(t *t
 }
 
 func TestWindowsDefaultDomainInfoProvider_IsEntraConnectServer(t *testing.T) {
-	domain := &windowsDefaultDomainInfoProvider{psRunner: defaultPSRunner}
+	domain := &windowsDefaultDomainInfoProvider{
+		psRunner: defaultPSRunner,
+		scQuery:  defaultSCQuery,
+	}
 	_, err := domain.IsEntraConnectServer(context.Background())
 	if err != nil {
 		t.Errorf("expected no error, got %v", err)
 	}
 }
 
+// hangingSCQuery stands in for "sc query" against a wedged Service Control
+// Manager: it never returns on its own and only unblocks when the context the
+// provider handed it is done. It records how many names were attempted so a
+// test can tell an aborted check apart from one that plodded through all four.
+func hangingSCQuery(attempts *int) scQueryFunc {
+	return func(ctx context.Context, name string) error {
+		*attempts++
+		<-ctx.Done()
+		return ctx.Err()
+	}
+}
+
 func TestWindowsDefaultDomainInfoProvider_IsEntraConnectServer_TimesOutOnHungQuery(t *testing.T) {
 	orig := hostCommandTimeoutOverrideStr
-	hostCommandTimeoutOverrideStr = "50ms"
+	hostCommandTimeoutOverrideStr = "100ms"
 	t.Cleanup(func() { hostCommandTimeoutOverrideStr = orig })
 
-	domain := &windowsDefaultDomainInfoProvider{psRunner: defaultPSRunner}
+	attempts := 0
+	domain := &windowsDefaultDomainInfoProvider{
+		psRunner: defaultPSRunner,
+		scQuery:  hangingSCQuery(&attempts),
+	}
 
 	start := time.Now()
 	found, err := domain.IsEntraConnectServer(context.Background())
 	elapsed := time.Since(start)
 
-	// A hung "sc query" is indistinguishable from "service not found" here (both
-	// just fail the query for that name), so the bounded call must still return
-	// promptly rather than hang - it is not expected to surface an error.
+	// A hung query says nothing about whether the service exists, so the check
+	// must surface an error rather than report the host as "not an Entra
+	// Connect server".
+	if err == nil {
+		t.Fatal("expected an error when sc query hangs, got nil")
+	}
+	if found {
+		t.Error("expected false alongside the error")
+	}
+	if !strings.Contains(err.Error(), "timed out") {
+		t.Errorf("expected a timeout error, got %v", err)
+	}
+
+	// The four names share one budget: the first hang burns it and aborts the
+	// whole check, instead of each name getting its own full timeout.
+	if attempts != 1 {
+		t.Errorf("expected the check to abort after 1 hung query, got %d attempts", attempts)
+	}
+	if elapsed > 2*time.Second {
+		t.Errorf("IsEntraConnectServer took %v; expected the whole check to be bounded", elapsed)
+	}
+}
+
+func TestWindowsDefaultDomainInfoProvider_IsEntraConnectServer_SharesTimeoutBudget(t *testing.T) {
+	orig := hostCommandTimeoutOverrideStr
+	hostCommandTimeoutOverrideStr = "300ms"
+	t.Cleanup(func() { hostCommandTimeoutOverrideStr = orig })
+
+	// Each query burns most of the budget before failing the way a
+	// "service does not exist" query does. Without a shared deadline the four
+	// names would take four times the timeout; with one, the check aborts part
+	// way through.
+	attempts := 0
+	domain := &windowsDefaultDomainInfoProvider{
+		psRunner: defaultPSRunner,
+		scQuery: func(ctx context.Context, name string) error {
+			attempts++
+			select {
+			case <-time.After(200 * time.Millisecond):
+			case <-ctx.Done():
+			}
+			return errors.New("the specified service does not exist")
+		},
+	}
+
+	start := time.Now()
+	_, err := domain.IsEntraConnectServer(context.Background())
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("expected an error once the shared budget is exhausted, got nil")
+	}
+	if attempts >= 4 {
+		t.Errorf("expected the check to abort before all 4 names, got %d attempts", attempts)
+	}
+	if elapsed > 2*time.Second {
+		t.Errorf("IsEntraConnectServer took %v; expected the whole check to be bounded", elapsed)
+	}
+}
+
+func TestWindowsDefaultDomainInfoProvider_IsEntraConnectServer_NotInstalled(t *testing.T) {
+	// A fast "service does not exist" for every name is the normal result on a
+	// host without Entra Connect: false, no error, every name tried.
+	attempts := 0
+	domain := &windowsDefaultDomainInfoProvider{
+		psRunner: defaultPSRunner,
+		scQuery: func(ctx context.Context, name string) error {
+			attempts++
+			return errors.New("the specified service does not exist")
+		},
+	}
+
+	found, err := domain.IsEntraConnectServer(context.Background())
 	if err != nil {
-		t.Errorf("expected no error, got %v", err)
+		t.Fatalf("expected no error, got %v", err)
 	}
 	if found {
 		t.Error("expected false when no Entra Connect service is installed")
 	}
-	if elapsed > 5*time.Second {
-		t.Errorf("IsEntraConnectServer took %v; expected each query to be bounded", elapsed)
+	if attempts != 4 {
+		t.Errorf("expected all 4 service names to be queried, got %d", attempts)
+	}
+}
+
+func TestWindowsDefaultDomainInfoProvider_IsEntraConnectServer_Found(t *testing.T) {
+	// The second name resolves, so the check stops there and reports true.
+	attempts := 0
+	domain := &windowsDefaultDomainInfoProvider{
+		psRunner: defaultPSRunner,
+		scQuery: func(ctx context.Context, name string) error {
+			attempts++
+			if name == "Azure AD Sync" {
+				return nil
+			}
+			return errors.New("the specified service does not exist")
+		},
+	}
+
+	found, err := domain.IsEntraConnectServer(context.Background())
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if !found {
+		t.Error("expected true when an Entra Connect service is installed")
+	}
+	if attempts != 2 {
+		t.Errorf("expected the check to stop at the matching name, got %d attempts", attempts)
+	}
+}
+
+func TestWindowsDefaultDomainInfoProvider_IsEntraConnectServer_CallerCanceled(t *testing.T) {
+	// A canceled caller (the service shutting down mid get_installation) aborts
+	// the check with an error rather than walking the remaining names and
+	// reporting a value derived from failures it caused itself.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	attempts := 0
+	domain := &windowsDefaultDomainInfoProvider{
+		psRunner: defaultPSRunner,
+		scQuery:  hangingSCQuery(&attempts),
+	}
+
+	found, err := domain.IsEntraConnectServer(ctx)
+	if err == nil {
+		t.Fatal("expected an error when the caller's context is canceled, got nil")
+	}
+	if found {
+		t.Error("expected false alongside the error")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("expected the cancellation to be reported, got %v", err)
+	}
+	if attempts != 1 {
+		t.Errorf("expected the check to abort after 1 query, got %d attempts", attempts)
+	}
+}
+
+func TestNewHostInfo_BoundsHungEntraConnectQuery(t *testing.T) {
+	// The context NewHostInfo hands the domain provider reaches the sc query
+	// calls, so a wedged SCM cannot occupy the caller - a get_installation MQTT
+	// worker, or a config/update CLI run - indefinitely. The field is reported
+	// as false with a logged warning, and the rest of the host info still comes
+	// back.
+	orig := hostCommandTimeoutOverrideStr
+	hostCommandTimeoutOverrideStr = "100ms"
+	t.Cleanup(func() { hostCommandTimeoutOverrideStr = orig })
+
+	attempts := 0
+	domain := &windowsDefaultDomainInfoProvider{
+		psRunner: func(ctx context.Context, script string) (string, error) {
+			return "", nil
+		},
+		scQuery: hangingSCQuery(&attempts),
+	}
+
+	start := time.Now()
+	info, err := NewHostInfo(
+		context.Background(),
+		"test123",
+		hclog.NewNullLogger(),
+		&mockSystemInfoProvider{hostname: "mock", hostPlatform: "windows", cpuModelName: "fake"},
+		domain,
+	)
+	elapsed := time.Since(start)
+
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if info.IsEntraConnectServer {
+		t.Error("expected false when the sc query never returns")
+	}
+	if attempts != 1 {
+		t.Errorf("expected the check to abort after 1 hung query, got %d attempts", attempts)
+	}
+	if elapsed > 10*time.Second {
+		t.Errorf("NewHostInfo took %v; expected the hung query to be bounded", elapsed)
+	}
+}
+
+func TestNewHostInfo_PropagatesCallerCancellation(t *testing.T) {
+	// A canceled caller context reaches the provider rather than being replaced
+	// by a fresh background context somewhere in the chain.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	attempts := 0
+	domain := &windowsDefaultDomainInfoProvider{
+		psRunner: func(ctx context.Context, script string) (string, error) {
+			if err := ctx.Err(); err != nil {
+				return "", err
+			}
+			return "", nil
+		},
+		scQuery: hangingSCQuery(&attempts),
+	}
+
+	info, err := NewHostInfo(
+		ctx,
+		"test123",
+		hclog.NewNullLogger(),
+		&mockSystemInfoProvider{hostname: "mock", hostPlatform: "windows", cpuModelName: "fake"},
+		domain,
+	)
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if info.IsEntraConnectServer {
+		t.Error("expected false when the caller's context is already canceled")
+	}
+	if attempts != 1 {
+		t.Errorf("expected the check to abort after 1 query, got %d attempts", attempts)
 	}
 }
 

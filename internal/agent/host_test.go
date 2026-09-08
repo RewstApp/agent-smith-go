@@ -70,6 +70,96 @@ func (mock *mockDomainInfoProvider) EntraDomain(context.Context) (*string, error
 	return mock.entraDomain, mock.entraDomainErr
 }
 
+// ctxCapturingDomainInfoProvider records the context NewHostInfo hands each
+// DomainInfoProvider method. Every one of those methods bounds its own
+// subprocess call off the context it is given (see host_windows.go's
+// hostCommandTimeout), so that only holds a wedged sc query, WMI query or
+// dsregcmd off the caller if host.go actually passes the caller's context
+// through instead of substituting a fresh background one somewhere in the
+// chain.
+type ctxCapturingDomainInfoProvider struct {
+	contexts map[string]context.Context
+}
+
+func (mock *ctxCapturingDomainInfoProvider) record(name string, ctx context.Context) {
+	if mock.contexts == nil {
+		mock.contexts = map[string]context.Context{}
+	}
+	mock.contexts[name] = ctx
+}
+
+func (mock *ctxCapturingDomainInfoProvider) ADDomain(ctx context.Context) (*string, error) {
+	mock.record("ADDomain", ctx)
+	return nil, nil
+}
+
+func (mock *ctxCapturingDomainInfoProvider) IsADDomainController(
+	ctx context.Context,
+) (bool, error) {
+	mock.record("IsADDomainController", ctx)
+	return false, nil
+}
+
+func (mock *ctxCapturingDomainInfoProvider) IsEntraConnectServer(
+	ctx context.Context,
+) (bool, error) {
+	mock.record("IsEntraConnectServer", ctx)
+	return false, nil
+}
+
+func (mock *ctxCapturingDomainInfoProvider) EntraDomain(ctx context.Context) (*string, error) {
+	mock.record("EntraDomain", ctx)
+	return nil, nil
+}
+
+func TestNewHostInfo_PassesCallerContextToDomainProvider(t *testing.T) {
+	sys := &mockSystemInfoProvider{hostname: "mock", hostPlatform: "test", cpuModelName: "fake"}
+	domain := &ctxCapturingDomainInfoProvider{}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if _, err := NewHostInfo(ctx, "test123", hclog.NewNullLogger(), sys, domain); err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+
+	expected := []string{
+		"ADDomain",
+		"IsADDomainController",
+		"IsEntraConnectServer",
+		"EntraDomain",
+	}
+	if len(domain.contexts) != len(expected) {
+		t.Fatalf("expected %d domain calls, got %d", len(expected), len(domain.contexts))
+	}
+	for _, name := range expected {
+		got, ok := domain.contexts[name]
+		if !ok {
+			t.Errorf("%s was never called", name)
+			continue
+		}
+		if got != ctx {
+			t.Errorf("%s received %v, expected the caller's context", name, got)
+		}
+	}
+
+	// Cancelling the caller's context is observable through every context that
+	// was handed out, which is what lets a stop signal or a CLI abort unwind a
+	// host-info gather that is blocked in a subprocess call.
+	cancel()
+	for _, name := range expected {
+		got, ok := domain.contexts[name]
+		if !ok {
+			continue
+		}
+		select {
+		case <-got.Done():
+		default:
+			t.Errorf("%s's context did not observe the caller's cancellation", name)
+		}
+	}
+}
+
 func TestNewHostInfo(t *testing.T) {
 	orgId := "test123"
 	logger := hclog.NewNullLogger()

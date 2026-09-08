@@ -5,6 +5,7 @@ package agent
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -124,8 +125,20 @@ func defaultPSRunner(ctx context.Context, script string) (string, error) {
 	return strings.TrimSpace(outb.String()), nil
 }
 
+// scQueryFunc runs "sc query <name>" and reports whether the service exists,
+// returning nil when the query succeeds and an error otherwise. It is a field
+// on the provider - like psRunnerFunc - so tests can substitute a query that
+// hangs or fails deterministically instead of depending on the real Service
+// Control Manager's state.
+type scQueryFunc func(ctx context.Context, name string) error
+
+func defaultSCQuery(ctx context.Context, name string) error {
+	return exec.CommandContext(ctx, "sc", "query", name).Run()
+}
+
 type windowsDefaultDomainInfoProvider struct {
 	psRunner psRunnerFunc
+	scQuery  scQueryFunc
 }
 
 func (p *windowsDefaultDomainInfoProvider) ADDomain(ctx context.Context) (*string, error) {
@@ -157,16 +170,43 @@ func (p *windowsDefaultDomainInfoProvider) IsADDomainController(ctx context.Cont
 	return output == "True", nil
 }
 
+// IsEntraConnectServer probes for an Entra Connect sync service by name. The
+// whole check - up to four sequential "sc query" calls - shares a single
+// hostCommandTimeout budget rather than granting each call its own, so a
+// wedged Service Control Manager cannot stretch one host-info field out to
+// four times the documented bound (two minutes at the production timeout).
+// That matters most on the get_installation path, where the caller is an MQTT
+// command-processing worker out of a small pool and is not covered by the
+// per-command execution timeout, which bounds only the interpreter's own
+// command execution.
+//
+// A query that fails because the service simply is not installed (sc exits
+// 1060) is the expected case for a non-Entra-Connect host and just moves on to
+// the next name. A query that fails with the shared budget expired or the
+// caller canceled is different in kind: the failure says nothing about whether
+// the service exists, and every later name would fail the same way, so the
+// check aborts with an error instead of reporting a host as "not an Entra
+// Connect server" on the strength of a timeout.
 func (p *windowsDefaultDomainInfoProvider) IsEntraConnectServer(ctx context.Context) (bool, error) {
 	entraServiceNames := []string{"ADSync", "Azure AD Sync", "EntraConnectSync", "OtherFutureName"}
 
+	timeout := resolveHostCommandTimeout()
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
 	for _, name := range entraServiceNames {
-		queryCtx, cancel := context.WithTimeout(ctx, resolveHostCommandTimeout())
-		cmd := exec.CommandContext(queryCtx, "sc", "query", name)
-		err := cmd.Run()
-		cancel()
+		err := p.scQuery(ctx, name)
 		if err == nil {
 			return true, nil
+		}
+
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			if errors.Is(ctxErr, context.DeadlineExceeded) {
+				return false, fmt.Errorf(
+					"sc query %q timed out after %s: %w", name, timeout, err,
+				)
+			}
+			return false, fmt.Errorf("sc query %q aborted: %w", name, ctxErr)
 		}
 	}
 
@@ -213,5 +253,8 @@ func (p *windowsDefaultDomainInfoProvider) EntraDomain(ctx context.Context) (*st
 }
 
 func NewDomainInfoProvider() DomainInfoProvider {
-	return &windowsDefaultDomainInfoProvider{psRunner: defaultPSRunner}
+	return &windowsDefaultDomainInfoProvider{
+		psRunner: defaultPSRunner,
+		scQuery:  defaultSCQuery,
+	}
 }
