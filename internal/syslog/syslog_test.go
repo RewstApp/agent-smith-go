@@ -59,3 +59,52 @@ func TestExtractMessage(t *testing.T) {
 		})
 	}
 }
+
+func TestLevelForLine(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected logLevel
+	}{
+		// hclog writes "[WARN] ", never "[WARNING]", so this spelling is the
+		// one that actually reaches the writer in production.
+		{
+			name:     "hclog warn bracket",
+			input:    "2024-01-01T00:00:00.000Z [WARN]  agent_smith: disk space low",
+			expected: levelWarning,
+		},
+		{
+			name:     "spelled-out warning bracket",
+			input:    "[WARNING] disk space low",
+			expected: levelWarning,
+		},
+		{
+			name:     "error bracket",
+			input:    "2024-01-01T00:00:00.000Z [ERROR] agent_smith: it broke",
+			expected: levelError,
+		},
+		{
+			name:     "info bracket",
+			input:    "[INFO] hello",
+			expected: levelInfo,
+		},
+		{
+			name:     "debug bracket falls back to info",
+			input:    "[DEBUG] hello",
+			expected: levelInfo,
+		},
+		{
+			name:     "no bracket falls back to info",
+			input:    "plain line",
+			expected: levelInfo,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := levelForLine(tt.input); got != tt.expected {
+				t.Errorf("levelForLine(%q) = %v, want %v", tt.input, got, tt.expected)
+			}
+		})
+	}
+}
