@@ -639,6 +639,81 @@ and `agent.hostCommandTimeoutOverrideStr` — the same mechanism
 `stopTimeoutOverrideStr` uses for the Windows service stop wait, so a wedged
 command can be observed aborting in seconds rather than the production bound.
 
+### Bounded, Non-Fatal Syslog Forwarding (Linux, macOS)
+
+With `use_syslog` enabled, every log line the agent writes is also forwarded to
+the system logger by shelling out to `logger` (`internal/syslog/syslog_unix.go`).
+That forward happens **synchronously inside the writer hclog holds**, so it runs
+on whatever goroutine is logging — the MQTT client, a command worker, the plugin
+supervisor. It used to be an unbounded `exec.Command(...).Run()`, and it used to
+return early on failure:
+
+- **A hung `logger` froze the logging goroutine forever.** A syslog daemon in a
+  bad state, or `logger` blocked writing to `/dev/log`, had no timeout to
+  recover from — the same failure class as the unbounded `systemctl`/`launchctl`
+  shell-outs above, but reachable from every subsystem, since every subsystem
+  logs.
+- **A failed `logger` deleted the line from the on-disk log too.** The write
+  returned `(0, err)` before ever reaching the log file, so a transient hiccup
+  (daemon restart, missing `logger` binary) punched a hole in the file operators
+  read *afterwards* — precisely at the moments something is already going wrong
+  and the on-disk log most needs to be complete.
+
+Both are fixed, and the fix has three parts:
+
+- **Each `logger` call is bounded.** It runs under `exec.CommandContext` with a
+  **5 second** timeout (`syslogCommandTimeout`), enormously generous for a
+  one-shot that normally finishes in milliseconds. As with the interpreter's
+  per-command timeout, expiry kills the whole process group, not just `logger`
+  itself: a surviving descendant inherits the output pipe and would keep
+  `cmd.Wait` blocked, leaving the call hung despite the deadline. The group kill
+  reaches that descendant only while it stays in the group, so the command also
+  carries a **1 second** `WaitDelay`: a descendant that calls `setsid`, or is
+  re-homed by an init system, escapes the group still holding the pipe, and
+  without that backstop `Wait` would block forever — the same permanent freeze,
+  reached through the pipe rather than through the process.
+- **The on-disk write always happens.** The syslog forward is best effort and
+  its outcome never propagates: `Write` returns the log file write's `(n, err)`,
+  so a genuine file error still surfaces to hclog while a syslog failure never
+  costs the log file a line. This matches how the Windows event-log writer has
+  always behaved (event-log errors are ignored, the file write proceeds) and the
+  "counted, not fatal" treatment plugin notify failures get — hclog cannot react
+  to a writer error beyond discarding the line, so surfacing one buys nothing
+  and loses the record.
+- **A degraded daemon is not paid for on every line.** Bounding one call is not
+  enough when `logger` runs once per log line: at 5 seconds each, with hclog
+  serializing writers, all agent logging would crawl. After a failed or timed-out
+  call the agent stops shelling out for `syslogSuppressWindow` (**1 minute**) and
+  then lets one line through as a probe, so a wedged daemon costs at most one
+  timeout per minute while the log file keeps every line at full speed.
+
+Forwarding failures are not silent. The transition into failing and the
+transition back to healthy are each recorded once, in hclog's own line format,
+in the log file itself:
+
+```
+2026-01-01T00:00:00.000+0000 [WARN]  rewst_agent_smith_<org>: syslog forwarding failed, suppressing it for 1m0s (log lines still reach this file): logger -p daemon.info -t rewst_agent_smith_<org> timed out after 5s:
+2026-01-01T00:01:00.000+0000 [WARN]  rewst_agent_smith_<org>: syslog forwarding recovered after 1 failure(s); 128 line(s) reached this log only
+```
+
+Nothing is written in between, so a syslog outage lasting hours cannot flood the
+log file it is, at that point, the only copy of.
+
+Separately, the severity mapping was wrong on **all three** platforms. Each
+writer matched the level bracket in the formatted line itself, and all three
+looked for `[WARNING]` — a spelling hclog never emits; it writes `[WARN] `. Every
+agent warning was therefore forwarded as `daemon.info` on Linux/macOS and as an
+informational event-log entry on Windows. The classification now lives once in
+`internal/syslog/syslog.go` (`levelForLine`, which accepts both spellings) and
+each platform only maps it onto its own sink, so the three writers cannot drift
+apart again.
+
+Because Linux and macOS differed only in whether the source is repeated in the
+message body (macOS' unified logging does not surface `logger -t` the way
+`syslogd` does), the two byte-identical implementations were collapsed into one
+`syslog_unix.go`; `syslog_linux.go` and `syslog_darwin.go` now hold just that
+per-platform `syslogMessage` formatting.
+
 ### Waiting for the Old Agent Process to Exit
 
 Stopping the service is not the same as the old agent process being gone. Install,

@@ -114,6 +114,26 @@ func TestWindowsSyslog_Write_Warning(t *testing.T) {
 	}
 }
 
+// hclog writes "[WARN] ", not "[WARNING]", so this is the spelling that has to
+// reach the event log as a warning for real agent warnings.
+func TestWindowsSyslog_Write_Warn(t *testing.T) {
+	mock := &mockEventLogger{}
+	var out bytes.Buffer
+	s := &windowsSyslog{out: &out, log: mock}
+
+	data := []byte("2024-01-01T00:00:00.000Z [WARN]  agent_smith: disk space low")
+	_, err := s.Write(data)
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if len(mock.warningMessages) != 1 {
+		t.Fatalf("expected 1 warning message, got %d", len(mock.warningMessages))
+	}
+	if len(mock.infoMessages) != 0 || len(mock.errorMessages) != 0 {
+		t.Error("expected no info or error messages")
+	}
+}
+
 func TestWindowsSyslog_Write_Error(t *testing.T) {
 	mock := &mockEventLogger{}
 	var out bytes.Buffer

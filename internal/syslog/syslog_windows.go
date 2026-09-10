@@ -5,7 +5,6 @@ package syslog
 import (
 	"errors"
 	"io"
-	"strings"
 	"syscall"
 
 	"golang.org/x/sys/windows/registry"
@@ -62,11 +61,12 @@ func (s *windowsSyslog) Write(data []byte) (int, error) {
 	message := extractMessage(line)
 
 	// Use different levels
-	if strings.Contains(line, "[ERROR]") {
+	switch levelForLine(line) {
+	case levelError:
 		_ = s.log.Error(errorEventId, message) // Best effort logging
-	} else if strings.Contains(line, "[WARNING]") {
+	case levelWarning:
 		_ = s.log.Warning(warningEventId, message) // Best effort logging
-	} else {
+	default:
 		_ = s.log.Info(infoEventId, message) // Best effort logging
 	}
 
