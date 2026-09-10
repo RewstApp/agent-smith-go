@@ -564,6 +564,49 @@ Recovery is the ordinary one: end the wedged agent process, start the service, a
 re-run the update or uninstall. Linux and macOS are unaffected — their service
 implementations do not use this polling loop.
 
+### Reporting Stop Progress to the SCM (Windows only)
+
+The bound above is the caller's side of a stop: how long the updater waits for the
+service to report `Stopped`. The service's own side used to say nothing during that
+wait. `windowsRunner.Execute` published `StartPending` at entry and `Running` once
+the agent was up, but on receiving a stop control it only signalled its internal
+stop channel and then published `Stopped` after the agent had finished shutting
+down — so the service went from `Running` straight to `Stopped` with a silent gap
+in between.
+
+Windows reads that silence as a hang. The Service Control Manager expects a
+stopping service to acknowledge the control with `StopPending` and then keep
+showing progress — an incremented `CheckPoint` within the `WaitHint` the service
+published — and a service that goes quiet is logged as not responding (events 7009
+and 7043), with `services.msc` or `net stop` reporting failure. The gap is not
+short: the agent's shutdown drains in-flight command workers, each of which an
+operator can let run for as long as `command_timeout_seconds` (30 minutes by
+default), and then waits on plugin shutdown. A stop, restart, auto-update or
+uninstall issued while a long command was in flight therefore looked like a wedged
+service for its whole duration, even though the agent was following its own bounded
+shutdown sequence correctly — enough to trigger alerting or an external forced kill
+mid-update.
+
+The service now reports its progress:
+
+- The stop control is acknowledged **immediately**, before the agent starts
+  draining: `StopPending` with `CheckPoint` 1 and a `WaitHint` of 30 seconds.
+- While the shutdown runs, `StopPending` is republished every **10 seconds** with
+  an incremented `CheckPoint`, for as long as the shutdown takes. The `WaitHint` is
+  three times the checkpoint interval, so a merely late checkpoint on a busy
+  endpoint does not read as a wedge either.
+- `Stopped` is still published exactly once, after the agent's shutdown returns,
+  and is always the last status sent. All of the service's status updates now go
+  through one reporter that enforces the order the SCM expects: nothing is
+  published after `Stopped` — so a checkpoint that wakes up late can neither
+  contradict the terminal status nor block on a channel the SCM has stopped
+  reading — and `Running` is dropped once a stop has been acknowledged, which
+  matters for a stop issued while the agent is still starting up.
+
+The caller-side wait is unchanged — this fixes what the service reports *during*
+that wait, not the wait itself — and a shutdown that genuinely wedges still fails
+the same way, on the same 5-minute bound, with the same error.
+
 ### Bounded Service and Host-Info Shell-Outs (macOS, Linux, Windows)
 
 The Windows service `Stop()` wait above bounds one path to a wedged OS-level

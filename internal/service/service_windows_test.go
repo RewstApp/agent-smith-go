@@ -143,12 +143,27 @@ func (m *mockWindowsServiceManagerFactory) Connect() (windowsServiceManager, err
 type mockRunner struct {
 	name     string
 	exitCode ServiceExitCode
+
+	// stopping, when non-nil, is closed as soon as the runner observes the stop
+	// signal, and shutdown is then waited on before the runner returns. Together
+	// they let a test hold the runner in the middle of its shutdown the way a
+	// long-running command worker or a slow plugin does in production.
+	stopping chan struct{}
+	shutdown chan struct{}
 }
 
 func (m *mockRunner) Name() string { return m.name }
 func (m *mockRunner) Execute(stop <-chan struct{}, running chan<- struct{}) ServiceExitCode {
 	running <- struct{}{}
 	<-stop
+
+	if m.stopping != nil {
+		close(m.stopping)
+	}
+	if m.shutdown != nil {
+		<-m.shutdown
+	}
+
 	return m.exitCode
 }
 
@@ -834,6 +849,11 @@ func TestWindowsRunner_Execute_SendsRunningThenStopped(t *testing.T) {
 
 	request <- svc.ChangeRequest{Cmd: svc.Stop}
 
+	pending := <-response
+	if pending.State != svc.StopPending {
+		t.Errorf("expected StopPending after stop request, got %v", pending.State)
+	}
+
 	stopped := <-response
 	if stopped.State != svc.Stopped {
 		t.Errorf("expected Stopped, got %v", stopped.State)
@@ -860,6 +880,7 @@ func TestWindowsRunner_Execute_ReturnsExitCode(t *testing.T) {
 	<-response
 
 	request <- svc.ChangeRequest{Cmd: svc.Stop}
+	<-response // StopPending
 	<-done
 
 	if ok {
@@ -887,9 +908,217 @@ func TestWindowsRunner_Execute_ShutdownAlsoStops(t *testing.T) {
 
 	request <- svc.ChangeRequest{Cmd: svc.Shutdown}
 
+	pending := <-response
+	if pending.State != svc.StopPending {
+		t.Errorf("expected StopPending on Shutdown, got %v", pending.State)
+	}
+
 	stopped := <-response
 	if stopped.State != svc.Stopped {
 		t.Errorf("expected Stopped on Shutdown, got %v", stopped.State)
 	}
 	<-done
+}
+
+// TestWindowsRunner_Execute_AcknowledgesStopBeforeStopped asserts the shape the
+// SCM requires: a StopPending acknowledgment, carrying a WaitHint, reaches the
+// SCM before the service reports Stopped rather than the service jumping
+// straight from Running to Stopped.
+func TestWindowsRunner_Execute_AcknowledgesStopBeforeStopped(t *testing.T) {
+	request := make(chan svc.ChangeRequest, 1)
+	response := make(chan svc.Status, 16)
+	runner := &mockRunner{exitCode: 0}
+	host := &windowsRunner{runner: runner}
+
+	done := make(chan struct{})
+	go func() {
+		host.Execute(nil, request, response)
+		close(done)
+	}()
+
+	<-response // StartPending
+	<-response // Running
+
+	request <- svc.ChangeRequest{Cmd: svc.Stop}
+	<-done
+	close(response)
+
+	states := []svc.State{}
+	pendingSeen := 0
+	stoppedSeen := 0
+	for status := range response {
+		states = append(states, status.State)
+		switch status.State {
+		case svc.StopPending:
+			pendingSeen++
+			if status.WaitHint == 0 {
+				t.Error("expected StopPending to carry a non-zero WaitHint")
+			}
+			if status.CheckPoint == 0 {
+				t.Error("expected StopPending to carry a non-zero CheckPoint")
+			}
+			if stoppedSeen > 0 {
+				t.Error("expected no StopPending after Stopped")
+			}
+		case svc.Stopped:
+			stoppedSeen++
+		default:
+			t.Errorf("unexpected state after stop request: %v", status.State)
+		}
+	}
+
+	if pendingSeen < 1 {
+		t.Errorf("expected at least one StopPending, got states %v", states)
+	}
+	if stoppedSeen != 1 {
+		t.Errorf("expected exactly one Stopped, got %d (states %v)", stoppedSeen, states)
+	}
+	if len(states) == 0 || states[len(states)-1] != svc.Stopped {
+		t.Errorf("expected Stopped last, got states %v", states)
+	}
+}
+
+// TestWindowsRunner_Execute_CheckpointsWhileShuttingDown holds the runner in the
+// middle of its shutdown — what a draining command worker or a slow plugin does
+// in production — and asserts the agent keeps republishing StopPending with an
+// incrementing CheckPoint instead of going quiet and looking hung.
+func TestWindowsRunner_Execute_CheckpointsWhileShuttingDown(t *testing.T) {
+	request := make(chan svc.ChangeRequest, 1)
+	response := make(chan svc.Status, 64)
+	runner := &mockRunner{
+		exitCode: 0,
+		stopping: make(chan struct{}),
+		shutdown: make(chan struct{}),
+	}
+	host := &windowsRunner{runner: runner, checkpointInterval: time.Millisecond}
+
+	done := make(chan struct{})
+	go func() {
+		host.Execute(nil, request, response)
+		close(done)
+	}()
+
+	<-response // StartPending
+	<-response // Running
+
+	request <- svc.ChangeRequest{Cmd: svc.Stop}
+	<-runner.stopping
+
+	// Collect checkpoints while the runner is still shutting down.
+	checkpoints := []uint32{}
+	deadline := time.After(5 * time.Second)
+	for len(checkpoints) < 3 {
+		select {
+		case status := <-response:
+			if status.State != svc.StopPending {
+				t.Fatalf("expected StopPending while shutting down, got %v", status.State)
+			}
+			checkpoints = append(checkpoints, status.CheckPoint)
+		case <-deadline:
+			t.Fatalf("timed out waiting for stop checkpoints, got %v", checkpoints)
+		}
+	}
+
+	for i := 1; i < len(checkpoints); i++ {
+		if checkpoints[i] <= checkpoints[i-1] {
+			t.Errorf("expected incrementing checkpoints, got %v", checkpoints)
+			break
+		}
+	}
+
+	// Let the shutdown finish and confirm Stopped still terminates the sequence.
+	close(runner.shutdown)
+	<-done
+
+	for {
+		select {
+		case status := <-response:
+			if status.State == svc.Stopped {
+				return
+			}
+			if status.State != svc.StopPending {
+				t.Fatalf("expected only StopPending before Stopped, got %v", status.State)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("timed out waiting for Stopped")
+		}
+	}
+}
+
+// statusReporter tests
+
+func TestStatusReporter_DropsReportsAfterStopped(t *testing.T) {
+	response := make(chan svc.Status, 8)
+	reporter := &statusReporter{response: response}
+
+	reporter.report(svc.Status{State: svc.StopPending})
+	reporter.report(svc.Status{State: svc.Stopped})
+	reporter.report(svc.Status{State: svc.StopPending})
+	reporter.report(svc.Status{State: svc.Running})
+	reporter.report(svc.Status{State: svc.Stopped})
+
+	close(response)
+
+	states := []svc.State{}
+	for status := range response {
+		states = append(states, status.State)
+	}
+
+	if len(states) != 2 {
+		t.Fatalf("expected 2 statuses, got %v", states)
+	}
+	if states[0] != svc.StopPending || states[1] != svc.Stopped {
+		t.Errorf("expected [StopPending Stopped], got %v", states)
+	}
+}
+
+// TestStatusReporter_DropsRunningOnceStopping covers a stop control that arrives
+// while the agent is still starting up: the SCM must not be told the service is
+// Running again after the stop was acknowledged.
+func TestStatusReporter_DropsRunningOnceStopping(t *testing.T) {
+	response := make(chan svc.Status, 8)
+	reporter := &statusReporter{response: response}
+
+	reporter.report(svc.Status{State: svc.StartPending})
+	reporter.report(stopPendingStatus(1))
+	reporter.report(svc.Status{State: svc.Running, Accepts: svc.AcceptStop | svc.AcceptShutdown})
+	reporter.report(stopPendingStatus(2))
+	reporter.report(svc.Status{State: svc.Stopped})
+
+	close(response)
+
+	states := []svc.State{}
+	for status := range response {
+		states = append(states, status.State)
+	}
+
+	expected := []svc.State{svc.StartPending, svc.StopPending, svc.StopPending, svc.Stopped}
+	if len(states) != len(expected) {
+		t.Fatalf("expected %v, got %v", expected, states)
+	}
+	for i := range expected {
+		if states[i] != expected[i] {
+			t.Fatalf("expected %v, got %v", expected, states)
+		}
+	}
+}
+
+func TestStopPendingStatus_WaitHintExceedsCheckpointInterval(t *testing.T) {
+	status := stopPendingStatus(7)
+
+	if status.State != svc.StopPending {
+		t.Errorf("expected StopPending, got %v", status.State)
+	}
+	if status.CheckPoint != 7 {
+		t.Errorf("expected CheckPoint 7, got %d", status.CheckPoint)
+	}
+
+	waitHint := time.Duration(status.WaitHint) * time.Millisecond
+	if waitHint <= stopPendingCheckpointInterval {
+		t.Errorf(
+			"expected WaitHint (%s) to exceed the checkpoint interval (%s)",
+			waitHint,
+			stopPendingCheckpointInterval,
+		)
+	}
 }
