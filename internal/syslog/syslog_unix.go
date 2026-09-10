@@ -35,6 +35,16 @@ const (
 	// on-disk log keeps every line at full speed.
 	syslogSuppressWindow = time.Minute
 
+	// syslogWaitDelay bounds how long cmd.Wait may keep waiting once the context
+	// has expired and the process group has been killed. The group kill covers
+	// the descendant that inherits the output pipe, but only while that
+	// descendant stays in the group: anything that calls setsid, or is re-homed
+	// by an init system, escapes it, keeps the pipe open and leaves Wait blocked
+	// forever - reinstating, through the pipe, the exact freeze this timeout
+	// exists to prevent. WaitDelay makes the bound unconditional: Wait closes
+	// the pipes and returns rather than trusting the kill to have worked.
+	syslogWaitDelay = time.Second
+
 	// syslogNoteTimeFormat matches hclog's default timestamp format so the
 	// diagnostics this writer inserts into the log file line up with the entries
 	// around them.
@@ -69,8 +79,7 @@ func (r *loggerCommandRunner) Run(priority, source, message string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, binary, "-p", priority, "-t", source, message)
-	killProcessGroupOnCancel(cmd)
+	cmd := newLoggerCommand(ctx, binary, priority, source, message)
 
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -86,20 +95,25 @@ func (r *loggerCommandRunner) Run(priority, source, message string) error {
 	return nil
 }
 
-// killProcessGroupOnCancel places the command in its own process group and
-// kills the whole group when the context expires.
+// newLoggerCommand builds the bounded `logger` invocation: the command itself,
+// plus the two mechanisms that guarantee Run returns even when `logger` or
+// something it spawned refuses to.
 //
-// Killing only `logger` itself is not enough to unblock the caller: anything it
+// Killing only `logger` is not enough to unblock the caller: anything it
 // spawned inherits the pipe CombinedOutput reads, so cmd.Wait keeps blocking
 // until that descendant exits - the timeout would elapse and Run would still
-// hang, which is the bug this bound exists to prevent. This mirrors
-// interpreter.configureProcessGroup, which tears down command trees for the
-// same reason.
-func killProcessGroupOnCancel(cmd *exec.Cmd) {
+// hang, which is the bug this bound exists to prevent. Cancel therefore kills
+// the whole process group, mirroring interpreter.configureProcessGroup, which
+// tears down command trees for the same reason. WaitDelay then covers what the
+// group kill cannot: a descendant that left the group still holding the pipe.
+func newLoggerCommand(ctx context.Context, binary, priority, source, message string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, binary, "-p", priority, "-t", source, message)
+
 	if cmd.SysProcAttr == nil {
 		cmd.SysProcAttr = &syscall.SysProcAttr{}
 	}
 	cmd.SysProcAttr.Setpgid = true
+
 	cmd.Cancel = func() error {
 		if cmd.Process == nil {
 			return nil
@@ -107,6 +121,10 @@ func killProcessGroupOnCancel(cmd *exec.Cmd) {
 		// A negative pid targets the entire process group led by `logger`.
 		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 	}
+
+	cmd.WaitDelay = syslogWaitDelay
+
+	return cmd
 }
 
 // unixSyslog forwards each log line to the system logger and writes it to the

@@ -4,6 +4,7 @@ package syslog
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -336,6 +337,37 @@ func TestLoggerCommandRunner_Run_TimesOutOnHungLogger(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "timed out") {
 		t.Errorf("expected the error to mention the timeout, got %q", err.Error())
+	}
+}
+
+// The bound must not depend on the process-group kill alone: a descendant that
+// escapes the group still holds the output pipe, and without WaitDelay
+// cmd.Wait would block on it forever - the freeze this timeout exists to
+// prevent, reached by another route.
+func TestNewLoggerCommand_BoundsWaitEvenIfTheKillMisses(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	cmd := newLoggerCommand(ctx, "logger", "daemon.info", "src", "message")
+
+	if cmd.WaitDelay <= 0 {
+		t.Error("expected a WaitDelay so a pipe held after the kill cannot block Wait forever")
+	}
+	if cmd.Cancel == nil {
+		t.Error("expected a Cancel hook to kill the process group on expiry")
+	}
+	if cmd.SysProcAttr == nil || !cmd.SysProcAttr.Setpgid {
+		t.Error("expected the command to run in its own process group")
+	}
+
+	want := []string{"logger", "-p", "daemon.info", "-t", "src", "message"}
+	if len(cmd.Args) != len(want) {
+		t.Fatalf("expected args %v, got %v", want, cmd.Args)
+	}
+	for i := range want {
+		if cmd.Args[i] != want[i] {
+			t.Errorf("arg %d: expected %q, got %q", i, want[i], cmd.Args[i])
+		}
 	}
 }
 

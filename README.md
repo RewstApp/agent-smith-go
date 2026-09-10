@@ -666,7 +666,12 @@ Both are fixed, and the fix has three parts:
   one-shot that normally finishes in milliseconds. As with the interpreter's
   per-command timeout, expiry kills the whole process group, not just `logger`
   itself: a surviving descendant inherits the output pipe and would keep
-  `cmd.Wait` blocked, leaving the call hung despite the deadline.
+  `cmd.Wait` blocked, leaving the call hung despite the deadline. The group kill
+  reaches that descendant only while it stays in the group, so the command also
+  carries a **1 second** `WaitDelay`: a descendant that calls `setsid`, or is
+  re-homed by an init system, escapes the group still holding the pipe, and
+  without that backstop `Wait` would block forever — the same permanent freeze,
+  reached through the pipe rather than through the process.
 - **The on-disk write always happens.** The syslog forward is best effort and
   its outcome never propagates: `Write` returns the log file write's `(n, err)`,
   so a genuine file error still surfaces to hclog while a syslog failure never
