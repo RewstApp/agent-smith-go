@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"sync"
 	"time"
 
 	"github.com/RewstApp/agent-smith-go/internal/utils"
@@ -29,6 +30,29 @@ const pollingInterval = 250 * time.Millisecond
 // being short enough that an unattended update fails with an actionable error
 // the same day it runs.
 const serviceStopTimeout = 5 * time.Minute
+
+// stopPendingCheckpointInterval is how often Execute republishes StopPending
+// with a fresh CheckPoint while the runner is still shutting down.
+//
+// The Service Control Manager watches a stopping service for progress: it wants
+// either the next state or an incremented CheckPoint within the WaitHint the
+// service published, and a service that goes quiet is reported as not
+// responding (event 7009/7043) even when it is shutting down correctly. The
+// agent's own shutdown can legitimately run for minutes — it drains in-flight
+// command workers, each bounded by command_timeout_seconds, and waits on plugin
+// shutdown — so the checkpoints have to keep coming for as long as that takes
+// rather than being sent once at the start.
+//
+// Ten seconds is frequent enough to sit well inside stopPendingWaitHint while
+// producing only a handful of status updates over a normal shutdown.
+const stopPendingCheckpointInterval = 10 * time.Second
+
+// stopPendingWaitHint is the WaitHint published with every StopPending status:
+// how long the SCM should wait for the next checkpoint before treating the
+// service as hung. It is three times stopPendingCheckpointInterval, so a
+// checkpoint that is merely late — a scheduling hiccup, a busy endpoint — does
+// not read as a wedge.
+const stopPendingWaitHint = 3 * stopPendingCheckpointInterval
 
 // stopTimeoutOverrideStr is overridable via -ldflags for integration testing.
 // When set to a valid, positive Go duration it replaces serviceStopTimeout, so a
@@ -284,6 +308,94 @@ func NewServiceManager() ServiceManager {
 type windowsRunner struct {
 	runner   Runner
 	exitCode int
+
+	// checkpointInterval overrides stopPendingCheckpointInterval. It is a test
+	// seam only; the zero value selects the package default, so production code
+	// never sets it.
+	checkpointInterval time.Duration
+}
+
+// statusReporter serializes the status updates Execute publishes to the Service
+// Control Manager and drops any that would walk the service lifecycle backwards.
+//
+// Execute reports from more than one goroutine: the running monitor publishes
+// Running, and the request monitor publishes StopPending and then keeps
+// checkpointing it while the runner drains. Those goroutines race each other and
+// the shutdown, so the reporter enforces the order the SCM expects:
+//
+//   - Stopped is terminal. The dispatcher stops reading the response channel
+//     once it arrives, so a later send would both contradict the status and
+//     block its goroutine forever on a channel nobody is reading.
+//   - Running is dropped once a stop is in progress. A stop control can arrive
+//     before the agent finishes starting up, and telling the SCM the service is
+//     Running after it acknowledged StopPending would report it as healthy again
+//     and re-advertise the controls it accepts.
+type statusReporter struct {
+	mu       sync.Mutex
+	response chan<- svc.Status
+	stopping bool
+	stopped  bool
+}
+
+// report publishes status unless it would walk the service lifecycle backwards,
+// in which case it is dropped.
+func (reporter *statusReporter) report(status svc.Status) {
+	reporter.mu.Lock()
+	defer reporter.mu.Unlock()
+
+	if reporter.stopped {
+		return
+	}
+
+	switch status.State {
+	case svc.Running:
+		if reporter.stopping {
+			return
+		}
+	case svc.StopPending:
+		reporter.stopping = true
+	case svc.Stopped:
+		reporter.stopped = true
+	}
+
+	reporter.response <- status
+}
+
+// stopPendingStatus builds a StopPending status carrying the given progress
+// checkpoint. WaitHint is in milliseconds.
+func stopPendingStatus(checkpoint uint32) svc.Status {
+	return svc.Status{
+		State:      svc.StopPending,
+		CheckPoint: checkpoint,
+		WaitHint:   uint32(stopPendingWaitHint / time.Millisecond),
+	}
+}
+
+// reportStopProgress republishes StopPending with an incrementing CheckPoint
+// until ctx is canceled, which happens when the runner has finished shutting
+// down. The first StopPending is published by the caller before the runner is
+// asked to stop, so the SCM has the acknowledgment in hand before any draining
+// starts.
+func (host *windowsRunner) reportStopProgress(ctx context.Context, reporter *statusReporter) {
+	interval := host.checkpointInterval
+	if interval <= 0 {
+		interval = stopPendingCheckpointInterval
+	}
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	// The immediate StopPending the caller already sent is checkpoint 1.
+	checkpoint := uint32(1)
+	for {
+		select {
+		case <-ticker.C:
+			checkpoint++
+			reporter.report(stopPendingStatus(checkpoint))
+		case <-ctx.Done():
+			return
+		}
+	}
 }
 
 func (host *windowsRunner) Execute(
@@ -291,7 +403,8 @@ func (host *windowsRunner) Execute(
 	request <-chan svc.ChangeRequest,
 	response chan<- svc.Status,
 ) (bool, uint32) {
-	response <- svc.Status{State: svc.StartPending}
+	reporter := &statusReporter{response: response}
+	reporter.report(svc.Status{State: svc.StartPending})
 
 	// Make the channels
 	stop := make(chan struct{}, 1)
@@ -306,7 +419,15 @@ func (host *windowsRunner) Execute(
 			case change := <-request:
 				switch change.Cmd {
 				case svc.Stop, svc.Shutdown:
+					// Acknowledge the stop to the SCM before the runner starts
+					// draining, then keep checkpointing for as long as the
+					// shutdown takes. Without this the service jumped straight
+					// from Running to Stopped, and a shutdown that spent
+					// minutes draining a long-running command looked like a
+					// hang to Windows and to anything watching service state.
+					reporter.report(stopPendingStatus(1))
 					stop <- struct{}{}
+					host.reportStopProgress(ctxStop, reporter)
 					return
 				}
 			case <-ctxStop.Done():
@@ -321,7 +442,10 @@ func (host *windowsRunner) Execute(
 	utils.SafeGo(hclog.Default(), func() {
 		select {
 		case <-running:
-			response <- svc.Status{State: svc.Running, Accepts: svc.AcceptStop | svc.AcceptShutdown}
+			reporter.report(svc.Status{
+				State:   svc.Running,
+				Accepts: svc.AcceptStop | svc.AcceptShutdown,
+			})
 		case <-ctxRunning.Done():
 			// Stop this routine
 			return
@@ -330,7 +454,11 @@ func (host *windowsRunner) Execute(
 
 	// Execute the runner
 	host.exitCode = int(host.runner.Execute(stop, running))
-	response <- svc.Status{State: svc.Stopped}
+
+	// Shutdown is over: end the checkpoints before publishing Stopped so the
+	// SCM does not see progress reported after the service has stopped.
+	cancelStop()
+	reporter.report(svc.Status{State: svc.Stopped})
 
 	// Return the proper response
 	if host.exitCode < 0 || host.exitCode > math.MaxUint32 {
