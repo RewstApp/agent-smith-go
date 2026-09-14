@@ -11,6 +11,10 @@ inputs:
   commands:
     description: "Raw value for the curl --form commands=... field. Should already include any surrounding quoting expected by the Rewst engine."
     required: true
+  max_time:
+    description: "Hard ceiling, in seconds, on the whole curl request. A backstop against a connection that never answers, not a latency policy - the engine's own ceiling is well below this."
+    required: false
+    default: "300"
 
 runs:
   using: composite
@@ -21,7 +25,63 @@ runs:
         TRIGGER_URL: ${{ inputs.trigger_url }}
         DEVICE_ID: ${{ inputs.device_id }}
         COMMANDS: ${{ inputs.commands }}
+        MAX_TIME: ${{ inputs.max_time }}
       run: |
-        curl --location "$TRIGGER_URL" \
-          --form "device_id=\"$DEVICE_ID\"" \
-          --form "commands=$COMMANDS"
+        # This step used to be a bare curl whose response was discarded. That
+        # made it report success whenever the HTTP call itself succeeded - which
+        # includes the case the engine answers 200 with a timeout payload,
+        # having never dispatched the command to the device. The next step then
+        # polled the agent log for a result that could not arrive and failed on
+        # a count that never moved, pointing the investigator at agent code that
+        # never ran. Checking the status and the body turns that into a failure
+        # at the step that actually failed, naming the real cause.
+        set -uo pipefail
+
+        # Body and status come back on one stream - curl appends the status as a
+        # final line - rather than via --output to a temp file. On windows-latest
+        # this step runs under Git Bash, where a mktemp path is an MSYS path that
+        # the curl on PATH may not resolve; keeping everything on stdout sidesteps
+        # that entirely and behaves identically on all three runners.
+        curl_exit=0
+        response="$(
+          curl --silent --show-error --location \
+            --max-time "$MAX_TIME" \
+            --write-out '\n%{http_code}' \
+            --form "device_id=\"$DEVICE_ID\"" \
+            --form "commands=$COMMANDS" \
+            "$TRIGGER_URL"
+        )" || curl_exit=$?
+
+        http_code="$(printf '%s' "$response" | tail -n 1)"
+        body="$(printf '%s' "$response" | sed '$d')"
+
+        # The request never completed: connection refused, DNS failure, or the
+        # --max-time ceiling. Nothing was dispatched.
+        if [ "$curl_exit" -ne 0 ]; then
+          echo "::error title=send-command: request failed::curl exited $curl_exit after at most ${MAX_TIME}s; the command was not dispatched to the device"
+          echo "Response body (may be empty): ${body}"
+          exit 1
+        fi
+
+        # Anything outside 2xx is a refusal, not a dispatch.
+        case "$http_code" in
+          2??) ;;
+          *)
+            echo "::error title=send-command: HTTP $http_code::the Rewst engine returned $http_code; the command was not dispatched to the device"
+            echo "Response body: ${body}"
+            exit 1
+            ;;
+        esac
+
+        # The engine-side timeout. It is returned with a 2xx because the HTTP
+        # request itself was fine - the workflow behind it simply did not finish
+        # in time, so the command never reached the device. Matched on the stable
+        # part of the message rather than the whole sentence.
+        if printf '%s' "$body" | grep -qF 'did not complete in a reasonable amount of time'; then
+          execution_id="$(printf '%s' "$body" | sed -n 's/.*"execution_id":"\([^"]*\)".*/\1/p')"
+          echo "::error title=send-command: Rewst engine timed out::the engine did not dispatch the command before giving up (execution_id=${execution_id:-unknown}). This is an engine-side timeout, NOT a regression in the code under test - re-dispatch rather than investigating the diff. HTTP $http_code was returned because the request itself succeeded."
+          echo "Response body: ${body}"
+          exit 1
+        fi
+
+        echo "send-command: dispatched (HTTP $http_code)"
