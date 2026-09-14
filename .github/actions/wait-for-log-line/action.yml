@@ -22,6 +22,16 @@ inputs:
     description: "Seconds between poll attempts"
     required: false
     default: "2"
+  baseline_count:
+    description: >-
+      Occurrences of the pattern already in the log before whatever this is
+      waiting on. When supplied, the wait is a delta - it returns only once the
+      count exceeds this - and fails if that never happens. Required for any
+      pattern the agent logs more than once ("Subscribed to messages" is written
+      on every connect), where a bare match returns immediately against a stale
+      line and the step waits for nothing. Omit for a pattern that appears once.
+    required: false
+    default: ""
 
 runs:
   using: composite
@@ -34,15 +44,16 @@ runs:
         PATTERN: ${{ inputs.pattern }}
         MAX_ATTEMPTS: ${{ inputs.max_attempts }}
         INTERVAL: ${{ inputs.interval_seconds }}
+        BASELINE_COUNT: ${{ inputs.baseline_count }}
       run: |
         set -euo pipefail
         # Resolve pwsh up front: sudo resets PATH via secure_path on some runners.
         pwsh_path="$(command -v pwsh)"
-        sudo "$pwsh_path" -NoProfile -File "$GITHUB_ACTION_PATH/wait.ps1" \
-          -LogFile "$LOG_FILE" \
-          -Pattern "$PATTERN" \
-          -MaxAttempts "$MAX_ATTEMPTS" \
-          -IntervalSeconds "$INTERVAL"
+        args=(-LogFile "$LOG_FILE" -Pattern "$PATTERN" -MaxAttempts "$MAX_ATTEMPTS" -IntervalSeconds "$INTERVAL")
+        if [ -n "$BASELINE_COUNT" ]; then
+          args+=(-BaselineCount "$BASELINE_COUNT")
+        fi
+        sudo "$pwsh_path" -NoProfile -File "$GITHUB_ACTION_PATH/wait.ps1" "${args[@]}"
 
     - name: Wait for log line (Windows)
       if: runner.os == 'Windows'
@@ -52,9 +63,13 @@ runs:
         PATTERN: ${{ inputs.pattern }}
         MAX_ATTEMPTS: ${{ inputs.max_attempts }}
         INTERVAL: ${{ inputs.interval_seconds }}
+        BASELINE_COUNT: ${{ inputs.baseline_count }}
       run: |
-        & "$env:GITHUB_ACTION_PATH/wait.ps1" `
-          -LogFile $env:LOG_FILE `
-          -Pattern $env:PATTERN `
-          -MaxAttempts ([int]$env:MAX_ATTEMPTS) `
-          -IntervalSeconds ([int]$env:INTERVAL)
+        $waitArgs = @{
+          LogFile         = $env:LOG_FILE
+          Pattern         = $env:PATTERN
+          MaxAttempts     = [int]$env:MAX_ATTEMPTS
+          IntervalSeconds = [int]$env:INTERVAL
+        }
+        if ($env:BASELINE_COUNT) { $waitArgs.BaselineCount = [int]$env:BASELINE_COUNT }
+        & "$env:GITHUB_ACTION_PATH/wait.ps1" @waitArgs
