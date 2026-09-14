@@ -1133,16 +1133,50 @@ jobs:
           DEVICE_ID: ${{ steps.config.outputs.device_id }}
           COMMANDS: ${{ matrix.child_process_hang_commands }}
         run: |
-          set -euo pipefail
-          curl --location "$TRIGGER_URL" \
+          # This scenario cannot use the send-command action (it needs the call
+          # backgrounded so it can inspect the child's live process state), but it
+          # must not re-introduce the bug that action exists to fix: a discarded
+          # response means an engine that never dispatched the command is reported
+          # as success, and the assertion below fails instead. Same checks, inline.
+          # Unlike the sweep scenario this one does not depend on the engine
+          # timeout - it reinstalls with a 15s command timeout above, so the
+          # postback round-trips long before the engine's ceiling.
+          set -uo pipefail
+          resp="$RUNNER_TEMP/child-scenario-response.json"
+          curl --silent --show-error --location \
+            --max-time 300 \
+            --write-out '\n%{http_code}' \
             --form "device_id=\"$DEVICE_ID\"" \
-            --form "commands=$COMMANDS" > "$RUNNER_TEMP/child-scenario-response.json" &
+            --form "commands=$COMMANDS" > "$resp" &
           curl_pid=$!
 
           pwsh -NoProfile -File "$GITHUB_WORKSPACE/.github/workflows/it-scripts/wait-for-child-process-to-start.ps1"
 
-          wait "$curl_pid"
-          cat "$RUNNER_TEMP/child-scenario-response.json"
+          curl_exit=0
+          wait "$curl_pid" || curl_exit=$?
+
+          response="$(cat "$resp")"
+          http_code="$(printf '%s' "$response" | tail -n 1)"
+          body="$(printf '%s' "$response" | sed '$d')"
+          echo "Response body: ${body}"
+
+          if [ "$curl_exit" -ne 0 ]; then
+            echo "::error title=send-command (child-process): request failed::curl exited $curl_exit; the command was not dispatched to the device"
+            exit 1
+          fi
+
+          if [ "$http_code" = "408" ] || printf '%s' "$body" | grep -qF 'did not complete in a reasonable amount of time'; then
+            echo "::error title=send-command (child-process): Rewst engine timed out::the engine did not dispatch the command before giving up (HTTP $http_code). Engine-side, NOT a regression in the code under test - re-dispatch rather than investigating the diff."
+            exit 1
+          fi
+
+          case "$http_code" in
+            2??) ;;
+            *)
+              echo "::error title=send-command (child-process): HTTP $http_code::the Rewst engine returned $http_code; the command was not dispatched to the device"
+              exit 1
+              ;;
+          esac
 
       - name: Assert hanging parent command was killed by the timeout (child-process scenario)
         if: matrix.os == 'windows-latest'
@@ -1762,12 +1796,21 @@ jobs:
           BASELINE: ${{ (steps.sweep_baseline_unix.outputs.subscribed || steps.sweep_baseline_windows.outputs.subscribed) }}
         run: |
           & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/wait-for-fresh-subscription-before-the-sweep-scenario.ps1"
+      # allow_engine_timeout: this scenario dispatches a 180s command against a
+      # 600s agent timeout and the steps below need it *still running* to capture
+      # the in-flight script path and force-kill the agent mid-command. Because
+      # send-command blocks until the device postback round-trips, the engine
+      # giving up at ~165s is the only thing that returns this send early - the
+      # scenario depends on that timeout rather than being broken by it, so it
+      # must not be treated as a failure here. Every other call site still fails
+      # fast on it.
       - name: Send long-running command
         uses: ./.github/actions/send-command
         with:
           trigger_url: ${{ vars.IT_SEND_COMMAND_TRIGGER_URL }}
           device_id: ${{ steps.config.outputs.device_id }}
           commands: ${{ matrix.sweep_commands }}
+          allow_engine_timeout: "true"
 
       - name: Capture the in-flight script file path (Unix)
         if: runner.os != 'Windows'
