@@ -884,11 +884,51 @@ jobs:
       # moment command_timeout_seconds is configured, which the following
       # scenario (still on this same device) proves separately.
       # --no-auto-updates keeps this binary running for the scenario's duration.
+      # Count the subscriptions already in the log before the reinstall, so the
+      # wait below can be a delta against it. "Subscribed to messages" is written
+      # on every connect, so a bare match returns on the first poll against a line
+      # from an earlier scenario and the step waits for nothing. On Windows the
+      # service restart is slow enough that "Send hanging command..." below then
+      # reached the engine before the restarted agent had resubscribed: the engine
+      # held the command, never dispatched it, and gave up at its own ceiling
+      # ~167s later. That surfaced as the send failing (or, before the send
+      # checked its response, as the *assertion* failing on a device that never
+      # received the command - the agent log showed zero "Command timed out").
+      - name: Capture subscription baseline before the default-timeout install (Unix)
+        if: runner.os != 'Windows'
+        id: default_timeout_sub_baseline_unix
+        shell: bash
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+        run: |
+          set -euo pipefail
+          # Resolve pwsh up front: sudo resets PATH via secure_path on some runners.
+          pwsh_path="$(command -v pwsh)"
+          sudo --preserve-env=LOG_FILE,GITHUB_OUTPUT "$pwsh_path" -NoProfile -File "$GITHUB_WORKSPACE/.github/workflows/it-scripts/capture-restore-baseline-counts.ps1"
+
+      - name: Capture subscription baseline before the default-timeout install (Windows)
+        if: runner.os == 'Windows'
+        id: default_timeout_sub_baseline_windows
+        shell: pwsh
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+        run: |
+          & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/capture-restore-baseline-counts.ps1"
+
+      # Deliberately NOT ${{ matrix.no_auto_updates_extra }}: that variable exists
+      # for the postback-verification scenario above and, on windows, carries
+      # --disable-agent-postback. This scenario copied the reinstall line and
+      # inherited the flag by accident (d8e13a7), which is why the hanging-command
+      # send below always took ~166s on windows and ~20s elsewhere: the agent
+      # timed the command out on schedule and then, with postback disabled,
+      # returned from processMessage before sendPostbackWithRetry - so the engine
+      # waited for a result that would never arrive and gave up at its ceiling.
+      # It only needs --no-auto-updates, which is spelled out.
       - name: Install IT binary to exercise the default command timeout
         uses: ./.github/actions/run-agent
         with:
           binary: ${{ matrix.it_binary }}
-          args: --update --org-id ${{ vars.IT_ORG_ID }} --no-auto-updates ${{ matrix.no_auto_updates_extra }} --github-token ${{ secrets.GITHUB_TOKEN }}
+          args: --update --org-id ${{ vars.IT_ORG_ID }} --no-auto-updates --github-token ${{ secrets.GITHUB_TOKEN }}
 
       - name: Wait for fresh subscription after default-timeout binary install
         uses: ./.github/actions/wait-for-log-line
@@ -897,6 +937,7 @@ jobs:
           pattern: Subscribed to messages
           max_attempts: "60"
           interval_seconds: "2"
+          baseline_count: ${{ steps.default_timeout_sub_baseline_unix.outputs.subscribed || steps.default_timeout_sub_baseline_windows.outputs.subscribed }}
 
       - name: Capture default-command-timeout baseline counts (Unix)
         if: runner.os != 'Windows'
@@ -1133,16 +1174,51 @@ jobs:
           DEVICE_ID: ${{ steps.config.outputs.device_id }}
           COMMANDS: ${{ matrix.child_process_hang_commands }}
         run: |
-          set -euo pipefail
-          curl --location "$TRIGGER_URL" \
+          # This scenario cannot use the send-command action (it needs the call
+          # backgrounded so it can inspect the child's live process state), but it
+          # must not re-introduce the bug that action exists to fix: a discarded
+          # response means an engine that never dispatched the command is reported
+          # as success, and the assertion below fails instead. Same checks, inline.
+          # Unlike the sweep scenario this one does not depend on the engine
+          # timeout - it reinstalls with a 15s command timeout above, so the
+          # postback round-trips long before the engine's ceiling.
+          set -uo pipefail
+          resp="$RUNNER_TEMP/child-scenario-response.json"
+          curl --silent --show-error --location \
+            --max-time 300 \
+            --write-out '\n%{http_code}' \
             --form "device_id=\"$DEVICE_ID\"" \
-            --form "commands=$COMMANDS" > "$RUNNER_TEMP/child-scenario-response.json" &
+            --form "commands=$COMMANDS" \
+            "$TRIGGER_URL" > "$resp" &
           curl_pid=$!
 
           pwsh -NoProfile -File "$GITHUB_WORKSPACE/.github/workflows/it-scripts/wait-for-child-process-to-start.ps1"
 
-          wait "$curl_pid"
-          cat "$RUNNER_TEMP/child-scenario-response.json"
+          curl_exit=0
+          wait "$curl_pid" || curl_exit=$?
+
+          response="$(cat "$resp")"
+          http_code="$(printf '%s' "$response" | tail -n 1)"
+          body="$(printf '%s' "$response" | sed '$d')"
+          echo "Response body: ${body}"
+
+          if [ "$curl_exit" -ne 0 ]; then
+            echo "::error title=send-command (child-process): request failed::curl exited $curl_exit; the command was not dispatched to the device"
+            exit 1
+          fi
+
+          if [ "$http_code" = "408" ] || printf '%s' "$body" | grep -qF 'did not complete in a reasonable amount of time'; then
+            echo "::error title=send-command (child-process): Rewst engine timed out::the engine did not dispatch the command before giving up (HTTP $http_code). Engine-side, NOT a regression in the code under test - re-dispatch rather than investigating the diff."
+            exit 1
+          fi
+
+          case "$http_code" in
+            2??) ;;
+            *)
+              echo "::error title=send-command (child-process): HTTP $http_code::the Rewst engine returned $http_code; the command was not dispatched to the device"
+              exit 1
+              ;;
+          esac
 
       - name: Assert hanging parent command was killed by the timeout (child-process scenario)
         if: matrix.os == 'windows-latest'
@@ -1187,11 +1263,14 @@ jobs:
       # graceful - no Error "Connection lost" is produced. Deltas are compared
       # because earlier cycles already left "Subscribed to messages"/"Connection
       # lost" lines in the log.
+      # Same accidental inheritance of no_auto_updates_extra as the default-timeout
+      # reinstall (see the comment there); nothing this scenario asserts involves
+      # postback, so only --no-auto-updates is wanted.
       - name: Install IT binary with short SAS token lifetime
         uses: ./.github/actions/run-agent
         with:
           binary: ${{ matrix.it_binary }}
-          args: --update --org-id ${{ vars.IT_ORG_ID }} --no-auto-updates ${{ matrix.no_auto_updates_extra }} --github-token ${{ secrets.GITHUB_TOKEN }}
+          args: --update --org-id ${{ vars.IT_ORG_ID }} --no-auto-updates --github-token ${{ secrets.GITHUB_TOKEN }}
 
       - name: Wait for fresh subscription after SAS lifetime update
         uses: ./.github/actions/wait-for-log-line
@@ -1762,12 +1841,21 @@ jobs:
           BASELINE: ${{ (steps.sweep_baseline_unix.outputs.subscribed || steps.sweep_baseline_windows.outputs.subscribed) }}
         run: |
           & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/wait-for-fresh-subscription-before-the-sweep-scenario.ps1"
+      # allow_engine_timeout: this scenario dispatches a 180s command against a
+      # 600s agent timeout and the steps below need it *still running* to capture
+      # the in-flight script path and force-kill the agent mid-command. Because
+      # send-command blocks until the device postback round-trips, the engine
+      # giving up at ~165s is the only thing that returns this send early - the
+      # scenario depends on that timeout rather than being broken by it, so it
+      # must not be treated as a failure here. Every other call site still fails
+      # fast on it.
       - name: Send long-running command
         uses: ./.github/actions/send-command
         with:
           trigger_url: ${{ vars.IT_SEND_COMMAND_TRIGGER_URL }}
           device_id: ${{ steps.config.outputs.device_id }}
           commands: ${{ matrix.sweep_commands }}
+          allow_engine_timeout: "true"
 
       - name: Capture the in-flight script file path (Unix)
         if: runner.os != 'Windows'

@@ -11,6 +11,21 @@ inputs:
   commands:
     description: "Raw value for the curl --form commands=... field. Should already include any surrounding quoting expected by the Rewst engine."
     required: true
+  max_time:
+    description: "Hard ceiling, in seconds, on the whole curl request. A backstop against a connection that never answers, not a latency policy - the engine's own ceiling is well below this."
+    required: false
+    default: "300"
+  allow_engine_timeout:
+    description: >-
+      Set to "true" only for a scenario that needs the command to still be
+      running on the device when this step returns. This action blocks until the
+      device's postback round-trips, so for a command that outlives the engine's
+      own ceiling the engine giving up is the only thing that returns the send
+      early - the scenario depends on it rather than being broken by it. When
+      true, an engine timeout is logged and the step continues; every other
+      failure (non-2xx, curl error) still fails as normal.
+    required: false
+    default: "false"
 
 runs:
   using: composite
@@ -21,7 +36,92 @@ runs:
         TRIGGER_URL: ${{ inputs.trigger_url }}
         DEVICE_ID: ${{ inputs.device_id }}
         COMMANDS: ${{ inputs.commands }}
+        MAX_TIME: ${{ inputs.max_time }}
+        ALLOW_ENGINE_TIMEOUT: ${{ inputs.allow_engine_timeout }}
       run: |
-        curl --location "$TRIGGER_URL" \
-          --form "device_id=\"$DEVICE_ID\"" \
-          --form "commands=$COMMANDS"
+        # This step used to be a bare curl whose response was discarded. That
+        # made it report success whenever the HTTP call itself succeeded - which
+        # includes the case the engine answers without ever dispatching the
+        # command to the device. The next step then polled the agent log for a
+        # result that could not arrive and failed on a count that never moved,
+        # pointing the investigator at agent code that never ran. Checking the
+        # status and the body turns that into a failure at the step that
+        # actually failed, naming the real cause.
+        set -uo pipefail
+
+        # Body and status come back on one stream - curl appends the status as a
+        # final line - rather than via --output to a temp file. On windows-latest
+        # this step runs under Git Bash, where a mktemp path is an MSYS path that
+        # the curl on PATH may not resolve; keeping everything on stdout sidesteps
+        # that entirely and behaves identically on all three runners.
+        curl_exit=0
+        response="$(
+          curl --silent --show-error --location \
+            --max-time "$MAX_TIME" \
+            --write-out '\n%{http_code}' \
+            --form "device_id=\"$DEVICE_ID\"" \
+            --form "commands=$COMMANDS" \
+            "$TRIGGER_URL"
+        )" || curl_exit=$?
+
+        http_code="$(printf '%s' "$response" | tail -n 1)"
+        body="$(printf '%s' "$response" | sed '$d')"
+
+        # Always surface the body. The bare curl this replaced printed it on
+        # every send, and the flake triage playbook reads the preceding send's
+        # payload out of the job log; --silent would otherwise delete that
+        # record for any send that succeeded.
+        echo "Response body: ${body}"
+
+        # The request never completed: connection refused, DNS failure, or the
+        # --max-time ceiling. Nothing was dispatched, and http_code is meaningless.
+        if [ "$curl_exit" -ne 0 ]; then
+          echo "::error title=send-command: request failed::curl exited $curl_exit after at most ${MAX_TIME}s; the command was not dispatched to the device"
+          exit 1
+        fi
+
+        # The engine gave up before dispatching. It has two shapes at its ceiling:
+        # a 408, and a 2xx carrying the timeout payload. Both mean the same thing,
+        # so both are detected here rather than leaving 408 to the generic non-2xx
+        # branch below - that branch would report it as a plain refusal and would
+        # also ignore allow_engine_timeout.
+        engine_timed_out=false
+        if [ "$http_code" = "408" ]; then
+          engine_timed_out=true
+        fi
+        if printf '%s' "$body" | grep -qF 'did not complete in a reasonable amount of time'; then
+          engine_timed_out=true
+        fi
+
+        if [ "$engine_timed_out" = "true" ]; then
+          # Whitespace after the colon is tolerated - an exact-byte match on
+          # "execution_id":" printed "unknown" for equally valid JSON. First
+          # match wins, which is deterministic rather than semantically
+          # top-level; the payload carries exactly one, and this is a diagnostic
+          # string, not something the workflow branches on.
+          execution_id="$(
+            printf '%s' "$body" \
+              | grep -oE '"execution_id"[[:space:]]*:[[:space:]]*"[^"]*"' \
+              | head -n 1 \
+              | sed -E 's/.*"([^"]*)"$/\1/'
+          )"
+
+          if [ "$ALLOW_ENGINE_TIMEOUT" = "true" ]; then
+            echo "::notice title=send-command: engine timed out (expected here)::the engine gave up before the command finished (HTTP $http_code, execution_id=${execution_id:-unknown}). Continuing because allow_engine_timeout is set - this scenario needs the command still running on the device."
+            exit 0
+          fi
+
+          echo "::error title=send-command: Rewst engine timed out::the engine did not dispatch the command before giving up (HTTP $http_code, execution_id=${execution_id:-unknown}). This is an engine-side timeout, NOT a regression in the code under test - re-dispatch rather than investigating the diff."
+          exit 1
+        fi
+
+        # Anything else outside 2xx is a refusal, not a dispatch.
+        case "$http_code" in
+          2??) ;;
+          *)
+            echo "::error title=send-command: HTTP $http_code::the Rewst engine returned $http_code; the command was not dispatched to the device"
+            exit 1
+            ;;
+        esac
+
+        echo "send-command: dispatched (HTTP $http_code)"
