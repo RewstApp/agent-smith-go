@@ -1188,7 +1188,8 @@ jobs:
             --max-time 300 \
             --write-out '\n%{http_code}' \
             --form "device_id=\"$DEVICE_ID\"" \
-            --form "commands=$COMMANDS" > "$resp" &
+            --form "commands=$COMMANDS" \
+            "$TRIGGER_URL" > "$resp" &
           curl_pid=$!
 
           pwsh -NoProfile -File "$GITHUB_WORKSPACE/.github/workflows/it-scripts/wait-for-child-process-to-start.ps1"
