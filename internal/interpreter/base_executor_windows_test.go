@@ -163,7 +163,10 @@ func TestBaseExecutor_CommandTimeout_KillsHungScript(t *testing.T) {
 	device := agent.Device{RewstOrgId: "test-org-windows-timeout", CommandTimeoutSeconds: &timeout}
 
 	// A script that would otherwise block a worker indefinitely.
-	msg := Message{PostId: "test:windows-timeout", Commands: encodeCommand("Start-Sleep -Seconds 120")}
+	msg := Message{
+		PostId:   "test:windows-timeout",
+		Commands: encodeCommand("Start-Sleep -Seconds 120"),
+	}
 
 	start := time.Now()
 	done := make(chan []byte, 1)
