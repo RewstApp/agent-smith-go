@@ -915,11 +915,20 @@ jobs:
         run: |
           & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/capture-restore-baseline-counts.ps1"
 
+      # Deliberately NOT ${{ matrix.no_auto_updates_extra }}: that variable exists
+      # for the postback-verification scenario above and, on windows, carries
+      # --disable-agent-postback. This scenario copied the reinstall line and
+      # inherited the flag by accident (d8e13a7), which is why the hanging-command
+      # send below always took ~166s on windows and ~20s elsewhere: the agent
+      # timed the command out on schedule and then, with postback disabled,
+      # returned from processMessage before sendPostbackWithRetry - so the engine
+      # waited for a result that would never arrive and gave up at its ceiling.
+      # It only needs --no-auto-updates, which is spelled out.
       - name: Install IT binary to exercise the default command timeout
         uses: ./.github/actions/run-agent
         with:
           binary: ${{ matrix.it_binary }}
-          args: --update --org-id ${{ vars.IT_ORG_ID }} --no-auto-updates ${{ matrix.no_auto_updates_extra }} --github-token ${{ secrets.GITHUB_TOKEN }}
+          args: --update --org-id ${{ vars.IT_ORG_ID }} --no-auto-updates --github-token ${{ secrets.GITHUB_TOKEN }}
 
       - name: Wait for fresh subscription after default-timeout binary install
         uses: ./.github/actions/wait-for-log-line
@@ -1253,11 +1262,14 @@ jobs:
       # graceful - no Error "Connection lost" is produced. Deltas are compared
       # because earlier cycles already left "Subscribed to messages"/"Connection
       # lost" lines in the log.
+      # Same accidental inheritance of no_auto_updates_extra as the default-timeout
+      # reinstall (see the comment there); nothing this scenario asserts involves
+      # postback, so only --no-auto-updates is wanted.
       - name: Install IT binary with short SAS token lifetime
         uses: ./.github/actions/run-agent
         with:
           binary: ${{ matrix.it_binary }}
-          args: --update --org-id ${{ vars.IT_ORG_ID }} --no-auto-updates ${{ matrix.no_auto_updates_extra }} --github-token ${{ secrets.GITHUB_TOKEN }}
+          args: --update --org-id ${{ vars.IT_ORG_ID }} --no-auto-updates --github-token ${{ secrets.GITHUB_TOKEN }}
 
       - name: Wait for fresh subscription after SAS lifetime update
         uses: ./.github/actions/wait-for-log-line
