@@ -1,5 +1,17 @@
 name: Integration Test
 
+# One run at a time, across every branch. The IT org's config endpoint hands
+# every run the same fixed device_id per platform, and Azure IoT Hub permits a
+# single connection per device - so two runs in flight install two agents on
+# one device that kick each other off every few seconds, and a command sent
+# by one run is executed and posted back by the other's agent. A second
+# dispatch now waits for the first to finish instead of colliding with it.
+# cancel-in-progress is off deliberately: a queued re-dispatch must not kill
+# a run that is mid-suite with a real agent installed on the runner.
+concurrency:
+  group: integration-test
+  cancel-in-progress: false
+
 on:
   workflow_dispatch:
     inputs:
@@ -1879,10 +1891,50 @@ jobs:
           BASELINE: ${{ (steps.sweep_baseline_unix.outputs.saved || steps.sweep_baseline_windows.outputs.saved) }}
         run: |
           & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/capture-the-in-flight-script-file-path.ps1"
+      # Linux only: the systemd unit has Restart=always, so ~100ms after the
+      # SIGKILL below systemd brings the agent back on its own - before this
+      # workflow's own restart step - and that agent runs its startup sweep.
+      # SweepStaleScripts logs only when it removed something. If that sweep
+      # lands after the fixture has aged the files but before the sweep-log
+      # baseline is captured, it reclaims them, its log line is absorbed into
+      # the baseline, and the --update'd agent then finds nothing to sweep and
+      # logs nothing: "Startup sweep was never logged (count stayed at 1)" on
+      # ~1 in 5 ubuntu runs (34903639683, 35107186644). Capturing the
+      # subscription count first and waiting for the respawned agent to
+      # subscribe again *before* ageing makes its sweep deterministically run
+      # against fresh files (removing 0) and leaves the aged files for the
+      # restart this scenario is actually testing. The sweep runs before the
+      # MQTT loop, so a new "Subscribed to messages" proves it has completed.
+      # macOS is not gated in: launchd's KeepAlive respawn has never landed
+      # inside this window (its baseline is 0 in every observed run), and
+      # Windows has no auto-restart; on either, a delta wait would only be
+      # able to time out.
+      - name: Capture subscription count before the force-kill (Linux)
+        if: runner.os == 'Linux'
+        id: sweep_kill_sub_baseline
+        shell: bash
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+        run: |
+          set -euo pipefail
+          # Resolve pwsh up front: sudo resets PATH via secure_path on some runners.
+          pwsh_path="$(command -v pwsh)"
+          sudo --preserve-env=LOG_FILE,GITHUB_OUTPUT "$pwsh_path" -NoProfile -File "$GITHUB_WORKSPACE/.github/workflows/it-scripts/capture-restore-baseline-counts.ps1"
+
       - name: Force-kill the agent mid-command
         uses: ./.github/actions/kill-service
         with:
           service: ${{ matrix.service }}
+
+      - name: Wait for systemd to auto-restart the agent before ageing (Linux)
+        if: runner.os == 'Linux'
+        uses: ./.github/actions/wait-for-log-line
+        with:
+          log_file: ${{ matrix.log_file }}
+          pattern: Subscribed to messages
+          max_attempts: "60"
+          interval_seconds: "2"
+          baseline_count: ${{ steps.sweep_kill_sub_baseline.outputs.subscribed }}
 
       - name: Age the stranded script file and seed sweep control files
         uses: ./.github/actions/script-sweep-fixture
