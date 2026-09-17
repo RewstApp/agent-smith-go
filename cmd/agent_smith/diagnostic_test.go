@@ -333,7 +333,8 @@ func TestLogRotated_RenamedAndRecreatedIsTrue(t *testing.T) {
 }
 
 func TestLogRotated_MissingPathIsFalse(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "agent.log")
+	dir := t.TempDir()
+	path := filepath.Join(dir, "agent.log")
 	if err := os.WriteFile(path, []byte("a\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -342,13 +343,15 @@ func TestLogRotated_MissingPathIsFalse(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = f.Close() }()
-	if err := os.Remove(path); err != nil {
-		t.Fatal(err)
-	}
-	// Mid-rotation window (renamed, not yet recreated): keep the current
-	// handle rather than reopening nothing.
-	if logRotated(f, path) {
-		t.Error("logRotated = true while the path is transiently absent")
+
+	// The branch under test is "stat of the path fails -> false", which is what
+	// the viewer hits in the mid-rotation window (renamed, not yet recreated):
+	// it must keep its current handle rather than reopen nothing. A path that
+	// never existed exercises that same branch on every platform; deleting the
+	// open file would only work on Unix, since Windows refuses to remove a file
+	// another handle has open.
+	if logRotated(f, filepath.Join(dir, "not-yet-recreated.log")) {
+		t.Error("logRotated = true while the path is absent")
 	}
 }
 
