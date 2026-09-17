@@ -78,17 +78,21 @@ func (svc *serviceContext) loadConfig() (agent.Device, error) {
 	return device, nil
 }
 
-func (svc *serviceContext) loadLog() (*os.File, error) {
-	logFile, err := os.OpenFile(
+// loadLog opens the agent's log file for appending through a size-bounded
+// rotating writer. The log used to be a bare append-only *os.File that nothing
+// ever rotated, truncated or swept, so on a long-lived endpoint it grew for the
+// life of the installation and could fill the system volume - the same volume
+// that holds the data directory, the postback spool and the OS. Every other
+// file the agent writes there was already bounded; this was the last one that
+// was not. See utils.RotatingFile for the rotation and failure semantics, and
+// device.ResolvedLogMaxBytes / ResolvedLogMaxFiles for the bounds.
+func (svc *serviceContext) loadLog(device agent.Device) (*utils.RotatingFile, error) {
+	return utils.NewRotatingFile(
 		svc.LogFile,
-		os.O_APPEND|os.O_CREATE|os.O_WRONLY,
+		int64(device.ResolvedLogMaxBytes()),
+		device.ResolvedLogMaxFiles(),
 		utils.DefaultFileMod,
 	)
-	if err != nil {
-		return nil, err
-	}
-
-	return logFile, nil
 }
 
 // sweepOrgId returns the org id whose directories the startup sweeps reclaim
@@ -121,7 +125,7 @@ func (svc *serviceContext) Execute(
 	}
 
 	// Configure the logger
-	logFile, err := svc.loadLog()
+	logFile, err := svc.loadLog(device)
 	if err != nil {
 		return service.LogFileError
 	}
@@ -196,7 +200,21 @@ func (svc *serviceContext) Execute(
 			agent.ResolveLatestReleaseUrl(logger, svc.OrgId, defaultLatestReleaseUrl),
 			device.GithubToken,
 			func(path string, args []string) error {
-				return detachedCommand(path, args, logFile, logFile).Start()
+				// The helper is detached and outlives this process, so it needs a
+				// real file descriptor to inherit rather than the rotating writer.
+				// A fresh append handle on the active log file gives it one; this
+				// process closes its own copy once the child has started, and the
+				// child keeps writing through its inherited copy. On Windows that
+				// inherited handle blocks a rotation for as long as the helper runs
+				// (rotation then degrades to appending and retries), and on
+				// Linux/macOS a rotation during the helper's run leaves its output
+				// in the rotated copy - both acceptable for a short-lived helper.
+				out, err := logFile.OpenAppendHandle()
+				if err != nil {
+					return err
+				}
+				defer func() { _ = out.Close() }()
+				return detachedCommand(path, args, out, out).Start()
 			},
 		)
 		runner := agent.NewAutoUpdateRunner(

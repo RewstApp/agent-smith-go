@@ -75,6 +75,21 @@ type Device struct {
 	// legitimately returns very large results, lower it to tighten the memory
 	// ceiling.
 	MaxOutputBytes *int `json:"max_output_bytes,omitempty"`
+	// LogMaxBytes optionally overrides the size at which the agent's log file
+	// is rotated. When unset (or non-positive) the agent falls back to
+	// DefaultLogMaxBytes. Without rotation the log file grew for the life of
+	// the installation and could fill the endpoint's system volume; with it the
+	// active file is renamed to rewst_agent.log.1 (shifting older copies up)
+	// once a write would carry it past this size, so the footprint on disk is
+	// bounded at (LogMaxFiles+1) times this value. Raise it to keep more recent
+	// history in the active file, lower it to tighten the footprint.
+	LogMaxBytes *int `json:"log_max_bytes,omitempty"`
+	// LogMaxFiles optionally overrides how many rotated log files are kept
+	// (rewst_agent.log.1 through .N). When unset (or non-positive) the agent
+	// falls back to DefaultLogMaxFiles. The oldest copy is discarded on each
+	// rotation once this many exist; lowering it between runs also removes any
+	// copies numbered above the new value.
+	LogMaxFiles *int `json:"log_max_files,omitempty"`
 	// SasTokenLifetimeHours optionally overrides the lifetime of the Azure IoT
 	// Hub SAS token minted for each MQTT connection, in hours. When unset (or
 	// non-positive) the agent falls back to utils.DefaultSasTokenLifetime. Azure
@@ -118,6 +133,16 @@ const (
 	// the agent to a small constant multiple of it instead of tracking however
 	// much the script decides to write.
 	DefaultMaxOutputBytes = 10 * 1024 * 1024
+	// DefaultLogMaxBytes is the size at which the agent's log file is rotated
+	// when LogMaxBytes is not configured. With DefaultLogMaxFiles rotated copies
+	// retained, the worst-case footprint is (DefaultLogMaxFiles+1) * this, 60
+	// MiB - enough to hold days of info-level history on a busy device while
+	// making it impossible for the log to fill a system volume, which is what
+	// an unrotated log eventually did on long-lived installations.
+	DefaultLogMaxBytes = 10 * 1024 * 1024
+	// DefaultLogMaxFiles is how many rotated log files are kept when
+	// LogMaxFiles is not configured.
+	DefaultLogMaxFiles = 5
 	// DefaultCommandTimeout bounds how long a single received command may run
 	// when CommandTimeoutSeconds is not configured. Without a default, a hung
 	// command (infinite loop, blocked on stdin, stuck network call) occupies its
@@ -208,6 +233,26 @@ func (d Device) ResolvedMaxOutputBytes() int {
 		return *d.MaxOutputBytes
 	}
 	return DefaultMaxOutputBytes
+}
+
+// ResolvedLogMaxBytes returns the size at which the log file is rotated,
+// honoring the per-device override when set to a positive value and falling
+// back to DefaultLogMaxBytes otherwise. It is always positive.
+func (d Device) ResolvedLogMaxBytes() int {
+	if d.LogMaxBytes != nil && *d.LogMaxBytes > 0 {
+		return *d.LogMaxBytes
+	}
+	return DefaultLogMaxBytes
+}
+
+// ResolvedLogMaxFiles returns how many rotated log files are kept, honoring the
+// per-device override when set to a positive value and falling back to
+// DefaultLogMaxFiles otherwise. It is always positive.
+func (d Device) ResolvedLogMaxFiles() int {
+	if d.LogMaxFiles != nil && *d.LogMaxFiles > 0 {
+		return *d.LogMaxFiles
+	}
+	return DefaultLogMaxFiles
 }
 
 // MqttConnectTimeout returns the per-attempt MQTT connect timeout, honoring the

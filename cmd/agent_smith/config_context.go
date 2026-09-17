@@ -48,6 +48,8 @@ type tuningFlags struct {
 	CommandTimeoutSeconds           int
 	SasTokenLifetimeHours           int
 	MaxOutputBytes                  int
+	LogMaxBytes                     int
+	LogMaxFiles                     int
 	// provided records which tuning flag names the operator explicitly set. It is
 	// populated from flag.FlagSet.Visit after parsing so validation can flag an
 	// explicitly-provided non-positive value (e.g. --worker-count -1) even when it
@@ -67,6 +69,8 @@ var tuningFlagNames = []string{
 	"command-timeout-seconds",
 	"sas-token-lifetime-hours",
 	"max-output-bytes",
+	"log-max-bytes",
+	"log-max-files",
 }
 
 // captureProvided records which tuning flags were explicitly set on fs so that
@@ -142,6 +146,18 @@ func bindTuningFlags(fs *flag.FlagSet, t *tuningFlags) {
 		tuningFlagUnset,
 		"Maximum bytes of command output kept per stream before truncation (positive integer)",
 	)
+	fs.IntVar(
+		&t.LogMaxBytes,
+		"log-max-bytes",
+		tuningFlagUnset,
+		"Size in bytes at which the agent log file is rotated (positive integer)",
+	)
+	fs.IntVar(
+		&t.LogMaxFiles,
+		"log-max-files",
+		tuningFlagUnset,
+		"Number of rotated agent log files to keep (positive integer)",
+	)
 }
 
 // validate rejects any tuning flag that was explicitly provided with a
@@ -161,6 +177,8 @@ func (t tuningFlags) validate() error {
 		{"command-timeout-seconds", t.CommandTimeoutSeconds},
 		{"sas-token-lifetime-hours", t.SasTokenLifetimeHours},
 		{"max-output-bytes", t.MaxOutputBytes},
+		{"log-max-bytes", t.LogMaxBytes},
+		{"log-max-files", t.LogMaxFiles},
 	}
 	for _, c := range checks {
 		if t.provided[c.name] && c.value <= 0 {

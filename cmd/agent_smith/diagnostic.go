@@ -481,10 +481,47 @@ func runLiveLogsWith(ctx context.Context, target agentInfo, opener logFileOpener
 				fmt.Print("    ", string(buf[:n]))
 			}
 			if err != nil {
+				// At EOF, check whether the agent has rotated the log underneath
+				// us. On Linux/macOS our handle would otherwise keep following the
+				// renamed rewst_agent.log.1 forever while new lines land in a
+				// fresh file at the original path; reopen so the tail follows the
+				// active file. (On Windows our open handle blocks the rename, so
+				// rotation waits until this viewer exits.)
+				if logRotated(rc, logFile) {
+					if next, openErr := opener.Open(logFile); openErr == nil {
+						_ = rc.Close()
+						rc = next
+						fmt.Println("    --- log rotated; now following the new file ---")
+						continue
+					}
+				}
 				time.Sleep(500 * time.Millisecond)
 			}
 		}
 	}
+}
+
+// logRotated reports whether the file open behind rc is no longer the file at
+// path - i.e. the agent rotated the log by renaming it and reopened a new one.
+// Identity is compared with os.SameFile, which is inode-based on Unix and
+// file-index-based on Windows, so it is not fooled by a new file that has
+// already grown past the old one's size. A reader that is not an *os.File (the
+// tests' in-memory opener) can never be rotated underneath and reports false;
+// so does a transient stat failure, which the next poll retries.
+func logRotated(rc io.ReadCloser, path string) bool {
+	f, ok := rc.(*os.File)
+	if !ok {
+		return false
+	}
+	open, err := f.Stat()
+	if err != nil {
+		return false
+	}
+	current, err := os.Stat(path)
+	if err != nil {
+		return false
+	}
+	return !os.SameFile(open, current)
 }
 
 // ── Check 6: Run all checks ──

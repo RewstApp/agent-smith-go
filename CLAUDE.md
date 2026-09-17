@@ -111,7 +111,7 @@ Loaded plugins are supervised: a subprocess that exits or crashes is detected (b
 
 The agent runs as a system service with these key files:
 - Configuration file: Contains device credentials, MQTT endpoints, logging settings, and plugin configurations
-- Log file: Application logs (with optional syslog integration)
+- Log file: Application logs (with optional syslog integration). Written through `utils.RotatingFile` (`internal/utils/logrotate.go`): rotated in-process at `log_max_bytes` (10 MiB) keeping `log_max_files` (5) copies, so the on-disk footprint is bounded at `(files+1) × size` instead of growing for the life of the installation. The writer closes its handle before renaming so rotation works on Windows; a rename blocked by another process (diagnostic log viewer, detached updater) degrades to appending with one WARN per failure/recovery transition. The detached `--update` helper gets a fresh `OpenAppendHandle()` to inherit rather than the writer. See the README's "Bounding the agent log file on disk" section.
 - Plugin executables: Located at paths specified in device configuration
 - Service binary: Platform-specific executable installed as system service
 

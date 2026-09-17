@@ -306,6 +306,62 @@ command that was both verbose and hung carries `"truncated": true` alongside
 Each truncation is logged **once per command** at `Warn` level with the
 `message_id`, the ceiling in effect, and both byte counts — never once per write.
 
+#### Bounding the agent log file on disk
+
+The agent's own log file (`rewst_agent.log` in the data directory) is written
+through a **size-bounded rotating writer**, so a long-running installation can
+no longer fill the endpoint's system volume — the volume that also holds the
+data directory, the postback spool and the operating system. Every other file
+the agent writes there was already bounded (the spool by entries and age,
+stale scripts and installers by the startup sweeps, command output by
+`max_output_bytes`); the log was the last one that was not, and the only one
+whose growth was proportional to how long the agent had been doing its job
+correctly.
+
+When a write would carry the active file past `log_max_bytes`, the file is
+rotated first: `rewst_agent.log` becomes `rewst_agent.log.1`, the previous `.1`
+becomes `.2`, and so on up to `.log_max_files`, which is discarded. Rotation
+happens in-process on the write that crosses the threshold, not only at
+startup, so an agent that stays up for months rotates without a restart. The
+worst-case footprint is **`(log_max_files + 1) × log_max_bytes`** plus one
+line's overshoot — 60 MiB at the defaults.
+
+| Config key | Default | Description |
+|------------|---------|-------------|
+| `log_max_bytes` | `10485760` (10 MiB) | Size at which the active log file is rotated. |
+| `log_max_files` | `5` | Rotated copies kept (`rewst_agent.log.1` … `.5`); the oldest is discarded on each rotation. |
+
+Both fall back to their defaults when omitted or set to a non-positive value,
+so existing deployments need no config change. They can be set at install time
+with `--log-max-bytes <N>` / `--log-max-files <N>`, or changed later with
+`--update`. Lowering `log_max_files` also removes any copies numbered above the
+new value on the next rotation. A pre-existing oversized log left by an agent
+that never rotated is rotated on the first write that crosses the threshold
+after upgrade, rather than left in place.
+
+Rotated copies are created by renaming the active file, so they keep its
+permissions and stay in the (owner-only) data directory. Rotation never loses
+a line: it happens before the write, under the same lock, and the line then
+lands in whichever file is open afterwards.
+
+**Rotation is best effort and cannot take the service down.** The writer owns
+the file handle and closes it before renaming, which is what lets the rename
+succeed on Windows — where a file another handle has open cannot be renamed.
+A handle held by *another* process still blocks it there: the diagnostic
+mode's live log viewer, or the detached `--update` helper writing its output.
+In that case (or on a full disk) the current file is reopened and appending
+continues, one `[WARN]` line records the failure, rotation is not retried for a
+minute so a lasting block cannot flood the file, and one line records the
+eventual recovery. This mirrors the syslog forwarder's "counted, not fatal"
+posture. Syslog forwarding itself is unchanged: the on-disk write is always
+performed and its result is what `Write` returns.
+
+Diagnostic mode's live log viewer (menu option 5) follows the *active* file
+across a rotation on Linux and macOS: at EOF it compares the identity of the
+file it holds open with the file at the log path and reopens when they differ,
+printing a marker line. On Windows its open handle blocks the rename, so
+rotation simply waits until the viewer exits.
+
 #### Hardening the Command Scripts Directory
 
 Each received command is written to a temporary script file before it is

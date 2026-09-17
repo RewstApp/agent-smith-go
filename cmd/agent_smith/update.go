@@ -216,6 +216,12 @@ func runUpdate(params *updateContext) {
 	if params.Tuning.MaxOutputBytes != tuningFlagUnset {
 		device.MaxOutputBytes = tuningPtr(params.Tuning.MaxOutputBytes)
 	}
+	if params.Tuning.LogMaxBytes != tuningFlagUnset {
+		device.LogMaxBytes = tuningPtr(params.Tuning.LogMaxBytes)
+	}
+	if params.Tuning.LogMaxFiles != tuningFlagUnset {
+		device.LogMaxFiles = tuningPtr(params.Tuning.LogMaxFiles)
+	}
 
 	// Save the updated configuration file
 	configBytes, err := json.MarshalIndent(device, "", "  ")

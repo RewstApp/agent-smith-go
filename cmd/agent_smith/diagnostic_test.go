@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -279,6 +280,83 @@ func TestRunLiveLogs_SmallFile(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	runLiveLogsWith(ctx, agentInfo{OrgId: "org-1", LogFile: "fake.log"}, opener)
+}
+
+// ── logRotated ───────────────────────────────────────────────────────────────
+
+func TestLogRotated_SameFileIsFalse(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "agent.log")
+	if err := os.WriteFile(path, []byte("a\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = f.Close() }()
+
+	// Growing the file at the path does not change its identity.
+	if err := os.WriteFile(path, []byte("a\nb\nc\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if logRotated(f, path) {
+		t.Error("logRotated = true for the same, merely larger, file")
+	}
+}
+
+func TestLogRotated_RenamedAndRecreatedIsTrue(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("an open file cannot be renamed on Windows; the agent's rotation degrades instead")
+	}
+	path := filepath.Join(t.TempDir(), "agent.log")
+	if err := os.WriteFile(path, []byte("old\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = f.Close() }()
+
+	// What RotatingFile does: rename the active file aside, start a new one.
+	if err := os.Rename(path, path+".1"); err != nil {
+		t.Fatal(err)
+	}
+	// Make the new file larger than the old one to prove the check is
+	// identity-based, not size-based.
+	if err := os.WriteFile(path, []byte("new file, bigger than before\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if !logRotated(f, path) {
+		t.Error("logRotated = false after the file was renamed and recreated")
+	}
+}
+
+func TestLogRotated_MissingPathIsFalse(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "agent.log")
+	if err := os.WriteFile(path, []byte("a\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = f.Close() }()
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	// Mid-rotation window (renamed, not yet recreated): keep the current
+	// handle rather than reopening nothing.
+	if logRotated(f, path) {
+		t.Error("logRotated = true while the path is transiently absent")
+	}
+}
+
+func TestLogRotated_NonFileReaderIsFalse(t *testing.T) {
+	rc := io.NopCloser(strings.NewReader("in-memory"))
+	if logRotated(rc, filepath.Join(t.TempDir(), "whatever.log")) {
+		t.Error("logRotated = true for a reader that is not an *os.File")
+	}
 }
 
 // ── selectAgent ──────────────────────────────────────────────────────────────
