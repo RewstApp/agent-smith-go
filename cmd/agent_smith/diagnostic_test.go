@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -279,6 +280,275 @@ func TestRunLiveLogs_SmallFile(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	runLiveLogsWith(ctx, agentInfo{OrgId: "org-1", LogFile: "fake.log"}, opener)
+}
+
+// ── logRotated ───────────────────────────────────────────────────────────────
+
+func TestLogRotated_SameFileIsFalse(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "agent.log")
+	if err := os.WriteFile(path, []byte("a\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = f.Close() }()
+
+	// Growing the file at the path does not change its identity.
+	if err := os.WriteFile(path, []byte("a\nb\nc\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if logRotated(f, path) {
+		t.Error("logRotated = true for the same, merely larger, file")
+	}
+}
+
+func TestLogRotated_RenamedAndRecreatedIsTrue(t *testing.T) {
+	// Opened through the real opener, not os.Open: on Windows that is what
+	// requests FILE_SHARE_DELETE, and this test is the proof that the agent can
+	// rename the log underneath a running viewer there. It is not skipped.
+	path := filepath.Join(t.TempDir(), "agent.log")
+	if err := os.WriteFile(path, []byte("old\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f, err := (&osLogFileOpener{}).Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = f.Close() }()
+
+	// What RotatingFile does: rename the active file aside, start a new one.
+	if err := os.Rename(path, path+".1"); err != nil {
+		t.Fatal(err)
+	}
+	// Make the new file larger than the old one to prove the check is
+	// identity-based, not size-based.
+	if err := os.WriteFile(path, []byte("new file, bigger than before\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if !logRotated(f, path) {
+		t.Error("logRotated = false after the file was renamed and recreated")
+	}
+}
+
+func TestLogRotated_MissingPathIsFalse(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "agent.log")
+	if err := os.WriteFile(path, []byte("a\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = f.Close() }()
+
+	// The branch under test is "stat of the path fails -> false", which is what
+	// the viewer hits in the mid-rotation window (renamed, not yet recreated):
+	// it must keep its current handle rather than reopen nothing. A path that
+	// never existed exercises that same branch on every platform; deleting the
+	// open file would only work on Unix, since Windows refuses to remove a file
+	// another handle has open.
+	if logRotated(f, filepath.Join(dir, "not-yet-recreated.log")) {
+		t.Error("logRotated = true while the path is absent")
+	}
+}
+
+func TestLogRotated_NonFileReaderIsFalse(t *testing.T) {
+	rc := io.NopCloser(strings.NewReader("in-memory"))
+	if logRotated(rc, filepath.Join(t.TempDir(), "whatever.log")) {
+		t.Error("logRotated = true for a reader that is not an *os.File")
+	}
+}
+
+// ── followRotatedLog / runLiveLogsWith across a rotation ─────────────────────
+
+// syncBuffer is a goroutine-safe io.Writer the viewer tests capture output into.
+type syncBuffer struct {
+	mu sync.Mutex
+	b  strings.Builder
+}
+
+func (s *syncBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+
+func (s *syncBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
+}
+
+func appendToFile(t *testing.T, path, content string) {
+	t.Helper()
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(content); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// rotateLog does what utils.RotatingFile does: rename the active file aside and
+// start a fresh one at the same path with new content.
+func rotateLog(t *testing.T, path, newContent string) {
+	t.Helper()
+	if err := os.Rename(path, path+".1"); err != nil {
+		t.Fatalf("rename while the viewer holds the file open: %v", err)
+	}
+	if err := os.WriteFile(path, []byte(newContent), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func waitForOutput(t *testing.T, out *syncBuffer, substr string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if strings.Contains(out.String(), substr) {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("viewer never printed %q; output so far:\n%s", substr, out.String())
+}
+
+// The deterministic pin for the drain: a line written to the old file after the
+// viewer's last read and before the rotation must be printed, not skipped.
+func TestFollowRotatedLog_DrainsOldFileBeforeSwitching(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "agent.log")
+	if err := os.WriteFile(path, []byte("a\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	opener := &osLogFileOpener{}
+	rc, err := opener.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = rc.Close() }()
+
+	// The viewer has read to EOF...
+	if _, err := io.ReadAll(rc); err != nil {
+		t.Fatal(err)
+	}
+	// ...then the agent writes one more line to the old file and rotates.
+	appendToFile(t, path, "late\n")
+	rotateLog(t, path, "new\n")
+
+	var out syncBuffer
+	next, ok := followRotatedLog(rc, path, opener, &out)
+	if !ok {
+		t.Fatal("followRotatedLog did not switch to the new file")
+	}
+	defer func() { _ = next.Close() }()
+
+	if !strings.Contains(out.String(), "late") {
+		t.Errorf(
+			"line written to the old file before the rotation was skipped; out = %q",
+			out.String(),
+		)
+	}
+	if strings.Count(out.String(), "log rotated") != 1 {
+		t.Errorf(
+			"rotation marker printed %d times, want 1",
+			strings.Count(out.String(), "log rotated"),
+		)
+	}
+	got, err := io.ReadAll(next)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "new\n" {
+		t.Errorf("new handle is not on the new file; read %q", got)
+	}
+}
+
+func TestFollowRotatedLog_KeepsOldHandleWhenNewFileNotYetOpenable(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "agent.log")
+	if err := os.WriteFile(path, []byte("a\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	opener := &osLogFileOpener{}
+	rc, err := opener.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = rc.Close() }()
+
+	// Mid-rotation: renamed, not yet recreated. Nothing to open at the path.
+	if err := os.Rename(path, path+".1"); err != nil {
+		t.Fatalf("rename while the viewer holds the file open: %v", err)
+	}
+
+	var out syncBuffer
+	next, ok := followRotatedLog(rc, path, opener, &out)
+	if ok {
+		t.Fatal("followRotatedLog reported a switch with nothing at the path")
+	}
+	if next != rc {
+		t.Error("the old handle was not kept for the retry")
+	}
+	if strings.Contains(out.String(), "log rotated") {
+		t.Error("rotation marker printed although no switch happened")
+	}
+	// The kept handle is still usable (not closed).
+	if _, err := rc.Read(make([]byte, 1)); err != nil && err != io.EOF {
+		t.Errorf("old handle unusable after a failed switch: %v", err)
+	}
+}
+
+// End to end: a real viewer tailing a real file that is rotated underneath it
+// prints every line exactly once and follows the new file. Runs on Windows too,
+// which is what proves the FILE_SHARE_DELETE opener lets the rename succeed.
+func TestRunLiveLogs_FollowsRotationPrintingEveryLineOnce(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "agent.log")
+	if err := os.WriteFile(path, []byte("one\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var out syncBuffer
+	prev := liveLogOutput
+	liveLogOutput = &out
+	t.Cleanup(func() { liveLogOutput = prev })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		runLiveLogsWith(ctx, agentInfo{OrgId: "org-1", LogFile: path}, &osLogFileOpener{})
+	}()
+
+	waitForOutput(t, &out, "one")
+	appendToFile(t, path, "two\n") // lands in the old file after the viewer's EOF
+	rotateLog(t, path, "three\n")  // the agent rotates and starts a new file
+	waitForOutput(t, &out, "three")
+	appendToFile(t, path, "four\n") // keeps following the new file
+	waitForOutput(t, &out, "four")
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("viewer did not stop after cancel")
+	}
+
+	got := out.String()
+	for _, line := range []string{"one", "two", "three", "four"} {
+		if n := strings.Count(got, line); n != 1 {
+			t.Errorf("line %q printed %d times, want exactly once; output:\n%s", line, n, got)
+		}
+	}
+	if n := strings.Count(got, "log rotated"); n != 1 {
+		t.Errorf("rotation marker printed %d times, want 1; output:\n%s", n, got)
+	}
 }
 
 // ── selectAgent ──────────────────────────────────────────────────────────────

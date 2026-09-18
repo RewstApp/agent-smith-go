@@ -196,7 +196,7 @@ func TestLoadLog(t *testing.T) {
 		LogFile: logPath,
 	}
 
-	logFile, err := svc.loadLog()
+	logFile, err := svc.loadLog(agent.Device{})
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
@@ -240,7 +240,7 @@ func TestLoadLog_AppendMode(t *testing.T) {
 		LogFile: logPath,
 	}
 
-	logFile, err := svc.loadLog()
+	logFile, err := svc.loadLog(agent.Device{})
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
@@ -275,7 +275,7 @@ func TestLoadLog_InvalidPath(t *testing.T) {
 		LogFile: "/nonexistent/directory/log.txt",
 	}
 
-	_, err := svc.loadLog()
+	_, err := svc.loadLog(agent.Device{})
 	if err == nil {
 		t.Error("expected error for invalid path, got nil")
 	}

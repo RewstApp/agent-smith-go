@@ -147,6 +147,8 @@ func runConfig(params *configContext) error {
 	response.Configuration.CommandTimeoutSeconds = tuningPtr(params.Tuning.CommandTimeoutSeconds)
 	response.Configuration.SasTokenLifetimeHours = tuningPtr(params.Tuning.SasTokenLifetimeHours)
 	response.Configuration.MaxOutputBytes = tuningPtr(params.Tuning.MaxOutputBytes)
+	response.Configuration.LogMaxBytes = tuningPtr(params.Tuning.LogMaxBytes)
+	response.Configuration.LogMaxFiles = tuningPtr(params.Tuning.LogMaxFiles)
 
 	// Create the data directory. EnsureSecureDir (rather than a bare MkdirAll)
 	// is what locks it to 0700 on Linux/macOS on both a fresh install and a

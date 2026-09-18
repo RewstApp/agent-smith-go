@@ -147,6 +147,48 @@ func TestResolvedPostbackMaxAttempts(t *testing.T) {
 	}
 }
 
+func TestResolvedLogMaxBytes(t *testing.T) {
+	tests := []struct {
+		name   string
+		value  *int
+		expect int
+	}{
+		{"unset falls back to default", nil, DefaultLogMaxBytes},
+		{"zero falls back to default", intPtr(0), DefaultLogMaxBytes},
+		{"negative falls back to default", intPtr(-1), DefaultLogMaxBytes},
+		{"positive override honored", intPtr(4096), 4096},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			d := Device{LogMaxBytes: tt.value}
+			if got := d.ResolvedLogMaxBytes(); got != tt.expect {
+				t.Errorf("ResolvedLogMaxBytes() = %d, want %d", got, tt.expect)
+			}
+		})
+	}
+}
+
+func TestResolvedLogMaxFiles(t *testing.T) {
+	tests := []struct {
+		name   string
+		value  *int
+		expect int
+	}{
+		{"unset falls back to default", nil, DefaultLogMaxFiles},
+		{"zero falls back to default", intPtr(0), DefaultLogMaxFiles},
+		{"negative falls back to default", intPtr(-3), DefaultLogMaxFiles},
+		{"positive override honored", intPtr(2), 2},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			d := Device{LogMaxFiles: tt.value}
+			if got := d.ResolvedLogMaxFiles(); got != tt.expect {
+				t.Errorf("ResolvedLogMaxFiles() = %d, want %d", got, tt.expect)
+			}
+		})
+	}
+}
+
 func TestResolvedMaxOutputBytes(t *testing.T) {
 	tests := []struct {
 		name   string

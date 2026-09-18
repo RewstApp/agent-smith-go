@@ -38,11 +38,17 @@ type logFileOpener interface {
 	Open(name string) (io.ReadCloser, error)
 }
 
+// osLogFileOpener opens the real log file. Its Open lives in per-platform files:
+// on Windows it must ask for FILE_SHARE_DELETE, which Go's os.Open does not, so
+// that the agent can rename the log underneath a running viewer instead of the
+// viewer's handle blocking every rotation for as long as it stays open.
 type osLogFileOpener struct{}
 
-func (o *osLogFileOpener) Open(name string) (io.ReadCloser, error) {
-	return os.Open(name) // #nosec G304 - path comes from internal config
-}
+// liveLogOutput is where the live log viewer writes the log's content and its
+// own markers. A package variable rather than os.Stdout inline so a test can
+// capture what the viewer printed and assert every line appears exactly once
+// across a rotation.
+var liveLogOutput io.Writer = os.Stdout
 
 type agentInfo struct {
 	OrgId       string
@@ -462,7 +468,7 @@ func runLiveLogsWith(ctx context.Context, target agentInfo, opener logFileOpener
 	for {
 		line, err := reader.ReadString('\n')
 		if line != "" {
-			fmt.Print("    ", line)
+			_, _ = fmt.Fprint(liveLogOutput, "    ", line)
 		}
 		if err != nil {
 			break
@@ -478,13 +484,84 @@ func runLiveLogsWith(ctx context.Context, target agentInfo, opener logFileOpener
 		default:
 			n, err := rc.Read(buf)
 			if n > 0 {
-				fmt.Print("    ", string(buf[:n]))
+				_, _ = fmt.Fprint(liveLogOutput, "    ", string(buf[:n]))
 			}
 			if err != nil {
+				// At EOF, check whether the agent has rotated the log underneath
+				// us: our handle would otherwise keep following the renamed
+				// rewst_agent.log.1 forever while new lines land in a fresh file
+				// at the original path. The switch drains the old file first, so
+				// a line the agent wrote to it between this EOF and the rename is
+				// printed rather than skipped.
+				if logRotated(rc, logFile) {
+					if next, ok := followRotatedLog(rc, logFile, opener, liveLogOutput); ok {
+						rc = next
+						continue
+					}
+				}
 				time.Sleep(500 * time.Millisecond)
 			}
 		}
 	}
+}
+
+// followRotatedLog moves the viewer from the rotated file it holds open to the
+// new active file at path. It first reads the old handle to EOF and prints
+// whatever is there - the agent may have written lines to the old file after
+// the viewer's last read and before the rename, and swapping without draining
+// would silently skip them - then opens the new file. If the new file cannot be
+// opened yet (the rename has happened but the reopen has not), the old handle
+// is kept and false is returned so the caller retries on its next poll; nothing
+// is closed until its replacement is in hand.
+func followRotatedLog(
+	old io.ReadCloser,
+	path string,
+	opener logFileOpener,
+	out io.Writer,
+) (io.ReadCloser, bool) {
+	buf := make([]byte, 4096)
+	for {
+		n, err := old.Read(buf)
+		if n > 0 {
+			_, _ = fmt.Fprint(out, "    ", string(buf[:n]))
+		}
+		if err != nil {
+			break
+		}
+	}
+
+	next, err := opener.Open(path)
+	if err != nil {
+		return old, false
+	}
+	_ = old.Close()
+	// Best effort: the viewer is a display, and a console write error is not
+	// something it can act on.
+	_, _ = fmt.Fprintln(out, "    --- log rotated; now following the new file ---")
+	return next, true
+}
+
+// logRotated reports whether the file open behind rc is no longer the file at
+// path - i.e. the agent rotated the log by renaming it and reopened a new one.
+// Identity is compared with os.SameFile, which is inode-based on Unix and
+// file-index-based on Windows, so it is not fooled by a new file that has
+// already grown past the old one's size. A reader that is not an *os.File (the
+// tests' in-memory opener) can never be rotated underneath and reports false;
+// so does a transient stat failure, which the next poll retries.
+func logRotated(rc io.ReadCloser, path string) bool {
+	f, ok := rc.(*os.File)
+	if !ok {
+		return false
+	}
+	open, err := f.Stat()
+	if err != nil {
+		return false
+	}
+	current, err := os.Stat(path)
+	if err != nil {
+		return false
+	}
+	return !os.SameFile(open, current)
 }
 
 // ── Check 6: Run all checks ──
