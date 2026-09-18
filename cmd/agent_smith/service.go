@@ -92,8 +92,15 @@ func (svc *serviceContext) loadLog(device agent.Device) (*utils.RotatingFile, er
 		int64(device.ResolvedLogMaxBytes()),
 		device.ResolvedLogMaxFiles(),
 		utils.DefaultFileMod,
+		agentLoggerName,
 	)
 }
+
+// agentLoggerName is the hclog logger name every line in the agent's log file
+// carries. The rotating writer stamps its own diagnostics with the same name so
+// they parse like the logger's lines; keeping it in one place means the two
+// cannot drift apart.
+const agentLoggerName = "agent_smith"
 
 // sweepOrgId returns the org id whose directories the startup sweeps reclaim
 // files from. The executor and the updater both derive their paths from the
@@ -133,7 +140,7 @@ func (svc *serviceContext) Execute(
 		_ = logFile.Close()
 	}()
 
-	logger := utils.ConfigureLogger("agent_smith", logFile, device.LoggingLevel)
+	logger := utils.ConfigureLogger(agentLoggerName, logFile, device.LoggingLevel)
 
 	// Migrate the data directory and config file to owner-only permissions for
 	// installations that pre-date this hardening (sc-108849), so an endpoint
@@ -173,7 +180,7 @@ func (svc *serviceContext) Execute(
 			}
 		}()
 
-		logger = utils.ConfigureLogger("agent_smith", sysLogger, device.LoggingLevel)
+		logger = utils.ConfigureLogger(agentLoggerName, sysLogger, device.LoggingLevel)
 	}
 
 	// Resolve the postback retry budget from the device config, falling back to

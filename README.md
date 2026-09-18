@@ -342,25 +342,43 @@ after upgrade, rather than left in place.
 Rotated copies are created by renaming the active file, so they keep its
 permissions and stay in the (owner-only) data directory. Rotation never loses
 a line: it happens before the write, under the same lock, and the line then
-lands in whichever file is open afterwards.
+lands in whichever file is open afterwards. It also **prefers a line
+boundary**: a writer that delivers one line in several chunks (a notification
+plugin's stderr is copied through in whatever pieces the pipe returns) never
+has that line split across two files. A crossing that arrives mid-line is
+deferred until the line completes; a writer that never terminates a line is
+rotated regardless once the file reaches twice the ceiling, so the bound
+still holds.
 
 **Rotation is best effort and cannot take the service down.** The writer owns
 the file handle and closes it before renaming, which is what lets the rename
-succeed on Windows — where a file another handle has open cannot be renamed.
-A handle held by *another* process still blocks it there: the diagnostic
-mode's live log viewer, or the detached `--update` helper writing its output.
-In that case (or on a full disk) the current file is reopened and appending
+succeed on Windows — where a file cannot be renamed while any handle lacking
+`FILE_SHARE_DELETE` is open on it. The agent's own handle is the common one.
+The one remaining handle that can still block a rename there is the detached
+`--update` helper's inherited stdout, for the seconds it takes to start. In
+that case (or on a full disk) the current file is reopened and appending
 continues, one `[WARN]` line records the failure, rotation is not retried for a
 minute so a lasting block cannot flood the file, and one line records the
 eventual recovery. This mirrors the syslog forwarder's "counted, not fatal"
-posture. Syslog forwarding itself is unchanged: the on-disk write is always
+posture, and the two writers share one formatter for those lines so they parse
+identically. Syslog forwarding itself is unchanged: the on-disk write is always
 performed and its result is what `Write` returns.
 
+A rename that succeeds but whose reopen then fails (out of descriptors, a full
+disk refusing a new inode) is a different case and is reported as one: the log
+is momentarily closed, every write until it reopens is counted, and when it
+does reopen a single `[WARN]` line says how many writes were lost. That is
+never reported as a rotation failure and never produces a "recovered" line,
+because rotation did not fail.
+
 Diagnostic mode's live log viewer (menu option 5) follows the *active* file
-across a rotation on Linux and macOS: at EOF it compares the identity of the
-file it holds open with the file at the log path and reopens when they differ,
-printing a marker line. On Windows its open handle blocks the rename, so
-rotation simply waits until the viewer exits.
+across a rotation on every platform. At EOF it compares the identity of the
+file it holds open with the file at the log path; when they differ it first
+drains whatever the agent wrote to the old file after the viewer's last read,
+then reopens the new one and prints a marker line, so no line is skipped. On
+Windows the viewer opens the log with `FILE_SHARE_DELETE` (which Go's `os.Open`
+does not request) precisely so that its own handle can never be the thing
+blocking the agent's rotation for the length of a support session.
 
 #### Hardening the Command Scripts Directory
 

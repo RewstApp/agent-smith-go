@@ -10,6 +10,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/RewstApp/agent-smith-go/internal/utils"
 )
 
 const (
@@ -44,11 +46,6 @@ const (
 	// exists to prevent. WaitDelay makes the bound unconditional: Wait closes
 	// the pipes and returns rather than trusting the kill to have worked.
 	syslogWaitDelay = time.Second
-
-	// syslogNoteTimeFormat matches hclog's default timestamp format so the
-	// diagnostics this writer inserts into the log file line up with the entries
-	// around them.
-	syslogNoteTimeFormat = "2006-01-02T15:04:05.000Z0700"
 )
 
 type commandRunner interface {
@@ -249,10 +246,7 @@ func (s *unixSyslog) recordResult(err error) string {
 // note formats a diagnostic the way hclog formats its own entries so it does
 // not break tooling that parses the log file.
 func (s *unixSyslog) note(message string) string {
-	return fmt.Sprintf(
-		"%s [WARN]  %s: %s\n",
-		time.Now().Format(syslogNoteTimeFormat), s.source, message,
-	)
+	return utils.HclogWarnLine(time.Now(), s.source, message)
 }
 
 func (s *unixSyslog) resolveSuppressWindow() time.Duration {
