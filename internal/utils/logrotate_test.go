@@ -459,8 +459,11 @@ func TestRotatingFile_PrunesCopiesBeyondMaxFiles(t *testing.T) {
 
 func TestRotatingFile_PathWithGlobMetacharactersStillPrunesAndShifts(t *testing.T) {
 	// The data directory embeds the org id; nothing here may depend on the path
-	// being free of characters that mean something to a glob.
-	dir := filepath.Join(t.TempDir(), "org[1]*?")
+	// being free of characters that mean something to a glob. '[' is the one
+	// that makes filepath.Glob fail outright (ErrBadPattern) rather than merely
+	// mismatch, and unlike '*' and '?' it is a legal filename character on
+	// Windows too, so the test runs on every platform.
+	dir := filepath.Join(t.TempDir(), "org[1]")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
