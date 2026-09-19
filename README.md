@@ -176,22 +176,75 @@ Directory Cannot Be Removed" below).
 
 ### Message Delivery Guarantee
 
-Incoming messages are handed to a buffered queue drained by a pool of
-command-execution workers. When that queue fills (a burst of commands, or
-execution slow enough to keep every worker busy), the subscribe callback
-**applies back-pressure instead of dropping the message**: it blocks until a
-worker frees a slot. Because the agent subscribes at QoS 1 (at-least-once) by
-default and the MQTT client only acknowledges a message after the callback
-returns, a saturated agent stops acknowledging — so the broker holds and later
-redelivers the command rather than the agent silently discarding it. This trades
-a small amount of in-broker buffering for no silent command loss.
+Incoming commands are handed to a buffered queue drained by a pool of
+command-execution workers. Two mechanisms together make sure a command the
+broker has handed over is never silently lost.
 
-The only case where a message is discarded is when it arrives while a connection
-cycle is tearing down (service stop or reconnect). The connection is going away
-regardless, so at QoS ≥ 1 the broker redelivers on the next connection. These
-drops are surfaced loudly — an `Error` log line, a cumulative dropped-message
-counter, and a best-effort `AgentMessageDropped` plugin notification — rather
-than a single warning, so they are observable in monitoring.
+**Back-pressure.** When the queue fills (a burst of commands, or execution slow
+enough to keep every worker busy), the subscribe callback **blocks instead of
+dropping**: it waits until a worker frees a slot. The agent acknowledges a
+message only after the callback returns, so a saturated agent stops
+acknowledging and the broker holds later commands rather than the agent
+discarding them.
+
+**A durable command journal.** Before a command is acknowledged to the broker
+it is written to `<data directory>/command_journal`, one file per command. The
+acknowledgement therefore means *"durably accepted"*, not *"buffered in
+memory"*. If the agent process dies — a crash, an OOM kill, a force-stop, host
+power loss — with commands queued or executing, their journal entries survive
+and the next start replays them:
+
+- a command that had **not started** executes exactly as it would have;
+- a command that **had started** is **reported back to the engine as
+  interrupted** (`"interrupted": true` in the result) rather than run again — a
+  partial first run of a non-idempotent script followed by a second full run is
+  the failure mode at-least-once delivery is most often criticised for, so the
+  receiving workflow gets the facts and decides whether to re-issue;
+- a command older than one hour (the broker's own default message TTL) is
+  reported as expired and discarded, so a device that was off for a day does
+  not wake up and run a day-old script.
+
+A completed command leaves a tombstone for an hour, so a redelivery of the same
+message — the broker resends an unacknowledged QoS 1 message on reconnect, and
+the acknowledgement for a message the agent has since finished can be lost in
+transit — is acknowledged and not executed a second time. The de-duplication
+key is the message's `post_id` (what the engine correlates results by), or a
+digest of the payload for a message without one.
+
+#### Why the acknowledgement cannot simply wait for execution
+
+The obvious design — acknowledge only once the command has run and posted back
+— does not work against Azure IoT Hub. From Microsoft's documentation: a
+cloud-to-device message the device has not acknowledged returns to the queue
+*"after a visibility timeout (or lock timeout). The length of this timeout is
+one minute and can't be changed"*, and *"If the lock expires, the message
+returns to Enqueued but the delivery count does not increment"* — so it is
+redelivered, and *"messages continue cycling … indefinitely until they
+expire."* A command that runs longer than a minute (the default timeout is
+thirty) would be redelivered every minute for as long as it ran. Microsoft's
+recommendation for long-running work is exactly what the journal does:
+*"Complete the cloud-to-device message after the device persists the task
+description in local storage."*
+
+#### Where a command can still be lost
+
+The journal is best effort in the same way the postback spool, the syslog
+forwarder and the log rotator are: a disk problem must not stop commands from
+running. If the journal write fails (disk full, permissions), the command is
+accepted in memory and acknowledged anyway — the behaviour before the journal
+existed — and the failure is logged once at Error level with an
+`AgentCommandJournalDegraded` plugin notification, then once more when it
+recovers. A crash in that degraded window loses the queued commands, as it
+always did. The journal is bounded to 1000 pending entries; past that it
+behaves as if the write failed.
+
+The one case in which the agent leaves a message **unacknowledged on purpose**
+is a command that arrives while a connection cycle is tearing down *and* could
+not be journaled: there is nowhere to put it, so it is left for the broker to
+redeliver after its lock expires — which is what the corresponding Error log
+now says. It is counted (`AgentMessageDropped` notification) so it is visible
+in monitoring. A journaled command arriving during teardown is acknowledged
+and replayed on the next connection.
 
 #### Tuning queue capacity and concurrency
 

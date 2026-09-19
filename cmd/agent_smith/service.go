@@ -189,6 +189,20 @@ func (svc *serviceContext) Execute(
 	svc.PostbackMaxAttempts = device.ResolvedPostbackMaxAttempts()
 	svc.PostbackBaseRetryBackoff = device.ResolvedPostbackBaseRetryBackoff()
 
+	// Create the durable command journal so an inbound command is persisted
+	// before it is acknowledged to the broker. Without it, paho sent the QoS 1
+	// PUBACK the instant the subscribe callback returned - i.e. once the payload
+	// sat in the in-memory queue - so up to message_queue_size commands could be
+	// acknowledged-but-unexecuted at any moment, and a crash, OOM kill or power
+	// loss in that window discarded all of them with no redelivery. See
+	// commandJournal for why the acknowledgement cannot simply be held until
+	// execution finishes.
+	svc.journal = newCommandJournal(
+		filepath.Join(agent.GetDataDirectory(svc.OrgId), "command_journal"),
+		defaultJournalMaxPending,
+		defaultJournalMaxAge,
+	)
+
 	// Create the durable postback spool so results that exhaust their in-line
 	// retry budget are persisted and re-attempted on a later cycle instead of
 	// being dropped.
@@ -426,7 +440,7 @@ func (svc *serviceContext) runCycle(
 	resolvedWorkerCount := device.ResolvedWorkerCount()
 	resolvedQueueSize := device.ResolvedMessageQueueSize()
 
-	msgQueue := make(chan []byte, resolvedQueueSize)
+	msgQueue := make(chan inboundMessage, resolvedQueueSize)
 
 	// draining is closed at the very start of teardown (its defer is registered
 	// last, so it runs first) to release the subscribe callback if it is blocked
@@ -444,7 +458,7 @@ func (svc *serviceContext) runCycle(
 			logger.Debug("Message worker started", "worker", i)
 			for {
 				select {
-				case payload, ok := <-msgQueue:
+				case item, ok := <-msgQueue:
 					if !ok {
 						logger.Debug("Message worker stopped: queue closed", "worker", i)
 						return
@@ -454,7 +468,7 @@ func (svc *serviceContext) runCycle(
 						"worker", i,
 						"queue_length", len(msgQueue),
 					)
-					svc.processMessageGuarded(i, payload, cycleCtx, device, logger, notifier)
+					svc.processInboundGuarded(i, item, cycleCtx, device, logger, notifier)
 				case <-cycleCtx.Done():
 					logger.Debug("Message worker stopped: context cancelled", "worker", i)
 					return
@@ -478,6 +492,14 @@ func (svc *serviceContext) runCycle(
 	}
 
 	opts.SetAutoReconnect(false)
+	// Acknowledge explicitly, after the message has been journaled, rather than
+	// letting paho acknowledge on return from the subscribe callback. The
+	// difference is what the PUBACK means: with auto-ack it meant "the payload is
+	// in an in-memory queue"; now it means "the payload is on disk and will be
+	// executed or reported even if this process dies". It also lets a message
+	// that could not be accepted at all (journal failed while the cycle was
+	// tearing down) stay unacknowledged so the broker redelivers it.
+	opts.SetAutoAckDisabled(true)
 	opts.OnConnectionLost = func(client mqtt.Client, err error) {
 		logger.Error("Connection lost", "error", err)
 		lost <- struct{}{}
@@ -556,7 +578,7 @@ func (svc *serviceContext) runCycle(
 	// enqueueMessage applies back-pressure instead of dropping; see its doc for
 	// the delivery guarantee and the single (loudly surfaced) teardown drop path.
 	token = client.Subscribe(topic, qos, func(client mqtt.Client, msg mqtt.Message) {
-		svc.enqueueMessage(msg.Payload(), msgQueue, draining, resolvedQueueSize, logger, notifier)
+		svc.receiveMessage(msg, msgQueue, draining, resolvedQueueSize, logger, notifier)
 	})
 
 	// paho puts no deadline on a subscribe token, so a broker that keeps the
@@ -601,6 +623,15 @@ func (svc *serviceContext) runCycle(
 	utils.SafeGo(logger, func() {
 		svc.flushPostbackSpool(cycleCtx, device, logger, notifier)
 	}, "scope", "postback_spool_flush")
+
+	// Replay commands a previous run accepted from the broker but never
+	// finished - the acknowledged-but-unexecuted window this journal closes.
+	// Cycle-scoped like the spool flush so it can neither block the connection
+	// loop nor delay teardown; a replay that is still feeding the queue when the
+	// cycle ends leaves the remaining entries journaled for the next one.
+	utils.SafeGo(logger, func() {
+		svc.replayJournal(cycleCtx, msgQueue, draining, resolvedQueueSize, device, logger, notifier)
+	}, "scope", "command_journal_replay")
 
 	// Proactively renew the SAS token before Azure IoT Hub expires it. The token
 	// minted for this connection is valid for device.SasTokenLifetime(); Azure
@@ -656,40 +687,142 @@ func buildReceivedMessageNotification(payload []byte) string {
 	)
 }
 
-// enqueueMessage hands a received payload to the worker queue, applying
-// back-pressure rather than dropping. paho dispatches messages on a single
-// ordered goroutine and sends the QoS-1 PUBACK only after the subscribe callback
-// (and thus this function) returns, so blocking here stops the broker from
+// inboundMessage is one command travelling from the subscribe callback to a
+// worker. Key is its command-journal key, or empty when the message could not
+// be journaled and is being carried in memory only.
+type inboundMessage struct {
+	Payload []byte
+	Key     string
+}
+
+// receiveMessage is the subscribe callback: journal the payload, hand it to a
+// worker, then acknowledge it to the broker.
+//
+// The order is the point. Azure IoT Hub redelivers a QoS 1 message it has not
+// received a PUBACK for after a fixed one-minute lock, forever, without
+// counting toward the delivery limit - so the acknowledgement cannot wait for
+// execution (the default command timeout is thirty minutes). It also must not
+// be sent before the command is safe: the auto-ack this replaced fired the
+// moment the payload reached the in-memory queue, which is how a crash with a
+// full queue lost every queued command. Writing the entry first makes the
+// acknowledgement mean "durably accepted": if this process dies, the next
+// start replays the entry.
+//
+// Outcomes:
+//   - journaled and enqueued: acknowledged.
+//   - journaled but the cycle is tearing down: acknowledged; the entry is
+//     replayed on the next cycle. This used to be a drop.
+//   - already journaled or completed (a redelivery, e.g. the broker resending
+//     on reconnect a message whose PUBACK was lost): acknowledged, not enqueued.
+//   - journal write failed: accepted in memory and acknowledged anyway, as
+//     before this journal existed - a disk problem must not stop commands from
+//     running - with the failure reported once per transition. If the cycle is
+//     also tearing down there is nowhere to put it: it is left unacknowledged,
+//     so the broker redelivers it, and that is counted.
+func (svc *serviceContext) receiveMessage(
+	msg mqtt.Message,
+	msgQueue chan<- inboundMessage,
+	draining <-chan struct{},
+	queueSize int,
+	logger hclog.Logger,
+	notifier plugins.NotifierWrapper,
+) {
+	payload := msg.Payload()
+	item := inboundMessage{Payload: payload}
+
+	if svc.journal != nil {
+		key := journalKey(payload)
+		existed, err := svc.journal.put(key, payload)
+		switch {
+		case err != nil:
+			svc.recordJournalOutcome(err, logger, notifier)
+		case existed:
+			logger.Info(
+				"Duplicate delivery acknowledged without execution",
+				"key", key,
+				"broker_dup_flag", msg.Duplicate(),
+			)
+			msg.Ack()
+			return
+		default:
+			svc.recordJournalOutcome(nil, logger, notifier)
+			item.Key = key
+		}
+	}
+
+	enqueued := svc.enqueueMessage(item, msgQueue, draining, queueSize, logger, notifier)
+	if enqueued || item.Key != "" {
+		msg.Ack()
+	}
+}
+
+// recordJournalOutcome folds one journal write result into a once-per-
+// transition report, the same "counted, not fatal" treatment the syslog
+// forwarder and the log rotator give their own failures.
+func (svc *serviceContext) recordJournalOutcome(
+	err error,
+	logger hclog.Logger,
+	notifier plugins.NotifierWrapper,
+) {
+	if err == nil {
+		if svc.journalDegraded.CompareAndSwap(true, false) {
+			logger.Info("Command journal recovered; inbound commands are durable again")
+		}
+		return
+	}
+	if svc.journalDegraded.CompareAndSwap(false, true) {
+		logger.Error(
+			"Command journal unavailable; inbound commands are accepted in memory only "+
+				"and a crash before they finish would lose them",
+			"error", err,
+		)
+		_ = notifier.Notify("AgentCommandJournalDegraded") // Best effort notification
+	}
+}
+
+// enqueueMessage hands a received command to the worker queue, applying
+// back-pressure rather than dropping. The subscribe callback (and thus this
+// function) runs on paho's single ordered dispatch goroutine, and the caller
+// acknowledges only after this returns, so blocking here stops the broker from
 // considering the message delivered: when the queue is full the call waits until
 // a worker frees a slot, and if the agent stays saturated paho's inbound buffer
-// fills so the broker holds and later redelivers messages instead of the agent
-// silently discarding them.
+// fills so the broker holds later messages instead of the agent discarding them.
 //
-// The single drop path is a payload arriving while the cycle is tearing down
-// (draining closed). The connection is going away regardless, so at QoS >= 1 the
-// broker redelivers on the next connection; the drop is therefore surfaced
-// loudly — an Error log, a cumulative counter, and a best-effort plugin
-// notification — rather than buried in a single Warn. draining is selected as a
-// bounded escape so teardown can never deadlock on a full queue.
+// The escape is a command arriving while the cycle is tearing down (draining
+// closed), selected so teardown can never deadlock on a full queue. A journaled
+// command is not lost by it - the entry is replayed on the next cycle - and the
+// caller still acknowledges it. Only a command that could not be journaled is
+// lost from this process's point of view; it is left unacknowledged, which is
+// what actually makes the broker redeliver it, and that case is surfaced
+// loudly: an Error log, a cumulative counter, and a best-effort plugin
+// notification.
 //
-// Returns true when the payload was enqueued, false when it was dropped.
+// Returns true when the command was enqueued, false when it was not.
 func (svc *serviceContext) enqueueMessage(
-	payload []byte,
-	msgQueue chan<- []byte,
+	item inboundMessage,
+	msgQueue chan<- inboundMessage,
 	draining <-chan struct{},
 	queueSize int,
 	logger hclog.Logger,
 	notifier plugins.NotifierWrapper,
 ) bool {
 	select {
-	case msgQueue <- payload:
+	case msgQueue <- item:
 		return true
 	case <-draining:
+		if item.Key != "" {
+			logger.Info(
+				"Message received during shutdown; journaled for replay on the next connection",
+				"key", item.Key,
+			)
+			return false
+		}
 		dropped := svc.droppedMessages.Add(1)
 		logger.Error(
-			"Message dropped: received during shutdown, broker will redeliver at QoS>=1",
+			"Message not accepted: received during shutdown and could not be journaled; "+
+				"left unacknowledged so the broker redelivers it after its lock expires",
 			"queue_size", queueSize,
-			"dropped_total", dropped,
+			"unaccepted_total", dropped,
 		)
 		_ = notifier.Notify(
 			fmt.Sprintf("AgentMessageDropped:shutdown (dropped_total=%d)", dropped),
@@ -698,38 +831,78 @@ func (svc *serviceContext) enqueueMessage(
 	}
 }
 
-// processMessageGuarded runs processMessage with per-message panic recovery.
+// processInboundGuarded runs processInbound with per-message panic recovery.
 // Because the payload is untrusted (received over MQTT), a malformed message,
 // an unexpected nil, a plugin RPC fault, or any library panic on this path must
 // not crash the process. Recovering per-message — rather than per-worker-loop —
 // contains the fault to the single offending message and keeps the worker alive
 // to process the next item, so the pool stays at full strength. The recovered
 // value and a stack trace are logged at Error level (with the worker id) to aid
-// diagnosis. Normal error returns from processMessage are unaffected.
-func (svc *serviceContext) processMessageGuarded(
+// diagnosis. Normal error returns are unaffected.
+func (svc *serviceContext) processInboundGuarded(
 	workerId int,
-	payload []byte,
+	item inboundMessage,
 	ctx context.Context,
 	device agent.Device,
 	logger hclog.Logger,
 	notifier plugins.NotifierWrapper,
 ) {
 	defer utils.Recover(logger, "worker", workerId, "scope", "processMessage")
-	svc.processMessage(payload, ctx, device, logger, notifier)
+	svc.processInbound(item, ctx, device, logger, notifier)
 }
 
+// processInbound brackets processMessage with the journal's lifecycle: the
+// entry is marked started before execution begins, so a replay after a crash
+// knows not to run the command a second time, and completed once the result
+// has settled - delivered, spooled, or terminally dropped. An outcome that did
+// not settle (the cycle was cancelled mid-way) leaves the entry as it is, and
+// the next cycle's replay reports it as interrupted.
+func (svc *serviceContext) processInbound(
+	item inboundMessage,
+	ctx context.Context,
+	device agent.Device,
+	logger hclog.Logger,
+	notifier plugins.NotifierWrapper,
+) {
+	journaled := item.Key != "" && svc.journal != nil
+	if journaled {
+		if err := svc.journal.markStarted(item.Key); err != nil {
+			logger.Warn(
+				"Failed to mark journaled command as started",
+				"key", item.Key,
+				"error", err,
+			)
+		}
+	}
+
+	settled := svc.processMessage(item.Payload, ctx, device, logger, notifier)
+
+	if journaled && settled {
+		if err := svc.journal.complete(item.Key); err != nil {
+			logger.Warn("Failed to complete journaled command", "key", item.Key, "error", err)
+		}
+	}
+}
+
+// processMessage parses, executes and posts back one command. It reports
+// whether the command's outcome settled: true when the result was delivered,
+// spooled, terminally dropped, or there was nothing to post back; false only
+// when the cycle was cancelled before the outcome was known, in which case a
+// journaled command is reported as interrupted on the next cycle rather than
+// silently lost.
 func (svc *serviceContext) processMessage(
 	payload []byte,
 	ctx context.Context,
 	device agent.Device,
 	logger hclog.Logger,
 	notifier plugins.NotifierWrapper,
-) {
+) bool {
 	var message interpreter.Message
 	err := message.Parse(payload)
 	if err != nil {
 		logger.Error("Parse failed", "error", err)
-		return
+		// A payload that does not parse will not parse on replay either.
+		return true
 	}
 
 	_ = notifier.Notify(
@@ -746,17 +919,137 @@ func (svc *serviceContext) processMessage(
 		svc.Domain,
 	)
 
+	// A command cut short by the cycle ending did not produce a result the
+	// engine should trust; leave it for the replay to report.
+	if ctx.Err() != nil {
+		return false
+	}
+
 	// Skip if there is no post_id specified
 	if message.PostId == "" {
-		return
+		return true
 	}
 
 	// Skip postback if disabled in config (ignored when executor always posts back)
 	if device.DisableAgentPostback && !svc.Executor.AlwaysPostback() {
+		return true
+	}
+
+	return svc.sendPostbackWithRetry(ctx, &message, device, resultBytes, logger, notifier)
+}
+
+// replayJournal feeds the commands a previous run left in the journal back
+// through the worker queue. Entries that had not started execute exactly as
+// they would have; entries that had started are reported to the engine as
+// interrupted rather than run again, because a partial first run of a
+// non-idempotent script followed by a second full run is the failure mode
+// at-least-once delivery is most often criticised for; entries older than the
+// journal's max age - the broker would have expired them too - are reported
+// and discarded.
+func (svc *serviceContext) replayJournal(
+	ctx context.Context,
+	msgQueue chan<- inboundMessage,
+	draining <-chan struct{},
+	queueSize int,
+	device agent.Device,
+	logger hclog.Logger,
+	notifier plugins.NotifierWrapper,
+) {
+	if svc.journal == nil {
+		return
+	}
+	fresh, expired, err := svc.journal.pending()
+	if err != nil {
+		logger.Error("Failed to read the command journal for replay", "error", err)
+		return
+	}
+	if len(fresh) == 0 && len(expired) == 0 {
 		return
 	}
 
-	svc.sendPostbackWithRetry(ctx, &message, device, resultBytes, logger, notifier)
+	for _, e := range expired {
+		logger.Error(
+			"Journaled command expired before it could run; discarding it",
+			"key", e.Key,
+			"received_at", e.ReceivedAt,
+			"max_age", svc.journal.maxAge,
+		)
+		_ = notifier.Notify("AgentCommandExpired:" + e.Key) // Best effort notification
+		if err := svc.journal.discard(e.Key); err != nil {
+			logger.Warn("Failed to discard expired journal entry", "key", e.Key, "error", err)
+		}
+	}
+
+	executed, interrupted := 0, 0
+	for _, e := range fresh {
+		if ctx.Err() != nil {
+			break
+		}
+		if !e.StartedAt.IsZero() {
+			svc.reportInterrupted(ctx, e, device, logger, notifier)
+			interrupted++
+			continue
+		}
+		logger.Info(
+			"Replaying command a previous run accepted but never executed",
+			"key", e.Key,
+			"received_at", e.ReceivedAt,
+		)
+		item := inboundMessage{Payload: e.Payload, Key: e.Key}
+		if !svc.enqueueMessage(item, msgQueue, draining, queueSize, logger, notifier) {
+			break // tearing down; the rest stay journaled for the next cycle
+		}
+		executed++
+	}
+
+	logger.Info(
+		"Command journal replayed",
+		"executed", executed,
+		"reported_interrupted", interrupted,
+		"expired", len(expired),
+	)
+}
+
+// reportInterrupted tells the engine that a command started and did not
+// finish, then completes the journal entry so it is not reported again.
+func (svc *serviceContext) reportInterrupted(
+	ctx context.Context,
+	e journalEntry,
+	device agent.Device,
+	logger hclog.Logger,
+	notifier plugins.NotifierWrapper,
+) {
+	var message interpreter.Message
+	canReport := message.Parse(e.Payload) == nil &&
+		message.PostId != "" &&
+		(!device.DisableAgentPostback || svc.Executor.AlwaysPostback())
+
+	logger.Error(
+		"Command was interrupted by an agent stop after it had started; "+
+			"reporting it to the engine instead of running it again",
+		"key", e.Key,
+		"post_id", message.PostId,
+		"received_at", e.ReceivedAt,
+		"started_at", e.StartedAt,
+		"reported", canReport,
+	)
+	_ = notifier.Notify("AgentCommandInterrupted:" + e.Key) // Best effort notification
+
+	settled := true
+	if canReport {
+		reason := fmt.Sprintf(
+			"the agent stopped after starting this command at %s (received %s) and did not finish it",
+			e.StartedAt.UTC().Format(time.RFC3339),
+			e.ReceivedAt.UTC().Format(time.RFC3339),
+		)
+		result := interpreter.InterruptedResultBytes(logger, reason)
+		settled = svc.sendPostbackWithRetry(ctx, &message, device, result, logger, notifier)
+	}
+	if settled {
+		if err := svc.journal.complete(e.Key); err != nil {
+			logger.Warn("Failed to complete interrupted journal entry", "key", e.Key, "error", err)
+		}
+	}
 }
 
 // postbackRetryBackoff computes the delay to wait before the given postback
@@ -799,7 +1092,7 @@ func (svc *serviceContext) sendPostbackWithRetry(
 	resultBytes []byte,
 	logger hclog.Logger,
 	notifier plugins.NotifierWrapper,
-) {
+) bool {
 	maxAttempts := svc.PostbackMaxAttempts
 	if maxAttempts < 1 {
 		maxAttempts = postbackMaxAttempts
@@ -828,7 +1121,7 @@ func (svc *serviceContext) sendPostbackWithRetry(
 					"attempts", attempt-1,
 					"error", ctx.Err(),
 				)
-				return
+				return false
 			case <-time.After(backoff):
 			}
 		}
@@ -839,9 +1132,15 @@ func (svc *serviceContext) sendPostbackWithRetry(
 		// other entries to get to.
 		outcome, err := svc.attemptPostback(ctx, message, device, resultBytes, logger, attempt)
 		if outcome == deliveryDone {
-			return
+			return true
 		}
 		lastErr = err
+	}
+
+	// A budget exhausted only because the cycle was cancelled mid-way has not
+	// settled anything; the journal will report the command as interrupted.
+	if ctx.Err() != nil {
+		return false
 	}
 
 	// All in-line attempts failed. Surface the failure beyond the log and, when a
@@ -859,7 +1158,7 @@ func (svc *serviceContext) sendPostbackWithRetry(
 
 	if svc.spool == nil {
 		logger.Error("Postback result dropped: no spool configured", "post_id", message.PostId)
-		return
+		return true
 	}
 
 	if err := svc.spool.enqueue(spoolEntry{
@@ -872,13 +1171,14 @@ func (svc *serviceContext) sendPostbackWithRetry(
 			"post_id", message.PostId,
 			"error", err,
 		)
-		return
+		return true
 	}
 
 	logger.Warn(
 		"Postback result spooled for later delivery",
 		"post_id", message.PostId,
 	)
+	return true
 }
 
 // flushPostbackSpool re-attempts delivery of any command results whose in-line
