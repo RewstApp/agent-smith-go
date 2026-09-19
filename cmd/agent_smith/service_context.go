@@ -37,12 +37,25 @@ type serviceContext struct {
 	// case exhausted results are surfaced via log and plugin notification only.
 	spool *postbackSpool
 
+	// journal is the durable record of commands accepted from the broker but not
+	// yet finished. A message is written here before its MQTT acknowledgement is
+	// sent, so an ack means "durably accepted" rather than "buffered in memory",
+	// and a process that dies with commands queued or executing replays them on
+	// the next start (never-started ones execute; started ones are reported as
+	// interrupted). See commandJournal. nil disables journaling, which is what
+	// most unit tests want.
+	journal *commandJournal
+
 	// droppedMessages counts inbound messages the agent could not accept and had
 	// to discard. Under normal operation the subscribe callback applies
 	// back-pressure instead of dropping, so this only increments when a payload
 	// arrives during teardown (see runCycle). It is a cumulative, process-wide
 	// counter exposed for observability beyond the per-drop error log.
 	droppedMessages atomic.Int64
+
+	// journalDegraded is true while the command journal is failing writes, so
+	// the failure and the eventual recovery are each reported exactly once.
+	journalDegraded atomic.Bool
 }
 
 // newServiceFlagSet builds the flag set for service mode, binding flags to the

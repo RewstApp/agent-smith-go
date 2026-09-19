@@ -104,7 +104,7 @@ func TestMessageQueue_WorkersProcessAllMessages(t *testing.T) {
 	notifier := &mockNotifierWrapper{}
 	device := agent.Device{}
 
-	msgQueue := make(chan []byte, messageQueueSize)
+	msgQueue := make(chan inboundMessage, messageQueueSize)
 
 	var wg sync.WaitGroup
 	for range workerCount {
@@ -113,11 +113,11 @@ func TestMessageQueue_WorkersProcessAllMessages(t *testing.T) {
 			defer wg.Done()
 			for {
 				select {
-				case payload, ok := <-msgQueue:
+				case item, ok := <-msgQueue:
 					if !ok {
 						return
 					}
-					svc.processMessage(payload, ctx, device, logger, notifier)
+					svc.processMessage(item.Payload, ctx, device, logger, notifier)
 				case <-ctx.Done():
 					return
 				}
@@ -127,7 +127,7 @@ func TestMessageQueue_WorkersProcessAllMessages(t *testing.T) {
 
 	const total = 20
 	for range total {
-		msgQueue <- validPayload("echo hi")
+		msgQueue <- inboundMessage{Payload: validPayload("echo hi")}
 	}
 
 	// Drain: wait until all messages have been processed.
@@ -154,17 +154,18 @@ func TestEnqueueMessage_EnqueuesWhenSlotAvailable(t *testing.T) {
 	logger := hclog.NewNullLogger()
 	notifier := &recordingNotifierWrapper{}
 
-	msgQueue := make(chan []byte, 1)
+	msgQueue := make(chan inboundMessage, 1)
 	draining := make(chan struct{})
 
 	payload := validPayload("echo hi")
-	if ok := svc.enqueueMessage(payload, msgQueue, draining, 1, logger, notifier); !ok {
+	item := inboundMessage{Payload: payload}
+	if ok := svc.enqueueMessage(item, msgQueue, draining, 1, logger, notifier); !ok {
 		t.Fatal("expected enqueueMessage to report success when a slot is free")
 	}
 
 	select {
 	case got := <-msgQueue:
-		if string(got) != string(payload) {
+		if string(got.Payload) != string(payload) {
 			t.Errorf("queued payload mismatch: got %q want %q", got, payload)
 		}
 	default:
@@ -188,15 +189,16 @@ func TestEnqueueMessage_BackPressureBlocksThenSucceeds(t *testing.T) {
 	logger := hclog.NewNullLogger()
 	notifier := &recordingNotifierWrapper{}
 
-	msgQueue := make(chan []byte, 1)
+	msgQueue := make(chan inboundMessage, 1)
 	draining := make(chan struct{})
 
 	// Pre-fill the queue so the next enqueue must wait.
-	msgQueue <- validPayload("echo first")
+	msgQueue <- inboundMessage{Payload: validPayload("echo first")}
 
 	done := make(chan bool, 1)
 	go func() {
-		done <- svc.enqueueMessage(validPayload("echo second"), msgQueue, draining, 1, logger, notifier)
+		done <- svc.enqueueMessage(
+			inboundMessage{Payload: validPayload("echo second")}, msgQueue, draining, 1, logger, notifier)
 	}()
 
 	// The enqueue must not complete while the queue stays full.
@@ -235,15 +237,15 @@ func TestEnqueueMessage_DropsLoudlyOnDrain(t *testing.T) {
 	logger := hclog.NewNullLogger()
 	notifier := &recordingNotifierWrapper{}
 
-	msgQueue := make(chan []byte, 1)
+	msgQueue := make(chan inboundMessage, 1)
 	draining := make(chan struct{})
 
 	// Fill the queue and signal teardown so the only available branch is drain.
-	msgQueue <- validPayload("echo full")
+	msgQueue <- inboundMessage{Payload: validPayload("echo full")}
 	close(draining)
 
 	ok := svc.enqueueMessage(
-		validPayload("echo overflow"),
+		inboundMessage{Payload: validPayload("echo overflow")},
 		msgQueue,
 		draining,
 		1,
@@ -275,15 +277,16 @@ func TestEnqueueMessage_DrainUnblocksBackPressure(t *testing.T) {
 	logger := hclog.NewNullLogger()
 	notifier := &recordingNotifierWrapper{}
 
-	msgQueue := make(chan []byte, 1)
+	msgQueue := make(chan inboundMessage, 1)
 	draining := make(chan struct{})
 
 	// Fill the queue so the enqueue blocks.
-	msgQueue <- validPayload("echo full")
+	msgQueue <- inboundMessage{Payload: validPayload("echo full")}
 
 	done := make(chan bool, 1)
 	go func() {
-		done <- svc.enqueueMessage(validPayload("echo blocked"), msgQueue, draining, 1, logger, notifier)
+		done <- svc.enqueueMessage(
+			inboundMessage{Payload: validPayload("echo blocked")}, msgQueue, draining, 1, logger, notifier)
 	}()
 
 	// Confirm it is blocked.
@@ -321,7 +324,7 @@ func TestMessageQueue_WorkersCancelOnContextDone(t *testing.T) {
 	notifier := &mockNotifierWrapper{}
 	device := agent.Device{}
 
-	msgQueue := make(chan []byte, messageQueueSize)
+	msgQueue := make(chan inboundMessage, messageQueueSize)
 
 	var wg sync.WaitGroup
 	for range workerCount {
@@ -330,11 +333,11 @@ func TestMessageQueue_WorkersCancelOnContextDone(t *testing.T) {
 			defer wg.Done()
 			for {
 				select {
-				case payload, ok := <-msgQueue:
+				case item, ok := <-msgQueue:
 					if !ok {
 						return
 					}
-					svc.processMessage(payload, ctx, device, logger, notifier)
+					svc.processMessage(item.Payload, ctx, device, logger, notifier)
 				case <-ctx.Done():
 					return
 				}
@@ -375,7 +378,7 @@ func TestMessageQueue_ConcurrencyBoundedByWorkerCount(t *testing.T) {
 	notifier := &mockNotifierWrapper{}
 	device := agent.Device{}
 
-	msgQueue := make(chan []byte, messageQueueSize)
+	msgQueue := make(chan inboundMessage, messageQueueSize)
 
 	// Use a custom svc that tracks concurrency via a wrapped Executor.
 	concurrentExec := &blockingConcurrencyExecutor{
@@ -403,11 +406,11 @@ func TestMessageQueue_ConcurrencyBoundedByWorkerCount(t *testing.T) {
 			defer wg.Done()
 			for {
 				select {
-				case payload, ok := <-msgQueue:
+				case item, ok := <-msgQueue:
 					if !ok {
 						return
 					}
-					svc.processMessage(payload, ctx, device, logger, notifier)
+					svc.processMessage(item.Payload, ctx, device, logger, notifier)
 				case <-ctx.Done():
 					return
 				}
@@ -417,7 +420,7 @@ func TestMessageQueue_ConcurrencyBoundedByWorkerCount(t *testing.T) {
 
 	// Send exactly workerCount messages so all workers are busy.
 	for range workerCount {
-		msgQueue <- validPayload("echo concurrent")
+		msgQueue <- inboundMessage{Payload: validPayload("echo concurrent")}
 	}
 
 	// Wait until all workers are inside Execute.
@@ -463,7 +466,7 @@ func TestWorkerPool_NoLeakAcrossReconnectCycles(t *testing.T) {
 
 	const cycles = 5
 	for range cycles {
-		msgQueue := make(chan []byte, messageQueueSize)
+		msgQueue := make(chan inboundMessage, messageQueueSize)
 		var wg sync.WaitGroup
 		for range workerCount {
 			wg.Add(1)
@@ -475,7 +478,7 @@ func TestWorkerPool_NoLeakAcrossReconnectCycles(t *testing.T) {
 						if !ok {
 							return
 						}
-						svc.processMessage(payload, ctx, device, logger, notifier)
+						svc.processMessage(payload.Payload, ctx, device, logger, notifier)
 					case <-ctx.Done():
 						return
 					}
@@ -484,7 +487,7 @@ func TestWorkerPool_NoLeakAcrossReconnectCycles(t *testing.T) {
 		}
 
 		// Enqueue a message to exercise the drain path.
-		msgQueue <- validPayload("echo hi")
+		msgQueue <- inboundMessage{Payload: validPayload("echo hi")}
 
 		// Simulate what Execute does on disconnect: close the queue and wait.
 		close(msgQueue)
