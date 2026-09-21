@@ -29,6 +29,14 @@ type result struct {
 	Truncated           bool  `json:"truncated,omitempty"`
 	OutputBytesProduced int64 `json:"output_bytes_produced,omitempty"`
 	OutputBytesKept     int64 `json:"output_bytes_kept,omitempty"`
+	// Interrupted is set when the agent had started executing the command and
+	// then stopped - the process was killed, the host lost power, the service
+	// was force-stopped - before it could finish and post back. The command's
+	// journal entry survived, so on the next start the agent reports the
+	// interruption rather than silently losing the command or, worse, running a
+	// possibly non-idempotent script a second time after a partial first run.
+	// The receiving workflow decides whether to re-issue. Omitted otherwise.
+	Interrupted bool `json:"interrupted,omitempty"`
 }
 
 // outputTruncation reports whether a command's captured output was cut short by
@@ -100,6 +108,23 @@ func timeoutResultBytes(
 	if marshalErr != nil {
 		logger.Error("Failed to marshal timeout result", "error", marshalErr)
 		return []byte(`{"error":"command timed out","output":"","timed_out":true}`)
+	}
+	return b
+}
+
+// InterruptedResultBytes marshals the result posted back for a command whose
+// execution had begun and was interrupted by the agent stopping before it
+// finished. reason names what is known about the interruption; the output is
+// empty because whatever the command produced died with the process.
+func InterruptedResultBytes(logger hclog.Logger, reason string) []byte {
+	r := &result{
+		Error:       "command interrupted: " + reason,
+		Interrupted: true,
+	}
+	b, marshalErr := json.Marshal(r)
+	if marshalErr != nil {
+		logger.Error("Failed to marshal interrupted result", "error", marshalErr)
+		return []byte(`{"error":"command interrupted","output":"","interrupted":true}`)
 	}
 	return b
 }

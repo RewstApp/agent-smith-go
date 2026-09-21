@@ -54,9 +54,9 @@ func TestProcessMessageGuarded_RecoversAndLogs(t *testing.T) {
 
 	// Must not panic — if recovery were missing, this call would crash the test
 	// process (and the agent in production).
-	svc.processMessageGuarded(
+	svc.processInboundGuarded(
 		7,
-		validPayload("echo boom"),
+		inboundMessage{Payload: validPayload("echo boom")},
 		context.Background(),
 		device,
 		logger,
@@ -96,7 +96,7 @@ func TestWorkerPool_SurvivesPanickingHandler(t *testing.T) {
 	notifier := &mockNotifierWrapper{}
 	device := agent.Device{}
 
-	msgQueue := make(chan []byte, messageQueueSize)
+	msgQueue := make(chan inboundMessage, messageQueueSize)
 
 	var wg sync.WaitGroup
 	for i := range workerCount {
@@ -105,11 +105,11 @@ func TestWorkerPool_SurvivesPanickingHandler(t *testing.T) {
 			defer wg.Done()
 			for {
 				select {
-				case payload, ok := <-msgQueue:
+				case item, ok := <-msgQueue:
 					if !ok {
 						return
 					}
-					svc.processMessageGuarded(i, payload, ctx, device, logger, notifier)
+					svc.processInboundGuarded(i, item, ctx, device, logger, notifier)
 				case <-ctx.Done():
 					return
 				}
@@ -119,7 +119,7 @@ func TestWorkerPool_SurvivesPanickingHandler(t *testing.T) {
 
 	const total = 20
 	for range total {
-		msgQueue <- validPayload("echo hi")
+		msgQueue <- inboundMessage{Payload: validPayload("echo hi")}
 	}
 
 	// All messages must be consumed (the first triggers the panic; the rest are
