@@ -243,7 +243,8 @@ func (e *baseExecutor) Execute(
 	cmd.Stdout = stdoutBuf
 	cmd.Stderr = stderrBuf
 	cmd.Env = os.Environ()
-	cmd.Env = append(cmd.Env, fmt.Sprintf("AGENT_SMITH_VERSION=%s", version.Version[1:]))
+	// Bare number, as customer scripts have always seen it; see version.Number.
+	cmd.Env = append(cmd.Env, fmt.Sprintf("AGENT_SMITH_VERSION=%s", version.Number()))
 
 	// Kill the whole descendant tree on cancellation (a process group on Unix, a
 	// job object on Windows — see configureProcessGroup) so a shell that spawned

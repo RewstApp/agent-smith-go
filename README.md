@@ -1002,6 +1002,10 @@ process group, which is enough to escape that teardown. Linux's cgroup-based
 `KillMode` is inherited across `fork()` and untouched by `setsid()`, so the
 same call that protects the helper on macOS does not protect it on Linux.
 
+### Reporting the Agent Version
+
+`internal/version.Version` is the release tag stamped by the build script (`v1.5.7`), and its default is `v0.0.0` — the same shape — so a plain `go build` or `go test` binary differs from a release only in the number. The bare number that the `x-rewst-agent-smith-version` header and the `AGENT_SMITH_VERSION` variable in every command script have always carried comes from `version.Number()`, which strips a leading `v` only when one is present and returns `0.0.0` for an empty stamp instead of panicking. Before this, both call sites sliced `Version[1:]` against a bare `0.0.0` default, so every developer and CI build reported `.0.0`, an empty `-X` injection would have panicked on the first HTTP request (the config fetch during install), and the only test of the header derived its expectation from the same `Version[1:]` expression and therefore could not fail. The device twin's `agent_version`, the startup log line and `--diagnostic` intentionally keep the tag form; that difference is documented at each call site.
+
 ### Verified, Version-Gated Auto-Updates
 
 Every auto-update downloads a full agent binary and executes it as the

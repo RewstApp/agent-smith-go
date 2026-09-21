@@ -19,7 +19,9 @@ func NewRequestWithContext(
 		return req, err
 	}
 
-	req.Header.Set("x-rewst-agent-smith-version", version.Version[1:])
+	// The header has always carried the bare number ("1.5.7"); the device twin
+	// and the startup log carry the tag form ("v1.5.7") — see version.Version.
+	req.Header.Set("x-rewst-agent-smith-version", version.Number())
 
 	return req, nil
 }
