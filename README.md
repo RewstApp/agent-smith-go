@@ -1304,6 +1304,8 @@ This script:
 
 The suite's `send-command` action (`.github/actions/send-command/send-command.sh`) classifies every answer from the Rewst engine so a red step names its cause: `request-failed` (curl itself), `engine-timeout` (the engine's own ceiling), `engine-transient` (a 5xx, or the transient 404 "Workflow was not found"), `engine-refusal` (any other 4xx), `wrong-result` (a 2xx that is not this command's postback, usually another agent on the same device id) and `success`. Timeouts and transients retry on a bounded schedule with a warning per attempt; refusals, wrong results and curl failures fail on the first attempt. Steps whose output is fixed pass `expected_output` so a foreign result fails at the send rather than at the log assertion after it. `test/sendcommand` runs the script against stub engines for every class under a plain `go test ./...`.
 
+`test/workflowlint` guards the workflow file itself under the same `go test ./...`: no matrix variable may be spliced into the agent's arguments (a Windows-only `--disable-agent-postback` used to ride along in one and was inherited by seven unrelated update steps, so five scenarios silently ran with the agent postback disabled on Windows alone - sc-117885), and `--disable-agent-postback` may appear in exactly one, Windows-only, step: the one that verifies it.
+
 **Platform-Specific Tests**: Test OS-specific functionality
 - Windows service management
 - Linux systemd integration
