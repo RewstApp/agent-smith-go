@@ -280,7 +280,7 @@ func TestEngineTimeout_2xxTimeoutBodyExhaustedFails(t *testing.T) {
 	wantContains(
 		t,
 		out,
-		"::error title=send-command: engine-timeout::the engine did not dispatch the command in any of 3 attempts",
+		"::error title=send-command: engine-timeout::the engine gave up waiting for a result on all 3 attempts",
 	)
 	if n := engine.count(); n != 3 {
 		t.Errorf("engine saw %d requests, want 3", n)
@@ -376,4 +376,50 @@ func TestWrongResult_FallbackWithoutJqStillMatchesAndStillRejects(t *testing.T) 
 		t.Fatalf("fallback accepted a foreign result: exit %d\n%s", code, out)
 	}
 	wantContains(t, out, "wrong-result::HTTP 200 with command_results.output")
+}
+
+// A 408 means the engine stopped waiting, not that the device never got the
+// command (sc-115631's step-78 investigation). The retry therefore dispatches a
+// duplicate, and the engine's next answer can be the first copy's postback -
+// run 35742735431 returned the agent's own empty-stdout duplicate. After a
+// timeout in the same step that is a warning, not a failure; the log assertion
+// after the send still checks the device did the work.
+func TestWrongResult_AfterEngineTimeoutRetryIsAWarningNotAFailure(t *testing.T) {
+	engine := newStubEngine(t, response{408, timeoutBody}, response{200, otherBody})
+	code, out := run(t, engine.server.URL, "EXPECTED_OUTPUT=hello world")
+	if code != 0 {
+		t.Fatalf("exit %d, want 0\n%s", code, out)
+	}
+	wantContains(
+		t,
+		out,
+		"engine-timeout, retrying::attempt 1 of 3: the engine gave up waiting",
+		"::warning title=send-command: wrong-result after engine-timeout retry::HTTP 200 with command_results.output",
+		"class: success-after-timeout",
+	)
+	wantNotContains(t, out, "::error")
+	if n := engine.count(); n != 2 {
+		t.Errorf("engine saw %d requests, want 2", n)
+	}
+}
+
+// The relaxation is only for the output match. A 2xx that is not even shaped
+// like a device postback is still wrong-result after a timeout.
+func TestWrongResult_NoCommandResultsStillFailsAfterEngineTimeoutRetry(t *testing.T) {
+	engine := newStubEngine(t, response{408, timeoutBody}, response{200, noResults})
+	code, out := run(t, engine.server.URL, "EXPECTED_OUTPUT=hello world")
+	if code != 1 {
+		t.Fatalf("exit %d, want 1\n%s", code, out)
+	}
+	wantContains(t, out, "wrong-result::HTTP 200 but the body carries no command_results object")
+}
+
+// And without a prior timeout the mismatch is still the hard failure it was.
+func TestWrongResult_MismatchWithoutPriorTimeoutStillFails(t *testing.T) {
+	engine := newStubEngine(t, response{502, nginx502}, response{200, otherBody})
+	code, out := run(t, engine.server.URL, "EXPECTED_OUTPUT=hello world")
+	if code != 1 {
+		t.Fatalf("exit %d, want 1 (a transient retry is not a timeout retry)\n%s", code, out)
+	}
+	wantContains(t, out, "::error title=send-command: wrong-result::")
 }

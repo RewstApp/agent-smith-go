@@ -22,7 +22,12 @@
 #                     network, not a transient the engine will recover from.
 #   engine-timeout    HTTP 408, or a 2xx carrying the engine's "did not complete
 #                     in a reasonable amount of time" payload. The engine gave
-#                     up at its own ceiling before dispatching. Retried; allowed
+#                     up WAITING at its own ceiling. That does not mean the
+#                     command was not delivered: the device usually received
+#                     and ran it, and the engine simply had no result yet. So a
+#                     retry dispatches a duplicate, and the engine's next answer
+#                     may be satisfied by the first command's postback rather
+#                     than the retry's (run 35742735431). Retried; allowed
 #                     through when allow_engine_timeout is set.
 #   engine-transient  Any 5xx, or a 404 whose body says "Workflow was not
 #                     found". The engine's front door failed before the request
@@ -32,7 +37,10 @@
 #   wrong-result      2xx, but the body is not the device's postback for this
 #                     command: no command_results object, or its output does
 #                     not contain EXPECTED_OUTPUT. Another agent on the same
-#                     device_id is the usual cause. Not retried.
+#                     device_id is the usual cause. Not retried. After an
+#                     engine-timeout retry in the same step the output check
+#                     is a warning instead of a failure, because the retry
+#                     itself made a foreign-but-legitimate result possible.
 #   success           2xx with a command_results object (and matching output).
 #
 # Inputs arrive as environment variables from action.yml. The file is separate
@@ -90,6 +98,11 @@ result_output() {
 attempts="${RETRY_ATTEMPTS:-3}"
 case "$attempts" in ''|*[!0-9]*|0) attempts=1 ;; esac
 
+# Set once an attempt in this step ended in engine-timeout: from then on the
+# device may have two copies of the command in flight and the engine's result
+# correlation cannot be trusted, so a mismatched output is reported, not failed.
+timed_out_earlier=false
+
 for attempt in $(seq 1 "$attempts"); do
   send_once
 
@@ -124,12 +137,13 @@ for attempt in $(seq 1 "$attempts"); do
     fi
 
     if [ "$attempt" -lt "$attempts" ]; then
-      warn "engine-timeout, retrying" "attempt $attempt of $attempts did not dispatch (HTTP $http_code, execution_id=${execution_id:-unknown}); retrying in ${RETRY_DELAY}s. A single crossing of the engine's ceiling does not fail the run."
+      timed_out_earlier=true
+      warn "engine-timeout, retrying" "attempt $attempt of $attempts: the engine gave up waiting for a result (HTTP $http_code, execution_id=${execution_id:-unknown}); retrying in ${RETRY_DELAY}s. The device may still have run this copy, so the retry is a duplicate and the result returned next may be the first copy's. A single crossing of the engine's ceiling does not fail the run."
       sleep "$RETRY_DELAY"
       continue
     fi
 
-    fail "engine-timeout" "the engine did not dispatch the command in any of $attempts attempts (last: HTTP $http_code, execution_id=${execution_id:-unknown}). This is an engine-side timeout, NOT a regression in the code under test - re-dispatch rather than investigating the diff."
+    fail "engine-timeout" "the engine gave up waiting for a result on all $attempts attempts (last: HTTP $http_code, execution_id=${execution_id:-unknown}). This is an engine-side timeout, NOT a regression in the code under test - re-dispatch rather than investigating the diff."
   fi
 
   # The engine's front door failed before the request reached the workflow: a
@@ -167,7 +181,14 @@ for attempt in $(seq 1 "$attempts"); do
     actual_output="$(result_output "$body")"
     case "$actual_output" in
       *"$EXPECTED_OUTPUT"*) ;;
-      *) fail "wrong-result" "HTTP $http_code with command_results.output $(printf '%q' "$actual_output"), which does not contain the expected $(printf '%q' "$EXPECTED_OUTPUT"). The engine returned a result, but not this command's - another agent on the same device_id is the usual cause." ;;
+      *)
+        if [ "$timed_out_earlier" = "true" ]; then
+          warn "wrong-result after engine-timeout retry" "HTTP $http_code with command_results.output $(printf '%q' "$actual_output"), not the expected $(printf '%q' "$EXPECTED_OUTPUT"). An earlier attempt in this step hit the engine's ceiling, so two copies of the command reached the device and the engine returned the first copy's postback; the command did run. Not a failure here - the log assertion that follows checks the device did the work."
+          echo "send-command: dispatched (HTTP $http_code, attempt $attempt of $attempts, class: success-after-timeout)"
+          exit 0
+        fi
+        fail "wrong-result" "HTTP $http_code with command_results.output $(printf '%q' "$actual_output"), which does not contain the expected $(printf '%q' "$EXPECTED_OUTPUT"). The engine returned a result, but not this command's - another agent on the same device_id is the usual cause."
+        ;;
     esac
   fi
 

@@ -35,7 +35,10 @@ inputs:
       (any 5xx, or a 404 whose body says the workflow was not found). Both are
       engine-side and pass on the next attempt; each used to fail the whole
       run. A refusal, a wrong result or a curl error still fails on the first
-      attempt. Set to "1" to disable.
+      attempt. Set to "1" to disable. Note that an engine-timeout means the
+      engine stopped waiting, not that the device never got the command, so a
+      retry dispatches a duplicate; after one, a mismatched expected_output is
+      a warning rather than a failure.
     required: false
     default: "3"
   retry_delay_seconds:
