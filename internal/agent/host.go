@@ -102,7 +102,7 @@ func NewHostInfo(
 	serviceExecutablePath := GetServiceExecutablePath(orgId)
 
 	var hostInfo HostInfo
-	hostInfo.AgentVersion = version.Version
+	hostInfo.AgentVersion = version.Version // tag form, like the device twin; see version.Version
 	hostInfo.AgentExecutablePath = agentExecutablePath
 	hostInfo.ServiceExecutablePath = serviceExecutablePath
 	hostInfo.HostName = hostname

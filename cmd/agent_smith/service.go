@@ -563,6 +563,9 @@ func (svc *serviceContext) runCycle(
 	}
 
 	err = mqtt.UpdateReportedProperties(client, mqtt.ReportedProperties{
+		// Tag form ("v1.5.7"), intentionally unlike the bare-number HTTP header and
+		// AGENT_SMITH_VERSION variable: the twin has always carried the release tag
+		// and Rewst-side consumers key on it. See version.Version / version.Number.
 		AgentVersion: version.Version,
 	}, utils.MqttPublishTimeout)
 	if err != nil {
