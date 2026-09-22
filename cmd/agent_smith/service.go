@@ -11,7 +11,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/RewstApp/agent-smith-go/internal/agent"
@@ -388,6 +387,7 @@ func (svc *serviceContext) Execute(
 			logger.Info("Reconnecting in", "timeout", rg.Timeout())
 			select {
 			case <-stopped:
+				svc.stopWorkers(cancel, logger)
 				return 0
 			case <-time.After(rg.Timeout()):
 				logger.Info("Reconnecting...")
@@ -404,8 +404,83 @@ func (svc *serviceContext) Execute(
 			rg.Next()
 		}
 		if shouldReturn {
+			svc.stopWorkers(cancel, logger)
 			return exitCode
 		}
+	}
+}
+
+// workerExitTimeout bounds how long a stopping service waits for its command
+// workers after cancelling them. Cancellation kills a running command's process
+// group, so the wait is normally milliseconds; the bound only guards against a
+// worker wedged somewhere that ignores the context.
+const workerExitTimeout = 30 * time.Second
+
+// startWorkers launches the command workers for one connection cycle. They take
+// work from msgQueue until it is closed and drained, and they execute under the
+// service ctx - not the cycle's - so a cycle that ends for a SAS renewal or a
+// lost connection leaves a running command running and lets its result post
+// back over HTTP, which needs no broker connection. Before this, every cycle
+// end killed whatever was executing: with the default 24h token that was a
+// routine kill of any long command once a day, and a kill on every connection
+// blip (sc-118039). While an outgoing pool finishes its last commands the next
+// cycle's pool is already receiving, so the live worker count can briefly reach
+// twice worker_count; it cannot exceed that, because a pool exits as soon as its
+// closed queue is drained. Only a service stop cancels commands: stopWorkers
+// then waits on svc.workers for every pool to exit.
+func (svc *serviceContext) startWorkers(
+	ctx context.Context,
+	msgQueue <-chan inboundMessage,
+	count int,
+	device agent.Device,
+	logger hclog.Logger,
+	notifier plugins.NotifierWrapper,
+) {
+	for i := range count {
+		svc.workers.Add(1)
+		go func() {
+			defer svc.workers.Done()
+			logger.Debug("Message worker started", "worker", i)
+			for {
+				select {
+				case item, ok := <-msgQueue:
+					if !ok {
+						logger.Debug("Message worker stopped: queue closed", "worker", i)
+						return
+					}
+					logger.Debug(
+						"Message worker processing",
+						"worker", i,
+						"queue_length", len(msgQueue),
+					)
+					svc.processInboundGuarded(i, item, ctx, device, logger, notifier)
+				case <-ctx.Done():
+					logger.Debug("Message worker stopped: service stopping", "worker", i)
+					return
+				}
+			}
+		}()
+	}
+}
+
+// stopWorkers cancels every running command (the only place that happens) and
+// waits, bounded, for all worker pools to exit so the process does not leave
+// with a postback in flight. A command cancelled here stays "started" in the
+// journal, and the next process reports it to the engine as interrupted.
+func (svc *serviceContext) stopWorkers(cancel context.CancelFunc, logger hclog.Logger) {
+	cancel()
+	done := make(chan struct{})
+	go func() {
+		svc.workers.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(workerExitTimeout):
+		logger.Warn(
+			"Command workers did not exit before the stop deadline; exiting anyway",
+			"timeout", workerExitTimeout,
+		)
 	}
 }
 
@@ -414,16 +489,19 @@ func (svc *serviceContext) Execute(
 // with exitCode; clearBackoff signals that a successful connection was
 // established and the reconnect backoff should be reset.
 //
-// A fresh cycleCtx is derived from the parent ctx for each invocation so
-// in-flight commands (run via exec.CommandContext) are cancelled when the
-// cycle ends. Commands started in a later cycle bind to that cycle's own
-// context and are unaffected by the previous cycle's cancellation.
+// A fresh cycleCtx is derived from the parent ctx for each invocation and
+// bounds only the cycle's own goroutines (spool flush, journal replay). The
+// command workers deliberately do NOT run under it: a cycle ends for a SAS
+// renewal or a lost connection far more often than for a service stop, and
+// cancelling the workers there killed whatever command was executing and
+// reported it as failed or interrupted (sc-118039). Workers run under the
+// service ctx, drain the closed queue, and exit on their own; see
+// startWorkers.
 //
 // Cleanup is guaranteed on all exit paths. The deferred teardown runs in LIFO
 // order: MQTT teardown (Unsubscribe → Disconnect) first so no new messages
-// arrive, then cycleCancel to interrupt any hung commands, then close the
-// queue and wait for workers. Cancelling before wg.Wait is required —
-// otherwise a hung command would block the wait indefinitely. Consolidating
+// arrive, then cycleCancel for the cycle-scoped goroutines, then close the
+// queue so the workers finish what is queued and stop. Consolidating
 // Unsubscribe and Disconnect in one defer ensures persistent (non-clean)
 // Azure IoT Hub sessions don't retain server-side subscriptions across
 // reconnects, which would re-deliver buffered messages and cause duplicate
@@ -450,36 +528,16 @@ func (svc *serviceContext) runCycle(
 	// blocked callback would also stall the UNSUBACK/disconnect handling.
 	draining := make(chan struct{})
 
-	var wg sync.WaitGroup
-	for i := range resolvedWorkerCount {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			logger.Debug("Message worker started", "worker", i)
-			for {
-				select {
-				case item, ok := <-msgQueue:
-					if !ok {
-						logger.Debug("Message worker stopped: queue closed", "worker", i)
-						return
-					}
-					logger.Debug(
-						"Message worker processing",
-						"worker", i,
-						"queue_length", len(msgQueue),
-					)
-					svc.processInboundGuarded(i, item, cycleCtx, device, logger, notifier)
-				case <-cycleCtx.Done():
-					logger.Debug("Message worker stopped: context cancelled", "worker", i)
-					return
-				}
-			}
-		}()
-	}
+	svc.startWorkers(ctx, msgQueue, resolvedWorkerCount, device, logger, notifier)
 	defer func() {
+		// End the cycle-scoped goroutines and stop feeding the workers. The
+		// workers themselves are not cancelled: they run under the service ctx,
+		// finish - or time out on their own per-command deadline - whatever they
+		// are executing, post the result back over HTTP, drain what is still
+		// queued, and exit when the closed queue is empty. Only the service
+		// stopping cancels a running command (stopWorkers).
 		cycleCancel()
 		close(msgQueue)
-		wg.Wait()
 	}()
 
 	// Create a channel to wait for lost connection
@@ -543,11 +601,13 @@ func (svc *serviceContext) runCycle(
 	// bound sits above paho's own ConnectTimeout.
 	connectTimeout := device.MqttConnectTimeout() + utils.MqttConnectWaitMargin
 	connectStarted := time.Now()
-	// Snapshot what a previous cycle left in the journal *before* this cycle can
-	// receive anything. Replay acts only on this snapshot: an entry the current
-	// cycle accepts is already in a worker's hands, and listing it later would
-	// report a running command as interrupted or enqueue a queued one a second
-	// time (run 35745811929 did both within a second of subscribing).
+	// Snapshot what a previous *process* left in the journal before this cycle
+	// can receive anything. Replay acts only on this snapshot, minus every key
+	// this process owns: an entry the current cycle accepts is already in a
+	// worker's hands, and so is anything the previous cycle's workers are still
+	// finishing. Listing it later, or replaying an owned key, would report a
+	// running command as interrupted or enqueue a queued one a second time (run
+	// 35745811929 did the former within a second of subscribing).
 	replayFresh, replayExpired := svc.snapshotJournal(logger)
 
 	token := client.Connect()
@@ -767,6 +827,7 @@ func (svc *serviceContext) receiveMessage(
 		default:
 			svc.recordJournalOutcome(nil, logger, notifier)
 			item.Key = key
+			svc.owned.Store(key, struct{}{})
 		}
 	}
 
@@ -826,29 +887,49 @@ func (svc *serviceContext) enqueueMessage(
 	logger hclog.Logger,
 	notifier plugins.NotifierWrapper,
 ) bool {
+	// Prefer the drain signal when it is already set: a select picks randomly
+	// among ready cases, and a send into a queue the cycle is about to close is
+	// the one choice that can panic.
+	select {
+	case <-draining:
+		return svc.rejectDuringDrain(item, queueSize, logger, notifier)
+	default:
+	}
 	select {
 	case msgQueue <- item:
 		return true
 	case <-draining:
-		if item.Key != "" {
-			logger.Info(
-				"Message received during shutdown; journaled for replay on the next connection",
-				"key", item.Key,
-			)
-			return false
-		}
-		dropped := svc.droppedMessages.Add(1)
-		logger.Error(
-			"Message not accepted: received during shutdown and could not be journaled; "+
-				"left unacknowledged so the broker redelivers it after its lock expires",
-			"queue_size", queueSize,
-			"unaccepted_total", dropped,
+		return svc.rejectDuringDrain(item, queueSize, logger, notifier)
+	}
+}
+
+// rejectDuringDrain records a message that arrived while the cycle was tearing
+// down. A journaled one is simply left for the next cycle's replay; an
+// unjournaled one is counted and left unacknowledged so the broker redelivers.
+func (svc *serviceContext) rejectDuringDrain(
+	item inboundMessage,
+	queueSize int,
+	logger hclog.Logger,
+	notifier plugins.NotifierWrapper,
+) bool {
+	if item.Key != "" {
+		logger.Info(
+			"Message received during shutdown; journaled for replay on the next connection",
+			"key", item.Key,
 		)
-		_ = notifier.Notify(
-			fmt.Sprintf("AgentMessageDropped:shutdown (dropped_total=%d)", dropped),
-		) // Best effort notification
 		return false
 	}
+	dropped := svc.droppedMessages.Add(1)
+	logger.Error(
+		"Message not accepted: received during shutdown and could not be journaled; "+
+			"left unacknowledged so the broker redelivers it after its lock expires",
+		"queue_size", queueSize,
+		"unaccepted_total", dropped,
+	)
+	_ = notifier.Notify(
+		fmt.Sprintf("AgentMessageDropped:shutdown (dropped_total=%d)", dropped),
+	) // Best effort notification
+	return false
 }
 
 // processInboundGuarded runs processInbound with per-message panic recovery.
@@ -901,6 +982,7 @@ func (svc *serviceContext) processInbound(
 		if err := svc.journal.complete(item.Key); err != nil {
 			logger.Warn("Failed to complete journaled command", "key", item.Key, "error", err)
 		}
+		svc.owned.Delete(item.Key)
 	}
 }
 
@@ -979,7 +1061,21 @@ func (svc *serviceContext) snapshotJournal(logger hclog.Logger) (fresh, expired 
 		logger.Error("Failed to read the command journal for replay", "error", err)
 		return nil, nil
 	}
-	return fresh, expired
+	return svc.notOwned(fresh), svc.notOwned(expired)
+}
+
+// notOwned drops the entries this process has accepted itself - queued,
+// running, or posting back in a worker pool that may belong to the previous
+// cycle - leaving only what a previous process left behind.
+func (svc *serviceContext) notOwned(entries []journalEntry) []journalEntry {
+	out := make([]journalEntry, 0, len(entries))
+	for _, e := range entries {
+		if _, live := svc.owned.Load(e.Key); live {
+			continue
+		}
+		out = append(out, e)
+	}
+	return out
 }
 
 func (svc *serviceContext) replayJournal(
@@ -1025,7 +1121,9 @@ func (svc *serviceContext) replayJournal(
 			"received_at", e.ReceivedAt,
 		)
 		item := inboundMessage{Payload: e.Payload, Key: e.Key}
+		svc.owned.Store(e.Key, struct{}{})
 		if !svc.enqueueMessage(item, msgQueue, draining, queueSize, logger, notifier) {
+			svc.owned.Delete(e.Key)
 			break // tearing down; the rest stay journaled for the next cycle
 		}
 		executed++

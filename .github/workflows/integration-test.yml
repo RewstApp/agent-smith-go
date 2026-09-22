@@ -878,6 +878,30 @@ jobs:
         with:
           mode: stop
 
+      # Baseline first so the wait below is satisfied only by *this* restart's
+      # subscription. A bare match passed instantly on a line left by an earlier
+      # cycle, and the default-timeout scenario that follows then captured its
+      # own baseline before this restart had actually subscribed.
+      - name: Capture subscription baseline before restarting against the real broker (Unix)
+        if: always() && steps.stub_host.outputs.previous_host != '' && runner.os != 'Windows'
+        id: real_broker_sub_baseline_unix
+        shell: bash
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+        run: |
+          set -euo pipefail
+          pwsh_path="$(command -v pwsh)"
+          sudo --preserve-env=LOG_FILE,GITHUB_OUTPUT "$pwsh_path" -NoProfile -File "$GITHUB_WORKSPACE/.github/workflows/it-scripts/capture-restore-baseline-counts.ps1"
+
+      - name: Capture subscription baseline before restarting against the real broker (Windows)
+        if: always() && steps.stub_host.outputs.previous_host != '' && runner.os == 'Windows'
+        id: real_broker_sub_baseline_windows
+        shell: pwsh
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+        run: |
+          & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/capture-restore-baseline-counts.ps1"
+
       - name: Restart agent against the real broker
         if: always() && steps.stub_host.outputs.previous_host != ''
         uses: ./.github/actions/run-agent
@@ -891,6 +915,7 @@ jobs:
         with:
           log_file: ${{ matrix.log_file }}
           pattern: Subscribed to messages
+          baseline_count: ${{ steps.real_broker_sub_baseline_unix.outputs.subscribed || steps.real_broker_sub_baseline_windows.outputs.subscribed }}
           max_attempts: "60"
           interval_seconds: "2"
 
@@ -2290,6 +2315,29 @@ jobs:
           BASELINE: ${{ (steps.retry_stop_baseline_unix.outputs.stopped || steps.retry_stop_baseline_windows.outputs.stopped) }}
         run: |
           & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/assert-a-service-stop-during-a-backoff-is-prompt.ps1"
+      # Every scenario above asserts on the agent log; when one fails, the log is
+      # the evidence. Dump its tail so triage does not need a re-run with extra
+      # steps (three runs on 2026-09-22 were diagnosed from postback bodies alone).
+      - name: Dump agent log on failure (Unix)
+        if: failure() && runner.os != 'Windows'
+        shell: bash
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+        run: |
+          echo "::group::Last 400 agent log lines ($LOG_FILE)"
+          sudo tail -n 400 "$LOG_FILE" || echo "(no log file)"
+          echo "::endgroup::"
+
+      - name: Dump agent log on failure (Windows)
+        if: failure() && runner.os == 'Windows'
+        shell: pwsh
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+        run: |
+          Write-Output "::group::Last 400 agent log lines ($env:LOG_FILE)"
+          if (Test-Path $env:LOG_FILE) { Get-Content $env:LOG_FILE -Tail 400 } else { Write-Output "(no log file)" }
+          Write-Output "::endgroup::"
+
       # The restore steps run under always() so a failed assertion above cannot
       # leave the rest of the job running an agent that points at a stub release
       # endpoint (or leave the service stopped for the scenarios that follow).

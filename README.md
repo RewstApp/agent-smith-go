@@ -244,7 +244,7 @@ not be journaled: there is nowhere to put it, so it is left for the broker to
 redeliver after its lock expires — which is what the corresponding Error log
 now says. It is counted (`AgentMessageDropped` notification) so it is visible
 in monitoring. A journaled command arriving during teardown is acknowledged
-and replayed on the next connection. The set that is replayed is captured before the cycle connects, so a command the cycle itself accepts - already in a worker's hands - is never mistaken for a leftover and reported as interrupted or run a second time.
+and replayed on the next connection. The set that is replayed is captured before the cycle connects and excludes every entry this process has accepted itself, so a command the cycle accepts - or one the previous cycle's workers are still finishing across a reconnect - is never mistaken for a leftover and reported as interrupted or run a second time. Replay is for what a *previous process* left behind.
 
 #### Tuning queue capacity and concurrency
 
@@ -580,6 +580,20 @@ is a routine, `Info`-level **`Renewing SAS token before expiry`** log line rathe
 than an `Error`-level `Connection lost`. An `Error` `Connection lost` now
 reflects a genuine fault (network drop, broker-side disconnect), and reconnect
 behavior for those real losses is unchanged.
+
+Neither a renewal nor a lost connection interrupts a command that is running.
+The command workers belong to the service, not to the connection cycle: when a
+cycle ends they stop taking new work, finish (or time out on their own
+per-command deadline) whatever they are executing, post the result back over
+HTTP - which needs no broker connection - and exit once the queue they were
+fed from is drained. Until sc-118039 every cycle end cancelled the workers, so
+a routine renewal killed any command spanning it and reported it as failed
+(or, since the command journal, as interrupted); with the default 24-hour token
+that was once a day on every device. Only a service stop cancels a running
+command, and a command cancelled that way is reported as `interrupted` by the
+next start. While an outgoing pool finishes its last commands the next cycle's
+pool is already receiving, so the live worker count can briefly reach twice
+`worker_count`, never more.
 
 | Config key | Default | Description |
 |------------|---------|-------------|

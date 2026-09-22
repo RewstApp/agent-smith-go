@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -595,5 +596,198 @@ func TestReplayJournal_IgnoresEntriesAcceptedAfterTheSnapshot(t *testing.T) {
 	}
 	if fileExists(svc.journal.donePath(runningKey)) {
 		t.Error("replay completed the running command's journal entry")
+	}
+}
+
+// ── worker lifetime across cycle ends (sc-118039) ────────────────────────────
+
+func waitFor(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %s", what)
+}
+
+// A cycle ending for a SAS renewal or a lost connection closes the queue; the
+// command that is executing must keep running, finish, post back and complete
+// its journal entry. Before this it was killed by the cycle's cancellation.
+func TestStartWorkers_RunningCommandSurvivesCycleEnd(t *testing.T) {
+	var started sync.Once
+	startedCh := make(chan struct{})
+	release := make(chan struct{})
+	var cancelled atomic.Bool
+	exec := &funcExecutor{fn: func(ctx context.Context) []byte {
+		started.Do(func() { close(startedCh) })
+		select {
+		case <-release:
+			return []byte(`{"error":"","output":"done"}`)
+		case <-ctx.Done():
+			cancelled.Store(true)
+			return []byte(`{"error":"cancelled","output":""}`)
+		}
+	}}
+	var postbacks atomic.Int32
+	engine := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		postbacks.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer engine.Close()
+	svc := svcWithJournal(t, exec)
+	svc.HTTPClient = &http.Client{Transport: &schemeRewriteTransport{scheme: "http"}}
+	device := deviceWithEngine(strings.TrimPrefix(engine.URL, "http://"))
+
+	queue := make(chan inboundMessage, 2)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	svc.startWorkers(ctx, queue, 1, device, hclog.NewNullLogger(), &recordingNotifierWrapper{})
+
+	payload := postbackPayload("long running", "id:survive")
+	key := journalKey(payload)
+	if _, err := svc.journal.put(key, payload); err != nil {
+		t.Fatal(err)
+	}
+	svc.owned.Store(key, struct{}{})
+	queue <- inboundMessage{Payload: payload, Key: key}
+	<-startedCh
+
+	close(queue) // the cycle ends: renewal or lost connection, not a service stop
+
+	time.Sleep(50 * time.Millisecond)
+	if cancelled.Load() {
+		t.Fatal("the running command was cancelled by the cycle ending")
+	}
+	if postbacks.Load() != 0 || fileExists(svc.journal.donePath(key)) {
+		t.Fatal("the command was settled before it finished")
+	}
+
+	close(release)
+	waitFor(t, "the postback", func() bool { return postbacks.Load() == 1 })
+	waitFor(
+		t,
+		"the journal entry to complete",
+		func() bool { return fileExists(svc.journal.donePath(key)) },
+	)
+	if _, live := svc.owned.Load(key); live {
+		t.Error("completed command is still marked owned")
+	}
+	if cancelled.Load() {
+		t.Error("the command observed a cancellation")
+	}
+
+	svc.stopWorkers(cancel, hclog.NewNullLogger())
+}
+
+// Commands still queued when the cycle ends are run by the outgoing pool, not
+// dropped, and are not re-enqueued by the next cycle because they are owned.
+func TestStartWorkers_QueuedCommandsRunAfterCycleEnd(t *testing.T) {
+	exec := &countingExecutor{result: []byte(`{"error":"","output":"ok"}`)}
+	svc := svcWithJournal(t, exec)
+	queue := make(chan inboundMessage, 4)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var keys []string
+	for _, cmd := range []string{"echo one", "echo two", "echo three"} {
+		payload := validPayload(cmd) // no post_id: settles without a postback
+		key := journalKey(payload)
+		if _, err := svc.journal.put(key, payload); err != nil {
+			t.Fatal(err)
+		}
+		svc.owned.Store(key, struct{}{})
+		queue <- inboundMessage{Payload: payload, Key: key}
+		keys = append(keys, key)
+	}
+	// The next cycle's snapshot, taken while these are queued, must skip them.
+	if fresh, _ := svc.snapshotJournal(hclog.NewNullLogger()); len(fresh) != 0 {
+		t.Fatalf("snapshot returned %d owned entries; want 0", len(fresh))
+	}
+
+	svc.startWorkers(
+		ctx,
+		queue,
+		1,
+		agent.Device{},
+		hclog.NewNullLogger(),
+		&recordingNotifierWrapper{},
+	)
+	close(queue) // cycle ends with work still queued
+	waitFor(t, "all queued commands to run", func() bool { return exec.count.Load() == 3 })
+	for _, key := range keys {
+		waitFor(t, "journal entry "+key+" to complete", func() bool {
+			return fileExists(svc.journal.donePath(key))
+		})
+	}
+	svc.stopWorkers(cancel, hclog.NewNullLogger())
+}
+
+// The snapshot is for what a previous process left behind. A key this process
+// accepted - via receiveMessage - is skipped; a leftover with no owner is kept.
+func TestSnapshotJournal_SkipsKeysOwnedByThisProcess(t *testing.T) {
+	svc := svcWithJournal(t, &countingExecutor{})
+	logger := hclog.NewNullLogger()
+	queue := make(chan inboundMessage, 4)
+	msg := &fakeMQTTMessage{payload: postbackPayload("echo mine", "id:mine")}
+	svc.receiveMessage(msg, queue, make(chan struct{}), 4, logger, &recordingNotifierWrapper{})
+
+	leftover := postbackPayload("echo theirs", "id:theirs")
+	if _, err := svc.journal.put(journalKey(leftover), leftover); err != nil {
+		t.Fatal(err)
+	}
+
+	fresh, expired := svc.snapshotJournal(logger)
+	if len(expired) != 0 {
+		t.Errorf("expired = %d, want 0", len(expired))
+	}
+	if len(fresh) != 1 || fresh[0].Key != journalKey(leftover) {
+		t.Fatalf("snapshot = %v, want only the leftover %q", keysOf(fresh), journalKey(leftover))
+	}
+}
+
+// Only a service stop cancels a running command. stopWorkers must return once
+// the pools have exited, and the cancelled command stays "started" in the
+// journal for the next process to report as interrupted.
+func TestStopWorkers_CancelsRunningCommandAndWaits(t *testing.T) {
+	startedCh := make(chan struct{})
+	var started sync.Once
+	exec := &funcExecutor{fn: func(ctx context.Context) []byte {
+		started.Do(func() { close(startedCh) })
+		<-ctx.Done()
+		return []byte(`{"error":"cancelled","output":""}`)
+	}}
+	svc := svcWithJournal(t, exec)
+	queue := make(chan inboundMessage, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	svc.startWorkers(
+		ctx,
+		queue,
+		1,
+		agent.Device{},
+		hclog.NewNullLogger(),
+		&recordingNotifierWrapper{},
+	)
+
+	payload := postbackPayload("sleep forever", "id:stop")
+	key := journalKey(payload)
+	if _, err := svc.journal.put(key, payload); err != nil {
+		t.Fatal(err)
+	}
+	svc.owned.Store(key, struct{}{})
+	queue <- inboundMessage{Payload: payload, Key: key}
+	<-startedCh
+
+	begun := time.Now()
+	svc.stopWorkers(cancel, hclog.NewNullLogger())
+	if took := time.Since(begun); took > 5*time.Second {
+		t.Fatalf("stopWorkers took %s; the cancelled worker should exit at once", took)
+	}
+	if fileExists(svc.journal.donePath(key)) {
+		t.Error(
+			"a command cancelled by the service stop was completed; it must stay started so the next process reports it",
+		)
 	}
 }
