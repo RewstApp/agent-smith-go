@@ -156,6 +156,7 @@ jobs:
               log_file = "/etc/rewst_remote_agent/$orgId/rewst_agent.log"
               service = "rewst_remote_agent_$orgId"
               success_commands = '"echo \"hello world\""'
+              success_output = 'hello world'
               failure_commands = '"exit 1"'
               timeout_commands = '"sleep 30"'
               sweep_commands = '"sleep 180"'
@@ -186,6 +187,7 @@ jobs:
               log_file = "C:\ProgramData\RewstRemoteAgent\$orgId\rewst_agent.log"
               service = "RewstRemoteAgent_$orgId"
               success_commands = $winSuccess
+              success_output = 'hello world'
               failure_commands = $winFailure
               timeout_commands = '"Start-Sleep -Seconds 30"'
               sweep_commands = '"Start-Sleep -Seconds 180"'
@@ -217,6 +219,7 @@ jobs:
               log_file = "/Library/Application Support/rewst_remote_agent/$orgId/rewst_agent.log"
               service = "io.rewst.remote_agent_$orgId"
               success_commands = '"echo \"hello world\""'
+              success_output = 'hello world'
               failure_commands = '"exit 1"'
               timeout_commands = '"sleep 30"'
               sweep_commands = '"sleep 180"'
@@ -314,6 +317,7 @@ jobs:
           trigger_url: ${{ vars.IT_SEND_COMMAND_TRIGGER_URL }}
           device_id: ${{ steps.config.outputs.device_id }}
           commands: ${{ matrix.success_commands }}
+          expected_output: ${{ matrix.success_output }}
 
       - name: Check logs for successful command
         uses: ./.github/actions/assert-log-contains
@@ -457,6 +461,7 @@ jobs:
           trigger_url: ${{ vars.IT_SEND_COMMAND_TRIGGER_URL }}
           device_id: ${{ steps.config.outputs.device_id }}
           commands: ${{ matrix.success_commands }}
+          expected_output: ${{ matrix.success_output }}
 
       - name: Check logs for command completion after auto-update
         uses: ./.github/actions/assert-log-contains
@@ -477,6 +482,7 @@ jobs:
           trigger_url: ${{ vars.IT_SEND_COMMAND_TRIGGER_URL }}
           device_id: ${{ steps.config.outputs.device_id }}
           commands: ${{ matrix.success_commands }}
+          expected_output: ${{ matrix.success_output }}
 
       - name: Check logs for debug level
         uses: ./.github/actions/assert-log-contains
@@ -514,6 +520,7 @@ jobs:
           trigger_url: ${{ vars.IT_SEND_COMMAND_TRIGGER_URL }}
           device_id: ${{ steps.config.outputs.device_id }}
           commands: ${{ matrix.success_commands }}
+          expected_output: ${{ matrix.success_output }}
 
       - name: Check logs for command received (windows)
         if: matrix.os == 'windows-latest'
@@ -541,6 +548,7 @@ jobs:
           trigger_url: ${{ vars.IT_SEND_COMMAND_TRIGGER_URL }}
           device_id: ${{ steps.config.outputs.device_id }}
           commands: ${{ matrix.success_commands }}
+          expected_output: ${{ matrix.success_output }}
 
       - name: Check syslog for command completed
         uses: ./.github/actions/assert-syslog-contains
@@ -632,6 +640,7 @@ jobs:
           trigger_url: ${{ vars.IT_SEND_COMMAND_TRIGGER_URL }}
           device_id: ${{ steps.config.outputs.device_id }}
           commands: ${{ matrix.success_commands }}
+          expected_output: ${{ matrix.success_output }}
 
       - name: Assert command executed exactly once after reconnect (Unix)
         if: runner.os != 'Windows'
@@ -1004,6 +1013,7 @@ jobs:
           trigger_url: ${{ vars.IT_SEND_COMMAND_TRIGGER_URL }}
           device_id: ${{ steps.config.outputs.device_id }}
           commands: ${{ matrix.success_commands }}
+          expected_output: ${{ matrix.success_output }}
 
       - name: Assert worker pool recovered after default timeout (Unix)
         if: runner.os != 'Windows'
@@ -1102,6 +1112,7 @@ jobs:
           trigger_url: ${{ vars.IT_SEND_COMMAND_TRIGGER_URL }}
           device_id: ${{ steps.config.outputs.device_id }}
           commands: ${{ matrix.success_commands }}
+          expected_output: ${{ matrix.success_output }}
 
       - name: Assert worker pool recovered after timeout (Unix)
         if: runner.os != 'Windows'
@@ -1254,6 +1265,7 @@ jobs:
           trigger_url: ${{ vars.IT_SEND_COMMAND_TRIGGER_URL }}
           device_id: ${{ steps.config.outputs.device_id }}
           commands: ${{ matrix.success_commands }}
+          expected_output: ${{ matrix.success_output }}
 
       - name: Assert worker pool recovered after child-process scenario
         if: matrix.os == 'windows-latest'
@@ -1368,6 +1380,7 @@ jobs:
           trigger_url: ${{ vars.IT_SEND_COMMAND_TRIGGER_URL }}
           device_id: ${{ steps.config.outputs.device_id }}
           commands: ${{ matrix.success_commands }}
+          expected_output: ${{ matrix.success_output }}
 
       - name: Assert command delivery continues after SAS renewal (Unix)
         if: runner.os != 'Windows'
@@ -1596,6 +1609,7 @@ jobs:
           trigger_url: ${{ vars.IT_SEND_COMMAND_TRIGGER_URL }}
           device_id: ${{ steps.config.outputs.device_id }}
           commands: ${{ matrix.success_commands }}
+          expected_output: ${{ matrix.success_output }}
 
       - name: Assert output below the ceiling is untouched and the worker recovered (Unix)
         if: runner.os != 'Windows'
@@ -1765,6 +1779,7 @@ jobs:
           trigger_url: ${{ vars.IT_SEND_COMMAND_TRIGGER_URL }}
           device_id: ${{ steps.config.outputs.device_id }}
           commands: ${{ matrix.success_commands }}
+          expected_output: ${{ matrix.success_output }}
 
       - name: Assert the worker recovered after the verbose timeout (Unix)
         if: runner.os != 'Windows'

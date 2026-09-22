@@ -1284,6 +1284,8 @@ This script:
 - Plugin loading and notifications
 - Command execution and postback
 
+The suite's `send-command` action (`.github/actions/send-command/send-command.sh`) classifies every answer from the Rewst engine so a red step names its cause: `request-failed` (curl itself), `engine-timeout` (the engine's own ceiling), `engine-transient` (a 5xx, or the transient 404 "Workflow was not found"), `engine-refusal` (any other 4xx), `wrong-result` (a 2xx that is not this command's postback, usually another agent on the same device id) and `success`. Timeouts and transients retry on a bounded schedule with a warning per attempt; refusals, wrong results and curl failures fail on the first attempt. Steps whose output is fixed pass `expected_output` so a foreign result fails at the send rather than at the log assertion after it. `test/sendcommand` runs the script against stub engines for every class under a plain `go test ./...`.
+
 **Platform-Specific Tests**: Test OS-specific functionality
 - Windows service management
 - Linux systemd integration
