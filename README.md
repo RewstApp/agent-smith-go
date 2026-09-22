@@ -244,7 +244,7 @@ not be journaled: there is nowhere to put it, so it is left for the broker to
 redeliver after its lock expires — which is what the corresponding Error log
 now says. It is counted (`AgentMessageDropped` notification) so it is visible
 in monitoring. A journaled command arriving during teardown is acknowledged
-and replayed on the next connection.
+and replayed on the next connection. The set that is replayed is captured before the cycle connects, so a command the cycle itself accepts - already in a worker's hands - is never mistaken for a leftover and reported as interrupted or run a second time.
 
 #### Tuning queue capacity and concurrency
 

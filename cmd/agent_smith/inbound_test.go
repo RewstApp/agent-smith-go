@@ -392,8 +392,11 @@ func TestReplayJournal_ExecutesUnstartedReportsStartedDiscardsExpired(t *testing
 
 	queue := make(chan inboundMessage, 4)
 	notifier := &recordingNotifierWrapper{}
+	fresh, expired := svc.snapshotJournal(hclog.NewNullLogger())
 	svc.replayJournal(
 		context.Background(),
+		fresh,
+		expired,
 		queue,
 		make(chan struct{}),
 		4,
@@ -469,8 +472,11 @@ func TestReplayJournal_StopsAtTeardownLeavingRestJournaled(t *testing.T) {
 	draining := make(chan struct{})
 	close(draining)
 
+	fresh, expired := svc.snapshotJournal(hclog.NewNullLogger())
 	svc.replayJournal(
 		context.Background(),
+		fresh,
+		expired,
 		queue,
 		draining,
 		1,
@@ -490,8 +496,14 @@ func TestReplayJournal_StopsAtTeardownLeavingRestJournaled(t *testing.T) {
 
 func TestReplayJournal_NoJournalIsANoop(t *testing.T) {
 	svc := newTestSvc(&countingExecutor{})
+	fresh, expired := svc.snapshotJournal(hclog.NewNullLogger())
+	if fresh != nil || expired != nil {
+		t.Fatalf("snapshot without a journal = %v/%v, want nil/nil", fresh, expired)
+	}
 	svc.replayJournal(
 		context.Background(),
+		fresh,
+		expired,
 		make(chan inboundMessage, 1),
 		make(chan struct{}),
 		1,
@@ -499,4 +511,89 @@ func TestReplayJournal_NoJournalIsANoop(t *testing.T) {
 		hclog.NewNullLogger(),
 		&recordingNotifierWrapper{},
 	)
+}
+
+// The race behind run 35745811929: the cycle subscribed, a command arrived and
+// a worker started it, and only then did replay list the journal - so it saw a
+// started entry and reported a running command as interrupted (and would have
+// enqueued a queued one a second time). Replay must act only on the snapshot
+// taken before the cycle could receive anything.
+func TestReplayJournal_IgnoresEntriesAcceptedAfterTheSnapshot(t *testing.T) {
+	engineHits := 0
+	engine := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		engineHits++
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer engine.Close()
+	svc := svcWithJournal(t, &countingExecutor{})
+	svc.HTTPClient = &http.Client{Transport: &schemeRewriteTransport{scheme: "http"}}
+
+	// The snapshot a cycle takes before Connect: nothing left over.
+	fresh, expired := svc.snapshotJournal(hclog.NewNullLogger())
+	if len(fresh) != 0 || len(expired) != 0 {
+		t.Fatalf("expected an empty snapshot, got %d fresh / %d expired", len(fresh), len(expired))
+	}
+
+	// Then the cycle accepts two commands: one a worker has started, one still
+	// queued. Both belong to this cycle, not to replay.
+	running := postbackPayload("sleep 30", "id:running")
+	runningKey := journalKey(running)
+	if _, err := svc.journal.put(runningKey, running); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.journal.markStarted(runningKey); err != nil {
+		t.Fatal(err)
+	}
+	queued := postbackPayload("echo queued", "id:queued")
+	if _, err := svc.journal.put(journalKey(queued), queued); err != nil {
+		t.Fatal(err)
+	}
+
+	queue := make(chan inboundMessage, 4)
+	notifier := &recordingNotifierWrapper{}
+	svc.replayJournal(
+		context.Background(),
+		fresh,
+		expired,
+		queue,
+		make(chan struct{}),
+		4,
+		deviceWithEngine(strings.TrimPrefix(engine.URL, "http://")),
+		hclog.NewNullLogger(),
+		notifier,
+	)
+
+	if len(queue) != 0 {
+		t.Errorf(
+			"replay enqueued %d command(s) this cycle had already accepted; want 0",
+			len(queue),
+		)
+	}
+	if engineHits != 0 {
+		t.Errorf(
+			"replay reported %d command(s) to the engine; the running one was not interrupted",
+			engineHits,
+		)
+	}
+	if has(notifier.all(), "AgentCommandInterrupted") != 0 {
+		t.Error("replay notified AgentCommandInterrupted for a command that is still running")
+	}
+	stillFresh, _, err := svc.journal.pending()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stillFresh) != 2 {
+		t.Fatalf(
+			"journal has %d pending entries after replay, want both untouched",
+			len(stillFresh),
+		)
+	}
+	for _, e := range stillFresh {
+		if e.Key == runningKey && e.StartedAt.IsZero() {
+			t.Error("the running entry lost its started mark")
+		}
+	}
+	if fileExists(svc.journal.donePath(runningKey)) {
+		t.Error("replay completed the running command's journal entry")
+	}
 }

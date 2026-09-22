@@ -543,6 +543,13 @@ func (svc *serviceContext) runCycle(
 	// bound sits above paho's own ConnectTimeout.
 	connectTimeout := device.MqttConnectTimeout() + utils.MqttConnectWaitMargin
 	connectStarted := time.Now()
+	// Snapshot what a previous cycle left in the journal *before* this cycle can
+	// receive anything. Replay acts only on this snapshot: an entry the current
+	// cycle accepts is already in a worker's hands, and listing it later would
+	// report a running command as interrupted or enqueue a queued one a second
+	// time (run 35745811929 did both within a second of subscribing).
+	replayFresh, replayExpired := svc.snapshotJournal(logger)
+
 	token := client.Connect()
 	switch mqtt.WaitToken(token, connectTimeout, stopped) {
 	case mqtt.TokenTimedOut:
@@ -633,7 +640,17 @@ func (svc *serviceContext) runCycle(
 	// loop nor delay teardown; a replay that is still feeding the queue when the
 	// cycle ends leaves the remaining entries journaled for the next one.
 	utils.SafeGo(logger, func() {
-		svc.replayJournal(cycleCtx, msgQueue, draining, resolvedQueueSize, device, logger, notifier)
+		svc.replayJournal(
+			cycleCtx,
+			replayFresh,
+			replayExpired,
+			msgQueue,
+			draining,
+			resolvedQueueSize,
+			device,
+			logger,
+			notifier,
+		)
 	}, "scope", "command_journal_replay")
 
 	// Proactively renew the SAS token before Azure IoT Hub expires it. The token
@@ -949,8 +966,25 @@ func (svc *serviceContext) processMessage(
 // at-least-once delivery is most often criticised for; entries older than the
 // journal's max age - the broker would have expired them too - are reported
 // and discarded.
+// snapshotJournal lists what previous cycles left in the journal. It must run
+// before the cycle can receive a message - before Connect - because
+// replayJournal acts only on what it returns: anything journaled afterwards
+// belongs to this cycle and is being handled by a worker.
+func (svc *serviceContext) snapshotJournal(logger hclog.Logger) (fresh, expired []journalEntry) {
+	if svc.journal == nil {
+		return nil, nil
+	}
+	fresh, expired, err := svc.journal.pending()
+	if err != nil {
+		logger.Error("Failed to read the command journal for replay", "error", err)
+		return nil, nil
+	}
+	return fresh, expired
+}
+
 func (svc *serviceContext) replayJournal(
 	ctx context.Context,
+	fresh, expired []journalEntry,
 	msgQueue chan<- inboundMessage,
 	draining <-chan struct{},
 	queueSize int,
@@ -958,15 +992,7 @@ func (svc *serviceContext) replayJournal(
 	logger hclog.Logger,
 	notifier plugins.NotifierWrapper,
 ) {
-	if svc.journal == nil {
-		return
-	}
-	fresh, expired, err := svc.journal.pending()
-	if err != nil {
-		logger.Error("Failed to read the command journal for replay", "error", err)
-		return
-	}
-	if len(fresh) == 0 && len(expired) == 0 {
+	if svc.journal == nil || (len(fresh) == 0 && len(expired) == 0) {
 		return
 	}
 
