@@ -59,6 +59,13 @@ Required tools:
   sender can push in that window. This mirrors `maxInstallerDownloadSize` on the
   auto-update download path. See the README's "Bounded Config-Fetch Response"
   section.
+  The fetch itself is retried (`fetchConfigurationWithRetry`, sc-118306): a
+  408/429/5xx, the engine's transient `Workflow was not found` 404, or a request
+  that never completed is transient and retried three times on a jittered
+  backoff (5s base, 30s cap; `--config-max-attempts`,
+  `--config-base-retry-backoff-seconds`), while any other non-2xx is a refusal
+  that fails at once with a body excerpt — the first transient answer used to
+  fail the install. See the README's "Retrying the Config Fetch" section.
 
   The install, update and uninstall paths never assume the old agent process has
   exited: after stopping the service they wait (bounded, 2 minutes, documented)

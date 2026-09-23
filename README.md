@@ -1059,6 +1059,10 @@ what is already running? Neither was checked before.
   oversized or endless body. `downloadTimeout` already bounds how long the
   request runs; this bounds how many bytes it can deliver in that time.
 
+### Retrying the Config Fetch
+
+The install-time `POST` to `--config-url` is answered by a Rewst workflow behind the engine's front door, and a fraction of requests come back with the engine's own ceiling (`408`), a gateway error (`5xx`), a rate limit (`429`) or a transient routing `404` whose body says `Workflow was not found`; a fresh attempt a few seconds later succeeds. Config mode now classifies the answer: those, and a request that never completed (connection refused, DNS, the request timeout), are **transient** and retried on a jittered exponential backoff (`utils.JitteredBackoff`) starting at 5 seconds and capped at 30, three attempts in total; any other non-2xx is a **refusal** (wrong trigger URL, wrong secret, bad payload) and fails immediately with the status and a body excerpt in the error. Each retry is an `Info` line naming the attempt and the reason, and an exhausted transient says so: `failed to fetch configuration: status 408 (transient; gave up after 3 attempts)`. Before sc-118306 the first transient answer failed the install outright, which in the integration suite was the largest single source of red runs and for a technician was an install that fails once and works on the second try. The budget is adjustable with `--config-max-attempts` and `--config-base-retry-backoff-seconds`.
+
 ### Bounded Config-Fetch Response
 
 The auto-update download is not the only response body the agent buffers in

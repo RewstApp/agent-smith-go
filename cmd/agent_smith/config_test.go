@@ -6,7 +6,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -75,7 +77,47 @@ func newBaseConfigParams(configURL string) *configContext {
 		FS:             newConfigTestFS(),
 		ServiceManager: newConfigTestServiceManager(),
 		exitWait:       stubExitWait(),
+		retrySleep:     func(time.Duration) {}, // retries are instant in tests
 	}
+}
+
+// scriptedConfigServer answers each request with the next status/body pair and
+// repeats the last one, counting requests.
+type scriptedConfigServer struct {
+	*httptest.Server
+	mu        sync.Mutex
+	responses [][2]string
+	requests  int
+}
+
+func newScriptedConfigServer(t *testing.T, responses ...[2]string) *scriptedConfigServer {
+	t.Helper()
+	s := &scriptedConfigServer{responses: responses}
+	s.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		s.mu.Lock()
+		i := s.requests
+		if i >= len(s.responses) {
+			i = len(s.responses) - 1
+		}
+		s.requests++
+		s.mu.Unlock()
+		status, _ := strconv.Atoi(s.responses[i][0])
+		w.WriteHeader(status)
+		_, _ = w.Write([]byte(s.responses[i][1]))
+	}))
+	t.Cleanup(s.Close)
+	return s
+}
+
+func (s *scriptedConfigServer) count() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.requests
+}
+
+// recordingSleep replaces retrySleep and remembers every delay requested.
+func recordingSleep(delays *[]time.Duration) func(time.Duration) {
+	return func(d time.Duration) { *delays = append(*delays, d) }
 }
 
 // ── validateConfiguration tests ──────────────────────────────────────────────
@@ -712,5 +754,180 @@ func TestRunConfig_ResponseAtSizeLimitAccepted(t *testing.T) {
 
 	if err := runConfig(params); err != nil {
 		t.Errorf("expected config at the size limit to succeed, got %v", err)
+	}
+}
+
+// ── config-fetch retry (sc-118306) ────────────────────────────────────────────
+
+func TestRunConfig_TransientThenSuccessRetriesOnce(t *testing.T) {
+	srv := newScriptedConfigServer(
+		t,
+		[2]string{
+			"408",
+			`{"error":"The workflow did not complete in a reasonable amount of time"}`,
+		},
+		[2]string{"200", validConfigResponseBody("test-org")},
+	)
+	params := newBaseConfigParams(srv.URL)
+	var delays []time.Duration
+	params.retrySleep = recordingSleep(&delays)
+
+	if err := runConfig(params); err != nil {
+		t.Fatalf("expected the second attempt to succeed, got %v", err)
+	}
+	if srv.count() != 2 {
+		t.Errorf("endpoint saw %d requests, want 2", srv.count())
+	}
+	if len(delays) != 1 || delays[0] <= 0 || delays[0] > maxConfigRetryBackoff {
+		t.Errorf(
+			"slept %v, want exactly one positive delay under %s",
+			delays,
+			maxConfigRetryBackoff,
+		)
+	}
+}
+
+func TestRunConfig_TransientExhaustedFailsNamingAttempts(t *testing.T) {
+	srv := newScriptedConfigServer(t, [2]string{"503", "upstream unavailable"})
+	params := newBaseConfigParams(srv.URL)
+	var delays []time.Duration
+	params.retrySleep = recordingSleep(&delays)
+
+	err := runConfig(params)
+	if err == nil || !strings.Contains(err.Error(), "failed to fetch configuration: status 503") ||
+		!strings.Contains(err.Error(), "gave up after 3 attempts") {
+		t.Fatalf("expected an exhausted transient error naming 3 attempts, got %v", err)
+	}
+	if srv.count() != 3 {
+		t.Errorf("endpoint saw %d requests, want 3", srv.count())
+	}
+	if len(delays) != 2 {
+		t.Errorf("slept %d times, want 2 (between three attempts)", len(delays))
+	}
+	// The second delay is the backoff doubled (with jitter), never above the cap.
+	for _, d := range delays {
+		if d <= 0 || d > maxConfigRetryBackoff {
+			t.Errorf("delay %s outside (0, %s]", d, maxConfigRetryBackoff)
+		}
+	}
+}
+
+func TestRunConfig_RefusalIsNotRetriedAndCarriesTheBody(t *testing.T) {
+	srv := newScriptedConfigServer(t,
+		[2]string{"403", `{"error":"bad secret"}`},
+		[2]string{"200", validConfigResponseBody("test-org")},
+	)
+	params := newBaseConfigParams(srv.URL)
+	var delays []time.Duration
+	params.retrySleep = recordingSleep(&delays)
+
+	err := runConfig(params)
+	if err == nil || !strings.Contains(err.Error(), "status 403 (refused; not retried)") ||
+		!strings.Contains(err.Error(), "bad secret") {
+		t.Fatalf("expected a refusal error carrying the body, got %v", err)
+	}
+	if srv.count() != 1 || len(delays) != 0 {
+		t.Errorf("refusal was retried: %d requests, %d sleeps", srv.count(), len(delays))
+	}
+}
+
+func TestRunConfig_Transient404IsRetriedPlain404IsRefused(t *testing.T) {
+	transient := newScriptedConfigServer(t,
+		[2]string{"404", `{"error":"Workflow was not found"}`},
+		[2]string{"200", validConfigResponseBody("test-org")},
+	)
+	if err := runConfig(newBaseConfigParams(transient.URL)); err != nil {
+		t.Fatalf("transient 404 should have been retried to success, got %v", err)
+	}
+	if transient.count() != 2 {
+		t.Errorf("transient 404: %d requests, want 2", transient.count())
+	}
+
+	plain := newScriptedConfigServer(t,
+		[2]string{"404", `{"error":"no such trigger"}`},
+		[2]string{"200", validConfigResponseBody("test-org")},
+	)
+	err := runConfig(newBaseConfigParams(plain.URL))
+	if err == nil || !strings.Contains(err.Error(), "status 404 (refused; not retried)") {
+		t.Fatalf("plain 404 should be a refusal, got %v", err)
+	}
+	if plain.count() != 1 {
+		t.Errorf("plain 404: %d requests, want 1", plain.count())
+	}
+}
+
+func TestRunConfig_ConnectionErrorIsRetried(t *testing.T) {
+	srv := newConfigServer(t, http.StatusOK, "")
+	url := srv.URL
+	srv.Close()
+	params := newBaseConfigParams(url)
+	var delays []time.Duration
+	params.retrySleep = recordingSleep(&delays)
+
+	err := runConfig(params)
+	if err == nil || !strings.Contains(err.Error(), "failed to execute http request") ||
+		!strings.Contains(err.Error(), "gave up after 3 attempts") {
+		t.Fatalf("expected a retried connection error, got %v", err)
+	}
+	if len(delays) != 2 {
+		t.Errorf("slept %d times, want 2", len(delays))
+	}
+}
+
+func TestRunConfig_RetryBudgetFlags(t *testing.T) {
+	srv := newScriptedConfigServer(
+		t,
+		[2]string{"408", ""},
+		[2]string{"200", validConfigResponseBody("test-org")},
+	)
+	params := newBaseConfigParams(srv.URL)
+	params.ConfigMaxAttempts = 1
+	err := runConfig(params)
+	if err == nil || strings.Contains(err.Error(), "gave up after") {
+		t.Fatalf("with one attempt a 408 must fail plainly, got %v", err)
+	}
+	if srv.count() != 1 {
+		t.Errorf("endpoint saw %d requests, want 1", srv.count())
+	}
+
+	srv2 := newScriptedConfigServer(
+		t,
+		[2]string{"408", ""},
+		[2]string{"200", validConfigResponseBody("test-org")},
+	)
+	params2 := newBaseConfigParams(srv2.URL)
+	params2.ConfigBaseRetryBackoffSeconds = 1
+	var delays []time.Duration
+	params2.retrySleep = recordingSleep(&delays)
+	if err := runConfig(params2); err != nil {
+		t.Fatal(err)
+	}
+	if len(delays) != 1 || delays[0] > 2*time.Second {
+		t.Errorf("base 1s should give a first delay around 1s (±25%%), got %v", delays)
+	}
+}
+
+func TestIsTransientConfigStatus_Classification(t *testing.T) {
+	cases := []struct {
+		status int
+		body   string
+		want   bool
+	}{
+		{408, "", true},
+		{429, "", true},
+		{500, "", true},
+		{502, "<html>502 Bad Gateway</html>", true},
+		{503, "", true},
+		{404, `{"error":"Workflow was not found"}`, true},
+		{404, `{"error":"not here"}`, false},
+		{400, "", false},
+		{401, "", false},
+		{403, "", false},
+		{409, "", false},
+	}
+	for _, tc := range cases {
+		if got := isTransientConfigStatus(tc.status, []byte(tc.body)); got != tc.want {
+			t.Errorf("status %d body %q: transient=%v, want %v", tc.status, tc.body, got, tc.want)
+		}
 	}
 }
