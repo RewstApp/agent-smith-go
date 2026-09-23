@@ -212,6 +212,17 @@ type configContext struct {
 	ServicePassword      string
 	Tuning               tuningFlags
 
+	// ConfigMaxAttempts and ConfigBaseRetryBackoffSeconds bound the retry of the
+	// install-time config fetch on a transient endpoint answer (sc-118306).
+	// Non-positive values fall back to defaultConfigMaxAttempts /
+	// defaultConfigBaseRetryBackoff. Install-time only, so not part of
+	// tuningFlags (which are persisted into the device configuration).
+	ConfigMaxAttempts             int
+	ConfigBaseRetryBackoffSeconds int
+
+	// retrySleep waits between config-fetch attempts; tests replace it.
+	retrySleep func(time.Duration)
+
 	Sys    agent.SystemInfoProvider
 	Domain agent.DomainInfoProvider
 
@@ -245,6 +256,18 @@ func newConfigFlagSet(params *configContext) *flag.FlagSet {
 		"disable-agent-postback",
 		false,
 		"Disable agent postback",
+	)
+	fs.IntVar(
+		&params.ConfigMaxAttempts,
+		"config-max-attempts",
+		defaultConfigMaxAttempts,
+		"Total attempts at the config endpoint before an install gives up on a transient answer (408, 429, 5xx, or the engine's transient 404); a refusal (other 4xx) is never retried",
+	)
+	fs.IntVar(
+		&params.ConfigBaseRetryBackoffSeconds,
+		"config-base-retry-backoff-seconds",
+		int(defaultConfigBaseRetryBackoff/time.Second),
+		"First delay between config-fetch attempts in seconds; doubles with jitter, capped at 30s",
 	)
 	fs.BoolVar(&params.NoAutoUpdates, "no-auto-updates", false, "No auto updates")
 	fs.StringVar(&params.GithubToken, "github-token", "", "GitHub token for update checks")

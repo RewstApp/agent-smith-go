@@ -4,16 +4,20 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"runtime"
+	"strings"
+	"time"
 
 	"github.com/RewstApp/agent-smith-go/internal/agent"
 	"github.com/RewstApp/agent-smith-go/internal/service"
 	"github.com/RewstApp/agent-smith-go/internal/utils"
 	"github.com/RewstApp/agent-smith-go/internal/version"
+	"github.com/hashicorp/go-hclog"
 )
 
 type fetchConfigurationResponse struct {
@@ -60,51 +64,15 @@ func runConfig(params *configContext) error {
 		return fmt.Errorf("failed to read host info: %w", err)
 	}
 
-	// Prepare http request and send
-	logger.Info("Sending", "data", string(hostInfoBytes), "to", params.ConfigUrl)
-	req, err := utils.NewRequest("POST", params.ConfigUrl, bytes.NewReader(hostInfoBytes))
+	// Fetch, retrying a transient endpoint answer. The endpoint is a Rewst
+	// workflow behind the engine's front door and answers a fraction of requests
+	// with the engine's own ceiling (408), a gateway error (5xx) or a transient
+	// routing 404; a fresh attempt a few seconds later succeeds. Before
+	// sc-118306 the first such answer failed the install outright, and in the
+	// integration suite it was the largest single source of red runs.
+	bodyBytes, err := fetchConfigurationWithRetry(params, hostInfoBytes, logger)
 	if err != nil {
-		return fmt.Errorf("failed to create request: %w", err)
-	}
-	req.Header.Set("x-rewst-secret", params.ConfigSecret)
-	req.Header.Set("Content-Type", "application/json")
-
-	httpClient := params.HTTPClient
-	if httpClient == nil {
-		httpClient = &http.Client{Timeout: configHTTPTimeout}
-	}
-	res, err := httpClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("failed to execute http request: %w", err)
-	}
-	defer func() {
-		err := res.Body.Close()
-		if err != nil {
-			logger.Error("Failed to close response body", "error", err)
-		}
-	}()
-
-	if res.StatusCode != http.StatusOK {
-		return fmt.Errorf("failed to fetch configuration: status %d", res.StatusCode)
-	}
-	logger.Info("Successfully fetched configuration", "status_code", res.StatusCode)
-
-	// Read through a bounded reader rather than a bare io.ReadAll: the endpoint
-	// is trusted to be Rewst, but a compromised, misconfigured or hijacked one
-	// could otherwise stream an unbounded body into memory for the whole
-	// configHTTPTimeout window. One byte over the ceiling is enough to tell a
-	// legitimate payload from an oversized one, and the fetch is aborted rather
-	// than parsing whatever prefix arrived — a truncated body would either fail
-	// to parse or, worse, parse into a partial configuration.
-	bodyBytes, err := io.ReadAll(io.LimitReader(res.Body, maxConfigResponseSize+1))
-	if err != nil {
-		return fmt.Errorf("failed to read response: %w", err)
-	}
-	if int64(len(bodyBytes)) > maxConfigResponseSize {
-		return fmt.Errorf(
-			"configuration response exceeds maximum allowed size of %d bytes",
-			maxConfigResponseSize,
-		)
+		return err
 	}
 
 	// Parse the fetch configuration response
@@ -389,4 +357,177 @@ func runConfig(params *configContext) error {
 
 	logger.Info("Service started")
 	return nil
+}
+
+// Config-fetch retry policy (sc-118306). Three attempts with a jittered
+// exponential backoff starting at 5s and capped at 30s keep the worst case
+// (~5 + ~10 + request time) well inside an installer's patience, while riding
+// out the single slow minute at the endpoint that used to fail installs.
+const (
+	defaultConfigMaxAttempts      = 3
+	defaultConfigBaseRetryBackoff = 5 * time.Second
+	maxConfigRetryBackoff         = 30 * time.Second
+
+	// transientConfig404Marker is the body the engine's front door returns when
+	// it transiently cannot route to a trigger that exists (seen alongside 502s
+	// on the same URL that answers 200 seconds later). A 404 without it is a
+	// refusal: the trigger URL is wrong.
+	transientConfig404Marker = "Workflow was not found"
+
+	// configErrorBodyExcerpt bounds how much of a refusal body reaches the error.
+	configErrorBodyExcerpt = 200
+)
+
+// configFetchError is one failed attempt at the config endpoint, classified so
+// the caller knows whether another attempt can help.
+type configFetchError struct {
+	err       error
+	transient bool
+}
+
+func (e *configFetchError) Error() string { return e.err.Error() }
+func (e *configFetchError) Unwrap() error { return e.err }
+
+// isTransientConfigStatus reports whether a non-2xx answer is the engine having
+// a bad moment (retry) rather than refusing the request (do not retry).
+func isTransientConfigStatus(status int, body []byte) bool {
+	switch {
+	case status == http.StatusRequestTimeout, status == http.StatusTooManyRequests:
+		return true
+	case status >= 500:
+		return true
+	case status == http.StatusNotFound:
+		return bytes.Contains(body, []byte(transientConfig404Marker))
+	}
+	return false
+}
+
+// fetchConfigurationWithRetry runs fetchConfigurationOnce up to
+// params.ConfigMaxAttempts times, sleeping a jittered, capped backoff between
+// transient failures, and returns the first successful body. A refusal, or the
+// last transient failure, is returned as-is with the attempt count appended so
+// an install log says what happened.
+func fetchConfigurationWithRetry(
+	params *configContext,
+	hostInfoBytes []byte,
+	logger hclog.Logger,
+) ([]byte, error) {
+	attempts := params.ConfigMaxAttempts
+	if attempts <= 0 {
+		attempts = defaultConfigMaxAttempts
+	}
+	base := time.Duration(params.ConfigBaseRetryBackoffSeconds) * time.Second
+	if base <= 0 {
+		base = defaultConfigBaseRetryBackoff
+	}
+	sleep := params.retrySleep
+	if sleep == nil {
+		sleep = time.Sleep
+	}
+
+	for attempt := 1; ; attempt++ {
+		body, err := fetchConfigurationOnce(params, hostInfoBytes, logger)
+		if err == nil {
+			return body, nil
+		}
+		var fe *configFetchError
+		transient := errors.As(err, &fe) && fe.transient
+		if !transient {
+			return nil, err
+		}
+		if attempt >= attempts {
+			if attempts > 1 {
+				return nil, fmt.Errorf("%w (transient; gave up after %d attempts)", err, attempts)
+			}
+			return nil, err
+		}
+		delay := utils.JitteredBackoff(base, maxConfigRetryBackoff, attempt-1)
+		logger.Info(
+			"Config endpoint answered transiently; retrying",
+			"attempt", attempt,
+			"of", attempts,
+			"error", err.Error(),
+			"retry_in", delay,
+		)
+		sleep(delay)
+	}
+}
+
+// fetchConfigurationOnce performs one POST to the config endpoint and returns
+// the bounded response body on a 2xx. Failures are classified: a request that
+// never completed and a transient status are retryable; any other non-2xx is a
+// refusal and carries a body excerpt so the operator sees why.
+func fetchConfigurationOnce(
+	params *configContext,
+	hostInfoBytes []byte,
+	logger hclog.Logger,
+) ([]byte, error) {
+	req, err := utils.NewRequest("POST", params.ConfigUrl, bytes.NewReader(hostInfoBytes))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set("x-rewst-secret", params.ConfigSecret)
+	req.Header.Set("Content-Type", "application/json")
+
+	httpClient := params.HTTPClient
+	if httpClient == nil {
+		httpClient = &http.Client{Timeout: configHTTPTimeout}
+	}
+	res, err := httpClient.Do(req)
+	if err != nil {
+		// Connection refused, DNS, or the configHTTPTimeout ceiling: nothing was
+		// answered, and a blip during install is exactly the case worth a retry.
+		return nil, &configFetchError{
+			err:       fmt.Errorf("failed to execute http request: %w", err),
+			transient: true,
+		}
+	}
+	defer func() {
+		if err := res.Body.Close(); err != nil {
+			logger.Error("Failed to close response body", "error", err)
+		}
+	}()
+
+	// Read through a bounded reader rather than a bare io.ReadAll: the endpoint
+	// is trusted to be Rewst, but a compromised, misconfigured or hijacked one
+	// could otherwise stream an unbounded body into memory for the whole
+	// configHTTPTimeout window. One byte over the ceiling is enough to tell a
+	// legitimate payload from an oversized one, and the fetch is aborted rather
+	// than parsing whatever prefix arrived — a truncated body would either fail
+	// to parse or, worse, parse into a partial configuration.
+	bodyBytes, err := io.ReadAll(io.LimitReader(res.Body, maxConfigResponseSize+1))
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response body: %w", err)
+	}
+
+	if res.StatusCode < 200 || res.StatusCode > 299 {
+		if isTransientConfigStatus(res.StatusCode, bodyBytes) {
+			return nil, &configFetchError{
+				err:       fmt.Errorf("failed to fetch configuration: status %d", res.StatusCode),
+				transient: true,
+			}
+		}
+		excerpt := strings.TrimSpace(string(bodyBytes))
+		if len(excerpt) > configErrorBodyExcerpt {
+			excerpt = excerpt[:configErrorBodyExcerpt] + "…"
+		}
+		if excerpt != "" {
+			return nil, fmt.Errorf(
+				"failed to fetch configuration: status %d (refused; not retried): %s",
+				res.StatusCode, excerpt,
+			)
+		}
+		return nil, fmt.Errorf(
+			"failed to fetch configuration: status %d (refused; not retried)", res.StatusCode,
+		)
+	}
+	logger.Info("Successfully fetched configuration", "status_code", res.StatusCode)
+
+	if int64(len(bodyBytes)) > maxConfigResponseSize {
+		return nil, fmt.Errorf(
+			"configuration response exceeds maximum allowed size of %d bytes",
+			maxConfigResponseSize,
+		)
+	}
+	return bodyBytes, nil
 }
