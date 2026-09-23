@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -45,6 +46,20 @@ type serviceContext struct {
 	// interrupted). See commandJournal. nil disables journaling, which is what
 	// most unit tests want.
 	journal *commandJournal
+
+	// workers tracks every command worker started by any connection cycle in
+	// this process. Workers outlive the cycle that started them - a cycle
+	// ending for a SAS renewal or a lost connection must not kill the commands
+	// it is running (sc-118039) - so the service stop path waits on this group
+	// rather than on anything cycle-scoped. See startWorkers / stopWorkers.
+	workers sync.WaitGroup
+
+	// owned holds the journal keys this process has accepted: queued, running,
+	// or posting back. The pre-connect replay snapshot skips them - they are
+	// live in this process, not leftovers from a previous one - which is what
+	// lets an outgoing cycle's workers keep running while the next cycle
+	// replays only what a dead process left behind.
+	owned sync.Map
 
 	// droppedMessages counts inbound messages the agent could not accept and had
 	// to discard. Under normal operation the subscribe callback applies
