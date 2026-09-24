@@ -164,7 +164,6 @@ jobs:
               verbose_stderr_commands = $unixVerboseStderr
               verbose_hang_commands = $unixVerboseHang
               success_patterns = "Command completed`nSending postback`nPostback sent"
-              no_auto_updates_extra = ''
               # Moved under the data directory (sc-108848); deterministic and
               # fixed, unlike the old $TMPDIR-based path, so it can be a
               # static matrix value rather than resolved from the log.
@@ -196,7 +195,6 @@ jobs:
               verbose_hang_commands = $winVerboseHang
               child_process_hang_commands = $winChildProcessHang
               success_patterns = "Command completed`nSending postback`nPostback already sent"
-              no_auto_updates_extra = '--disable-agent-postback'
               # Deliberately NOT moved (sc-108848): some customers whitelist
               # this exact path in their endpoint security software so the
               # agent's dynamically-written scripts are not flagged/blocked.
@@ -227,7 +225,6 @@ jobs:
               verbose_stderr_commands = $unixVerboseStderr
               verbose_hang_commands = $unixVerboseHang
               success_patterns = "Command completed`nSending postback`nPostback sent"
-              no_auto_updates_extra = ''
               # Moved under the data directory (sc-108848); deterministic and
               # fixed, unlike the old $TMPDIR-based path, so it can be a
               # static matrix value rather than resolved from the log.
@@ -504,7 +501,7 @@ jobs:
         uses: ./.github/actions/run-agent
         with:
           binary: ${{ matrix.binary }}
-          args: --update --org-id ${{ vars.IT_ORG_ID }} --no-auto-updates ${{ matrix.no_auto_updates_extra }} --github-token ${{ secrets.GITHUB_TOKEN }}
+          args: --update --org-id ${{ vars.IT_ORG_ID }} --no-auto-updates --github-token ${{ secrets.GITHUB_TOKEN }}
 
       - name: Check logs for no auto updater
         uses: ./.github/actions/assert-log-missing
@@ -512,6 +509,23 @@ jobs:
           log_file: ${{ matrix.log_file }}
           pattern: Starting auto updater
           wait_for_file_seconds: "30"
+
+      # --disable-agent-postback only has an effect on Windows: the PowerShell
+      # executor's AlwaysPostback() is false there because the typed PowerShell
+      # the engine wraps commands in posts its own result, so the agent's
+      # duplicate postback is what "Postback already sent" records. On Linux
+      # and macOS the executor always posts back and the flag is ignored. This
+      # is the one scenario that verifies the flag, so it is passed here,
+      # explicitly, and nowhere else (sc-117885: it used to ride along in a
+      # Windows-only matrix value that seven unrelated update steps inherited).
+      # The syslog update below runs without it, which re-enables the agent
+      # postback - every --update resets the option from its own flags.
+      - name: Update agent with the agent postback disabled (windows)
+        if: matrix.os == 'windows-latest'
+        uses: ./.github/actions/run-agent
+        with:
+          binary: ${{ matrix.binary }}
+          args: --update --org-id ${{ vars.IT_ORG_ID }} --no-auto-updates --disable-agent-postback --github-token ${{ secrets.GITHUB_TOKEN }}
 
       - name: Send test command (windows postback verification)
         if: matrix.os == 'windows-latest'
@@ -961,15 +975,6 @@ jobs:
         run: |
           & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/capture-restore-baseline-counts.ps1"
 
-      # Deliberately NOT ${{ matrix.no_auto_updates_extra }}: that variable exists
-      # for the postback-verification scenario above and, on windows, carries
-      # --disable-agent-postback. This scenario copied the reinstall line and
-      # inherited the flag by accident (d8e13a7), which is why the hanging-command
-      # send below always took ~166s on windows and ~20s elsewhere: the agent
-      # timed the command out on schedule and then, with postback disabled,
-      # returned from processMessage before sendPostbackWithRetry - so the engine
-      # waited for a result that would never arrive and gave up at its ceiling.
-      # It only needs --no-auto-updates, which is spelled out.
       - name: Install IT binary to exercise the default command timeout
         uses: ./.github/actions/run-agent
         with:
@@ -1312,9 +1317,6 @@ jobs:
       # graceful - no Error "Connection lost" is produced. Deltas are compared
       # because earlier cycles already left "Subscribed to messages"/"Connection
       # lost" lines in the log.
-      # Same accidental inheritance of no_auto_updates_extra as the default-timeout
-      # reinstall (see the comment there); nothing this scenario asserts involves
-      # postback, so only --no-auto-updates is wanted.
       - name: Install IT binary with short SAS token lifetime
         uses: ./.github/actions/run-agent
         with:
@@ -1443,8 +1445,8 @@ jobs:
       # passed: it resets to the default (Info), which keeps the Warn under test
       # visible while leaving the debug handler that dumps whole command outputs
       # into the log switched off. --disable-agent-postback is likewise not
-      # passed (unlike the sweep scenario) so the truncated result actually
-      # traverses the postback path on every platform.
+      # passed, so the truncated result actually traverses the postback path
+      # on every platform.
       #
       # Coverage note: these steps assert on the agent log, which is where the
       # byte counts are observable on the endpoint. The same counts are what the
@@ -1871,7 +1873,7 @@ jobs:
         uses: ./.github/actions/run-agent
         with:
           binary: ${{ matrix.binary }}
-          args: --update --org-id ${{ vars.IT_ORG_ID }} --no-auto-updates ${{ matrix.no_auto_updates_extra }} --command-timeout-seconds 600 --github-token ${{ secrets.GITHUB_TOKEN }}
+          args: --update --org-id ${{ vars.IT_ORG_ID }} --no-auto-updates --command-timeout-seconds 600 --github-token ${{ secrets.GITHUB_TOKEN }}
 
       - name: Wait for fresh subscription before the sweep scenario (Unix)
         if: runner.os != 'Windows'
@@ -2007,7 +2009,7 @@ jobs:
         uses: ./.github/actions/run-agent
         with:
           binary: ${{ matrix.binary }}
-          args: --update --org-id ${{ vars.IT_ORG_ID }} --no-auto-updates ${{ matrix.no_auto_updates_extra }} --github-token ${{ secrets.GITHUB_TOKEN }}
+          args: --update --org-id ${{ vars.IT_ORG_ID }} --no-auto-updates --github-token ${{ secrets.GITHUB_TOKEN }}
 
       - name: Wait for and assert the startup sweep was logged (Unix)
         if: runner.os != 'Windows'
@@ -2088,7 +2090,7 @@ jobs:
         uses: ./.github/actions/run-agent
         with:
           binary: ${{ matrix.binary }}
-          args: --update --org-id ${{ vars.IT_ORG_ID }} --no-auto-updates ${{ matrix.no_auto_updates_extra }} --github-token ${{ secrets.GITHUB_TOKEN }}
+          args: --update --org-id ${{ vars.IT_ORG_ID }} --no-auto-updates --github-token ${{ secrets.GITHUB_TOKEN }}
 
       - name: Wait for and assert the installer sweep was logged (Unix)
         if: runner.os != 'Windows'
@@ -2380,7 +2382,7 @@ jobs:
         uses: ./.github/actions/run-agent
         with:
           binary: ${{ matrix.binary }}
-          args: --update --org-id ${{ vars.IT_ORG_ID }} --no-auto-updates ${{ matrix.no_auto_updates_extra }} --github-token ${{ secrets.GITHUB_TOKEN }}
+          args: --update --org-id ${{ vars.IT_ORG_ID }} --no-auto-updates --github-token ${{ secrets.GITHUB_TOKEN }}
 
       - name: Wait for resubscription after the retry scenario (Unix)
         if: (always()) && runner.os != 'Windows'
@@ -2484,7 +2486,7 @@ jobs:
         uses: ./.github/actions/run-agent
         with:
           binary: ${{ matrix.binary }}
-          args: --update --org-id ${{ vars.IT_ORG_ID }} --no-auto-updates ${{ matrix.no_auto_updates_extra }} --github-token ${{ secrets.GITHUB_TOKEN }}
+          args: --update --org-id ${{ vars.IT_ORG_ID }} --no-auto-updates --github-token ${{ secrets.GITHUB_TOKEN }}
 
       - name: Start stub release endpoint (missing digest)
         id: stub_release_missing_digest
@@ -2552,7 +2554,7 @@ jobs:
         uses: ./.github/actions/run-agent
         with:
           binary: ${{ matrix.binary }}
-          args: --update --org-id ${{ vars.IT_ORG_ID }} --no-auto-updates ${{ matrix.no_auto_updates_extra }} --github-token ${{ secrets.GITHUB_TOKEN }}
+          args: --update --org-id ${{ vars.IT_ORG_ID }} --no-auto-updates --github-token ${{ secrets.GITHUB_TOKEN }}
       # ---- Wedged Windows service stop scenario (sc-106108) ----
       # windowsService.Stop() polled the service state every 250ms in an
       # unbounded loop, so a service that never reached Stopped hung its caller
@@ -2826,13 +2828,12 @@ jobs:
           BINARY: ${{ matrix.binary }}
           ORG_ID: ${{ vars.IT_ORG_ID }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          NO_AUTO_UPDATES_EXTRA: ${{ matrix.no_auto_updates_extra }}
         run: |
           # The bound must only catch a wedge: once the endpoint is recovered, an
           # ordinary update stops the service, replaces the binary and starts it
           # again with no behavioral change.
           $out = & "./dist/$($env:BINARY)" --update --org-id $env:ORG_ID --no-auto-updates `
-            $env:NO_AUTO_UPDATES_EXTRA --github-token $env:GH_TOKEN 2>&1 | Out-String
+            --github-token $env:GH_TOKEN 2>&1 | Out-String
           $global:LASTEXITCODE = 0
           Write-Output $out
 
