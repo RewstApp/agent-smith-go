@@ -42,6 +42,8 @@ jobs:
       matrix:
         os: ${{ fromJson(inputs.os == 'all' && '[''windows-latest'',''ubuntu-latest'',''macos-latest'']' || format('[{0}{1}{0}]', '''', inputs.os)) }}
     runs-on: ${{ matrix.os }}
+    # 2x the p95 of the last 20 runs (see README "Bounding the integration jobs").
+    timeout-minutes: 10
     steps:
       - name: Checkout code
         uses: actions/checkout@v5
@@ -79,6 +81,8 @@ jobs:
     permissions:
       contents: read
     runs-on: ubuntu-latest
+    # 2x the p95 of the last 20 runs (see README "Bounding the integration jobs").
+    timeout-minutes: 5
     outputs:
       matrix: ${{ steps.gen.outputs.matrix }}
     steps:
@@ -260,6 +264,8 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJson(needs.set-matrix.outputs.matrix) }}
     runs-on: ${{ matrix.os }}
+    # 2x the p95 of the last 20 runs (see README "Bounding the integration jobs").
+    timeout-minutes: 55
     steps:
       - name: Checkout code
         uses: actions/checkout@v5
@@ -270,6 +276,7 @@ jobs:
         uses: ./.github/actions/inject-profile-noise
 
       - name: Install agent
+        timeout-minutes: 20
         id: install_agent
         uses: ./.github/actions/install-agent
         with:
@@ -282,6 +289,7 @@ jobs:
           github_token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Check install output for profile noise
+        timeout-minutes: 5
         if: matrix.os == 'windows-latest'
         uses: ./.github/actions/check-profile-noise
         with:
@@ -289,11 +297,13 @@ jobs:
           noise: ${{ steps.inject_profile_noise.outputs.noise }}
 
       - name: Check service
+        timeout-minutes: 5
         uses: ./.github/actions/check-service
         with:
           service: ${{ matrix.service }}
 
       - name: Validate config and get device id
+        timeout-minutes: 5
         id: config
         uses: ./.github/actions/validate-config
         with:
@@ -301,6 +311,7 @@ jobs:
           org_id: ${{ vars.IT_ORG_ID }}
 
       - name: Check subscribed messages log for topic and QoS
+        timeout-minutes: 5
         uses: ./.github/actions/assert-log-contains
         with:
           log_file: ${{ matrix.log_file }}
@@ -309,6 +320,7 @@ jobs:
           wait_seconds: "10"
 
       - name: Send success command
+        timeout-minutes: 20
         uses: ./.github/actions/send-command
         with:
           trigger_url: ${{ vars.IT_SEND_COMMAND_TRIGGER_URL }}
@@ -317,6 +329,7 @@ jobs:
           expected_output: ${{ matrix.success_output }}
 
       - name: Check logs for successful command
+        timeout-minutes: 5
         uses: ./.github/actions/assert-log-contains
         with:
           log_file: ${{ matrix.log_file }}
@@ -331,12 +344,14 @@ jobs:
       # confirms the historical path still exists (see the action's
       # description for why).
       - name: Assert scripts directory has hardened permissions
+        timeout-minutes: 5
         uses: ./.github/actions/assert-scripts-dir-permissions
         with:
           scripts_dir: ${{ matrix.scripts_dir }}
           expected_owner: ${{ matrix.scripts_dir_owner }}
 
       - name: Send failing command
+        timeout-minutes: 20
         uses: ./.github/actions/send-command
         with:
           trigger_url: ${{ vars.IT_SEND_COMMAND_TRIGGER_URL }}
@@ -344,6 +359,7 @@ jobs:
           commands: ${{ matrix.failure_commands }}
 
       - name: Check logs for error handling
+        timeout-minutes: 5
         uses: ./.github/actions/assert-log-contains
         with:
           log_file: ${{ matrix.log_file }}
@@ -351,6 +367,7 @@ jobs:
           wait_seconds: "15"
 
       - name: Install integration test binary (old version)
+        timeout-minutes: 10
         uses: ./.github/actions/run-agent
         with:
           binary: ${{ matrix.it_binary }}
@@ -380,12 +397,14 @@ jobs:
         run: |
           & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/capture-pre-auto-update-baseline-counts.ps1"
       - name: Wait for auto updater to trigger and update
+        timeout-minutes: 6
         uses: ./.github/actions/wait-for-log-line
         with:
           log_file: ${{ matrix.log_file }}
           pattern: Updating agent
 
       - name: Verify auto update completed
+        timeout-minutes: 5
         uses: ./.github/actions/verify-auto-update
         with:
           log_file: ${{ matrix.log_file }}
@@ -408,6 +427,7 @@ jobs:
       # above, and "Subscribed to messages" already has lines from earlier
       # scenarios.
       - name: Assert the update helper survived to restart the service (Unix)
+        timeout-minutes: 6
         if: runner.os != 'Windows'
         shell: bash
         env:
@@ -420,6 +440,7 @@ jobs:
           sudo --preserve-env=LOG_FILE,BASELINE "$pwsh_path" -NoProfile -File "$GITHUB_WORKSPACE/.github/workflows/it-scripts/assert-the-update-helper-survived-to-restart-the-service.ps1"
 
       - name: Assert the update helper survived to restart the service (Windows)
+        timeout-minutes: 6
         if: runner.os == 'Windows'
         shell: pwsh
         env:
@@ -428,11 +449,13 @@ jobs:
         run: |
           & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/assert-the-update-helper-survived-to-restart-the-service.ps1"
       - name: Check service is active after auto-update
+        timeout-minutes: 5
         uses: ./.github/actions/check-service
         with:
           service: ${{ matrix.service }}
 
       - name: Wait for fresh subscription after auto-update (Unix)
+        timeout-minutes: 6
         if: runner.os != 'Windows'
         shell: bash
         env:
@@ -445,6 +468,7 @@ jobs:
           sudo --preserve-env=LOG_FILE,BASELINE "$pwsh_path" -NoProfile -File "$GITHUB_WORKSPACE/.github/workflows/it-scripts/wait-for-fresh-subscription-after-auto-update.ps1"
 
       - name: Wait for fresh subscription after auto-update (Windows)
+        timeout-minutes: 6
         if: runner.os == 'Windows'
         shell: pwsh
         env:
@@ -453,6 +477,7 @@ jobs:
         run: |
           & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/wait-for-fresh-subscription-after-auto-update.ps1"
       - name: Send command after auto-update
+        timeout-minutes: 20
         uses: ./.github/actions/send-command
         with:
           trigger_url: ${{ vars.IT_SEND_COMMAND_TRIGGER_URL }}
@@ -461,6 +486,7 @@ jobs:
           expected_output: ${{ matrix.success_output }}
 
       - name: Check logs for command completion after auto-update
+        timeout-minutes: 5
         uses: ./.github/actions/assert-log-contains
         with:
           log_file: ${{ matrix.log_file }}
@@ -468,12 +494,14 @@ jobs:
           wait_seconds: "15"
 
       - name: Update logging level to debug
+        timeout-minutes: 10
         uses: ./.github/actions/run-agent
         with:
           binary: ${{ matrix.binary }}
           args: --update --org-id ${{ vars.IT_ORG_ID }} --logging-level debug --github-token ${{ secrets.GITHUB_TOKEN }}
 
       - name: Send test command (debug)
+        timeout-minutes: 20
         uses: ./.github/actions/send-command
         with:
           trigger_url: ${{ vars.IT_SEND_COMMAND_TRIGGER_URL }}
@@ -482,28 +510,33 @@ jobs:
           expected_output: ${{ matrix.success_output }}
 
       - name: Check logs for debug level
+        timeout-minutes: 5
         uses: ./.github/actions/assert-log-contains
         with:
           log_file: ${{ matrix.log_file }}
           patterns: DEBUG
 
       - name: Stop service
+        timeout-minutes: 5
         uses: ./.github/actions/stop-service
         with:
           service: ${{ matrix.service }}
 
       - name: Delete log file
+        timeout-minutes: 5
         uses: ./.github/actions/delete-log
         with:
           log_file: ${{ matrix.log_file }}
 
       - name: Update agent (no auto updates)
+        timeout-minutes: 10
         uses: ./.github/actions/run-agent
         with:
           binary: ${{ matrix.binary }}
           args: --update --org-id ${{ vars.IT_ORG_ID }} --no-auto-updates --github-token ${{ secrets.GITHUB_TOKEN }}
 
       - name: Check logs for no auto updater
+        timeout-minutes: 5
         uses: ./.github/actions/assert-log-missing
         with:
           log_file: ${{ matrix.log_file }}
@@ -521,6 +554,7 @@ jobs:
       # The syslog update below runs without it, which re-enables the agent
       # postback - every --update resets the option from its own flags.
       - name: Update agent with the agent postback disabled (windows)
+        timeout-minutes: 10
         if: matrix.os == 'windows-latest'
         uses: ./.github/actions/run-agent
         with:
@@ -528,6 +562,7 @@ jobs:
           args: --update --org-id ${{ vars.IT_ORG_ID }} --no-auto-updates --disable-agent-postback --github-token ${{ secrets.GITHUB_TOKEN }}
 
       - name: Send test command (windows postback verification)
+        timeout-minutes: 20
         if: matrix.os == 'windows-latest'
         uses: ./.github/actions/send-command
         with:
@@ -537,6 +572,7 @@ jobs:
           expected_output: ${{ matrix.success_output }}
 
       - name: Check logs for command received (windows)
+        timeout-minutes: 5
         if: matrix.os == 'windows-latest'
         uses: ./.github/actions/assert-log-contains
         with:
@@ -544,6 +580,7 @@ jobs:
           patterns: Command completed
 
       - name: Check logs absent postback (windows)
+        timeout-minutes: 5
         if: matrix.os == 'windows-latest'
         uses: ./.github/actions/assert-log-missing
         with:
@@ -551,12 +588,14 @@ jobs:
           pattern: Postback already sent
 
       - name: Update agent with syslog
+        timeout-minutes: 10
         uses: ./.github/actions/run-agent
         with:
           binary: ${{ matrix.binary }}
           args: --update --org-id ${{ vars.IT_ORG_ID }} --syslog --github-token ${{ secrets.GITHUB_TOKEN }}
 
       - name: Send test command (syslog)
+        timeout-minutes: 20
         uses: ./.github/actions/send-command
         with:
           trigger_url: ${{ vars.IT_SEND_COMMAND_TRIGGER_URL }}
@@ -565,6 +604,7 @@ jobs:
           expected_output: ${{ matrix.success_output }}
 
       - name: Check syslog for command completed
+        timeout-minutes: 5
         uses: ./.github/actions/assert-syslog-contains
         with:
           service: ${{ matrix.service }}
@@ -598,12 +638,14 @@ jobs:
         run: |
           & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/capture-reconnect-baseline-counts.ps1"
       - name: Disrupt broker connection
+        timeout-minutes: 5
         uses: ./.github/actions/disrupt-connection
         with:
           mode: block
           host: ${{ steps.config.outputs.azure_iot_hub_host }}
 
       - name: Wait for connection lost detection
+        timeout-minutes: 6
         uses: ./.github/actions/wait-for-log-line
         with:
           log_file: ${{ matrix.log_file }}
@@ -612,6 +654,7 @@ jobs:
           interval_seconds: "2"
 
       - name: Assert connection lost and reconnect/backoff activity
+        timeout-minutes: 5
         uses: ./.github/actions/assert-log-contains
         with:
           log_file: ${{ matrix.log_file }}
@@ -622,6 +665,7 @@ jobs:
           wait_seconds: "10"
 
       - name: Restore broker connection
+        timeout-minutes: 5
         if: always()
         uses: ./.github/actions/disrupt-connection
         with:
@@ -629,6 +673,7 @@ jobs:
           host: ${{ steps.config.outputs.azure_iot_hub_host }}
 
       - name: Wait for fresh subscription after reconnect (Unix)
+        timeout-minutes: 6
         if: runner.os != 'Windows'
         shell: bash
         env:
@@ -641,6 +686,7 @@ jobs:
           sudo --preserve-env=LOG_FILE,BASELINE "$pwsh_path" -NoProfile -File "$GITHUB_WORKSPACE/.github/workflows/it-scripts/wait-for-fresh-subscription-after-reconnect.ps1"
 
       - name: Wait for fresh subscription after reconnect (Windows)
+        timeout-minutes: 6
         if: runner.os == 'Windows'
         shell: pwsh
         env:
@@ -649,6 +695,7 @@ jobs:
         run: |
           & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/wait-for-fresh-subscription-after-reconnect.ps1"
       - name: Send command after reconnect
+        timeout-minutes: 20
         uses: ./.github/actions/send-command
         with:
           trigger_url: ${{ vars.IT_SEND_COMMAND_TRIGGER_URL }}
@@ -657,6 +704,7 @@ jobs:
           expected_output: ${{ matrix.success_output }}
 
       - name: Assert command executed exactly once after reconnect (Unix)
+        timeout-minutes: 6
         if: runner.os != 'Windows'
         shell: bash
         env:
@@ -669,6 +717,7 @@ jobs:
           sudo --preserve-env=LOG_FILE,BASELINE "$pwsh_path" -NoProfile -File "$GITHUB_WORKSPACE/.github/workflows/it-scripts/assert-command-executed-exactly-once-after-reconnect.ps1"
 
       - name: Assert command executed exactly once after reconnect (Windows)
+        timeout-minutes: 6
         if: runner.os == 'Windows'
         shell: pwsh
         env:
@@ -732,18 +781,21 @@ jobs:
         run: |
           & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/resolve-the-scripts-directory-suback-scenario.ps1"
       - name: Snapshot temp script files before the withheld-SUBACK scenario
+        timeout-minutes: 5
         uses: ./.github/actions/assert-no-orphaned-scripts
         with:
           mode: snapshot
           scripts_dir: ${{ (steps.suback_scripts_dir_unix.outputs.path || steps.suback_scripts_dir_windows.outputs.path) }}
 
       - name: Start stub broker withholding SUBACK
+        timeout-minutes: 5
         id: stub_broker
         uses: ./.github/actions/stub-broker
         with:
           mode: start
 
       - name: Point agent at the stub broker
+        timeout-minutes: 5
         id: stub_host
         uses: ./.github/actions/set-broker-host
         with:
@@ -755,12 +807,14 @@ jobs:
       # The short subscribe timeout keeps each wedged cycle to ~10s so several
       # backoff slots are observable inside the job.
       - name: Restart agent against the stub broker
+        timeout-minutes: 10
         uses: ./.github/actions/run-agent
         with:
           binary: ${{ matrix.binary }}
           args: --update --org-id ${{ vars.IT_ORG_ID }} --mqtt-subscribe-timeout-seconds 10 --github-token ${{ secrets.GITHUB_TOKEN }}
 
       - name: Assert bounded subscribe failure and growing backoff (Unix)
+        timeout-minutes: 6
         if: runner.os != 'Windows'
         id: assert_suback_withheld_unix
         shell: bash
@@ -776,6 +830,7 @@ jobs:
           sudo --preserve-env=LOG_FILE,BASE_TIMED_OUT,BASE_BACKOFFS,BASE_SUBSCRIBED "$pwsh_path" -NoProfile -File "$GITHUB_WORKSPACE/.github/workflows/it-scripts/assert-bounded-subscribe-failure-and-growing-backoff.ps1"
 
       - name: Assert bounded subscribe failure and growing backoff (Windows)
+        timeout-minutes: 6
         if: runner.os == 'Windows'
         id: assert_suback_withheld_windows
         shell: pwsh
@@ -813,6 +868,7 @@ jobs:
       # token.Wait() the stop signal was never reached, the platform waited out
       # its stop deadline (30s on the Windows SCM) and force-killed the process.
       - name: Assert the service stops promptly while wedged on the stub broker (Unix)
+        timeout-minutes: 6
         if: runner.os != 'Windows'
         shell: bash
         env:
@@ -825,6 +881,7 @@ jobs:
           sudo --preserve-env=LOG_FILE,SERVICE "$pwsh_path" -NoProfile -File "$GITHUB_WORKSPACE/.github/workflows/it-scripts/assert-the-service-stops-promptly-while-wedged-on-the-stub-broker.ps1"
 
       - name: Assert the service stops promptly while wedged on the stub broker (Windows)
+        timeout-minutes: 6
         if: runner.os == 'Windows'
         shell: pwsh
         env:
@@ -833,17 +890,20 @@ jobs:
         run: |
           & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/assert-the-service-stops-promptly-while-wedged-on-the-stub-broker.ps1"
       - name: Assert no orphaned scripts after the wedged stop
+        timeout-minutes: 5
         uses: ./.github/actions/assert-no-orphaned-scripts
         with:
           mode: assert
           scripts_dir: ${{ (steps.suback_scripts_dir_unix.outputs.path || steps.suback_scripts_dir_windows.outputs.path) }}
 
       - name: Restart the service against the still-withholding broker
+        timeout-minutes: 5
         uses: ./.github/actions/start-service
         with:
           service: ${{ matrix.service }}
 
       - name: Wait for the agent to wedge on the stub broker again
+        timeout-minutes: 6
         uses: ./.github/actions/wait-for-log-line
         with:
           log_file: ${{ matrix.log_file }}
@@ -854,11 +914,13 @@ jobs:
       # Flipped on the live connection - the stub re-reads its mode per packet -
       # so recovery is the agent's own next reconnect cycle, not a restart.
       - name: Switch stub broker to acknowledge SUBACK
+        timeout-minutes: 5
         uses: ./.github/actions/stub-broker
         with:
           mode: ack
 
       - name: Assert the agent recovers on a later cycle (Unix)
+        timeout-minutes: 6
         if: runner.os != 'Windows'
         shell: bash
         env:
@@ -871,6 +933,7 @@ jobs:
           sudo --preserve-env=LOG_FILE,BASELINE "$pwsh_path" -NoProfile -File "$GITHUB_WORKSPACE/.github/workflows/it-scripts/assert-the-agent-recovers-on-a-later-cycle.ps1"
 
       - name: Assert the agent recovers on a later cycle (Windows)
+        timeout-minutes: 6
         if: runner.os == 'Windows'
         shell: pwsh
         env:
@@ -879,6 +942,7 @@ jobs:
         run: |
           & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/assert-the-agent-recovers-on-a-later-cycle.ps1"
       - name: Restore the real broker host
+        timeout-minutes: 5
         if: always() && steps.stub_host.outputs.previous_host != ''
         uses: ./.github/actions/set-broker-host
         with:
@@ -887,6 +951,7 @@ jobs:
           host: ${{ steps.stub_host.outputs.previous_host }}
 
       - name: Stop stub broker
+        timeout-minutes: 5
         if: always()
         uses: ./.github/actions/stub-broker
         with:
@@ -917,6 +982,7 @@ jobs:
           & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/capture-restore-baseline-counts.ps1"
 
       - name: Restart agent against the real broker
+        timeout-minutes: 10
         if: always() && steps.stub_host.outputs.previous_host != ''
         uses: ./.github/actions/run-agent
         with:
@@ -924,6 +990,7 @@ jobs:
           args: --update --org-id ${{ vars.IT_ORG_ID }} --mqtt-subscribe-timeout-seconds 30 --github-token ${{ secrets.GITHUB_TOKEN }}
 
       - name: Wait for resubscription to the real broker
+        timeout-minutes: 6
         if: always() && steps.stub_host.outputs.previous_host != ''
         uses: ./.github/actions/wait-for-log-line
         with:
@@ -976,12 +1043,14 @@ jobs:
           & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/capture-restore-baseline-counts.ps1"
 
       - name: Install IT binary to exercise the default command timeout
+        timeout-minutes: 10
         uses: ./.github/actions/run-agent
         with:
           binary: ${{ matrix.it_binary }}
           args: --update --org-id ${{ vars.IT_ORG_ID }} --no-auto-updates --github-token ${{ secrets.GITHUB_TOKEN }}
 
       - name: Wait for fresh subscription after default-timeout binary install
+        timeout-minutes: 6
         uses: ./.github/actions/wait-for-log-line
         with:
           log_file: ${{ matrix.log_file }}
@@ -1011,6 +1080,7 @@ jobs:
         run: |
           & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/capture-command-timeout-baseline-counts.ps1"
       - name: Send hanging command with no command_timeout_seconds configured
+        timeout-minutes: 20
         uses: ./.github/actions/send-command
         with:
           trigger_url: ${{ vars.IT_SEND_COMMAND_TRIGGER_URL }}
@@ -1018,6 +1088,7 @@ jobs:
           commands: ${{ matrix.timeout_commands }}
 
       - name: Assert hanging command was killed by the default timeout (Unix)
+        timeout-minutes: 6
         if: runner.os != 'Windows'
         shell: bash
         env:
@@ -1030,6 +1101,7 @@ jobs:
           sudo --preserve-env=LOG_FILE,BASELINE "$pwsh_path" -NoProfile -File "$GITHUB_WORKSPACE/.github/workflows/it-scripts/assert-hanging-command-was-killed-by-the-timeout.ps1"
 
       - name: Assert hanging command was killed by the default timeout (Windows)
+        timeout-minutes: 6
         if: runner.os == 'Windows'
         shell: pwsh
         env:
@@ -1038,6 +1110,7 @@ jobs:
         run: |
           & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/assert-hanging-command-was-killed-by-the-timeout.ps1"
       - name: Send command after default timeout
+        timeout-minutes: 20
         uses: ./.github/actions/send-command
         with:
           trigger_url: ${{ vars.IT_SEND_COMMAND_TRIGGER_URL }}
@@ -1046,6 +1119,7 @@ jobs:
           expected_output: ${{ matrix.success_output }}
 
       - name: Assert worker pool recovered after default timeout (Unix)
+        timeout-minutes: 6
         if: runner.os != 'Windows'
         shell: bash
         env:
@@ -1058,6 +1132,7 @@ jobs:
           sudo --preserve-env=LOG_FILE,BASELINE "$pwsh_path" -NoProfile -File "$GITHUB_WORKSPACE/.github/workflows/it-scripts/assert-worker-pool-recovered-after-timeout.ps1"
 
       - name: Assert worker pool recovered after default timeout (Windows)
+        timeout-minutes: 6
         if: runner.os == 'Windows'
         shell: pwsh
         env:
@@ -1076,12 +1151,14 @@ jobs:
       # recovered instead of staying wedged. Counts are compared as deltas because
       # the log already carries lines from earlier cycles.
       - name: Enable short command timeout
+        timeout-minutes: 10
         uses: ./.github/actions/run-agent
         with:
           binary: ${{ matrix.binary }}
           args: --update --org-id ${{ vars.IT_ORG_ID }} --command-timeout-seconds 5 --github-token ${{ secrets.GITHUB_TOKEN }}
 
       - name: Wait for fresh subscription after timeout update
+        timeout-minutes: 6
         uses: ./.github/actions/wait-for-log-line
         with:
           log_file: ${{ matrix.log_file }}
@@ -1110,6 +1187,7 @@ jobs:
         run: |
           & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/capture-command-timeout-baseline-counts.ps1"
       - name: Send hanging command
+        timeout-minutes: 20
         uses: ./.github/actions/send-command
         with:
           trigger_url: ${{ vars.IT_SEND_COMMAND_TRIGGER_URL }}
@@ -1117,6 +1195,7 @@ jobs:
           commands: ${{ matrix.timeout_commands }}
 
       - name: Assert hanging command was killed by the timeout (Unix)
+        timeout-minutes: 6
         if: runner.os != 'Windows'
         shell: bash
         env:
@@ -1129,6 +1208,7 @@ jobs:
           sudo --preserve-env=LOG_FILE,BASELINE "$pwsh_path" -NoProfile -File "$GITHUB_WORKSPACE/.github/workflows/it-scripts/assert-hanging-command-was-killed-by-the-timeout.ps1"
 
       - name: Assert hanging command was killed by the timeout (Windows)
+        timeout-minutes: 6
         if: runner.os == 'Windows'
         shell: pwsh
         env:
@@ -1137,6 +1217,7 @@ jobs:
         run: |
           & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/assert-hanging-command-was-killed-by-the-timeout.ps1"
       - name: Send command after timeout
+        timeout-minutes: 20
         uses: ./.github/actions/send-command
         with:
           trigger_url: ${{ vars.IT_SEND_COMMAND_TRIGGER_URL }}
@@ -1145,6 +1226,7 @@ jobs:
           expected_output: ${{ matrix.success_output }}
 
       - name: Assert worker pool recovered after timeout (Unix)
+        timeout-minutes: 6
         if: runner.os != 'Windows'
         shell: bash
         env:
@@ -1157,6 +1239,7 @@ jobs:
           sudo --preserve-env=LOG_FILE,BASELINE "$pwsh_path" -NoProfile -File "$GITHUB_WORKSPACE/.github/workflows/it-scripts/assert-worker-pool-recovered-after-timeout.ps1"
 
       - name: Assert worker pool recovered after timeout (Windows)
+        timeout-minutes: 6
         if: runner.os == 'Windows'
         shell: pwsh
         env:
@@ -1183,6 +1266,7 @@ jobs:
       # actually spawning a nested powershell.exe left too little headroom
       # in 5s for the child to reliably start before the parent was killed.
       - name: Enable a longer command timeout for the child-process scenario
+        timeout-minutes: 10
         if: matrix.os == 'windows-latest'
         uses: ./.github/actions/run-agent
         with:
@@ -1190,6 +1274,7 @@ jobs:
           args: --update --org-id ${{ vars.IT_ORG_ID }} --command-timeout-seconds 15 --github-token ${{ secrets.GITHUB_TOKEN }}
 
       - name: Wait for fresh subscription after child-process-scenario timeout update
+        timeout-minutes: 6
         if: matrix.os == 'windows-latest'
         uses: ./.github/actions/wait-for-log-line
         with:
@@ -1220,6 +1305,7 @@ jobs:
       # for the child appearing while it (and the parent's timeout) are still
       # running, and only then waited on for its own completion.
       - name: Send command that spawns a child process and hangs, then wait for it to start
+        timeout-minutes: 6
         if: matrix.os == 'windows-latest'
         shell: bash
         env:
@@ -1274,6 +1360,7 @@ jobs:
           esac
 
       - name: Assert hanging parent command was killed by the timeout (child-process scenario)
+        timeout-minutes: 6
         if: matrix.os == 'windows-latest'
         shell: pwsh
         env:
@@ -1283,12 +1370,14 @@ jobs:
           & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/assert-hanging-command-was-killed-by-the-timeout.ps1"
 
       - name: Assert the child process did not survive the timeout kill
+        timeout-minutes: 6
         if: matrix.os == 'windows-latest'
         shell: pwsh
         run: |
           & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/assert-child-process-terminated.ps1"
 
       - name: Send command after child-process scenario
+        timeout-minutes: 20
         if: matrix.os == 'windows-latest'
         uses: ./.github/actions/send-command
         with:
@@ -1298,6 +1387,7 @@ jobs:
           expected_output: ${{ matrix.success_output }}
 
       - name: Assert worker pool recovered after child-process scenario
+        timeout-minutes: 6
         if: matrix.os == 'windows-latest'
         shell: pwsh
         env:
@@ -1318,12 +1408,14 @@ jobs:
       # because earlier cycles already left "Subscribed to messages"/"Connection
       # lost" lines in the log.
       - name: Install IT binary with short SAS token lifetime
+        timeout-minutes: 10
         uses: ./.github/actions/run-agent
         with:
           binary: ${{ matrix.it_binary }}
           args: --update --org-id ${{ vars.IT_ORG_ID }} --no-auto-updates --github-token ${{ secrets.GITHUB_TOKEN }}
 
       - name: Wait for fresh subscription after SAS lifetime update
+        timeout-minutes: 6
         uses: ./.github/actions/wait-for-log-line
         with:
           log_file: ${{ matrix.log_file }}
@@ -1352,6 +1444,7 @@ jobs:
         run: |
           & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/capture-sas-renewal-baseline-counts.ps1"
       - name: Wait for proactive SAS token renewal
+        timeout-minutes: 6
         uses: ./.github/actions/wait-for-log-line
         with:
           log_file: ${{ matrix.log_file }}
@@ -1360,6 +1453,7 @@ jobs:
           interval_seconds: "2"
 
       - name: Assert SAS token renewed and agent resubscribed with fresh token (Unix)
+        timeout-minutes: 6
         if: runner.os != 'Windows'
         shell: bash
         env:
@@ -1373,6 +1467,7 @@ jobs:
           sudo --preserve-env=LOG_FILE,RENEWED_BASELINE,SUBSCRIBED_BASELINE "$pwsh_path" -NoProfile -File "$GITHUB_WORKSPACE/.github/workflows/it-scripts/assert-sas-token-renewed-and-agent-resubscribed-with-fresh-token.ps1"
 
       - name: Assert SAS token renewed and agent resubscribed with fresh token (Windows)
+        timeout-minutes: 6
         if: runner.os == 'Windows'
         shell: pwsh
         env:
@@ -1382,6 +1477,7 @@ jobs:
         run: |
           & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/assert-sas-token-renewed-and-agent-resubscribed-with-fresh-token.ps1"
       - name: Assert SAS renewal was graceful (no forced disconnect) (Unix)
+        timeout-minutes: 6
         if: runner.os != 'Windows'
         shell: bash
         env:
@@ -1394,6 +1490,7 @@ jobs:
           sudo --preserve-env=LOG_FILE,LOST_BASELINE "$pwsh_path" -NoProfile -File "$GITHUB_WORKSPACE/.github/workflows/it-scripts/assert-sas-renewal-was-graceful-no-forced-disconnect.ps1"
 
       - name: Assert SAS renewal was graceful (no forced disconnect) (Windows)
+        timeout-minutes: 6
         if: runner.os == 'Windows'
         shell: pwsh
         env:
@@ -1402,6 +1499,7 @@ jobs:
         run: |
           & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/assert-sas-renewal-was-graceful-no-forced-disconnect.ps1"
       - name: Send command after SAS renewal
+        timeout-minutes: 20
         uses: ./.github/actions/send-command
         with:
           trigger_url: ${{ vars.IT_SEND_COMMAND_TRIGGER_URL }}
@@ -1410,6 +1508,7 @@ jobs:
           expected_output: ${{ matrix.success_output }}
 
       - name: Assert command delivery continues after SAS renewal (Unix)
+        timeout-minutes: 6
         if: runner.os != 'Windows'
         shell: bash
         env:
@@ -1422,6 +1521,7 @@ jobs:
           sudo --preserve-env=LOG_FILE,BASELINE "$pwsh_path" -NoProfile -File "$GITHUB_WORKSPACE/.github/workflows/it-scripts/assert-command-delivery-continues-after-sas-renewal.ps1"
 
       - name: Assert command delivery continues after SAS renewal (Windows)
+        timeout-minutes: 6
         if: runner.os == 'Windows'
         shell: pwsh
         env:
@@ -1475,6 +1575,7 @@ jobs:
         run: |
           & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/resolve-the-scripts-directory.ps1"
       - name: Snapshot temp script files before the output floods
+        timeout-minutes: 5
         uses: ./.github/actions/assert-no-orphaned-scripts
         with:
           mode: snapshot
@@ -1504,6 +1605,7 @@ jobs:
         run: |
           & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/capture-bounded-output-baseline-counts.ps1"
       - name: Configure a small output ceiling
+        timeout-minutes: 10
         uses: ./.github/actions/run-agent
         with:
           binary: ${{ matrix.binary }}
@@ -1544,6 +1646,7 @@ jobs:
           exit 0
 
       - name: Wait for fresh subscription after the output ceiling update (Unix)
+        timeout-minutes: 6
         if: runner.os != 'Windows'
         shell: bash
         env:
@@ -1556,6 +1659,7 @@ jobs:
           sudo --preserve-env=LOG_FILE,BASELINE "$pwsh_path" -NoProfile -File "$GITHUB_WORKSPACE/.github/workflows/it-scripts/wait-for-fresh-subscription-after-the-output-ceiling-update.ps1"
 
       - name: Wait for fresh subscription after the output ceiling update (Windows)
+        timeout-minutes: 6
         if: runner.os == 'Windows'
         shell: pwsh
         env:
@@ -1564,6 +1668,7 @@ jobs:
         run: |
           & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/wait-for-fresh-subscription-after-the-output-ceiling-update.ps1"
       - name: Send stdout flood command
+        timeout-minutes: 20
         uses: ./.github/actions/send-command
         with:
           trigger_url: ${{ vars.IT_SEND_COMMAND_TRIGGER_URL }}
@@ -1571,6 +1676,7 @@ jobs:
           commands: ${{ matrix.verbose_commands }}
 
       - name: Assert the stdout flood was bounded
+        timeout-minutes: 5
         uses: ./.github/actions/assert-output-bounded
         with:
           service: ${{ matrix.service }}
@@ -1591,6 +1697,7 @@ jobs:
           max_rss_mb: "250"
 
       - name: Assert the flooding command still succeeded (Unix)
+        timeout-minutes: 6
         if: runner.os != 'Windows'
         shell: bash
         env:
@@ -1603,6 +1710,7 @@ jobs:
           sudo --preserve-env=LOG_FILE,BASELINE "$pwsh_path" -NoProfile -File "$GITHUB_WORKSPACE/.github/workflows/it-scripts/assert-the-flooding-command-still-succeeded.ps1"
 
       - name: Assert the flooding command still succeeded (Windows)
+        timeout-minutes: 6
         if: runner.os == 'Windows'
         shell: pwsh
         env:
@@ -1631,6 +1739,7 @@ jobs:
         run: |
           & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/capture-small-output-baseline-counts.ps1"
       - name: Send ordinary command after the flood
+        timeout-minutes: 20
         uses: ./.github/actions/send-command
         with:
           trigger_url: ${{ vars.IT_SEND_COMMAND_TRIGGER_URL }}
@@ -1639,6 +1748,7 @@ jobs:
           expected_output: ${{ matrix.success_output }}
 
       - name: Assert output below the ceiling is untouched and the worker recovered (Unix)
+        timeout-minutes: 6
         if: runner.os != 'Windows'
         shell: bash
         env:
@@ -1652,6 +1762,7 @@ jobs:
           sudo --preserve-env=LOG_FILE,COMPLETED_BASELINE,TRUNCATED_BASELINE "$pwsh_path" -NoProfile -File "$GITHUB_WORKSPACE/.github/workflows/it-scripts/assert-output-below-the-ceiling-is-untouched-and-the-worker-recovered.ps1"
 
       - name: Assert output below the ceiling is untouched and the worker recovered (Windows)
+        timeout-minutes: 6
         if: runner.os == 'Windows'
         shell: pwsh
         env:
@@ -1681,6 +1792,7 @@ jobs:
         run: |
           & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/capture-stderr-flood-baseline-counts.ps1"
       - name: Send stderr flood command
+        timeout-minutes: 20
         uses: ./.github/actions/send-command
         with:
           trigger_url: ${{ vars.IT_SEND_COMMAND_TRIGGER_URL }}
@@ -1688,6 +1800,7 @@ jobs:
           commands: ${{ matrix.verbose_stderr_commands }}
 
       - name: Assert stderr is bounded independently of stdout
+        timeout-minutes: 5
         uses: ./.github/actions/assert-output-bounded
         with:
           service: ${{ matrix.service }}
@@ -1729,12 +1842,14 @@ jobs:
         run: |
           & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/capture-timeout-composition-baseline-counts.ps1"
       - name: Shorten the command timeout for the composition check
+        timeout-minutes: 10
         uses: ./.github/actions/run-agent
         with:
           binary: ${{ matrix.binary }}
           args: --update --org-id ${{ vars.IT_ORG_ID }} --no-auto-updates --max-output-bytes 262144 --command-timeout-seconds 30 --github-token ${{ secrets.GITHUB_TOKEN }}
 
       - name: Wait for fresh subscription after the timeout update (Unix)
+        timeout-minutes: 6
         if: runner.os != 'Windows'
         shell: bash
         env:
@@ -1747,6 +1862,7 @@ jobs:
           sudo --preserve-env=LOG_FILE,BASELINE "$pwsh_path" -NoProfile -File "$GITHUB_WORKSPACE/.github/workflows/it-scripts/wait-for-fresh-subscription-after-the-timeout-update.ps1"
 
       - name: Wait for fresh subscription after the timeout update (Windows)
+        timeout-minutes: 6
         if: runner.os == 'Windows'
         shell: pwsh
         env:
@@ -1755,6 +1871,7 @@ jobs:
         run: |
           & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/wait-for-fresh-subscription-after-the-timeout-update.ps1"
       - name: Send verbose command that then hangs
+        timeout-minutes: 20
         uses: ./.github/actions/send-command
         with:
           trigger_url: ${{ vars.IT_SEND_COMMAND_TRIGGER_URL }}
@@ -1762,6 +1879,7 @@ jobs:
           commands: ${{ matrix.verbose_hang_commands }}
 
       - name: Assert the hanging command's output was still bounded
+        timeout-minutes: 5
         uses: ./.github/actions/assert-output-bounded
         with:
           service: ${{ matrix.service }}
@@ -1781,6 +1899,7 @@ jobs:
           max_attempts: "120"
 
       - name: Assert the hanging command also timed out and released its worker (Unix)
+        timeout-minutes: 6
         if: runner.os != 'Windows'
         shell: bash
         env:
@@ -1793,6 +1912,7 @@ jobs:
           sudo --preserve-env=LOG_FILE,TIMED_OUT_BASELINE "$pwsh_path" -NoProfile -File "$GITHUB_WORKSPACE/.github/workflows/it-scripts/assert-the-hanging-command-also-timed-out-and-released-its-worker.ps1"
 
       - name: Assert the hanging command also timed out and released its worker (Windows)
+        timeout-minutes: 6
         if: runner.os == 'Windows'
         shell: pwsh
         env:
@@ -1801,6 +1921,7 @@ jobs:
         run: |
           & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/assert-the-hanging-command-also-timed-out-and-released-its-worker.ps1"
       - name: Send command after the verbose timeout
+        timeout-minutes: 20
         uses: ./.github/actions/send-command
         with:
           trigger_url: ${{ vars.IT_SEND_COMMAND_TRIGGER_URL }}
@@ -1809,6 +1930,7 @@ jobs:
           expected_output: ${{ matrix.success_output }}
 
       - name: Assert the worker recovered after the verbose timeout (Unix)
+        timeout-minutes: 6
         if: runner.os != 'Windows'
         shell: bash
         env:
@@ -1821,6 +1943,7 @@ jobs:
           sudo --preserve-env=LOG_FILE,BASELINE "$pwsh_path" -NoProfile -File "$GITHUB_WORKSPACE/.github/workflows/it-scripts/assert-the-worker-recovered-after-the-verbose-timeout.ps1"
 
       - name: Assert the worker recovered after the verbose timeout (Windows)
+        timeout-minutes: 6
         if: runner.os == 'Windows'
         shell: pwsh
         env:
@@ -1829,6 +1952,7 @@ jobs:
         run: |
           & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/assert-the-worker-recovered-after-the-verbose-timeout.ps1"
       - name: Assert the output floods left no orphaned script files
+        timeout-minutes: 5
         uses: ./.github/actions/assert-no-orphaned-scripts
         with:
           mode: assert
@@ -1870,12 +1994,14 @@ jobs:
         run: |
           & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/capture-sweep-scenario-baseline-counts.ps1"
       - name: Install release binary for the sweep scenario
+        timeout-minutes: 10
         uses: ./.github/actions/run-agent
         with:
           binary: ${{ matrix.binary }}
           args: --update --org-id ${{ vars.IT_ORG_ID }} --no-auto-updates --command-timeout-seconds 600 --github-token ${{ secrets.GITHUB_TOKEN }}
 
       - name: Wait for fresh subscription before the sweep scenario (Unix)
+        timeout-minutes: 6
         if: runner.os != 'Windows'
         shell: bash
         env:
@@ -1888,6 +2014,7 @@ jobs:
           sudo --preserve-env=LOG_FILE,BASELINE "$pwsh_path" -NoProfile -File "$GITHUB_WORKSPACE/.github/workflows/it-scripts/wait-for-fresh-subscription-before-the-sweep-scenario.ps1"
 
       - name: Wait for fresh subscription before the sweep scenario (Windows)
+        timeout-minutes: 6
         if: runner.os == 'Windows'
         shell: pwsh
         env:
@@ -1904,6 +2031,7 @@ jobs:
       # must not be treated as a failure here. Every other call site still fails
       # fast on it.
       - name: Send long-running command
+        timeout-minutes: 20
         uses: ./.github/actions/send-command
         with:
           trigger_url: ${{ vars.IT_SEND_COMMAND_TRIGGER_URL }}
@@ -1964,11 +2092,13 @@ jobs:
           sudo --preserve-env=LOG_FILE,GITHUB_OUTPUT "$pwsh_path" -NoProfile -File "$GITHUB_WORKSPACE/.github/workflows/it-scripts/capture-restore-baseline-counts.ps1"
 
       - name: Force-kill the agent mid-command
+        timeout-minutes: 5
         uses: ./.github/actions/kill-service
         with:
           service: ${{ matrix.service }}
 
       - name: Wait for systemd to auto-restart the agent before ageing (Linux)
+        timeout-minutes: 6
         if: runner.os == 'Linux'
         uses: ./.github/actions/wait-for-log-line
         with:
@@ -1979,6 +2109,7 @@ jobs:
           baseline_count: ${{ steps.sweep_kill_sub_baseline.outputs.subscribed }}
 
       - name: Age the stranded script file and seed sweep control files
+        timeout-minutes: 5
         uses: ./.github/actions/script-sweep-fixture
         with:
           mode: seed
@@ -2006,12 +2137,14 @@ jobs:
         run: |
           & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/capture-sweep-log-baseline-count.ps1"
       - name: Restart agent to trigger the startup sweep
+        timeout-minutes: 10
         uses: ./.github/actions/run-agent
         with:
           binary: ${{ matrix.binary }}
           args: --update --org-id ${{ vars.IT_ORG_ID }} --no-auto-updates --github-token ${{ secrets.GITHUB_TOKEN }}
 
       - name: Wait for and assert the startup sweep was logged (Unix)
+        timeout-minutes: 6
         if: runner.os != 'Windows'
         shell: bash
         env:
@@ -2024,6 +2157,7 @@ jobs:
           sudo --preserve-env=LOG_FILE,BASELINE "$pwsh_path" -NoProfile -File "$GITHUB_WORKSPACE/.github/workflows/it-scripts/wait-for-and-assert-the-startup-sweep-was-logged.ps1"
 
       - name: Wait for and assert the startup sweep was logged (Windows)
+        timeout-minutes: 6
         if: runner.os == 'Windows'
         shell: pwsh
         env:
@@ -2032,6 +2166,7 @@ jobs:
         run: |
           & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/wait-for-and-assert-the-startup-sweep-was-logged.ps1"
       - name: Assert stale script files swept and live files untouched
+        timeout-minutes: 5
         uses: ./.github/actions/script-sweep-fixture
         with:
           mode: assert
@@ -2061,6 +2196,7 @@ jobs:
       # covered by TestExecute_SweepsStaleInstallerFilesOnStartup, which runs
       # Execute in-process and can see its own temp directory.
       - name: Seed the installer sweep fixture
+        timeout-minutes: 5
         uses: ./.github/actions/installer-sweep-fixture
         with:
           mode: seed
@@ -2087,12 +2223,14 @@ jobs:
         run: |
           & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/capture-installer-sweep-log-baseline-count.ps1"
       - name: Restart agent to trigger the installer sweep
+        timeout-minutes: 10
         uses: ./.github/actions/run-agent
         with:
           binary: ${{ matrix.binary }}
           args: --update --org-id ${{ vars.IT_ORG_ID }} --no-auto-updates --github-token ${{ secrets.GITHUB_TOKEN }}
 
       - name: Wait for and assert the installer sweep was logged (Unix)
+        timeout-minutes: 6
         if: runner.os != 'Windows'
         shell: bash
         env:
@@ -2105,6 +2243,7 @@ jobs:
           sudo --preserve-env=LOG_FILE,BASELINE "$pwsh_path" -NoProfile -File "$GITHUB_WORKSPACE/.github/workflows/it-scripts/wait-for-and-assert-the-installer-sweep-was-logged.ps1"
 
       - name: Wait for and assert the installer sweep was logged (Windows)
+        timeout-minutes: 6
         if: runner.os == 'Windows'
         shell: pwsh
         env:
@@ -2113,6 +2252,7 @@ jobs:
         run: |
           & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/wait-for-and-assert-the-installer-sweep-was-logged.ps1"
       - name: Assert stale installers swept and live files untouched
+        timeout-minutes: 5
         uses: ./.github/actions/installer-sweep-fixture
         with:
           mode: assert
@@ -2140,6 +2280,7 @@ jobs:
       # steps assert, is that every slot is strictly positive, bounded by the cap,
       # varies rather than repeating, and is never served back to back.
       - name: Start stub release endpoint (failing)
+        timeout-minutes: 5
         id: stub_release
         uses: ./.github/actions/stub-release
         with:
@@ -2170,6 +2311,7 @@ jobs:
       # until the next restart, and the agent would spend the scenario updating
       # itself from the real releases API instead.
       - name: Point the agent at the stub release endpoint
+        timeout-minutes: 5
         uses: ./.github/actions/set-release-url
         with:
           mode: set
@@ -2178,12 +2320,14 @@ jobs:
           url: ${{ steps.stub_release.outputs.url }}
 
       - name: Install integration test binary with auto-updates on
+        timeout-minutes: 10
         uses: ./.github/actions/run-agent
         with:
           binary: ${{ matrix.it_binary }}
           args: --update --org-id ${{ vars.IT_ORG_ID }} --github-token ${{ secrets.GITHUB_TOKEN }}
 
       - name: Wait for the update retry schedule to run (Unix)
+        timeout-minutes: 6
         if: runner.os != 'Windows'
         shell: bash
         env:
@@ -2196,6 +2340,7 @@ jobs:
           sudo --preserve-env=LOG_FILE,BASELINE "$pwsh_path" -NoProfile -File "$GITHUB_WORKSPACE/.github/workflows/it-scripts/wait-for-the-update-retry-schedule-to-run.ps1"
 
       - name: Wait for the update retry schedule to run (Windows)
+        timeout-minutes: 6
         if: runner.os == 'Windows'
         shell: pwsh
         env:
@@ -2206,11 +2351,13 @@ jobs:
       # Flipped mid-sequence - the fixture re-reads its mode per request - so the
       # recovery is the agent's own next retry, not a restart.
       - name: Serve a valid release payload mid-sequence
+        timeout-minutes: 5
         uses: ./.github/actions/stub-release
         with:
           mode: ok
 
       - name: Assert the update succeeds on a retry (Unix)
+        timeout-minutes: 6
         if: runner.os != 'Windows'
         shell: bash
         env:
@@ -2223,6 +2370,7 @@ jobs:
           sudo --preserve-env=LOG_FILE,BASELINE "$pwsh_path" -NoProfile -File "$GITHUB_WORKSPACE/.github/workflows/it-scripts/assert-the-update-succeeds-on-a-retry.ps1"
 
       - name: Assert the update succeeds on a retry (Windows)
+        timeout-minutes: 6
         if: runner.os == 'Windows'
         shell: pwsh
         env:
@@ -2231,6 +2379,7 @@ jobs:
         run: |
           & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/assert-the-update-succeeds-on-a-retry.ps1"
       - name: Assert the retry schedule is capped, jittered and never immediate (Unix)
+        timeout-minutes: 6
         if: runner.os != 'Windows'
         shell: bash
         env:
@@ -2243,6 +2392,7 @@ jobs:
           sudo --preserve-env=LOG_FILE,BASELINE "$pwsh_path" -NoProfile -File "$GITHUB_WORKSPACE/.github/workflows/it-scripts/assert-the-retry-schedule-is-capped-jittered-and-never-immediate.ps1"
 
       - name: Assert the retry schedule is capped, jittered and never immediate (Windows)
+        timeout-minutes: 6
         if: runner.os == 'Windows'
         shell: pwsh
         env:
@@ -2251,6 +2401,7 @@ jobs:
         run: |
           & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/assert-the-retry-schedule-is-capped-jittered-and-never-immediate.ps1"
       - name: Fail the release endpoint again for the stop check
+        timeout-minutes: 5
         uses: ./.github/actions/stub-release
         with:
           mode: fail
@@ -2276,6 +2427,7 @@ jobs:
         run: |
           & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/capture-stop-during-backoff-baseline-counts.ps1"
       - name: Wait for a fresh backoff to be entered (Unix)
+        timeout-minutes: 6
         if: runner.os != 'Windows'
         shell: bash
         env:
@@ -2288,6 +2440,7 @@ jobs:
           sudo --preserve-env=LOG_FILE,BASELINE "$pwsh_path" -NoProfile -File "$GITHUB_WORKSPACE/.github/workflows/it-scripts/wait-for-a-fresh-backoff-to-be-entered.ps1"
 
       - name: Wait for a fresh backoff to be entered (Windows)
+        timeout-minutes: 6
         if: runner.os == 'Windows'
         shell: pwsh
         env:
@@ -2296,6 +2449,7 @@ jobs:
         run: |
           & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/wait-for-a-fresh-backoff-to-be-entered.ps1"
       - name: Assert a service stop during a backoff is prompt (Unix)
+        timeout-minutes: 6
         if: runner.os != 'Windows'
         shell: bash
         env:
@@ -2309,6 +2463,7 @@ jobs:
           sudo --preserve-env=LOG_FILE,SERVICE,BASELINE "$pwsh_path" -NoProfile -File "$GITHUB_WORKSPACE/.github/workflows/it-scripts/assert-a-service-stop-during-a-backoff-is-prompt.ps1"
 
       - name: Assert a service stop during a backoff is prompt (Windows)
+        timeout-minutes: 6
         if: runner.os == 'Windows'
         shell: pwsh
         env:
@@ -2364,6 +2519,7 @@ jobs:
         run: |
           & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/capture-restore-baseline-counts.ps1"
       - name: Clear the release url override
+        timeout-minutes: 5
         if: always()
         uses: ./.github/actions/set-release-url
         with:
@@ -2372,12 +2528,14 @@ jobs:
           org_id: ${{ vars.IT_ORG_ID }}
 
       - name: Stop stub release endpoint
+        timeout-minutes: 5
         if: always()
         uses: ./.github/actions/stub-release
         with:
           mode: stop
 
       - name: Reinstall the release binary after the retry scenario
+        timeout-minutes: 10
         if: always()
         uses: ./.github/actions/run-agent
         with:
@@ -2385,6 +2543,7 @@ jobs:
           args: --update --org-id ${{ vars.IT_ORG_ID }} --no-auto-updates --github-token ${{ secrets.GITHUB_TOKEN }}
 
       - name: Wait for resubscription after the retry scenario (Unix)
+        timeout-minutes: 6
         if: (always()) && runner.os != 'Windows'
         shell: bash
         env:
@@ -2397,6 +2556,7 @@ jobs:
           sudo --preserve-env=LOG_FILE,BASELINE "$pwsh_path" -NoProfile -File "$GITHUB_WORKSPACE/.github/workflows/it-scripts/wait-for-resubscription-after-the-retry-scenario.ps1"
 
       - name: Wait for resubscription after the retry scenario (Windows)
+        timeout-minutes: 6
         if: (always()) && runner.os == 'Windows'
         shell: pwsh
         env:
@@ -2418,6 +2578,7 @@ jobs:
       # never executed even on a bug in this rejection: they are arbitrary fixed
       # content, not a real installer.
       - name: Start stub release endpoint (tampered digest)
+        timeout-minutes: 5
         id: stub_release_tampered_digest
         uses: ./.github/actions/stub-release
         with:
@@ -2435,6 +2596,7 @@ jobs:
           asset_digest: "sha256:0000000000000000000000000000000000000000000000000000000000000000"
 
       - name: Point the agent at the stub release endpoint (tampered digest)
+        timeout-minutes: 5
         uses: ./.github/actions/set-release-url
         with:
           mode: set
@@ -2443,23 +2605,27 @@ jobs:
           url: ${{ steps.stub_release_tampered_digest.outputs.url }}
 
       - name: Serve the tampered-digest release payload
+        timeout-minutes: 5
         uses: ./.github/actions/stub-release
         with:
           mode: ok
 
       - name: Install integration test binary with auto-updates on (tampered digest)
+        timeout-minutes: 10
         uses: ./.github/actions/run-agent
         with:
           binary: ${{ matrix.it_binary }}
           args: --update --org-id ${{ vars.IT_ORG_ID }} --github-token ${{ secrets.GITHUB_TOKEN }}
 
       - name: Wait for the tampered installer to be rejected
+        timeout-minutes: 6
         uses: ./.github/actions/wait-for-log-line
         with:
           log_file: ${{ matrix.log_file }}
           pattern: "checksum mismatch for"
 
       - name: Assert the tampered installer was rejected rather than installed
+        timeout-minutes: 5
         uses: ./.github/actions/assert-log-contains
         with:
           log_file: ${{ matrix.log_file }}
@@ -2468,6 +2634,7 @@ jobs:
             Update failed, starting retry backoff
 
       - name: Clear the release url override (tampered digest)
+        timeout-minutes: 5
         if: always()
         uses: ./.github/actions/set-release-url
         with:
@@ -2476,12 +2643,14 @@ jobs:
           org_id: ${{ vars.IT_ORG_ID }}
 
       - name: Stop stub release endpoint (tampered digest)
+        timeout-minutes: 5
         if: always()
         uses: ./.github/actions/stub-release
         with:
           mode: stop
 
       - name: Reinstall the release binary after the tampered-digest scenario
+        timeout-minutes: 10
         if: always()
         uses: ./.github/actions/run-agent
         with:
@@ -2489,6 +2658,7 @@ jobs:
           args: --update --org-id ${{ vars.IT_ORG_ID }} --no-auto-updates --github-token ${{ secrets.GITHUB_TOKEN }}
 
       - name: Start stub release endpoint (missing digest)
+        timeout-minutes: 5
         id: stub_release_missing_digest
         uses: ./.github/actions/stub-release
         with:
@@ -2502,6 +2672,7 @@ jobs:
           # computed one for.
 
       - name: Point the agent at the stub release endpoint (missing digest)
+        timeout-minutes: 5
         uses: ./.github/actions/set-release-url
         with:
           mode: set
@@ -2510,23 +2681,27 @@ jobs:
           url: ${{ steps.stub_release_missing_digest.outputs.url }}
 
       - name: Serve the missing-digest release payload
+        timeout-minutes: 5
         uses: ./.github/actions/stub-release
         with:
           mode: ok
 
       - name: Install integration test binary with auto-updates on (missing digest)
+        timeout-minutes: 10
         uses: ./.github/actions/run-agent
         with:
           binary: ${{ matrix.it_binary }}
           args: --update --org-id ${{ vars.IT_ORG_ID }} --github-token ${{ secrets.GITHUB_TOKEN }}
 
       - name: Wait for the missing-digest installer to be rejected
+        timeout-minutes: 6
         uses: ./.github/actions/wait-for-log-line
         with:
           log_file: ${{ matrix.log_file }}
           pattern: "failed to verify installer for"
 
       - name: Assert the missing-digest installer was rejected rather than installed
+        timeout-minutes: 5
         uses: ./.github/actions/assert-log-contains
         with:
           log_file: ${{ matrix.log_file }}
@@ -2536,6 +2711,7 @@ jobs:
             Update failed, starting retry backoff
 
       - name: Clear the release url override (missing digest)
+        timeout-minutes: 5
         if: always()
         uses: ./.github/actions/set-release-url
         with:
@@ -2544,12 +2720,14 @@ jobs:
           org_id: ${{ vars.IT_ORG_ID }}
 
       - name: Stop stub release endpoint (missing digest)
+        timeout-minutes: 5
         if: always()
         uses: ./.github/actions/stub-release
         with:
           mode: stop
 
       - name: Reinstall the release binary after the missing-digest scenario
+        timeout-minutes: 10
         if: always()
         uses: ./.github/actions/run-agent
         with:
@@ -2594,6 +2772,7 @@ jobs:
           Write-Output "config file $config sha256=$configHash"
 
       - name: Wedge the agent service in StopPending
+        timeout-minutes: 5
         if: matrix.os == 'windows-latest'
         uses: ./.github/actions/wedged-service
         with:
@@ -2704,6 +2883,7 @@ jobs:
       # stop entirely instead of exercising it. Start a fresh wedged run so the
       # uninstall meets a Running service, as an operator would.
       - name: Re-wedge the service for the uninstall check
+        timeout-minutes: 5
         if: matrix.os == 'windows-latest'
         uses: ./.github/actions/wedged-service
         with:
@@ -2795,6 +2975,7 @@ jobs:
       # registration pointing at the fixture, or the rest of the job (and the
       # final uninstall) would be testing the fixture instead of the agent.
       - name: Restore the agent service after the wedge
+        timeout-minutes: 5
         if: always() && matrix.os == 'windows-latest'
         uses: ./.github/actions/wedged-service
         with:
@@ -2860,6 +3041,7 @@ jobs:
       # Windows-only because an open handle only blocks unlink there; see the
       # locked-file action.
       - name: Lock a file in the program directory
+        timeout-minutes: 5
         if: matrix.os == 'windows-latest'
         uses: ./.github/actions/locked-file
         with:
@@ -2867,6 +3049,7 @@ jobs:
           path: ${{ matrix.program_dir }}
 
       - name: Assert the uninstall continues past the locked directory
+        timeout-minutes: 6
         if: matrix.os == 'windows-latest'
         shell: pwsh
         env:
@@ -2889,12 +3072,14 @@ jobs:
       # always(), because a handle left open would make the directory
       # unremovable for the rest of the job - including the assertion below.
       - name: Release the locked file
+        timeout-minutes: 5
         if: always() && matrix.os == 'windows-latest'
         uses: ./.github/actions/locked-file
         with:
           mode: release
 
       - name: Uninstall agent
+        timeout-minutes: 10
         if: matrix.os != 'windows-latest'
         uses: ./.github/actions/run-agent
         with:
@@ -2919,17 +3104,21 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJson(needs.set-matrix.outputs.matrix) }}
     runs-on: ${{ matrix.os }}
+    # 2x the p95 of the last 20 runs (see README "Bounding the integration jobs").
+    timeout-minutes: 10
     steps:
       - name: Checkout code
         uses: actions/checkout@v5
 
       - name: Provision service account
+        timeout-minutes: 5
         id: provision
         uses: ./.github/actions/provision-service-user
         with:
           username: ${{ matrix.service_user }}
 
       - name: Install agent as service account
+        timeout-minutes: 20
         uses: ./.github/actions/install-agent
         with:
           os: ${{ matrix.os }}
@@ -2943,18 +3132,21 @@ jobs:
           service_password: ${{ steps.provision.outputs.password }}
 
       - name: Assert service runs as account (config flow)
+        timeout-minutes: 5
         uses: ./.github/actions/assert-service-identity
         with:
           service: ${{ matrix.service }}
           expected_identity: ${{ matrix.service_identity }}
 
       - name: Validate config and get device id
+        timeout-minutes: 5
         uses: ./.github/actions/validate-config
         with:
           config_dir: ${{ matrix.config_dir }}
           org_id: ${{ vars.IT_ORG_ID }}
 
       - name: Assert password absent from config (config flow)
+        timeout-minutes: 5
         uses: ./.github/actions/assert-config-secret-absent
         with:
           config_dir: ${{ matrix.config_dir }}
@@ -2992,12 +3184,14 @@ jobs:
             --service-password $env:SERVICE_PASSWORD
 
       - name: Assert service runs as account (update flow)
+        timeout-minutes: 5
         uses: ./.github/actions/assert-service-identity
         with:
           service: ${{ matrix.service }}
           expected_identity: ${{ matrix.service_identity }}
 
       - name: Assert password absent from config (update flow)
+        timeout-minutes: 5
         uses: ./.github/actions/assert-config-secret-absent
         with:
           config_dir: ${{ matrix.config_dir }}
@@ -3005,12 +3199,14 @@ jobs:
           secret: ${{ steps.provision.outputs.password }}
 
       - name: Uninstall agent
+        timeout-minutes: 10
         uses: ./.github/actions/run-agent
         with:
           binary: ${{ matrix.binary }}
           args: --uninstall --org-id ${{ vars.IT_ORG_ID }}
 
       - name: Check deleted directories
+        timeout-minutes: 5
         uses: ./.github/actions/assert-uninstalled
         with:
           paths: ${{ matrix.uninstall_paths }}
@@ -3045,6 +3241,8 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJson(needs.set-matrix.outputs.matrix) }}
     runs-on: ${{ matrix.os }}
+    # 2x the p95 of the last 20 runs (see README "Bounding the integration jobs").
+    timeout-minutes: 5
     env:
       # 10 MiB, matching maxConfigResponseSize in cmd/agent_smith/config_context.go.
       # Spelled in bytes because that is how the agent's error reports it.
@@ -3082,6 +3280,7 @@ jobs:
       # Starts in oversized mode, so the failing leg runs against the endpoint
       # as launched.
       - name: Start stub config endpoint
+        timeout-minutes: 5
         id: stub_config
         uses: ./.github/actions/stub-config
         with:
@@ -3090,6 +3289,7 @@ jobs:
           oversized_bytes: ${{ env.OVERSIZED_BYTES }}
 
       - name: Assert the oversized config response is rejected
+        timeout-minutes: 6
         shell: pwsh
         env:
           # The production binary, not the integration build: nothing here
@@ -3108,6 +3308,7 @@ jobs:
           & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/assert-the-oversized-config-response-is-rejected.ps1"
 
       - name: Assert the oversized response was not read whole
+        timeout-minutes: 6
         shell: pwsh
         env:
           STUB_LOG: ${{ steps.stub_config.outputs.log_file }}
@@ -3120,6 +3321,7 @@ jobs:
       # the abort happens before the data directory is created, so none of the
       # paths a real install creates should exist.
       - name: Assert nothing was installed by the rejected fetch
+        timeout-minutes: 5
         uses: ./.github/actions/assert-uninstalled
         with:
           paths: ${{ matrix.uninstall_paths }}
@@ -3130,11 +3332,13 @@ jobs:
       # the small valid config an install actually gets (a couple of hundred
       # bytes - four orders of magnitude under the ceiling).
       - name: Serve a valid configuration
+        timeout-minutes: 5
         uses: ./.github/actions/stub-config
         with:
           mode: ok
 
       - name: Install agent against the valid configuration
+        timeout-minutes: 10
         uses: ./.github/actions/run-agent
         with:
           binary: ${{ matrix.binary }}
@@ -3145,11 +3349,13 @@ jobs:
             --no-auto-updates
 
       - name: Check service
+        timeout-minutes: 5
         uses: ./.github/actions/check-service
         with:
           service: ${{ matrix.service }}
 
       - name: Validate config and get device id
+        timeout-minutes: 5
         id: validate_config
         uses: ./.github/actions/validate-config
         with:
@@ -3183,12 +3389,14 @@ jobs:
       # install in place is better than an uninstall of something that was never
       # installed reporting a second, unrelated failure over the real one.
       - name: Uninstall agent
+        timeout-minutes: 10
         uses: ./.github/actions/run-agent
         with:
           binary: ${{ matrix.binary }}
           args: --uninstall --org-id ${{ vars.IT_ORG_ID }}
 
       - name: Check deleted directories
+        timeout-minutes: 5
         uses: ./.github/actions/assert-uninstalled
         with:
           paths: ${{ matrix.uninstall_paths }}
@@ -3197,6 +3405,7 @@ jobs:
       # this scenario is read from - it has to be reported on a failure most of
       # all.
       - name: Stop stub config endpoint
+        timeout-minutes: 5
         if: always()
         uses: ./.github/actions/stub-config
         with:
