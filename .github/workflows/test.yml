@@ -29,3 +29,16 @@ jobs:
 
       - name: Run all tests
         run: go test ./...
+
+      # The agent's command path is concurrent in ways a plain run cannot check:
+      # a worker pool that outlives its connection cycle and overlaps the next
+      # (sc-118039), the journal ownership map, the postback spool flushed on
+      # one goroutine while workers write to it, the log rotator's
+      # drain-before-swap. A separate step so a race report is distinguishable
+      # from a test failure in the summary. Windows is excluded: -race needs cgo
+      # and a C toolchain the hosted runner does not reliably provide, and the
+      # Windows-only files are covered by the GOOS=windows vet and lint jobs
+      # (sc-119837).
+      - name: Run all tests under the race detector
+        if: runner.os != 'Windows'
+        run: go test -race ./...
