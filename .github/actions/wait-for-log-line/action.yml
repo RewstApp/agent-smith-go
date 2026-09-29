@@ -24,6 +24,8 @@ inputs:
     default: "2"
   baseline_count:
     description: >-
+      Required by test/workflowlint (sc-117884): capture it with
+      capture-log-count *before* the step expected to produce the line.
       Occurrences of the pattern already in the log before whatever this is
       waiting on. When supplied, the wait is a delta - it returns only once the
       count exceeds this - and fails if that never happens. Required for any
