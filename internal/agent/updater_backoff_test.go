@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -300,8 +301,30 @@ func ptr(s string) *string { return &s }
 // one place a stop has to interrupt a pending sleep, so an exit with no log line
 // leaves the path the bounded, jittered schedule exists for unobservable - and
 // the integration workflow reads exactly this line to prove the stop was prompt.
+// lockedBuffer is a bytes.Buffer safe to read while a goroutine logs into it.
+// TestAutoUpdateRunner_LogsStopDuringBackoff polls the log for the line that
+// proves the runner is inside its backoff wait while the runner goroutine is
+// still writing; with a bare bytes.Buffer that is a data race the detector
+// reports on every run (the first thing CI's -race step found, sc-119837).
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
 func TestAutoUpdateRunner_LogsStopDuringBackoff(t *testing.T) {
-	var buf bytes.Buffer
+	var buf lockedBuffer
 	logger := utils.ConfigureLogger("test", &buf, utils.Info)
 	mock := &mockUpdater{runErr: fmt.Errorf("release endpoint unavailable")}
 
