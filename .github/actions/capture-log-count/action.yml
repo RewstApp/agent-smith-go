@@ -1,0 +1,45 @@
+name: Capture log count
+description: >-
+  Count how many times a substring already appears in the agent log, so a
+  following wait-for-log-line can require a *new* occurrence (baseline_count)
+  instead of matching a line an earlier cycle left behind. Capture it before
+  the step that is expected to produce the line, never after. Reading the log
+  requires elevation on Unix (sc-108849).
+
+inputs:
+  log_file:
+    description: "Path to the agent log file"
+    required: true
+  pattern:
+    description: "Substring to count"
+    required: true
+
+outputs:
+  count:
+    description: "Occurrences of pattern in the log right now (0 if the file does not exist)"
+    value: ${{ steps.unix.outputs.count || steps.windows.outputs.count }}
+
+runs:
+  using: composite
+  steps:
+    - name: Count (Unix)
+      id: unix
+      if: runner.os != 'Windows'
+      shell: bash
+      env:
+        LOG_FILE: ${{ inputs.log_file }}
+        PATTERN: ${{ inputs.pattern }}
+      run: |
+        set -euo pipefail
+        pwsh_path="$(command -v pwsh)"
+        sudo --preserve-env=LOG_FILE,PATTERN,GITHUB_OUTPUT "$pwsh_path" -NoProfile -File "$GITHUB_ACTION_PATH/count.ps1"
+
+    - name: Count (Windows)
+      id: windows
+      if: runner.os == 'Windows'
+      shell: pwsh
+      env:
+        LOG_FILE: ${{ inputs.log_file }}
+        PATTERN: ${{ inputs.pattern }}
+      run: |
+        & "$env:GITHUB_ACTION_PATH/count.ps1"

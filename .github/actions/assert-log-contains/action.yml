@@ -1,7 +1,9 @@
 name: Assert log contains
 description: >
-  Assert that a log file contains every supplied pattern (substring match).
-  Optionally sleeps before reading the log. Reading the agent's log file
+  Assert that a log file contains every supplied pattern (substring match),
+  polling until it does or timeout_seconds elapse - a fixed sleep before a
+  single read was exactly long enough on the runner it was tuned on and too
+  short on a slower one (sc-117884). Reading the agent's log file
   requires elevation now that its data directory is locked owner-only
   (sc-108849), so the shared implementation runs under sudo on Unix and
   natively on the already-elevated Windows runner.
@@ -13,10 +15,14 @@ inputs:
   patterns:
     description: "Newline-separated list of required substrings"
     required: true
-  wait_seconds:
-    description: "Seconds to sleep before reading the log"
+  timeout_seconds:
+    description: "How long to keep polling for the patterns before failing. Success returns as soon as every pattern is present."
     required: false
-    default: "0"
+    default: "60"
+  interval_seconds:
+    description: "Seconds between polls"
+    required: false
+    default: "2"
   subscribed_topic_qos:
     description: "When 'true', additionally require the matching line to include 'topic=' and 'qos=' tokens (used by the 'Subscribed to messages' check)"
     required: false
@@ -31,7 +37,8 @@ runs:
       env:
         LOG_FILE: ${{ inputs.log_file }}
         PATTERNS: ${{ inputs.patterns }}
-        WAIT_SECONDS: ${{ inputs.wait_seconds }}
+        TIMEOUT_SECONDS: ${{ inputs.timeout_seconds }}
+        INTERVAL_SECONDS: ${{ inputs.interval_seconds }}
         SUBSCRIBED: ${{ inputs.subscribed_topic_qos }}
       run: |
         set -euo pipefail
@@ -40,7 +47,8 @@ runs:
         sudo "$pwsh_path" -NoProfile -File "$GITHUB_ACTION_PATH/assert.ps1" \
           -LogFile "$LOG_FILE" \
           -Patterns "$PATTERNS" \
-          -WaitSeconds "$WAIT_SECONDS" \
+          -TimeoutSeconds "$TIMEOUT_SECONDS" \
+          -IntervalSeconds "$INTERVAL_SECONDS" \
           -SubscribedTopicQos "$SUBSCRIBED"
 
     - name: Assert log contains (Windows)
@@ -49,11 +57,13 @@ runs:
       env:
         LOG_FILE: ${{ inputs.log_file }}
         PATTERNS: ${{ inputs.patterns }}
-        WAIT_SECONDS: ${{ inputs.wait_seconds }}
+        TIMEOUT_SECONDS: ${{ inputs.timeout_seconds }}
+        INTERVAL_SECONDS: ${{ inputs.interval_seconds }}
         SUBSCRIBED: ${{ inputs.subscribed_topic_qos }}
       run: |
         & "$env:GITHUB_ACTION_PATH/assert.ps1" `
           -LogFile $env:LOG_FILE `
           -Patterns $env:PATTERNS `
-          -WaitSeconds ([int]$env:WAIT_SECONDS) `
+          -TimeoutSeconds ([int]$env:TIMEOUT_SECONDS) `
+          -IntervalSeconds ([int]$env:INTERVAL_SECONDS) `
           -SubscribedTopicQos $env:SUBSCRIBED
