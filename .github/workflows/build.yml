@@ -23,6 +23,9 @@ jobs:
       matrix:
         os: ${{ fromJson(inputs.os_list) }}
     runs-on: ${{ matrix.os }}
+    # Builds take ~2 min warm; a cold module cache or a wedged signer must not hold a
+    # release or the integration queue for six hours (sc-117886).
+    timeout-minutes: 15
     steps:
       - name: Checkout code
         uses: actions/checkout@v5
