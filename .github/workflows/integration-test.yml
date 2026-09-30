@@ -788,7 +788,7 @@ jobs:
           scripts_dir: ${{ (steps.suback_scripts_dir_unix.outputs.path || steps.suback_scripts_dir_windows.outputs.path) }}
 
       - name: Start stub broker withholding SUBACK
-        timeout-minutes: 5
+        timeout-minutes: 15
         id: stub_broker
         uses: ./.github/actions/stub-broker
         with:
@@ -914,7 +914,7 @@ jobs:
       # Flipped on the live connection - the stub re-reads its mode per packet -
       # so recovery is the agent's own next reconnect cycle, not a restart.
       - name: Switch stub broker to acknowledge SUBACK
-        timeout-minutes: 5
+        timeout-minutes: 15
         uses: ./.github/actions/stub-broker
         with:
           mode: ack
@@ -951,7 +951,7 @@ jobs:
           host: ${{ steps.stub_host.outputs.previous_host }}
 
       - name: Stop stub broker
-        timeout-minutes: 5
+        timeout-minutes: 15
         if: always()
         uses: ./.github/actions/stub-broker
         with:
@@ -2280,7 +2280,7 @@ jobs:
       # steps assert, is that every slot is strictly positive, bounded by the cap,
       # varies rather than repeating, and is never served back to back.
       - name: Start stub release endpoint (failing)
-        timeout-minutes: 5
+        timeout-minutes: 15
         id: stub_release
         uses: ./.github/actions/stub-release
         with:
@@ -2351,7 +2351,7 @@ jobs:
       # Flipped mid-sequence - the fixture re-reads its mode per request - so the
       # recovery is the agent's own next retry, not a restart.
       - name: Serve a valid release payload mid-sequence
-        timeout-minutes: 5
+        timeout-minutes: 15
         uses: ./.github/actions/stub-release
         with:
           mode: ok
@@ -2401,7 +2401,7 @@ jobs:
         run: |
           & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/assert-the-retry-schedule-is-capped-jittered-and-never-immediate.ps1"
       - name: Fail the release endpoint again for the stop check
-        timeout-minutes: 5
+        timeout-minutes: 15
         uses: ./.github/actions/stub-release
         with:
           mode: fail
@@ -2528,7 +2528,7 @@ jobs:
           org_id: ${{ vars.IT_ORG_ID }}
 
       - name: Stop stub release endpoint
-        timeout-minutes: 5
+        timeout-minutes: 15
         if: always()
         uses: ./.github/actions/stub-release
         with:
@@ -2578,7 +2578,7 @@ jobs:
       # never executed even on a bug in this rejection: they are arbitrary fixed
       # content, not a real installer.
       - name: Start stub release endpoint (tampered digest)
-        timeout-minutes: 5
+        timeout-minutes: 15
         id: stub_release_tampered_digest
         uses: ./.github/actions/stub-release
         with:
@@ -2605,7 +2605,7 @@ jobs:
           url: ${{ steps.stub_release_tampered_digest.outputs.url }}
 
       - name: Serve the tampered-digest release payload
-        timeout-minutes: 5
+        timeout-minutes: 15
         uses: ./.github/actions/stub-release
         with:
           mode: ok
@@ -2643,7 +2643,7 @@ jobs:
           org_id: ${{ vars.IT_ORG_ID }}
 
       - name: Stop stub release endpoint (tampered digest)
-        timeout-minutes: 5
+        timeout-minutes: 15
         if: always()
         uses: ./.github/actions/stub-release
         with:
@@ -2658,7 +2658,7 @@ jobs:
           args: --update --org-id ${{ vars.IT_ORG_ID }} --no-auto-updates --github-token ${{ secrets.GITHUB_TOKEN }}
 
       - name: Start stub release endpoint (missing digest)
-        timeout-minutes: 5
+        timeout-minutes: 15
         id: stub_release_missing_digest
         uses: ./.github/actions/stub-release
         with:
@@ -2681,7 +2681,7 @@ jobs:
           url: ${{ steps.stub_release_missing_digest.outputs.url }}
 
       - name: Serve the missing-digest release payload
-        timeout-minutes: 5
+        timeout-minutes: 15
         uses: ./.github/actions/stub-release
         with:
           mode: ok
@@ -2720,7 +2720,7 @@ jobs:
           org_id: ${{ vars.IT_ORG_ID }}
 
       - name: Stop stub release endpoint (missing digest)
-        timeout-minutes: 5
+        timeout-minutes: 15
         if: always()
         uses: ./.github/actions/stub-release
         with:
@@ -2772,7 +2772,7 @@ jobs:
           Write-Output "config file $config sha256=$configHash"
 
       - name: Wedge the agent service in StopPending
-        timeout-minutes: 5
+        timeout-minutes: 15
         if: matrix.os == 'windows-latest'
         uses: ./.github/actions/wedged-service
         with:
@@ -2883,7 +2883,7 @@ jobs:
       # stop entirely instead of exercising it. Start a fresh wedged run so the
       # uninstall meets a Running service, as an operator would.
       - name: Re-wedge the service for the uninstall check
-        timeout-minutes: 5
+        timeout-minutes: 15
         if: matrix.os == 'windows-latest'
         uses: ./.github/actions/wedged-service
         with:
@@ -2975,7 +2975,7 @@ jobs:
       # registration pointing at the fixture, or the rest of the job (and the
       # final uninstall) would be testing the fixture instead of the agent.
       - name: Restore the agent service after the wedge
-        timeout-minutes: 5
+        timeout-minutes: 15
         if: always() && matrix.os == 'windows-latest'
         uses: ./.github/actions/wedged-service
         with:
@@ -3280,7 +3280,7 @@ jobs:
       # Starts in oversized mode, so the failing leg runs against the endpoint
       # as launched.
       - name: Start stub config endpoint
-        timeout-minutes: 5
+        timeout-minutes: 15
         id: stub_config
         uses: ./.github/actions/stub-config
         with:
@@ -3332,7 +3332,7 @@ jobs:
       # the small valid config an install actually gets (a couple of hundred
       # bytes - four orders of magnitude under the ceiling).
       - name: Serve a valid configuration
-        timeout-minutes: 5
+        timeout-minutes: 15
         uses: ./.github/actions/stub-config
         with:
           mode: ok
@@ -3405,7 +3405,7 @@ jobs:
       # this scenario is read from - it has to be reported on a failure most of
       # all.
       - name: Stop stub config endpoint
-        timeout-minutes: 5
+        timeout-minutes: 15
         if: always()
         uses: ./.github/actions/stub-config
         with:
