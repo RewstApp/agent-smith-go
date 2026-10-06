@@ -14,7 +14,8 @@ on Unix and natively on the already-elevated Windows runner (see action.yml).
 param(
     [Parameter(Mandatory)][string]$LogFile,
     [Parameter(Mandatory)][string]$Patterns,
-    [int]$WaitSeconds = 0,
+    [int]$TimeoutSeconds = 60,
+    [int]$IntervalSeconds = 2,
     # A string rather than [bool]: PowerShell's string-to-bool coercion treats
     # any non-empty string (including the literal text "false") as $true, so
     # a [bool] parameter bound from a command-line "false" argument would
@@ -22,43 +23,51 @@ param(
     [string]$SubscribedTopicQos = "false"
 )
 
-if ($WaitSeconds -gt 0) {
-    Start-Sleep -Seconds $WaitSeconds
-}
-
-if (-not (Test-Path $LogFile)) {
-    Write-Error "Log file not found: $LogFile"
-    exit 1
-}
-$logContent = Get-Content $LogFile -Raw
-Write-Output $logContent
-
 $patternList = $Patterns -split "`r?`n" | Where-Object { $_ -and $_.Trim() }
-$failed = $false
-foreach ($pattern in $patternList) {
-    if ($logContent -notmatch [regex]::Escape($pattern)) {
-        Write-Error "Expected log line not found: $pattern"
-        $failed = $true
-    } else {
-        Write-Output "OK: found '$pattern'"
-    }
-}
+if ($IntervalSeconds -lt 1) { $IntervalSeconds = 1 }
+$deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+$started = Get-Date
 
-if ($SubscribedTopicQos -eq "true") {
-    $subscribedLine = ($logContent -split "`r?`n" | Where-Object { $_ -match "Subscribed to messages" } | Select-Object -First 1)
-    if (-not $subscribedLine) {
-        Write-Error "Expected 'Subscribed to messages' not found in logs"
-        $failed = $true
-    } else {
-        foreach ($token in @("topic=", "qos=")) {
-            if ($subscribedLine -notmatch [regex]::Escape($token)) {
-                Write-Error "Expected '$token' not found in 'Subscribed to messages' log line"
-                $failed = $true
+# Poll until every pattern (and the topic/qos tokens, when asked for) is
+# present, or the deadline passes. Success returns at once on a fast runner;
+# only the failure case waits the whole budget.
+while ($true) {
+    $logContent = if (Test-Path $LogFile) { Get-Content $LogFile -Raw -ErrorAction SilentlyContinue } else { $null }
+    if (-not $logContent) { $logContent = "" }
+
+    $missing = @()
+    foreach ($pattern in $patternList) {
+        if ($logContent -notmatch [regex]::Escape($pattern)) { $missing += $pattern }
+    }
+    $subscribedLine = $null
+    $subscribedProblems = @()
+    if ($SubscribedTopicQos -eq "true") {
+        $subscribedLine = ($logContent -split "`r?`n" | Where-Object { $_ -match "Subscribed to messages" } | Select-Object -First 1)
+        if (-not $subscribedLine) {
+            $subscribedProblems += "Expected 'Subscribed to messages' not found in logs"
+        } else {
+            foreach ($token in @("topic=", "qos=")) {
+                if ($subscribedLine -notmatch [regex]::Escape($token)) {
+                    $subscribedProblems += "Expected '$token' not found in 'Subscribed to messages' log line"
+                }
             }
         }
-        Write-Output "Subscribed messages log: $subscribedLine"
     }
-}
 
-if ($failed) { exit 1 }
-Write-Output "All expected log patterns found"
+    if ($missing.Count -eq 0 -and $subscribedProblems.Count -eq 0) {
+        $elapsed = [int]((Get-Date) - $started).TotalSeconds
+        foreach ($pattern in $patternList) { Write-Output "OK: found '$pattern'" }
+        if ($subscribedLine) { Write-Output "Subscribed messages log: $subscribedLine" }
+        Write-Output "All expected log patterns found after ${elapsed}s"
+        exit 0
+    }
+
+    if ((Get-Date) -ge $deadline) {
+        if (-not (Test-Path $LogFile)) { Write-Error "Log file not found: $LogFile" }
+        Write-Output $logContent
+        foreach ($pattern in $missing) { Write-Error "Expected log line not found after ${TimeoutSeconds}s: $pattern" }
+        foreach ($problem in $subscribedProblems) { Write-Error $problem }
+        exit 1
+    }
+    Start-Sleep -Seconds $IntervalSeconds
+}

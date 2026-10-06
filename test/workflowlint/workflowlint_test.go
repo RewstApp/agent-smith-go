@@ -23,11 +23,12 @@ func workflow(t *testing.T) []string {
 }
 
 type step struct {
-	name string
-	line int
-	uses string
-	cond string
-	args string // the args: value, continuation lines joined with spaces
+	name  string
+	line  int
+	uses  string
+	cond  string
+	args  string // the args: value, continuation lines joined with spaces
+	block string // the step's full text
 }
 
 var (
@@ -56,6 +57,7 @@ func steps(t *testing.T) []step {
 		if cur == nil {
 			continue
 		}
+		cur.block += ln + "\n"
 		if m := usesRe.FindStringSubmatch(ln); m != nil {
 			cur.uses = m[1]
 		}
@@ -294,5 +296,64 @@ func TestEveryCurlHasMaxTime(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatal(err)
+	}
+}
+
+// ── waits are event-relative (sc-117884) ────────────────────────────────────
+
+// A wait-for-log-line without a baseline passes the instant any earlier cycle
+// left a matching line, so it waits for nothing and the step after it races
+// the real event. Every wait must carry baseline_count captured before the
+// step that produces the line.
+func TestEveryWaitForLogLineHasABaseline(t *testing.T) {
+	for _, s := range steps(t) {
+		if s.uses != "wait-for-log-line" {
+			continue
+		}
+		if !strings.Contains(s.block, "baseline_count:") {
+			t.Errorf("line %d, step %q: wait-for-log-line without baseline_count", s.line, s.name)
+		}
+	}
+}
+
+// assert-log-contains polls with a timeout; a fixed sleep before a single read
+// is the flake this replaced. The input no longer exists, so any use is a typo
+// that GitHub would silently ignore.
+func TestNoFixedSleepBeforeAnAssertion(t *testing.T) {
+	for i, ln := range workflow(t) {
+		if strings.Contains(ln, "wait_seconds:") {
+			t.Errorf(
+				"line %d: wait_seconds is gone; assert-log-contains polls (timeout_seconds) - %s",
+				i+1,
+				strings.TrimSpace(ln),
+			)
+		}
+	}
+}
+
+// A sleep in an inline script is only acceptable as the interval of a bounded
+// poll loop. A bare sleep that gates the next assertion is a fixed delay.
+func TestInlineSleepsAreInsidePollLoops(t *testing.T) {
+	lines := workflow(t)
+	sleepRe := regexp.MustCompile(`^\s+(Start-Sleep|sleep)\s`)
+	loopRe := regexp.MustCompile(`\b(for|while|until|foreach)\b`)
+	for i, ln := range lines {
+		if !sleepRe.MatchString(ln) {
+			continue
+		}
+		// Look back within the same run: block for a loop header.
+		inLoop := false
+		for j := i - 1; j >= 0 && j > i-40; j-- {
+			if regexp.MustCompile(`^\s+run: \|`).MatchString(lines[j]) {
+				break
+			}
+			if loopRe.MatchString(lines[j]) {
+				inLoop = true
+				break
+			}
+		}
+		if !inLoop {
+			t.Errorf("line %d: sleep outside a poll loop: %s", i+1, strings.TrimSpace(ln))
+		}
 	}
 }

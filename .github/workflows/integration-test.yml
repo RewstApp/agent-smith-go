@@ -317,7 +317,6 @@ jobs:
           log_file: ${{ matrix.log_file }}
           patterns: Subscribed to messages
           subscribed_topic_qos: "true"
-          wait_seconds: "10"
 
       - name: Send success command
         timeout-minutes: 20
@@ -364,7 +363,14 @@ jobs:
         with:
           log_file: ${{ matrix.log_file }}
           patterns: Command failed
-          wait_seconds: "15"
+
+      # Baseline before the event so the wait below needs a *new* line (sc-117884).
+      - name: Baseline "Updating agent" before the auto-updating install
+        id: bl_updating_agent
+        uses: ./.github/actions/capture-log-count
+        with:
+          log_file: ${{ matrix.log_file }}
+          pattern: "Updating agent"
 
       - name: Install integration test binary (old version)
         timeout-minutes: 10
@@ -402,6 +408,7 @@ jobs:
         with:
           log_file: ${{ matrix.log_file }}
           pattern: Updating agent
+          baseline_count: ${{ steps.bl_updating_agent.outputs.count }}
 
       - name: Verify auto update completed
         timeout-minutes: 5
@@ -491,7 +498,6 @@ jobs:
         with:
           log_file: ${{ matrix.log_file }}
           patterns: ${{ matrix.success_patterns }}
-          wait_seconds: "15"
 
       - name: Update logging level to debug
         timeout-minutes: 10
@@ -637,6 +643,14 @@ jobs:
           LOG_FILE: ${{ matrix.log_file }}
         run: |
           & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/capture-reconnect-baseline-counts.ps1"
+      # Baseline before the event so the wait below needs a *new* line (sc-117884).
+      - name: Baseline "Connection lost" before the broker disruption
+        id: bl_connection_lost
+        uses: ./.github/actions/capture-log-count
+        with:
+          log_file: ${{ matrix.log_file }}
+          pattern: "Connection lost"
+
       - name: Disrupt broker connection
         timeout-minutes: 5
         uses: ./.github/actions/disrupt-connection
@@ -650,6 +664,7 @@ jobs:
         with:
           log_file: ${{ matrix.log_file }}
           pattern: Connection lost
+          baseline_count: ${{ steps.bl_connection_lost.outputs.count }}
           max_attempts: "60"
           interval_seconds: "2"
 
@@ -662,7 +677,6 @@ jobs:
             Connection lost
             Reconnecting in
             Reconnecting...
-          wait_seconds: "10"
 
       - name: Restore broker connection
         timeout-minutes: 5
@@ -896,6 +910,14 @@ jobs:
           mode: assert
           scripts_dir: ${{ (steps.suback_scripts_dir_unix.outputs.path || steps.suback_scripts_dir_windows.outputs.path) }}
 
+      # Baseline before the event so the wait below needs a *new* line (sc-117884).
+      - name: Baseline the subscribe-timeout line before the restart against the withholding broker
+        id: bl_wedge_again
+        uses: ./.github/actions/capture-log-count
+        with:
+          log_file: ${{ matrix.log_file }}
+          pattern: "Failed to subscribe: timed out waiting for broker acknowledgement"
+
       - name: Restart the service against the still-withholding broker
         timeout-minutes: 5
         uses: ./.github/actions/start-service
@@ -908,6 +930,7 @@ jobs:
         with:
           log_file: ${{ matrix.log_file }}
           pattern: "Failed to subscribe: timed out waiting for broker acknowledgement"
+          baseline_count: ${{ steps.bl_wedge_again.outputs.count }}
           max_attempts: "60"
           interval_seconds: "2"
 
@@ -1150,6 +1173,14 @@ jobs:
       # that a subsequent ordinary command still completes - i.e. the worker pool
       # recovered instead of staying wedged. Counts are compared as deltas because
       # the log already carries lines from earlier cycles.
+      # Baseline before the event so the wait below needs a *new* line (sc-117884).
+      - name: Baseline "Subscribed to messages" before the short-timeout update
+        id: bl_sub_timeout_update
+        uses: ./.github/actions/capture-log-count
+        with:
+          log_file: ${{ matrix.log_file }}
+          pattern: "Subscribed to messages"
+
       - name: Enable short command timeout
         timeout-minutes: 10
         uses: ./.github/actions/run-agent
@@ -1163,6 +1194,7 @@ jobs:
         with:
           log_file: ${{ matrix.log_file }}
           pattern: Subscribed to messages
+          baseline_count: ${{ steps.bl_sub_timeout_update.outputs.count }}
           max_attempts: "60"
           interval_seconds: "2"
 
@@ -1265,6 +1297,15 @@ jobs:
       # this job (every command run since loads it), and that load time plus
       # actually spawning a nested powershell.exe left too little headroom
       # in 5s for the child to reliably start before the parent was killed.
+      # Baseline before the event so the wait below needs a *new* line (sc-117884).
+      - name: Baseline "Subscribed to messages" before the child-process timeout update
+        id: bl_sub_child_update
+        if: matrix.os == 'windows-latest'
+        uses: ./.github/actions/capture-log-count
+        with:
+          log_file: ${{ matrix.log_file }}
+          pattern: "Subscribed to messages"
+
       - name: Enable a longer command timeout for the child-process scenario
         timeout-minutes: 10
         if: matrix.os == 'windows-latest'
@@ -1280,6 +1321,7 @@ jobs:
         with:
           log_file: ${{ matrix.log_file }}
           pattern: Subscribed to messages
+          baseline_count: ${{ steps.bl_sub_child_update.outputs.count }}
           max_attempts: "60"
           interval_seconds: "2"
 
@@ -1407,6 +1449,22 @@ jobs:
       # graceful - no Error "Connection lost" is produced. Deltas are compared
       # because earlier cycles already left "Subscribed to messages"/"Connection
       # lost" lines in the log.
+      # Baseline before the event so the wait below needs a *new* line (sc-117884).
+      - name: Baseline "Subscribed to messages" before the short-SAS install
+        id: bl_sub_sas_update
+        uses: ./.github/actions/capture-log-count
+        with:
+          log_file: ${{ matrix.log_file }}
+          pattern: "Subscribed to messages"
+
+      # Baseline before the event so the wait below needs a *new* line (sc-117884).
+      - name: Baseline "Renewing SAS token before expiry" before the short-SAS install
+        id: bl_sas_renewed
+        uses: ./.github/actions/capture-log-count
+        with:
+          log_file: ${{ matrix.log_file }}
+          pattern: "Renewing SAS token before expiry"
+
       - name: Install IT binary with short SAS token lifetime
         timeout-minutes: 10
         uses: ./.github/actions/run-agent
@@ -1420,6 +1478,7 @@ jobs:
         with:
           log_file: ${{ matrix.log_file }}
           pattern: Subscribed to messages
+          baseline_count: ${{ steps.bl_sub_sas_update.outputs.count }}
           max_attempts: "60"
           interval_seconds: "2"
 
@@ -1449,6 +1508,7 @@ jobs:
         with:
           log_file: ${{ matrix.log_file }}
           pattern: Renewing SAS token before expiry
+          baseline_count: ${{ steps.bl_sas_renewed.outputs.count }}
           max_attempts: "60"
           interval_seconds: "2"
 
@@ -2610,6 +2670,14 @@ jobs:
         with:
           mode: ok
 
+      # Baseline before the event so the wait below needs a *new* line (sc-117884).
+      - name: Baseline "checksum mismatch for" before the tampered-digest install
+        id: bl_tampered_reject
+        uses: ./.github/actions/capture-log-count
+        with:
+          log_file: ${{ matrix.log_file }}
+          pattern: "checksum mismatch for"
+
       - name: Install integration test binary with auto-updates on (tampered digest)
         timeout-minutes: 10
         uses: ./.github/actions/run-agent
@@ -2623,6 +2691,7 @@ jobs:
         with:
           log_file: ${{ matrix.log_file }}
           pattern: "checksum mismatch for"
+          baseline_count: ${{ steps.bl_tampered_reject.outputs.count }}
 
       - name: Assert the tampered installer was rejected rather than installed
         timeout-minutes: 5
@@ -2686,6 +2755,14 @@ jobs:
         with:
           mode: ok
 
+      # Baseline before the event so the wait below needs a *new* line (sc-117884).
+      - name: Baseline "failed to verify installer for" before the missing-digest install
+        id: bl_missing_digest_reject
+        uses: ./.github/actions/capture-log-count
+        with:
+          log_file: ${{ matrix.log_file }}
+          pattern: "failed to verify installer for"
+
       - name: Install integration test binary with auto-updates on (missing digest)
         timeout-minutes: 10
         uses: ./.github/actions/run-agent
@@ -2699,6 +2776,7 @@ jobs:
         with:
           log_file: ${{ matrix.log_file }}
           pattern: "failed to verify installer for"
+          baseline_count: ${{ steps.bl_missing_digest_reject.outputs.count }}
 
       - name: Assert the missing-digest installer was rejected rather than installed
         timeout-minutes: 5
