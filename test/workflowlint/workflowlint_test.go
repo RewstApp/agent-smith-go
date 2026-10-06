@@ -169,3 +169,130 @@ func TestNoScriptStepSplicesAMatrixFlagBagThroughEnv(t *testing.T) {
 		}
 	}
 }
+
+// ── bounds (sc-117886) ───────────────────────────────────────────────────────
+
+func readWorkflow(t *testing.T, name string) []string {
+	t.Helper()
+	p := filepath.Join("..", "..", ".github", "workflows", name)
+	b, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatalf("reading %s: %v", p, err)
+	}
+	return strings.Split(string(b), "\n")
+}
+
+// jobs returns each job's name and the lines of its block.
+func jobs(lines []string) map[string][]string {
+	out := map[string][]string{}
+	var cur string
+	inJobs := false
+	for _, ln := range lines {
+		if ln == "jobs:" {
+			inJobs = true
+			continue
+		}
+		if !inJobs {
+			continue
+		}
+		if m := regexp.MustCompile(`^  ([a-z-]+):$`).FindStringSubmatch(ln); m != nil {
+			cur = m[1]
+			continue
+		}
+		if cur != "" {
+			out[cur] = append(out[cur], ln)
+		}
+	}
+	return out
+}
+
+// A job without timeout-minutes runs to GitHub's six-hour default, and under the
+// integration-test concurrency group that blocks every dispatch behind it. A
+// job that delegates to a reusable workflow (`uses:`) carries no bound of its
+// own, so the reusable workflow's job must carry it instead.
+func TestEveryIntegrationJobIsBounded(t *testing.T) {
+	for name, block := range jobs(workflow(t)) {
+		body := strings.Join(block, "\n")
+		if regexp.MustCompile(`(?m)^    uses: \./\.github/workflows/`).MatchString(body) {
+			continue // bounded inside the reusable workflow; checked below
+		}
+		if !strings.Contains(body, "timeout-minutes:") {
+			t.Errorf("job %q has no timeout-minutes", name)
+		}
+	}
+	for name, block := range jobs(readWorkflow(t, "build.yml")) {
+		if !strings.Contains(strings.Join(block, "\n"), "timeout-minutes:") {
+			t.Errorf(
+				"build.yml job %q has no timeout-minutes (the integration `build` job reuses it)",
+				name,
+			)
+		}
+	}
+}
+
+// Every step that waits on something outside the runner - the agent binary, the
+// engine, a stub server, a log line - carries its own bound below the job's, so
+// a hang is attributed to the step in the job summary rather than surfacing as
+// "exceeded the maximum execution time" on the job.
+func TestEveryWaitingStepIsBounded(t *testing.T) {
+	waiting := regexp.MustCompile(
+		`(?m)^\s+uses: \./\.github/actions/(install-agent|run-agent|send-command|wait-for-log-line|stub-[a-z]+|wedged-service|assert-log-[a-z]+)$|it-scripts/(wait-for|assert)`,
+	)
+	lines := workflow(t)
+	starts := []int{}
+	for i, ln := range lines {
+		if strings.HasPrefix(ln, "      - name: ") {
+			starts = append(starts, i)
+		}
+	}
+	for k, s := range starts {
+		e := len(lines)
+		if k+1 < len(starts) {
+			e = starts[k+1]
+		}
+		block := strings.Join(lines[s:e], "\n")
+		if waiting.MatchString(block) && !strings.Contains(block, "timeout-minutes:") {
+			t.Errorf(
+				"line %d, step %s waits on an external system without timeout-minutes",
+				s+1,
+				strings.TrimPrefix(lines[s], "      - name: "),
+			)
+		}
+	}
+}
+
+// A curl without --max-time can wait on a half-open connection forever; the
+// step bound would catch it, but only after the whole budget is spent. Only
+// curl *commands* count - first word of a line, or after $( ( ; | && - so an
+// input description that mentions curl is not a finding.
+func TestEveryCurlHasMaxTime(t *testing.T) {
+	root := filepath.Join("..", "..", ".github")
+	command := regexp.MustCompile(`(^|\$\(|\(|;|\||&&)\s*curl\s`)
+	continuation := regexp.MustCompile(`\\\n\s*`)
+	err := filepath.Walk(root, func(p string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() {
+			return err
+		}
+		if !strings.HasSuffix(p, ".yml") && !strings.HasSuffix(p, ".sh") {
+			return nil
+		}
+		b, err := os.ReadFile(p)
+		if err != nil {
+			return err
+		}
+		text := continuation.ReplaceAllString(string(b), " ")
+		for i, ln := range strings.Split(text, "\n") {
+			trim := strings.TrimSpace(ln)
+			if strings.HasPrefix(trim, "#") || !command.MatchString(trim) {
+				continue
+			}
+			if !strings.Contains(trim, "--max-time") {
+				t.Errorf("%s:%d: curl without --max-time: %s", p, i+1, trim)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
