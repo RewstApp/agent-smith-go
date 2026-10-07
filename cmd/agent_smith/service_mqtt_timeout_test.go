@@ -163,7 +163,7 @@ func waitForLog(
 		if time.Now().After(deadline) {
 			return content
 		}
-		time.Sleep(20 * time.Millisecond)
+		time.Sleep(20 * time.Millisecond) // sleep-ok: poll interval
 	}
 }
 

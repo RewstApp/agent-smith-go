@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -688,15 +689,33 @@ func TestRun_OlderTagDoesNotDowngrade(t *testing.T) {
 type mockUpdater struct {
 	runErr     error
 	runFn      func(ctx context.Context) error
-	runCount   int
+	runCount   atomic.Int32
 	checkFn    func() (Release, error)
 	updateFn   func(string) error
 	selectFn   func(Release) (Asset, error)
 	downloadFn func(Asset) (string, error)
 }
 
+// waitForRuns blocks until the mock has been run at least n times. The runner
+// is driven by real timers, so the tests wait for the observable they care
+// about instead of sleeping a guessed number of milliseconds (sc-119840).
+func waitForRuns(t *testing.T, mock *mockUpdater, n int) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for int(mock.runCount.Load()) < n {
+		if time.Now().After(deadline) {
+			t.Fatalf(
+				"runner reached only %d run(s), wanted at least %d",
+				int(mock.runCount.Load()),
+				n,
+			)
+		}
+		time.Sleep(2 * time.Millisecond) // sleep-ok: poll interval
+	}
+}
+
 func (m *mockUpdater) Run(ctx context.Context) error {
-	m.runCount++
+	m.runCount.Add(1)
 	if m.runFn != nil {
 		return m.runFn(ctx)
 	}
@@ -766,8 +785,7 @@ func TestAutoUpdateRunner_StartAndStop(t *testing.T) {
 		close(done)
 	}()
 
-	// Wait for at least one run
-	time.Sleep(50 * time.Millisecond)
+	waitForRuns(t, mock, 1)
 	runner.Stop()
 
 	select {
@@ -776,7 +794,7 @@ func TestAutoUpdateRunner_StartAndStop(t *testing.T) {
 		t.Fatal("runner did not stop in time")
 	}
 
-	if mock.runCount == 0 {
+	if int(mock.runCount.Load()) == 0 {
 		t.Error("expected at least one run")
 	}
 }
@@ -801,8 +819,8 @@ func TestAutoUpdateRunner_StopBeforeFirstRun(t *testing.T) {
 		t.Fatal("runner did not stop in time")
 	}
 
-	if mock.runCount != 0 {
-		t.Errorf("expected 0 runs, got %d", mock.runCount)
+	if int(mock.runCount.Load()) != 0 {
+		t.Errorf("expected 0 runs, got %d", int(mock.runCount.Load()))
 	}
 }
 
@@ -820,8 +838,7 @@ func TestAutoUpdateRunner_RetryOnFailure(t *testing.T) {
 		close(done)
 	}()
 
-	// Wait for retries to happen
-	time.Sleep(100 * time.Millisecond)
+	waitForRuns(t, mock, 2) // the initial run and at least one retry
 	runner.Stop()
 
 	select {
@@ -831,8 +848,8 @@ func TestAutoUpdateRunner_RetryOnFailure(t *testing.T) {
 	}
 
 	// Should have run at least once (initial) + retries
-	if mock.runCount < 2 {
-		t.Errorf("expected at least 2 runs for retry, got %d", mock.runCount)
+	if int(mock.runCount.Load()) < 2 {
+		t.Errorf("expected at least 2 runs for retry, got %d", int(mock.runCount.Load()))
 	}
 }
 
@@ -851,8 +868,7 @@ func TestAutoUpdateRunner_RetriesExhausted(t *testing.T) {
 		close(done)
 	}()
 
-	// Wait for initial run + retries + next cycle
-	time.Sleep(200 * time.Millisecond)
+	waitForRuns(t, mock, 1+maxRetries)
 	runner.Stop()
 
 	select {
@@ -863,8 +879,8 @@ func TestAutoUpdateRunner_RetriesExhausted(t *testing.T) {
 
 	// Initial run + maxRetries per cycle, possibly multiple cycles
 	// At minimum: 1 initial + 2 retries = 3
-	if mock.runCount < 1+maxRetries {
-		t.Errorf("expected at least %d runs, got %d", 1+maxRetries, mock.runCount)
+	if int(mock.runCount.Load()) < 1+maxRetries {
+		t.Errorf("expected at least %d runs, got %d", 1+maxRetries, int(mock.runCount.Load()))
 	}
 }
 
@@ -873,7 +889,7 @@ func TestAutoUpdateRunner_RetrySucceedsAfterFailures(t *testing.T) {
 	failsBeforeSuccess := 2
 	mock := &mockUpdater{}
 	mock.runFn = func(ctx context.Context) error {
-		if mock.runCount <= failsBeforeSuccess {
+		if int(mock.runCount.Load()) <= failsBeforeSuccess {
 			return fmt.Errorf("temporary failure")
 		}
 		return nil
@@ -887,8 +903,7 @@ func TestAutoUpdateRunner_RetrySucceedsAfterFailures(t *testing.T) {
 		close(done)
 	}()
 
-	// Wait for initial failure + retries + resumed normal interval
-	time.Sleep(100 * time.Millisecond)
+	waitForRuns(t, mock, failsBeforeSuccess+1)
 	runner.Stop()
 
 	select {
@@ -898,8 +913,12 @@ func TestAutoUpdateRunner_RetrySucceedsAfterFailures(t *testing.T) {
 	}
 
 	// Should have run: 1 initial fail + 1 retry fail + 1 retry success + at least 1 normal cycle
-	if mock.runCount < failsBeforeSuccess+1 {
-		t.Errorf("expected at least %d runs, got %d", failsBeforeSuccess+1, mock.runCount)
+	if int(mock.runCount.Load()) < failsBeforeSuccess+1 {
+		t.Errorf(
+			"expected at least %d runs, got %d",
+			failsBeforeSuccess+1,
+			int(mock.runCount.Load()),
+		)
 	}
 }
 
@@ -921,8 +940,7 @@ func TestAutoUpdateRunner_StopDuringBackoff(t *testing.T) {
 		close(done)
 	}()
 
-	// Wait for initial failure to trigger backoff
-	time.Sleep(50 * time.Millisecond)
+	waitForRuns(t, mock, 1) // the first failure puts the runner into its backoff
 	runner.Stop()
 
 	select {
@@ -1165,7 +1183,12 @@ func TestDownload_Timeout(t *testing.T) {
 // in-flight update check promptly rather than waiting for the client Timeout.
 func TestCheck_ContextCancelled(t *testing.T) {
 	done := make(chan struct{})
+	arrived := make(chan struct{}, 1) // the request is in flight; cancel lands mid-request
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case arrived <- struct{}{}:
+		default:
+		}
 		select {
 		case <-done:
 		case <-r.Context().Done():
@@ -1182,7 +1205,7 @@ func TestCheck_ContextCancelled(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
-		time.Sleep(50 * time.Millisecond)
+		<-arrived
 		cancel()
 	}()
 
@@ -1202,7 +1225,12 @@ func TestCheck_ContextCancelled(t *testing.T) {
 // in-flight download promptly rather than waiting for the client Timeout.
 func TestDownload_ContextCancelled(t *testing.T) {
 	done := make(chan struct{})
+	arrived := make(chan struct{}, 1) // the request is in flight; cancel lands mid-request
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case arrived <- struct{}{}:
+		default:
+		}
 		select {
 		case <-done:
 		case <-r.Context().Done():
@@ -1215,7 +1243,7 @@ func TestDownload_ContextCancelled(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
-		time.Sleep(50 * time.Millisecond)
+		<-arrived
 		cancel()
 	}()
 

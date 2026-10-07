@@ -19,6 +19,7 @@ func TestHelperProcessSleeps(t *testing.T) {
 	if os.Getenv(helperSleepEnv) != "1" {
 		t.Skip("helper process; only runs when re-executed by the process scan test")
 	}
+	// sleep-ok: body of the helper child process; the parent test kills it
 	time.Sleep(30 * time.Second)
 }
 
@@ -108,6 +109,6 @@ func waitFor(t *testing.T, what string, condition func() bool) {
 		if time.Now().After(deadline) {
 			t.Fatalf("timed out waiting for %s", what)
 		}
-		time.Sleep(50 * time.Millisecond)
+		time.Sleep(50 * time.Millisecond) // sleep-ok: poll interval
 	}
 }

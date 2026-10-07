@@ -122,6 +122,8 @@ type spoolEntry struct {
 // workers — enqueue only ever creates new files and flush only ever reads or
 // removes existing ones, so the two never corrupt a shared file.
 type postbackSpool struct {
+	// now is the clock every age and spacing decision reads; tests replace it.
+	now         func() time.Time
 	dir         string
 	maxEntries  int
 	maxAge      time.Duration
@@ -164,6 +166,7 @@ func newPostbackSpool(
 		maxAttempts = defaultSpoolMaxAttempts
 	}
 	return &postbackSpool{
+		now:             time.Now,
 		dir:             dir,
 		maxEntries:      maxEntries,
 		maxAge:          maxAge,
@@ -232,7 +235,7 @@ func (s *postbackSpool) pruneLocked(keep int) {
 		return
 	}
 
-	cutoff := time.Now().Add(-s.maxAge)
+	cutoff := s.now().Add(-s.maxAge)
 	survivors := files[:0]
 	for _, name := range files {
 		if ts, ok := spoolFileTime(name); ok && ts.Before(cutoff) {
@@ -327,7 +330,7 @@ func (s *postbackSpool) flush(
 		return
 	}
 
-	cutoff := time.Now().Add(-s.maxAge)
+	cutoff := s.now().Add(-s.maxAge)
 	delivered := 0
 	abandoned := 0
 	rejected := 0
@@ -388,7 +391,7 @@ func (s *postbackSpool) flush(
 			// conditional. Only whether this rejection is COUNTED is spaced out, so
 			// an engine failing wholesale cannot spend an entry's whole budget in a
 			// burst of quick reconnects.
-			now := time.Now()
+			now := s.now()
 			if !entry.LastAttemptAt.IsZero() &&
 				now.Sub(entry.LastAttemptAt) < s.attemptInterval {
 				s.recordAttempt(name, entry)

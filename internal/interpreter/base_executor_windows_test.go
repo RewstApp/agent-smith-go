@@ -64,7 +64,7 @@ func waitForChildPid(t *testing.T, pidFile string) int {
 		if time.Now().After(deadline) {
 			t.Fatalf("child pid file %s was never written; the child never started", pidFile)
 		}
-		time.Sleep(100 * time.Millisecond)
+		time.Sleep(100 * time.Millisecond) // sleep-ok: poll interval
 	}
 }
 
@@ -138,7 +138,7 @@ func TestBaseExecutor_ContextCancel_KillsChildProcess(t *testing.T) {
 	// child no longer survives.
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) && processRunning(t, pid) {
-		time.Sleep(200 * time.Millisecond)
+		time.Sleep(200 * time.Millisecond) // sleep-ok: poll interval
 	}
 	if processRunning(t, pid) {
 		t.Errorf("child process %d survived the parent's cancellation kill", pid)

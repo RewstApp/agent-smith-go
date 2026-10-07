@@ -45,10 +45,10 @@ func (t *fakeToken) Error() error          { return t.err }
 
 func TestWaitToken_CompletedBeforeTimeout(t *testing.T) {
 	token := newFakeToken()
-	go func() {
-		time.Sleep(10 * time.Millisecond)
-		token.resolve(nil)
-	}()
+	// Resolving before the wait is the same observable as resolving during it:
+	// Done is a closed channel either way, and WaitToken must pick it over the
+	// timeout. A sleep-then-resolve only added a race with the runner's clock.
+	token.resolve(nil)
 
 	if got := WaitToken(token, 5*time.Second, nil); got != TokenCompleted {
 		t.Errorf("expected TokenCompleted, got %v", got)
@@ -73,10 +73,9 @@ func TestWaitToken_InterruptedByStop(t *testing.T) {
 	defer token.resolve(nil)
 
 	interrupt := make(chan struct{})
-	go func() {
-		time.Sleep(10 * time.Millisecond)
-		close(interrupt)
-	}()
+	close(
+		interrupt,
+	) // already stopping when the wait begins; same select outcome as stopping during it
 
 	start := time.Now()
 	// A long timeout, so returning promptly can only come from the interrupt.

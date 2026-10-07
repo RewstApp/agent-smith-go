@@ -893,7 +893,7 @@ func waitFor(t *testing.T, timeout time.Duration, cond func() bool) bool {
 		if cond() {
 			return true
 		}
-		time.Sleep(10 * time.Millisecond)
+		time.Sleep(10 * time.Millisecond) // sleep-ok: poll interval
 	}
 
 	return cond()
