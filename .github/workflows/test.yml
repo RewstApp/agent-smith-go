@@ -30,6 +30,13 @@ jobs:
       - name: Run all tests
         run: go test ./...
 
+      # The journal, spool and install writes fsync (sc-119835); the acceptance
+      # criterion is a median under 20 ms per write on each runner. Recorded
+      # here on every run rather than asserted, so the number is in the log
+      # without a starved runner being able to fail the build on it.
+      - name: Record the per-write fsync cost
+        run: go test ./internal/utils -run TestWriteFileAtomic_MedianCost -v -count=1
+
       # The agent's command path is concurrent in ways a plain run cannot check:
       # a worker pool that outlives its connection cycle and overlaps the next
       # (sc-118039), the journal ownership map, the postback spool flushed on

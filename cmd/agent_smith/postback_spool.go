@@ -147,6 +147,7 @@ type postbackSpool struct {
 	droppedCapacity atomic.Int64
 	droppedAttempts atomic.Int64
 	droppedCorrupt  atomic.Int64
+	fs              utils.FileSystem
 }
 
 func newPostbackSpool(
@@ -173,6 +174,7 @@ func newPostbackSpool(
 		maxAttempts:     maxAttempts,
 		attemptInterval: minAttemptInterval,
 		logger:          logger,
+		fs:              utils.NewFileSystem(),
 	}
 }
 
@@ -215,13 +217,10 @@ func (s *postbackSpool) enqueue(entry spoolEntry) error {
 	s.seq++
 	name := fmt.Sprintf("%020d-%06d%s", entry.CreatedAt.UnixNano(), s.seq, spoolFileSuffix)
 	final := filepath.Join(s.dir, name)
-	tmp := final + ".tmp"
 
-	if err := os.WriteFile(tmp, data, utils.DefaultFileMod); err != nil {
-		return fmt.Errorf("write spool entry: %w", err)
-	}
-	if err := os.Rename(tmp, final); err != nil {
-		_ = os.Remove(tmp)
+	// Fsynced as well as atomic: a result spooled because the engine was
+	// unreachable must survive a power loss while it waits (sc-119835).
+	if err := utils.WriteFileAtomic(s.fs, final, data, utils.DefaultFileMod); err != nil {
 		return fmt.Errorf("commit spool entry: %w", err)
 	}
 	return nil
@@ -452,13 +451,7 @@ func (s *postbackSpool) recordAttempt(name string, entry spoolEntry) {
 		return
 	}
 
-	tmp := final + ".tmp"
-	if err := os.WriteFile(tmp, data, utils.DefaultFileMod); err != nil {
-		s.logger.Error("Failed to write spool entry attempt", "file", name, "error", err)
-		return
-	}
-	if err := os.Rename(tmp, final); err != nil {
-		_ = os.Remove(tmp)
+	if err := utils.WriteFileAtomic(s.fs, final, data, utils.DefaultFileMod); err != nil {
 		s.logger.Error("Failed to commit spool entry attempt", "file", name, "error", err)
 	}
 }
