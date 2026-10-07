@@ -213,6 +213,38 @@ func (svc *serviceContext) Execute(
 		logger,
 	)
 
+	// Both age bounds run on clock evidence rather than the wall clock at the
+	// moment of the decision (sc-119838). A backward step is reported once;
+	// the cycle that found it expires nothing, and the evidence restarts in the
+	// new timeline. The timer keeps the heartbeat current while the agent is
+	// idle, so the next process knows how long this one actually ran.
+	clockStepBack := func(what string) func(last, now time.Time) {
+		return func(last, now time.Time) {
+			logger.Error(
+				"System clock stepped backwards; "+what+" expiry and pruning are suspended "+
+					"for this cycle and time is measured from the new clock",
+				"last_observed", last,
+				"now", now,
+				"step", last.Sub(now),
+			)
+		}
+	}
+	svc.journal.onClockStepBack = clockStepBack("command journal")
+	svc.spool.onClockStepBack = clockStepBack("postback spool")
+	utils.SafeGo(logger, func() {
+		ticker := time.NewTicker(clockHeartbeatInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				svc.journal.observeClock()
+				svc.spool.clock.observe()
+			}
+		}
+	}, "scope", "clock_heartbeat")
+
 	if !device.DisableAutoUpdates {
 		updater := agent.NewUpdater(
 			logger,
