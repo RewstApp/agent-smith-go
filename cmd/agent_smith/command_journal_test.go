@@ -8,12 +8,45 @@ import (
 	"time"
 )
 
+// newTestJournal returns a journal on an injected clock whose heartbeat is
+// already established at that clock - the state of any agent after its first
+// cycle - so the tests of ordinary behaviour are not run under the first-run
+// "no evidence yet" suspension. The clock-evidence tests build their own.
 func newTestJournal(t *testing.T) (*commandJournal, func(time.Duration)) {
 	t.Helper()
-	j := newCommandJournal(filepath.Join(t.TempDir(), "command_journal"), 5, time.Hour)
+	dir := filepath.Join(t.TempDir(), "command_journal")
 	now := time.Date(2026, 9, 18, 12, 0, 0, 0, time.UTC)
+	primeHeartbeat(t, filepath.Join(dir, journalHeartbeatFile), now)
+	j := newCommandJournal(dir, 5, time.Hour)
 	j.now = func() time.Time { return now }
 	return j, func(d time.Duration) { now = now.Add(d) }
+}
+
+// primeHeartbeat writes the clock evidence a previous run would have left.
+func primeHeartbeat(t *testing.T, path string, at time.Time) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(at.UTC().Format(time.RFC3339Nano)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// journalFiles lists the journal's records, leaving the heartbeat out.
+func journalFiles(t *testing.T, dir string) []string {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, e := range entries {
+		if e.Name() != journalHeartbeatFile {
+			names = append(names, e.Name())
+		}
+	}
+	return names
 }
 
 func TestJournalKey_UsesPostIdWhenPresentElseDigest(t *testing.T) {
@@ -40,14 +73,11 @@ func TestJournal_FilenamesAreWindowsSafeAndKeyDerivable(t *testing.T) {
 	if _, err := j.put(key, []byte("{}")); err != nil {
 		t.Fatal(err)
 	}
-	entries, err := os.ReadDir(j.dir)
-	if err != nil {
-		t.Fatal(err)
-	}
+	entries := journalFiles(t, j.dir)
 	if len(entries) != 1 {
 		t.Fatalf("expected one file, got %d", len(entries))
 	}
-	name := entries[0].Name()
+	name := entries[0]
 	if strings.ContainsAny(name, `:*?"<>|`) {
 		t.Errorf("journal filename %q contains a character Windows rejects", name)
 	}
