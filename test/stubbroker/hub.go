@@ -34,6 +34,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"golang.org/x/text/encoding/unicode"
 )
 
 // pendingMessage is one C2D message the broker owes a device.
@@ -354,14 +356,25 @@ func (h *hub) handlePostback(w http.ResponseWriter, r *http.Request) {
 }
 
 // commandPayload is the C2D message the real engine sends for a command: the
-// script is base64-encoded in the "commands" field, which the agent decodes
-// before executing (a plain string fails with "illegal base64 data").
+// script is UTF-16LE encoded and then base64-encoded in the "commands" field
+// (the PowerShell -EncodedCommand convention), and the agent reverses both
+// before executing. Plain base64 of UTF-8 ran as "捥潨∠敨汬⁯潷汲≤: command not
+// found" - the bytes read as UTF-16 - and plain text failed the base64 decode.
 func commandPayload(postID, commands string) json.RawMessage {
 	msg, _ := json.Marshal(map[string]string{
 		"post_id":  postID,
-		"commands": base64.StdEncoding.EncodeToString([]byte(commands)),
+		"commands": encodeCommands(commands),
 	})
 	return msg
+}
+
+func encodeCommands(commands string) string {
+	encoder := unicode.UTF16(unicode.LittleEndian, unicode.IgnoreBOM).NewEncoder()
+	utf16Bytes, err := encoder.Bytes([]byte(commands))
+	if err != nil {
+		utf16Bytes = []byte(commands)
+	}
+	return base64.StdEncoding.EncodeToString(utf16Bytes)
 }
 
 // handleEnqueue lets the harness owe a device a message without waiting for a

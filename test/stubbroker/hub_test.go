@@ -13,10 +13,12 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
 	mqtt "github.com/eclipse/paho.mqtt.golang"
+	"golang.org/x/text/encoding/unicode"
 )
 
 // startFixture runs the broker, engine and postback receiver on loopback ports
@@ -177,8 +179,8 @@ func TestFixture_TriggerDeliversAndReturnsThePostback(t *testing.T) {
 	if err := json.Unmarshal(m.Payload(), &msg); err != nil || msg.PostID == "" {
 		t.Fatalf("bad C2D payload %s: %v", m.Payload(), err)
 	}
-	decoded, err := base64.StdEncoding.DecodeString(msg.Commands)
-	if err != nil || string(decoded) != `echo "hello world"` {
+	decoded, err := decodeCommands(msg.Commands)
+	if err != nil || decoded != `echo "hello world"` {
 		t.Errorf(
 			"commands = %q (decoded %q, %v); want the suite's quoting unwrapped, base64-encoded",
 			msg.Commands,
@@ -325,14 +327,23 @@ func TestFixture_PostURLIsDefinedForSelfPostingScripts(t *testing.T) {
 		m.Ack()
 		var msg struct{ Commands string }
 		_ = json.Unmarshal(m.Payload(), &msg)
-		decoded, _ := base64.StdEncoding.DecodeString(msg.Commands)
-		if !bytes.HasPrefix(
-			decoded,
-			[]byte(`$post_url = "`+postbackBase+`/webhooks/custom/action/`),
-		) {
+		decoded, _ := decodeCommands(msg.Commands)
+		if !strings.HasPrefix(decoded, `$post_url = "`+postbackBase+`/webhooks/custom/action/`) {
 			t.Fatalf("commands did not get $post_url defined: %q", decoded)
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("no delivery")
 	}
+}
+
+// decodeCommands reverses encodeCommands the way the agent does: base64, then
+// UTF-16LE.
+func decodeCommands(encoded string) (string, error) {
+	raw, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		return "", err
+	}
+	decoder := unicode.UTF16(unicode.LittleEndian, unicode.IgnoreBOM).NewDecoder()
+	out, err := decoder.Bytes(raw)
+	return string(out), err
 }
