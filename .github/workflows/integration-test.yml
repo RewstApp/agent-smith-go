@@ -1728,6 +1728,7 @@ jobs:
         run: |
           & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/wait-for-fresh-subscription-after-the-output-ceiling-update.ps1"
       - name: Send stdout flood command
+        id: send_stdout_flood
         timeout-minutes: 20
         uses: ./.github/actions/send-command
         with:
@@ -1742,6 +1743,10 @@ jobs:
           service: ${{ matrix.service }}
           log_file: ${{ matrix.log_file }}
           baseline_truncations: ${{ (steps.output_baseline_unix.outputs.truncated || steps.output_baseline_windows.outputs.truncated) }}
+          # A retried send may have run the command twice (run 37633504250: the
+          # engine answered a transient 404 after dispatching, and the retry
+          # produced a second truncation warning two seconds after the first).
+          dispatches: ${{ steps.send_stdout_flood.outputs.attempts }}
           expected_ceiling_bytes: "262144"
           # At least the whole ceiling, since stdout alone floods it. The upper
           # bound carries 4 KiB of headroom rather than being exact because the
@@ -1852,6 +1857,7 @@ jobs:
         run: |
           & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/capture-stderr-flood-baseline-counts.ps1"
       - name: Send stderr flood command
+        id: send_stderr_flood
         timeout-minutes: 20
         uses: ./.github/actions/send-command
         with:
@@ -1866,6 +1872,7 @@ jobs:
           service: ${{ matrix.service }}
           log_file: ${{ matrix.log_file }}
           baseline_truncations: ${{ (steps.stderr_flood_baseline_unix.outputs.truncated || steps.stderr_flood_baseline_windows.outputs.truncated) }}
+          dispatches: ${{ steps.send_stderr_flood.outputs.attempts }}
           expected_ceiling_bytes: "262144"
           # Above the ceiling on purpose: the script floods stderr to its full
           # ceiling AND writes a short stdout line, so the kept total can only
@@ -1931,6 +1938,7 @@ jobs:
         run: |
           & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/wait-for-fresh-subscription-after-the-timeout-update.ps1"
       - name: Send verbose command that then hangs
+        id: send_verbose_hang
         timeout-minutes: 20
         uses: ./.github/actions/send-command
         with:
@@ -1945,6 +1953,7 @@ jobs:
           service: ${{ matrix.service }}
           log_file: ${{ matrix.log_file }}
           baseline_truncations: ${{ (steps.compose_baseline_unix.outputs.truncated || steps.compose_baseline_windows.outputs.truncated) }}
+          dispatches: ${{ steps.send_verbose_hang.outputs.attempts }}
           expected_ceiling_bytes: "262144"
           # Same headroom as the other floods: stdout fills the ceiling on its
           # own, and anything the shell adds on either stream is incidental.
@@ -3171,6 +3180,234 @@ jobs:
         uses: ./.github/actions/assert-uninstalled
         with:
           paths: ${{ matrix.uninstall_paths }}
+
+  # ---- Hermetic command path (sc-117887) ----
+  # The agent is installed from a stub config endpoint and talks to a single
+  # local fixture that is both its broker and its engine: the stub broker
+  # delivers cloud-to-device messages at QoS 1 with redelivery, and the stand-in
+  # engine's trigger blocks for the device's postback exactly as Rewst does. No
+  # request leaves the runner except to GitHub, so a red here is the agent, not
+  # the engine's ceiling, an expired token, or a shared device. continue-on-error
+  # while the job accumulates the 20 consecutive green runs the ticket asks for
+  # before it becomes the gate and the live suite is demoted to a smoke.
+  test-hermetic:
+    needs: [set-matrix, build]
+    permissions:
+      contents: read
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.set-matrix.outputs.matrix) }}
+    runs-on: ${{ matrix.os }}
+    # Measured on the first runs; see README "Hermetic command-path job".
+    timeout-minutes: 30
+    env:
+      # One device per job, never shared with another run or platform.
+      HERMETIC_DEVICE_ID: hermetic-${{ github.run_id }}-${{ matrix.os }}
+      STUB_CONFIG_SECRET: hermetic-secret
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Download compiled binary
+        uses: actions/download-artifact@v8
+        with:
+          name: ${{ matrix.os }}
+          path: ./dist
+
+      - name: Make binary executable
+        if: runner.os != 'Windows'
+        shell: bash
+        run: chmod +x "./dist/${{ matrix.binary }}"
+
+      - name: Start stub broker and engine
+        id: stub_broker
+        timeout-minutes: 15
+        uses: ./.github/actions/stub-broker
+        with:
+          mode: start
+
+      - name: Acknowledge subscriptions
+        timeout-minutes: 15
+        uses: ./.github/actions/stub-broker
+        with:
+          mode: ack
+
+      - name: Start stub config endpoint pointing at the fixture
+        id: stub_config
+        timeout-minutes: 15
+        uses: ./.github/actions/stub-config
+        with:
+          mode: start
+          org_id: ${{ vars.IT_ORG_ID }}
+          device_id: ${{ env.HERMETIC_DEVICE_ID }}
+          hub_host: ${{ steps.stub_broker.outputs.host }}
+          engine_host: ${{ steps.stub_broker.outputs.engine_host }}
+
+      - name: Serve a valid configuration
+        timeout-minutes: 15
+        uses: ./.github/actions/stub-config
+        with:
+          mode: ok
+
+      # worker_count 1 so queued commands are observably queued, which is what
+      # the kill-and-replay scenario below depends on.
+      - name: Install agent against the fixture
+        timeout-minutes: 10
+        uses: ./.github/actions/run-agent
+        with:
+          binary: ${{ matrix.binary }}
+          args: >-
+            --config-url ${{ steps.stub_config.outputs.url }}
+            --config-secret ${{ env.STUB_CONFIG_SECRET }}
+            --org-id ${{ vars.IT_ORG_ID }}
+            --no-auto-updates
+            --worker-count 1
+
+      - name: Check service
+        timeout-minutes: 5
+        uses: ./.github/actions/check-service
+        with:
+          service: ${{ matrix.service }}
+
+      - name: Wait for subscription to the fixture
+        timeout-minutes: 6
+        uses: ./.github/actions/wait-for-log-line
+        with:
+          log_file: ${{ matrix.log_file }}
+          pattern: Subscribed to messages
+          baseline_count: "0"
+          max_attempts: "60"
+
+      # ---- Round trip through the stand-in engine ----
+      - name: Send success command through the stub engine
+        timeout-minutes: 20
+        uses: ./.github/actions/send-command
+        with:
+          trigger_url: ${{ steps.stub_broker.outputs.engine_url }}/webhooks/custom/trigger/hermetic/stub
+          device_id: ${{ env.HERMETIC_DEVICE_ID }}
+          commands: ${{ matrix.success_commands }}
+          expected_output: ${{ matrix.success_output }}
+
+      - name: Check logs for command completion and postback
+        timeout-minutes: 5
+        uses: ./.github/actions/assert-log-contains
+        with:
+          log_file: ${{ matrix.log_file }}
+          patterns: ${{ matrix.success_patterns }}
+
+      - name: Send failing command through the stub engine
+        timeout-minutes: 20
+        uses: ./.github/actions/send-command
+        with:
+          trigger_url: ${{ steps.stub_broker.outputs.engine_url }}/webhooks/custom/trigger/hermetic/stub
+          device_id: ${{ env.HERMETIC_DEVICE_ID }}
+          commands: ${{ matrix.failure_commands }}
+
+      # ---- Kill with work queued, restart, every command reported exactly once ----
+      # The sc-115628 QA step the live suite could never automate: its
+      # send-command waits for each round trip, so nothing could be queued.
+      - name: Baseline "Executing commands" before the queued burst
+        id: bl_executing
+        uses: ./.github/actions/capture-log-count
+        with:
+          log_file: ${{ matrix.log_file }}
+          pattern: "Executing commands"
+
+      - name: Baseline "Subscribed to messages" before the kill
+        id: bl_sub_kill
+        uses: ./.github/actions/capture-log-count
+        with:
+          log_file: ${{ matrix.log_file }}
+          pattern: "Subscribed to messages"
+
+      - name: Queue five slow commands without waiting for results
+        timeout-minutes: 5
+        shell: pwsh
+        env:
+          ENGINE_URL: ${{ steps.stub_broker.outputs.engine_url }}
+          DEVICE_ID: ${{ env.HERMETIC_DEVICE_ID }}
+          COMMANDS: ${{ matrix.timeout_commands }}
+          COUNT: "5"
+        run: |
+          & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/hermetic-enqueue-commands.ps1"
+
+      - name: Wait for the first queued command to start executing
+        timeout-minutes: 6
+        uses: ./.github/actions/wait-for-log-line
+        with:
+          log_file: ${{ matrix.log_file }}
+          pattern: Executing commands
+          baseline_count: ${{ steps.bl_executing.outputs.count }}
+          max_attempts: "60"
+
+      - name: Kill the agent with one command running and four queued
+        timeout-minutes: 5
+        uses: ./.github/actions/kill-service
+        with:
+          service: ${{ matrix.service }}
+
+      # systemd (Restart=always) and launchd (KeepAlive) bring the agent back on
+      # their own; the Windows SCM has no recovery configured, so start it.
+      - name: Start the agent again (Windows)
+        if: runner.os == 'Windows'
+        timeout-minutes: 5
+        uses: ./.github/actions/start-service
+        with:
+          service: ${{ matrix.service }}
+
+      - name: Wait for the restarted agent to subscribe
+        timeout-minutes: 6
+        uses: ./.github/actions/wait-for-log-line
+        with:
+          log_file: ${{ matrix.log_file }}
+          pattern: Subscribed to messages
+          baseline_count: ${{ steps.bl_sub_kill.outputs.count }}
+          max_attempts: "60"
+
+      - name: Assert every queued command is reported exactly once, one of them interrupted
+        timeout-minutes: 10
+        shell: pwsh
+        env:
+          ENGINE_URL: ${{ steps.stub_broker.outputs.engine_url }}
+          COUNT: "5"
+          TIMEOUT_SECONDS: "420"
+        run: |
+          & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/hermetic-assert-postbacks.ps1"
+
+      - name: Dump agent log on failure (Unix)
+        if: failure() && runner.os != 'Windows'
+        shell: bash
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+        run: |
+          echo "::group::Last 400 agent log lines ($LOG_FILE)"
+          sudo tail -n 400 "$LOG_FILE" || echo "(no log file)"
+          echo "::endgroup::"
+
+      - name: Dump agent log on failure (Windows)
+        if: failure() && runner.os == 'Windows'
+        shell: pwsh
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+        run: |
+          Write-Output "::group::Last 400 agent log lines ($env:LOG_FILE)"
+          if (Test-Path $env:LOG_FILE) { Get-Content $env:LOG_FILE -Tail 400 } else { Write-Output "(no log file)" }
+          Write-Output "::endgroup::"
+
+      - name: Stop stub config endpoint
+        if: always()
+        timeout-minutes: 15
+        uses: ./.github/actions/stub-config
+        with:
+          mode: stop
+
+      - name: Stop stub broker and engine
+        if: always()
+        timeout-minutes: 15
+        uses: ./.github/actions/stub-broker
+        with:
+          mode: stop
 
   test-service-user:
     permissions:

@@ -33,6 +33,16 @@ inputs:
   max_rss_mb:
     description: "Peak agent RSS allowed while the command runs"
     required: true
+  dispatches:
+    description: >-
+      How many copies of the command may have reached the device - the
+      send-command step's `attempts` output. A retried send can run the
+      command twice (the engine answered 408 or a transient 404 after it had
+      already dispatched), and each copy legitimately logs one truncation
+      warning, so the exactly-one check becomes one-per-dispatch. What it still
+      catches is truncation being logged per write, which would be hundreds.
+    required: false
+    default: "1"
   max_attempts:
     description: "Maximum number of RSS samples to take while waiting for the truncation warning"
     required: false
@@ -61,6 +71,7 @@ runs:
         MAX_KEPT_BYTES: ${{ inputs.max_kept_bytes }}
         MIN_PRODUCED_BYTES: ${{ inputs.min_produced_bytes }}
         MAX_RSS_MB: ${{ inputs.max_rss_mb }}
+        DISPATCHES: ${{ inputs.dispatches }}
         MAX_ATTEMPTS: ${{ inputs.max_attempts }}
         INTERVAL_SECONDS: ${{ inputs.interval_seconds }}
         SETTLE_SAMPLES: ${{ inputs.settle_samples }}
@@ -77,6 +88,7 @@ runs:
           -MaxKeptBytes "$MAX_KEPT_BYTES" \
           -MinProducedBytes "$MIN_PRODUCED_BYTES" \
           -MaxRssMb "$MAX_RSS_MB" \
+          -Dispatches "${DISPATCHES:-1}" \
           -MaxAttempts "$MAX_ATTEMPTS" \
           -IntervalSeconds "$INTERVAL_SECONDS" \
           -SettleSamples "$SETTLE_SAMPLES"
@@ -93,10 +105,12 @@ runs:
         MAX_KEPT_BYTES: ${{ inputs.max_kept_bytes }}
         MIN_PRODUCED_BYTES: ${{ inputs.min_produced_bytes }}
         MAX_RSS_MB: ${{ inputs.max_rss_mb }}
+        DISPATCHES: ${{ inputs.dispatches }}
         MAX_ATTEMPTS: ${{ inputs.max_attempts }}
         INTERVAL_SECONDS: ${{ inputs.interval_seconds }}
         SETTLE_SAMPLES: ${{ inputs.settle_samples }}
       run: |
+        $dispatches = if ($env:DISPATCHES) { [int]$env:DISPATCHES } else { 1 }
         & "$env:GITHUB_ACTION_PATH/assert.ps1" `
           -Service $env:SERVICE `
           -LogFile $env:LOG_FILE `
@@ -106,6 +120,7 @@ runs:
           -MaxKeptBytes ([int]$env:MAX_KEPT_BYTES) `
           -MinProducedBytes ([long]$env:MIN_PRODUCED_BYTES) `
           -MaxRssMb ([int]$env:MAX_RSS_MB) `
+          -Dispatches $dispatches `
           -MaxAttempts ([int]$env:MAX_ATTEMPTS) `
           -IntervalSeconds ([int]$env:INTERVAL_SECONDS) `
           -SettleSamples ([int]$env:SETTLE_SAMPLES)
