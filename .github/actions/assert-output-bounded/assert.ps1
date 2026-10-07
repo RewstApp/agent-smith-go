@@ -21,7 +21,9 @@ Four things are asserted:
   2. Peak RSS stays under -MaxRssMb. Before the fix the agent's heap tracked the
      command's output at roughly 3-4x, so a command writing hundreds of MB moved
      RSS by hundreds of MB; afterwards it is a small multiple of the ceiling.
-  3. Exactly one truncation warning is emitted for the command - the report is
+  3. Exactly one truncation warning is emitted per copy of the command that
+     reached the device (-Dispatches, from send-command's attempts output; a
+     retried send can run the command twice) - the report is
      per command, never per write - and it carries the message id, the ceiling in
      effect, and both byte counts.
   4. The reported counts are consistent with a bounded capture: the command
@@ -55,6 +57,7 @@ param(
     [Parameter(Mandatory)][int]$MaxKeptBytes,
     [Parameter(Mandatory)][long]$MinProducedBytes,
     [Parameter(Mandatory)][int]$MaxRssMb,
+    [int]$Dispatches = 1,
     [int]$MaxAttempts = 120,
     [int]$IntervalSeconds = 1,
     [int]$SettleSamples = 10
@@ -200,13 +203,16 @@ if ($peakRss -gt $MaxRssMb) {
     Write-Output "OK: peak RSS ${peakRss} MB stayed under the ${MaxRssMb} MB ceiling (start ${startRss} MB)"
 }
 
+if ($Dispatches -lt 1) { $Dispatches = 1 }
 $finalCount = Get-TruncationCount
 $delta = $finalCount - $BaselineTruncations
-if ($delta -ne 1) {
-    Write-Error "Expected exactly one '$truncationPattern' warning for this command, got $delta (baseline $BaselineTruncations, final $finalCount) - is truncation being logged per write?" -ErrorAction Continue
+if ($delta -lt 1 -or $delta -gt $Dispatches) {
+    Write-Error "Expected one '$truncationPattern' warning per copy of this command that reached the device (1..$Dispatches, from the send's attempts), got $delta (baseline $BaselineTruncations, final $finalCount) - is truncation being logged per write, or did the send dispatch more copies than it reported?" -ErrorAction Continue
     $failed = $true
-} else {
+} elseif ($delta -eq 1) {
     Write-Output "OK: exactly one truncation warning for this command"
+} else {
+    Write-Output "OK: $delta truncation warnings for $Dispatches dispatched copies of this command (the send was retried; one warning per copy)"
 }
 
 $content = Get-Content $LogFile -Raw

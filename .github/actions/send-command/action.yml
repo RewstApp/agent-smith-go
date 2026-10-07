@@ -57,10 +57,24 @@ inputs:
     required: false
     default: "false"
 
+outputs:
+  attempts:
+    description: >-
+      Number of attempts this step made before it returned successfully. Every
+      attempt may have reached the device (an engine-timeout or a transient 404
+      can arrive after the engine has dispatched), so an assertion that counts a
+      per-command agent log line should accept between one and this many -
+      assert-output-bounded takes it as `dispatches`.
+    value: ${{ steps.send.outputs.attempts }}
+  class:
+    description: "Classification of the attempt that returned: success, success-after-timeout or engine-timeout-allowed."
+    value: ${{ steps.send.outputs.class }}
+
 runs:
   using: composite
   steps:
     - name: Send command
+      id: send
       shell: bash
       env:
         TRIGGER_URL: ${{ inputs.trigger_url }}

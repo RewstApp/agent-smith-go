@@ -109,7 +109,10 @@ func scriptPath(t *testing.T) string {
 func run(t *testing.T, triggerURL string, extraEnv ...string) (int, string) {
 	t.Helper()
 	cmd := exec.Command(bashPath(t), scriptPath(t))
+	// Each run writes its step outputs to its own file: under CI this test
+	// itself runs inside a step whose GITHUB_OUTPUT must not be polluted.
 	cmd.Env = append(os.Environ(),
+		"GITHUB_OUTPUT="+filepath.Join(t.TempDir(), "output"),
 		"TRIGGER_URL="+triggerURL,
 		"DEVICE_ID=00000000-0000-0000-0000-000000000000",
 		`COMMANDS="echo hello world"`,
@@ -422,4 +425,60 @@ func TestWrongResult_MismatchWithoutPriorTimeoutStillFails(t *testing.T) {
 		t.Fatalf("exit %d, want 1 (a transient retry is not a timeout retry)\n%s", code, out)
 	}
 	wantContains(t, out, "::error title=send-command: wrong-result::")
+}
+
+// runWithOutputs is run plus the step outputs the script wrote to GITHUB_OUTPUT.
+func runWithOutputs(t *testing.T, triggerURL string, extraEnv ...string) (int, string, string) {
+	t.Helper()
+	outputFile := filepath.Join(t.TempDir(), "output")
+	code, out := run(t, triggerURL, append(extraEnv, "GITHUB_OUTPUT="+outputFile)...)
+	written, err := os.ReadFile(outputFile)
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	return code, out, string(written)
+}
+
+// The assertion after a flood accepts one truncation warning per copy of the
+// command that may have reached the device, so the script must report how many
+// attempts it made - a retried transient 404 has run the command twice (run
+// 37633504250).
+func TestOutputs_AttemptsCountsEveryDispatch(t *testing.T) {
+	engine := newStubEngine(t, response{404, notFound}, response{200, goodBody})
+	code, out, outputs := runWithOutputs(t, engine.server.URL)
+	if code != 0 {
+		t.Fatalf("exit %d\n%s", code, out)
+	}
+	wantContains(t, outputs, "attempts=2\n", "class=success\n")
+	wantNotContains(t, out, "before the command was dispatched")
+	wantContains(t, out, "the retry is a possible duplicate")
+}
+
+func TestOutputs_SingleAttemptReportsOne(t *testing.T) {
+	engine := newStubEngine(t, response{200, goodBody})
+	code, out, outputs := runWithOutputs(t, engine.server.URL)
+	if code != 0 {
+		t.Fatalf("exit %d\n%s", code, out)
+	}
+	wantContains(t, outputs, "attempts=1\n", "class=success\n")
+}
+
+func TestOutputs_SuccessAfterTimeoutIsNamed(t *testing.T) {
+	engine := newStubEngine(t, response{408, timeoutBody}, response{200, otherBody})
+	code, _, outputs := runWithOutputs(t, engine.server.URL, "EXPECTED_OUTPUT=hello world")
+	if code != 0 {
+		t.Fatalf("exit %d", code)
+	}
+	wantContains(t, outputs, "attempts=2\n", "class=success-after-timeout\n")
+}
+
+func TestOutputs_NothingWrittenOnFailure(t *testing.T) {
+	engine := newStubEngine(t, response{403, `{"error":"forbidden"}`})
+	code, _, outputs := runWithOutputs(t, engine.server.URL)
+	if code == 0 {
+		t.Fatal("expected a refusal to fail")
+	}
+	if outputs != "" {
+		t.Errorf("a failed send wrote step outputs: %q", outputs)
+	}
 }

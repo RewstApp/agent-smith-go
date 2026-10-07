@@ -1728,6 +1728,7 @@ jobs:
         run: |
           & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/wait-for-fresh-subscription-after-the-output-ceiling-update.ps1"
       - name: Send stdout flood command
+        id: send_stdout_flood
         timeout-minutes: 20
         uses: ./.github/actions/send-command
         with:
@@ -1742,6 +1743,10 @@ jobs:
           service: ${{ matrix.service }}
           log_file: ${{ matrix.log_file }}
           baseline_truncations: ${{ (steps.output_baseline_unix.outputs.truncated || steps.output_baseline_windows.outputs.truncated) }}
+          # A retried send may have run the command twice (run 37633504250: the
+          # engine answered a transient 404 after dispatching, and the retry
+          # produced a second truncation warning two seconds after the first).
+          dispatches: ${{ steps.send_stdout_flood.outputs.attempts }}
           expected_ceiling_bytes: "262144"
           # At least the whole ceiling, since stdout alone floods it. The upper
           # bound carries 4 KiB of headroom rather than being exact because the
@@ -1852,6 +1857,7 @@ jobs:
         run: |
           & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/capture-stderr-flood-baseline-counts.ps1"
       - name: Send stderr flood command
+        id: send_stderr_flood
         timeout-minutes: 20
         uses: ./.github/actions/send-command
         with:
@@ -1866,6 +1872,7 @@ jobs:
           service: ${{ matrix.service }}
           log_file: ${{ matrix.log_file }}
           baseline_truncations: ${{ (steps.stderr_flood_baseline_unix.outputs.truncated || steps.stderr_flood_baseline_windows.outputs.truncated) }}
+          dispatches: ${{ steps.send_stderr_flood.outputs.attempts }}
           expected_ceiling_bytes: "262144"
           # Above the ceiling on purpose: the script floods stderr to its full
           # ceiling AND writes a short stdout line, so the kept total can only
@@ -1931,6 +1938,7 @@ jobs:
         run: |
           & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/wait-for-fresh-subscription-after-the-timeout-update.ps1"
       - name: Send verbose command that then hangs
+        id: send_verbose_hang
         timeout-minutes: 20
         uses: ./.github/actions/send-command
         with:
@@ -1945,6 +1953,7 @@ jobs:
           service: ${{ matrix.service }}
           log_file: ${{ matrix.log_file }}
           baseline_truncations: ${{ (steps.compose_baseline_unix.outputs.truncated || steps.compose_baseline_windows.outputs.truncated) }}
+          dispatches: ${{ steps.send_verbose_hang.outputs.attempts }}
           expected_ceiling_bytes: "262144"
           # Same headroom as the other floods: stdout fills the ceiling on its
           # own, and anything the shell adds on either stream is incidental.

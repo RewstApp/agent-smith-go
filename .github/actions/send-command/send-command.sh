@@ -98,6 +98,22 @@ result_output() {
 attempts="${RETRY_ATTEMPTS:-3}"
 case "$attempts" in ''|*[!0-9]*|0) attempts=1 ;; esac
 
+# Record, for the assertion that follows, how many attempts this step made and
+# how the last one was classified. Every attempt may have reached the device:
+# an engine-timeout means the engine stopped waiting, not that it never
+# dispatched, and the transient 404 has been seen *after* a dispatch too (run
+# 37633504250: 404 "Workflow was not found", then the command executed twice on
+# the device two seconds apart). An assertion that counts a per-command log
+# line therefore accepts between one and `attempts` of them.
+emit_outputs() {
+  if [ -n "${GITHUB_OUTPUT:-}" ]; then
+    {
+      echo "attempts=$1"
+      echo "class=$2"
+    } >> "$GITHUB_OUTPUT"
+  fi
+}
+
 # Set once an attempt in this step ended in engine-timeout: from then on the
 # device may have two copies of the command in flight and the engine's result
 # correlation cannot be trusted, so a mismatched output is reported, not failed.
@@ -133,6 +149,7 @@ for attempt in $(seq 1 "$attempts"); do
 
     if [ "$ALLOW_ENGINE_TIMEOUT" = "true" ]; then
       echo "::notice title=send-command: engine-timeout (expected here)::the engine gave up before the command finished (HTTP $http_code, execution_id=${execution_id:-unknown}). Continuing because allow_engine_timeout is set - this scenario needs the command still running on the device."
+      emit_outputs "$attempt" "engine-timeout-allowed"
       exit 0
     fi
 
@@ -146,10 +163,13 @@ for attempt in $(seq 1 "$attempts"); do
     fail "engine-timeout" "the engine gave up waiting for a result on all $attempts attempts (last: HTTP $http_code, execution_id=${execution_id:-unknown}). This is an engine-side timeout, NOT a regression in the code under test - re-dispatch rather than investigating the diff."
   fi
 
-  # The engine's front door failed before the request reached the workflow: a
-  # gateway 5xx, or the routing 404 the engine emits transiently for a trigger
-  # that exists (seen on runs 35649657962 and 35410153035, each once, each on
-  # a trigger that had just succeeded).
+  # The engine's front door failed: a gateway 5xx, or the routing 404 the
+  # engine emits transiently for a trigger that exists (seen on runs
+  # 35649657962 and 35410153035, each once, each on a trigger that had just
+  # succeeded). This does not mean the command never reached the device - on
+  # run 37633504250 the 404 came back *after* the engine had dispatched, and
+  # the retry ran the command a second time - so the retry is a possible
+  # duplicate, exactly like the engine-timeout retry above.
   engine_transient=false
   case "$http_code" in 5??) engine_transient=true ;; esac
   if [ "$http_code" = "404" ] && printf '%s' "$body" | grep -qF 'Workflow was not found'; then
@@ -158,11 +178,11 @@ for attempt in $(seq 1 "$attempts"); do
 
   if [ "$engine_transient" = "true" ]; then
     if [ "$attempt" -lt "$attempts" ]; then
-      warn "engine-transient, retrying" "attempt $attempt of $attempts got HTTP $http_code from the engine before the command was dispatched; retrying in ${RETRY_DELAY}s. Engine-side, not the code under test."
+      warn "engine-transient, retrying" "attempt $attempt of $attempts got HTTP $http_code from the engine; retrying in ${RETRY_DELAY}s. The engine may already have dispatched this copy before answering, so the retry is a possible duplicate - an assertion that counts per-command log lines reads this step's attempts output. Engine-side, not the code under test."
       sleep "$RETRY_DELAY"
       continue
     fi
-    fail "engine-transient" "the engine answered HTTP $http_code on all $attempts attempts and the command was never dispatched. This is an engine-side gateway or routing failure, NOT a regression in the code under test - re-dispatch rather than investigating the diff."
+    fail "engine-transient" "the engine answered HTTP $http_code on all $attempts attempts. This is an engine-side gateway or routing failure, NOT a regression in the code under test - re-dispatch rather than investigating the diff."
   fi
 
   # Any other non-2xx is a refusal of the request itself, not a transient.
@@ -185,6 +205,7 @@ for attempt in $(seq 1 "$attempts"); do
         if [ "$timed_out_earlier" = "true" ]; then
           warn "wrong-result after engine-timeout retry" "HTTP $http_code with command_results.output $(printf '%q' "$actual_output"), not the expected $(printf '%q' "$EXPECTED_OUTPUT"). An earlier attempt in this step hit the engine's ceiling, so two copies of the command reached the device and the engine returned the first copy's postback; the command did run. Not a failure here - the log assertion that follows checks the device did the work."
           echo "send-command: dispatched (HTTP $http_code, attempt $attempt of $attempts, class: success-after-timeout)"
+          emit_outputs "$attempt" "success-after-timeout"
           exit 0
         fi
         fail "wrong-result" "HTTP $http_code with command_results.output $(printf '%q' "$actual_output"), which does not contain the expected $(printf '%q' "$EXPECTED_OUTPUT"). The engine returned a result, but not this command's - another agent on the same device_id is the usual cause."
@@ -193,5 +214,6 @@ for attempt in $(seq 1 "$attempts"); do
   fi
 
   echo "send-command: dispatched (HTTP $http_code, attempt $attempt of $attempts, class: success)"
+  emit_outputs "$attempt" "success"
   exit 0
 done
