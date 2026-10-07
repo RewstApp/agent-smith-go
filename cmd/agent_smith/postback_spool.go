@@ -24,6 +24,10 @@ const (
 	// Entries older than this are discarded on the next enqueue or flush; a stale
 	// result is unlikely to be useful to a workflow that has long since timed out.
 	defaultSpoolMaxAge = 24 * time.Hour
+
+	// spoolHeartbeatFile is the clock evidence's heartbeat inside the spool
+	// directory (sc-119838).
+	spoolHeartbeatFile = "heartbeat"
 	// defaultSpoolMaxAttempts bounds how many flush cycles may reject a single
 	// entry at the HTTP layer before it is abandoned. An entry the engine keeps
 	// rejecting is undeliverable, and retrying it forever is what used to strand
@@ -148,6 +152,11 @@ type postbackSpool struct {
 	droppedAttempts atomic.Int64
 	droppedCorrupt  atomic.Int64
 	fs              utils.FileSystem
+	// clock is the evidence the age bound is decided on; see clockEvidence.
+	clock *clockEvidence
+	// onClockStepBack is reported once per backward clock step the spool
+	// notices; the service logs it at Error.
+	onClockStepBack func(last, now time.Time)
 }
 
 func newPostbackSpool(
@@ -166,7 +175,7 @@ func newPostbackSpool(
 	if maxAttempts <= 0 {
 		maxAttempts = defaultSpoolMaxAttempts
 	}
-	return &postbackSpool{
+	s := &postbackSpool{
 		now:             time.Now,
 		dir:             dir,
 		maxEntries:      maxEntries,
@@ -176,6 +185,17 @@ func newPostbackSpool(
 		logger:          logger,
 		fs:              utils.NewFileSystem(),
 	}
+	s.clock = newClockEvidence(
+		filepath.Join(dir, spoolHeartbeatFile),
+		s.fs,
+		func() time.Time { return s.now() },
+		func(last, now time.Time) {
+			if s.onClockStepBack != nil {
+				s.onClockStepBack(last, now)
+			}
+		},
+	)
+	return s
 }
 
 // countDrop records a discarded entry against the total and its reason.
@@ -204,6 +224,7 @@ func (s *postbackSpool) enqueue(entry spoolEntry) error {
 	if err := os.MkdirAll(s.dir, utils.DefaultDirMod); err != nil {
 		return fmt.Errorf("create spool dir: %w", err)
 	}
+	s.clock.observe()
 
 	// Drop expired entries first, then evict oldest until there is room for one
 	// more (target maxEntries-1 so the new write lands at the cap).
@@ -234,10 +255,9 @@ func (s *postbackSpool) pruneLocked(keep int) {
 		return
 	}
 
-	cutoff := s.now().Add(-s.maxAge)
 	survivors := files[:0]
 	for _, name := range files {
-		if ts, ok := spoolFileTime(name); ok && ts.Before(cutoff) {
+		if ts, ok := spoolFileTime(name); ok && s.clock.aged(ts, s.maxAge) {
 			s.removeLocked(name, "expired")
 			continue
 		}
@@ -329,7 +349,12 @@ func (s *postbackSpool) flush(
 		return
 	}
 
-	cutoff := s.now().Add(-s.maxAge)
+	// Age is decided on the clock evidence, so a clock stepped forward at boot
+	// cannot discard results spooled just before the reboot (sc-119838); a
+	// flush in which the evidence was missing or the clock stepped back expires
+	// nothing.
+	s.clock.observe()
+	defer s.clock.endCycle()
 	delivered := 0
 	abandoned := 0
 	rejected := 0
@@ -356,7 +381,7 @@ func (s *postbackSpool) flush(
 			continue
 		}
 
-		if entry.CreatedAt.Before(cutoff) {
+		if s.clock.aged(entry.CreatedAt, s.maxAge) {
 			s.drop(name, dropReasonExpired, "post_id", entry.PostId, "created_at", entry.CreatedAt)
 			continue
 		}

@@ -29,13 +29,19 @@ const (
 
 	// defaultJournalMaxAge is how long a journaled command stays eligible for
 	// replay. It matches IoT Hub's default cloud-to-device message TTL of one
-	// hour: a command the broker itself would have expired by the time the
-	// agent came back is reported as expired rather than executed, so a device
-	// that was off for a day does not wake up and run a day-old script. The
-	// same age bounds how long completion tombstones are kept for
-	// de-duplication - IoT Hub cannot redeliver a message past its TTL, so a
-	// tombstone older than that guards against nothing.
+	// hour: a command the agent *saw* age past that before it died is reported
+	// as expired rather than executed. Age is measured on the clock evidence
+	// (clockEvidence), not the wall clock at replay: time the device spent
+	// powered off is unobserved and does not count, so a clock stepped forward
+	// at boot cannot expire a command queued seconds before the reboot
+	// (sc-119838). The same age bounds how long completion tombstones are kept
+	// for de-duplication - IoT Hub cannot redeliver a message past its TTL, so
+	// a tombstone older than that guards against nothing.
 	defaultJournalMaxAge = time.Hour
+
+	// journalHeartbeatFile is the clock evidence's heartbeat inside the journal
+	// directory.
+	journalHeartbeatFile = "heartbeat"
 
 	journalPendingSuffix = ".json"
 	journalDoneSuffix    = ".done"
@@ -96,6 +102,11 @@ type commandJournal struct {
 	maxAge     time.Duration
 	now        func() time.Time
 	fs         utils.FileSystem
+	// clock is the evidence every age decision is made on; see clockEvidence.
+	clock *clockEvidence
+	// onClockStepBack is reported once per backward clock step the journal
+	// notices; the service logs it at Error.
+	onClockStepBack func(last, now time.Time)
 }
 
 func newCommandJournal(dir string, maxPending int, maxAge time.Duration) *commandJournal {
@@ -105,13 +116,31 @@ func newCommandJournal(dir string, maxPending int, maxAge time.Duration) *comman
 	if maxAge <= 0 {
 		maxAge = defaultJournalMaxAge
 	}
-	return &commandJournal{
+	j := &commandJournal{
 		dir:        dir,
 		maxPending: maxPending,
 		maxAge:     maxAge,
 		now:        time.Now,
 		fs:         utils.NewFileSystem(),
 	}
+	j.clock = newClockEvidence(
+		filepath.Join(dir, journalHeartbeatFile),
+		j.fs,
+		func() time.Time { return j.now() },
+		func(last, now time.Time) {
+			if j.onClockStepBack != nil {
+				j.onClockStepBack(last, now)
+			}
+		},
+	)
+	return j
+}
+
+// observeClock records the current clock as evidence; every operation calls
+// it so the heartbeat tracks the agent's activity, and the service's timer
+// covers idle stretches.
+func (j *commandJournal) observeClock() {
+	j.clock.observe()
 }
 
 // journalKey derives the de-duplication key for a received payload: the
@@ -153,6 +182,7 @@ func (j *commandJournal) put(key string, payload []byte) (existed bool, err erro
 	if err := os.MkdirAll(j.dir, utils.DefaultDirMod); err != nil {
 		return false, fmt.Errorf("create journal dir: %w", err)
 	}
+	j.observeClock()
 
 	// Prune first: an expired tombstone must not de-duplicate a redelivery the
 	// broker could no longer be making anyway, and a stale one would otherwise
@@ -183,6 +213,7 @@ func (j *commandJournal) markStarted(key string) error {
 	if err != nil {
 		return err
 	}
+	j.observeClock()
 	entry.StartedAt = j.now()
 	return j.writeLocked(j.pendingPath(key), entry)
 }
@@ -193,6 +224,7 @@ func (j *commandJournal) complete(key string) error {
 	j.mu.Lock()
 	defer j.mu.Unlock()
 
+	j.observeClock()
 	tombstone := journalTombstone{Key: key, CompletedAt: j.now()}
 	if err := j.writeLocked(j.donePath(key), tombstone); err != nil {
 		return err
@@ -217,17 +249,22 @@ func (j *commandJournal) discard(key string) error {
 // pending returns the entries left behind by a previous run, oldest first,
 // split into those still within maxAge (to replay) and those past it (to
 // report as expired and discard). Expired tombstones are pruned on the way.
+// Age is decided on the clock evidence: an entry is expired only if the
+// previous process saw it age past maxAge before it died, never because the
+// clock at replay says so (see clockEvidence). A cycle in which the evidence
+// was missing or the clock had stepped back expires nothing.
 func (j *commandJournal) pending() (fresh, expired []journalEntry, err error) {
 	j.mu.Lock()
 	defer j.mu.Unlock()
 
+	j.observeClock()
+	defer j.clock.endCycle()
 	j.pruneLocked()
 
 	names, err := j.listLocked(journalPendingSuffix)
 	if err != nil {
 		return nil, nil, err
 	}
-	cutoff := j.now().Add(-j.maxAge)
 	for _, name := range names {
 		entry, readErr := j.readLocked(filepath.Join(j.dir, name))
 		if readErr != nil {
@@ -236,7 +273,7 @@ func (j *commandJournal) pending() (fresh, expired []journalEntry, err error) {
 			_ = os.Remove(filepath.Join(j.dir, name))
 			continue
 		}
-		if entry.ReceivedAt.Before(cutoff) {
+		if j.clock.aged(entry.ReceivedAt, j.maxAge) {
 			expired = append(expired, entry)
 		} else {
 			fresh = append(fresh, entry)
@@ -258,15 +295,14 @@ func (j *commandJournal) countPendingLocked() int {
 	return len(names)
 }
 
-// pruneLocked removes tombstones older than maxAge. Pending entries are never
-// pruned here - an expired pending entry is reported by pending() so its loss
-// is visible, not silently reclaimed.
+// pruneLocked removes tombstones that have aged past maxAge on the clock
+// evidence. Pending entries are never pruned here - an expired pending entry
+// is reported by pending() so its loss is visible, not silently reclaimed.
 func (j *commandJournal) pruneLocked() {
 	names, err := j.listLocked(journalDoneSuffix)
 	if err != nil {
 		return
 	}
-	cutoff := j.now().Add(-j.maxAge)
 	for _, name := range names {
 		path := filepath.Join(j.dir, name)
 		data, readErr := os.ReadFile(path)
@@ -274,7 +310,7 @@ func (j *commandJournal) pruneLocked() {
 			continue
 		}
 		var t journalTombstone
-		if json.Unmarshal(data, &t) != nil || t.CompletedAt.Before(cutoff) {
+		if json.Unmarshal(data, &t) != nil || j.clock.aged(t.CompletedAt, j.maxAge) {
 			_ = os.Remove(path)
 		}
 	}

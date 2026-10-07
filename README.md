@@ -213,9 +213,29 @@ Test workflow run (`Record the per-write fsync cost`). After a restart:
   partial first run of a non-idempotent script followed by a second full run is
   the failure mode at-least-once delivery is most often criticised for, so the
   receiving workflow gets the facts and decides whether to re-issue;
-- a command older than one hour (the broker's own default message TTL) is
-  reported as expired and discarded, so a device that was off for a day does
-  not wake up and run a day-old script.
+- a command the previous process **saw** age past one hour (the broker's own
+  default message TTL) before it died is reported as expired and discarded.
+  Age is measured on **clock evidence**, not on the wall clock at replay
+  (sc-119838): the agent keeps a heartbeat file (`heartbeat`, in the journal
+  and spool directories) holding the latest wall clock it has observed,
+  rewritten at most once a minute, and a record a previous process left behind
+  has aged by that heartbeat minus its timestamp - the time the device spent
+  powered off is unobserved and does not count. Replay happens at the start of
+  a connection cycle, which on a fresh boot is exactly when the clock is least
+  trustworthy: a device without a battery-backed RTC, or a VM restored from a
+  snapshot, boots with its clock in the past and steps forward by hours or days
+  when NTP syncs, and before this every command queued seconds before the
+  reboot looked a day old and was reported expired. The price is that a command
+  which aged past the limit entirely while the device was off is replayed
+  rather than expired, because the agent cannot prove the time passed; the
+  design errs on that side because discarding is the silent, confident outcome
+  the journal exists to prevent. If the clock is found **earlier** than the
+  evidence - a backward step - an Error is logged once, the cycle that noticed
+  it expires and prunes nothing, and the evidence restarts from the new clock,
+  so a stale tombstone is never pruned early and a redelivered command never
+  runs twice because time appeared to go backwards; the first run after
+  installing this version (no heartbeat yet) is treated the same way. The
+  postback spool's age bound follows the same rule.
 
 A completed command leaves a tombstone for an hour, so a redelivery of the same
 message — the broker resends an unacknowledged QoS 1 message on reconnect, and
