@@ -669,9 +669,14 @@ func TestStartWorkers_RunningCommandSurvivesCycleEnd(t *testing.T) {
 		"the journal entry to complete",
 		func() bool { return fileExists(svc.journal.donePath(key)) },
 	)
-	if _, live := svc.owned.Load(key); live {
-		t.Error("completed command is still marked owned")
-	}
+	// processInbound writes the tombstone and only then releases ownership, so
+	// the release is its own observable: polling for it instead of asserting
+	// right after the tombstone appears is what the ubuntu coverage job's one
+	// failure in this test taught (sc-119840).
+	waitFor(t, "ownership to be released", func() bool {
+		_, live := svc.owned.Load(key)
+		return !live
+	})
 	if cancelled.Load() {
 		t.Error("the command observed a cancellation")
 	}
