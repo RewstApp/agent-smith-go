@@ -548,9 +548,11 @@ func TestSpool_LegacyEntryWithoutAttemptsIsDelivered(t *testing.T) {
 
 // Entries stranded behind a poisoned entry used to sit untried until maxAge
 // discarded them. With the poisoned entry passed over they are delivered on the
-// first flush, so nothing ages out at all.
+// first flush, so nothing ages out at all. maxAge is an hour: the assertion is
+// that nothing ages out, and a 300ms maxAge against the real clock aged all
+// three entries out on a Windows runner under load (sc-119840's soak).
 func TestSpool_StrandedEntriesAreDeliveredNotAgedOut(t *testing.T) {
-	s := newTestSpool(t, 10, 300*time.Millisecond)
+	s := newTestSpool(t, 10, time.Hour)
 
 	for _, id := range []string{"poison", "b", "c"} {
 		if err := s.enqueue(
