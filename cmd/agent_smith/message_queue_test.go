@@ -136,7 +136,7 @@ func TestMessageQueue_WorkersProcessAllMessages(t *testing.T) {
 		if int(exec.count.Load()) >= total {
 			break
 		}
-		time.Sleep(10 * time.Millisecond)
+		time.Sleep(10 * time.Millisecond) // sleep-ok: poll interval
 	}
 
 	close(msgQueue)
@@ -432,7 +432,7 @@ func TestMessageQueue_ConcurrencyBoundedByWorkerCount(t *testing.T) {
 		if c == workerCount {
 			break
 		}
-		time.Sleep(5 * time.Millisecond)
+		time.Sleep(5 * time.Millisecond) // sleep-ok: poll interval
 	}
 
 	close(block) // unblock all workers
@@ -494,12 +494,17 @@ func TestWorkerPool_NoLeakAcrossReconnectCycles(t *testing.T) {
 		wg.Wait()
 	}
 
-	// Allow the runtime to collect any transient goroutines.
-	runtime.GC()
-	time.Sleep(10 * time.Millisecond)
-
-	after := runtime.NumGoroutine()
+	// Transient goroutines (the http client's idle-connection reaper, a worker
+	// in its last defer) exit on their own schedule, so poll for the count to
+	// settle instead of hoping a fixed sleep is long enough.
 	const maxDelta = 3
+	deadline := time.Now().Add(5 * time.Second)
+	after := runtime.NumGoroutine()
+	for after > baseline+maxDelta && time.Now().Before(deadline) {
+		runtime.GC()
+		time.Sleep(10 * time.Millisecond) // sleep-ok: poll interval
+		after = runtime.NumGoroutine()
+	}
 	if after > baseline+maxDelta {
 		t.Errorf(
 			"goroutine count grew after %d reconnect cycles: baseline=%d after=%d (leaked ~%d)",

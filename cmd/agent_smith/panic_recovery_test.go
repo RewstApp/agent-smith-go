@@ -129,7 +129,7 @@ func TestWorkerPool_SurvivesPanickingHandler(t *testing.T) {
 		if int(exec.calls.Load()) >= total {
 			break
 		}
-		time.Sleep(10 * time.Millisecond)
+		time.Sleep(10 * time.Millisecond) // sleep-ok: poll interval
 	}
 
 	close(msgQueue)

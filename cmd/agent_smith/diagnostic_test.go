@@ -415,7 +415,7 @@ func waitForOutput(t *testing.T, out *syncBuffer, substr string) {
 		if strings.Contains(out.String(), substr) {
 			return
 		}
-		time.Sleep(20 * time.Millisecond)
+		time.Sleep(20 * time.Millisecond) // sleep-ok: poll interval
 	}
 	t.Fatalf("viewer never printed %q; output so far:\n%s", substr, out.String())
 }

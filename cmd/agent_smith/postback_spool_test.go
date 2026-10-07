@@ -125,7 +125,7 @@ func TestSpool_CapacityBound(t *testing.T) {
 			t.Fatalf("enqueue %s: %v", id, err)
 		}
 		// Distinct timestamps keep filename ordering deterministic.
-		time.Sleep(time.Millisecond)
+		time.Sleep(time.Millisecond) // sleep-ok: distinct CreatedAt/filenames; ordering, not timing
 	}
 
 	if n := countSpoolFiles(t, s.dir); n != 3 {
@@ -162,11 +162,10 @@ func TestSpool_AgeBoundOnFlush(t *testing.T) {
 	s := newTestSpool(t, 10, 10*time.Millisecond)
 
 	if err := s.enqueue(
-		spoolEntry{PostId: "old", Result: []byte("x"), CreatedAt: time.Now()},
+		spoolEntry{PostId: "old", Result: []byte("x"), CreatedAt: time.Now().Add(-time.Hour)},
 	); err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
-	time.Sleep(30 * time.Millisecond)
 
 	var attempts int
 	s.flush(context.Background(), func(e spoolEntry) (deliveryOutcome, error) {
@@ -325,7 +324,7 @@ func TestSpool_PoisonedEntryDoesNotBlockHealthyEntries(t *testing.T) {
 		}
 		// Distinct timestamps keep filename ordering deterministic, so "poison"
 		// really is attempted first and really is in front of the others.
-		time.Sleep(time.Millisecond)
+		time.Sleep(time.Millisecond) // sleep-ok: distinct CreatedAt/filenames; ordering, not timing
 	}
 
 	var attempted []string
@@ -549,9 +548,11 @@ func TestSpool_LegacyEntryWithoutAttemptsIsDelivered(t *testing.T) {
 
 // Entries stranded behind a poisoned entry used to sit untried until maxAge
 // discarded them. With the poisoned entry passed over they are delivered on the
-// first flush, so nothing ages out at all.
+// first flush, so nothing ages out at all. maxAge is an hour: the assertion is
+// that nothing ages out, and a 300ms maxAge against the real clock aged all
+// three entries out on a Windows runner under load (sc-119840's soak).
 func TestSpool_StrandedEntriesAreDeliveredNotAgedOut(t *testing.T) {
-	s := newTestSpool(t, 10, 300*time.Millisecond)
+	s := newTestSpool(t, 10, time.Hour)
 
 	for _, id := range []string{"poison", "b", "c"} {
 		if err := s.enqueue(
@@ -559,7 +560,7 @@ func TestSpool_StrandedEntriesAreDeliveredNotAgedOut(t *testing.T) {
 		); err != nil {
 			t.Fatalf("enqueue %s: %v", id, err)
 		}
-		time.Sleep(time.Millisecond)
+		time.Sleep(time.Millisecond) // sleep-ok: distinct CreatedAt/filenames; ordering, not timing
 	}
 
 	delivered := map[string]bool{}
@@ -611,11 +612,10 @@ func TestSpool_CorruptDropIsCounted(t *testing.T) {
 func TestSpool_ExpiredDropIsCountedAsExpired(t *testing.T) {
 	s := newTestSpool(t, 10, 10*time.Millisecond)
 	if err := s.enqueue(
-		spoolEntry{PostId: "old", Result: []byte("old"), CreatedAt: time.Now()},
+		spoolEntry{PostId: "old", Result: []byte("old"), CreatedAt: time.Now().Add(-time.Hour)},
 	); err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
-	time.Sleep(30 * time.Millisecond)
 
 	s.flush(context.Background(), func(e spoolEntry) (deliveryOutcome, error) {
 		t.Error("an expired entry must not be delivered")
@@ -649,7 +649,7 @@ func TestSpool_RapidRejectionsDoNotBurnTheAttemptBudget(t *testing.T) {
 		); err != nil {
 			t.Fatalf("enqueue %s: %v", id, err)
 		}
-		time.Sleep(time.Millisecond)
+		time.Sleep(time.Millisecond) // sleep-ok: distinct CreatedAt/filenames; ordering, not timing
 	}
 
 	// Ten flushes in quick succession, as a flapping connection would produce.
@@ -684,6 +684,8 @@ func TestSpool_RapidRejectionsDoNotBurnTheAttemptBudget(t *testing.T) {
 func TestSpool_SpacedRejectionsStillExhaustTheBudget(t *testing.T) {
 	s := newPostbackSpool(t.TempDir(), 10, time.Hour, 2, hclog.NewNullLogger())
 	s.attemptInterval = 20 * time.Millisecond
+	clock := time.Now()
+	s.now = func() time.Time { return clock }
 
 	if err := s.enqueue(
 		spoolEntry{PostId: "poison", Result: []byte("x"), CreatedAt: time.Now()},
@@ -704,7 +706,9 @@ func TestSpool_SpacedRejectionsStillExhaustTheBudget(t *testing.T) {
 		t.Fatalf("entry abandoned before the spacing elapsed")
 	}
 
-	time.Sleep(40 * time.Millisecond)
+	clock = clock.Add(
+		40 * time.Millisecond,
+	) // the spacing interval elapses on the spool's clock
 	s.flush(context.Background(), reject, onAbandon) // counted, budget spent
 
 	if abandoned != 1 {

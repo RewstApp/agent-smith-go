@@ -791,6 +791,8 @@ func TestExecute_StopHonoredPromptlyDuringReconnectBackoff(t *testing.T) {
 	// Give Execute a moment to settle into the backoff wait. This is shorter
 	// than the minimum backoff (1.5 * InitialReconnectInterval) so the stop is
 	// genuinely issued mid-backoff, not after it has elapsed.
+	// steers coverage onto the backoff select; the stop is honored
+	// sleep-ok: promptly on either path, so this cannot cause a false failure
 	time.Sleep(150 * time.Millisecond)
 
 	start := time.Now()
@@ -822,7 +824,7 @@ func TestExecute_StopHonoredPromptlyDuringReconnectBackoff(t *testing.T) {
 			leaked = false
 			break
 		}
-		time.Sleep(20 * time.Millisecond)
+		time.Sleep(20 * time.Millisecond) // sleep-ok: poll interval
 	}
 	if leaked {
 		t.Fatalf(

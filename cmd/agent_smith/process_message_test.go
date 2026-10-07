@@ -454,18 +454,13 @@ func TestProcessMessage_PostbackSuccessFirstAttemptNoRetry(t *testing.T) {
 	notifier := &mockNotifierWrapper{}
 	device := deviceWithEngine(srv.Listener.Addr().String())
 
-	start := time.Now()
 	svc.processMessage(postbackPayload("echo hi", "id:fast"), ctx, device, logger, notifier)
-	elapsed := time.Since(start)
 
+	// Exactly one request is the proof that first-attempt success paid no
+	// backoff: a retry would show up as a second call. The elapsed-time bound
+	// this used to carry (100ms) measured the runner, not the code (sc-119840).
 	if got := calls.Load(); got != 1 {
 		t.Errorf("expected exactly one postback on first-try success, got %d", got)
-	}
-	// First-attempt success must not pay any backoff cost. The base backoff
-	// is only 1ms in tests but real-world is seconds — assert that the call
-	// returns well below a single backoff window.
-	if elapsed > 100*time.Millisecond {
-		t.Errorf("first-attempt success took unexpectedly long: %v", elapsed)
 	}
 }
 
@@ -502,8 +497,11 @@ func TestProcessMessage_PostbackTerminalOn4xxNoRetry(t *testing.T) {
 // cancelled context aborts the retry loop instead of waiting out the backoff.
 func TestProcessMessage_PostbackContextCancelStopsRetries(t *testing.T) {
 	var calls atomic.Int32
+	firstServed := make(chan struct{})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		calls.Add(1)
+		if calls.Add(1) == 1 {
+			defer close(firstServed)
+		}
 		w.WriteHeader(http.StatusInternalServerError)
 		_, _ = w.Write([]byte(`{"error":"down"}`))
 	}))
@@ -521,10 +519,10 @@ func TestProcessMessage_PostbackContextCancelStopsRetries(t *testing.T) {
 	notifier := &mockNotifierWrapper{}
 	device := deviceWithEngine(srv.Listener.Addr().String())
 
-	// Cancel after a short delay so the first attempt completes but the
-	// retry-backoff sleep is interrupted.
+	// Cancel once the engine has served the first attempt, so the cancellation
+	// lands in the retry backoff rather than at an arbitrary wall-clock offset.
 	go func() {
-		time.Sleep(50 * time.Millisecond)
+		<-firstServed
 		cancel()
 	}()
 
@@ -686,7 +684,7 @@ func TestFlushPostbackSpool_PoisonedEntryDoesNotBlockOthers(t *testing.T) {
 		}); err != nil {
 			t.Fatalf("enqueue %s: %v", id, err)
 		}
-		time.Sleep(time.Millisecond)
+		time.Sleep(time.Millisecond) // sleep-ok: distinct CreatedAt/filenames; ordering, not timing
 	}
 
 	device := deviceWithEngine(srv.Listener.Addr().String())
@@ -894,7 +892,7 @@ func TestFlushPostbackSpool_StopsEarlyWhenEngineUnreachable(t *testing.T) {
 		}); err != nil {
 			t.Fatalf("enqueue %s: %v", id, err)
 		}
-		time.Sleep(time.Millisecond)
+		time.Sleep(time.Millisecond) // sleep-ok: distinct CreatedAt/filenames; ordering, not timing
 	}
 
 	device := deviceWithEngine(addr)

@@ -343,7 +343,7 @@ func TestAutoUpdateRunner_LogsStopDuringBackoff(t *testing.T) {
 		if time.Now().After(deadline) {
 			t.Fatal("runner never entered a retry backoff")
 		}
-		time.Sleep(5 * time.Millisecond)
+		time.Sleep(5 * time.Millisecond) // sleep-ok: poll interval
 	}
 
 	stopped := make(chan struct{})

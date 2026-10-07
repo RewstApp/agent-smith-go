@@ -71,7 +71,7 @@ func TestAutoUpdateRunner_SurvivesPanickingTick(t *testing.T) {
 		if calls.Load() >= 2 {
 			break
 		}
-		time.Sleep(5 * time.Millisecond)
+		time.Sleep(5 * time.Millisecond) // sleep-ok: poll interval
 	}
 	runner.Stop()
 

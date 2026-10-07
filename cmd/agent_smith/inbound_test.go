@@ -311,8 +311,10 @@ func TestProcessInbound_MarksStartedBeforeExecuteAndCompletesAfter(t *testing.T)
 func TestProcessInbound_CancelledMidExecutionLeavesEntryStartedForReplay(t *testing.T) {
 	payload := validPayload("sleep")
 	key := journalKey(payload)
+	started := make(chan struct{})
 	exec := &funcExecutor{fn: func(ctx context.Context) []byte {
-		<-ctx.Done() // the cycle ends while the command is running
+		close(started)
+		<-ctx.Done() // the service stops while the command is running
 		return []byte(`{"error":"cancelled"}`)
 	}}
 	svc := svcWithJournal(t, exec)
@@ -332,7 +334,7 @@ func TestProcessInbound_CancelledMidExecutionLeavesEntryStartedForReplay(t *test
 			&recordingNotifierWrapper{},
 		)
 	}()
-	time.Sleep(50 * time.Millisecond)
+	<-started // the command is executing: cancel lands mid-execution by construction
 	cancel()
 	<-done
 
@@ -608,7 +610,7 @@ func waitFor(t *testing.T, what string, cond func() bool) {
 		if cond() {
 			return
 		}
-		time.Sleep(10 * time.Millisecond)
+		time.Sleep(10 * time.Millisecond) // sleep-ok: poll interval
 	}
 	t.Fatalf("timed out waiting for %s", what)
 }
@@ -657,14 +659,9 @@ func TestStartWorkers_RunningCommandSurvivesCycleEnd(t *testing.T) {
 
 	close(queue) // the cycle ends: renewal or lost connection, not a service stop
 
-	time.Sleep(50 * time.Millisecond)
-	if cancelled.Load() {
-		t.Fatal("the running command was cancelled by the cycle ending")
-	}
-	if postbacks.Load() != 0 || fileExists(svc.journal.donePath(key)) {
-		t.Fatal("the command was settled before it finished")
-	}
-
+	// If the cycle ending had cancelled the worker, the executor would have
+	// observed ctx.Done() and returned the cancelled result instead of waiting
+	// for release; the assertions after release prove the command finished.
 	close(release)
 	waitFor(t, "the postback", func() bool { return postbacks.Load() == 1 })
 	waitFor(
@@ -672,9 +669,14 @@ func TestStartWorkers_RunningCommandSurvivesCycleEnd(t *testing.T) {
 		"the journal entry to complete",
 		func() bool { return fileExists(svc.journal.donePath(key)) },
 	)
-	if _, live := svc.owned.Load(key); live {
-		t.Error("completed command is still marked owned")
-	}
+	// processInbound writes the tombstone and only then releases ownership, so
+	// the release is its own observable: polling for it instead of asserting
+	// right after the tombstone appears is what the ubuntu coverage job's one
+	// failure in this test taught (sc-119840).
+	waitFor(t, "ownership to be released", func() bool {
+		_, live := svc.owned.Load(key)
+		return !live
+	})
 	if cancelled.Load() {
 		t.Error("the command observed a cancellation")
 	}

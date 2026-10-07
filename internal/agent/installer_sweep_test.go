@@ -148,6 +148,9 @@ func TestSweepStaleInstallers_DoesNotFollowSymlinks(t *testing.T) {
 	control := writeInstallerFile(t, dir, "installer-666666666.bin", time.Hour)
 
 	// Every entry in the directory is now older than the cutoff.
+	// the symlink was created this instant and must age past the 1ms
+	// cutoff so skipping it is attributable to being a symlink, not to being
+	// sleep-ok: young; Lchtimes is not portable
 	time.Sleep(10 * time.Millisecond)
 
 	logger, _ := newInstallerSweepLogger()
