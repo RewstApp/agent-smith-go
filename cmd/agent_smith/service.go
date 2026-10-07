@@ -518,17 +518,22 @@ func (svc *serviceContext) runCycle(
 	resolvedWorkerCount := device.ResolvedWorkerCount()
 	resolvedQueueSize := device.ResolvedMessageQueueSize()
 
-	msgQueue := make(chan inboundMessage, resolvedQueueSize)
+	// The queue's draining signal is raised at the very start of teardown (its
+	// defer is registered last, so it runs first) to release the subscribe
+	// callback if it is blocked applying back-pressure on a full queue.
+	// Releasing the callback before the MQTT Unsubscribe/Disconnect is what
+	// keeps teardown deadlock-free: paho dispatches messages on a single ordered
+	// goroutine, so a permanently blocked callback would also stall the
+	// UNSUBACK/disconnect handling. The queue itself is closed last, and only
+	// once no producer can still be mid-send: cycleQueue holds a read lock for
+	// the duration of every send and takes the write lock to close, with the
+	// draining signal (raised without the lock) guaranteeing the readers let go
+	// first. That ordering, not a recovered panic, is what makes a message
+	// arriving at exactly the wrong moment an ordinary event (sc-119839); see
+	// cycleQueue.
+	queue := newCycleQueue(resolvedQueueSize)
 
-	// draining is closed at the very start of teardown (its defer is registered
-	// last, so it runs first) to release the subscribe callback if it is blocked
-	// applying back-pressure on a full queue. Releasing the callback before the
-	// MQTT Unsubscribe/Disconnect is what keeps teardown deadlock-free: paho
-	// dispatches messages on a single ordered goroutine, so a permanently
-	// blocked callback would also stall the UNSUBACK/disconnect handling.
-	draining := make(chan struct{})
-
-	svc.startWorkers(ctx, msgQueue, resolvedWorkerCount, device, logger, notifier)
+	svc.startWorkers(ctx, queue.ch, resolvedWorkerCount, device, logger, notifier)
 	defer func() {
 		// End the cycle-scoped goroutines and stop feeding the workers. The
 		// workers themselves are not cancelled: they run under the service ctx,
@@ -537,7 +542,7 @@ func (svc *serviceContext) runCycle(
 		// queued, and exit when the closed queue is empty. Only the service
 		// stopping cancels a running command (stopWorkers).
 		cycleCancel()
-		close(msgQueue)
+		queue.close()
 	}()
 
 	// Create a channel to wait for lost connection
@@ -641,14 +646,14 @@ func (svc *serviceContext) runCycle(
 		logger.Info("Device twin reported properties updated", "agent_version", version.Version)
 	}
 
-	// Closed first during teardown (registered after the MQTT teardown defer so
+	// Raised first during teardown (registered after the MQTT teardown defer so
 	// it runs before it under LIFO) to unblock a back-pressured callback.
-	defer close(draining)
+	defer queue.startDraining()
 
 	// enqueueMessage applies back-pressure instead of dropping; see its doc for
 	// the delivery guarantee and the single (loudly surfaced) teardown drop path.
 	token = client.Subscribe(topic, qos, func(client mqtt.Client, msg mqtt.Message) {
-		svc.receiveMessage(msg, msgQueue, draining, resolvedQueueSize, logger, notifier)
+		svc.receiveMessage(msg, queue, resolvedQueueSize, logger, notifier)
 	})
 
 	// paho puts no deadline on a subscribe token, so a broker that keeps the
@@ -704,8 +709,7 @@ func (svc *serviceContext) runCycle(
 			cycleCtx,
 			replayFresh,
 			replayExpired,
-			msgQueue,
-			draining,
+			queue,
 			resolvedQueueSize,
 			device,
 			logger,
@@ -801,8 +805,7 @@ type inboundMessage struct {
 //     so the broker redelivers it, and that is counted.
 func (svc *serviceContext) receiveMessage(
 	msg mqtt.Message,
-	msgQueue chan<- inboundMessage,
-	draining <-chan struct{},
+	queue *cycleQueue,
 	queueSize int,
 	logger hclog.Logger,
 	notifier plugins.NotifierWrapper,
@@ -831,7 +834,7 @@ func (svc *serviceContext) receiveMessage(
 		}
 	}
 
-	enqueued := svc.enqueueMessage(item, msgQueue, draining, queueSize, logger, notifier)
+	enqueued := svc.enqueueMessage(item, queue, queueSize, logger, notifier)
 	if enqueued || item.Key != "" {
 		msg.Ack()
 	}
@@ -878,29 +881,20 @@ func (svc *serviceContext) recordJournalOutcome(
 // loudly: an Error log, a cumulative counter, and a best-effort plugin
 // notification.
 //
-// Returns true when the command was enqueued, false when it was not.
+// Returns true when the command was enqueued, false when it was not. The send
+// itself cannot panic on a queue the cycle has closed: cycleQueue.send holds
+// the queue's read lock for the duration and close waits for it (sc-119839).
 func (svc *serviceContext) enqueueMessage(
 	item inboundMessage,
-	msgQueue chan<- inboundMessage,
-	draining <-chan struct{},
+	queue *cycleQueue,
 	queueSize int,
 	logger hclog.Logger,
 	notifier plugins.NotifierWrapper,
 ) bool {
-	// Prefer the drain signal when it is already set: a select picks randomly
-	// among ready cases, and a send into a queue the cycle is about to close is
-	// the one choice that can panic.
-	select {
-	case <-draining:
-		return svc.rejectDuringDrain(item, queueSize, logger, notifier)
-	default:
-	}
-	select {
-	case msgQueue <- item:
+	if queue.send(item) {
 		return true
-	case <-draining:
-		return svc.rejectDuringDrain(item, queueSize, logger, notifier)
 	}
+	return svc.rejectDuringDrain(item, queueSize, logger, notifier)
 }
 
 // rejectDuringDrain records a message that arrived while the cycle was tearing
@@ -1081,8 +1075,7 @@ func (svc *serviceContext) notOwned(entries []journalEntry) []journalEntry {
 func (svc *serviceContext) replayJournal(
 	ctx context.Context,
 	fresh, expired []journalEntry,
-	msgQueue chan<- inboundMessage,
-	draining <-chan struct{},
+	queue *cycleQueue,
 	queueSize int,
 	device agent.Device,
 	logger hclog.Logger,
@@ -1122,7 +1115,7 @@ func (svc *serviceContext) replayJournal(
 		)
 		item := inboundMessage{Payload: e.Payload, Key: e.Key}
 		svc.owned.Store(e.Key, struct{}{})
-		if !svc.enqueueMessage(item, msgQueue, draining, queueSize, logger, notifier) {
+		if !svc.enqueueMessage(item, queue, queueSize, logger, notifier) {
 			svc.owned.Delete(e.Key)
 			break // tearing down; the rest stay journaled for the next cycle
 		}

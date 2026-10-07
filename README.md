@@ -185,7 +185,16 @@ enough to keep every worker busy), the subscribe callback **blocks instead of
 dropping**: it waits until a worker frees a slot. The agent acknowledges a
 message only after the callback returns, so a saturated agent stops
 acknowledging and the broker holds later commands rather than the agent
-discarding them.
+discarding them. The queue is a `cycleQueue` (`cmd/agent_smith/cycle_queue.go`):
+every send holds a read lock for its duration and the cycle's teardown takes the
+write lock before closing the channel, after raising the draining signal without
+the lock so a blocked sender lets go first. A command arriving at exactly the
+instant a connection cycle ends is therefore turned away (and, being journaled,
+replayed on the next cycle) rather than sent into a closed channel - until
+sc-119839 that race produced a `send on closed channel` panic that was survived
+only because the receive path recovers panics, and it abandoned a journal replay
+pass mid-loop. The stress test that drives producers against teardown 1 000
+times runs under the race detector in the normal suite.
 
 **A durable command journal.** Before a command is acknowledged to the broker
 it is written to `<data directory>/command_journal`, one file per command. The
