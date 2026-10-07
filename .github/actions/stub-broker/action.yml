@@ -40,11 +40,31 @@ inputs:
     description: "Port to listen on (the agent reaches a hub on 8883)"
     required: false
     default: "8883"
+  engine_port:
+    description: >
+      Plain-HTTP port for the stand-in Rewst engine (trigger endpoint and
+      control surface) the fixture also serves (sc-117887). The suite's
+      send-command action posts here instead of to engine.rewst.io.
+    required: false
+    default: "8080"
+  postback_port:
+    description: >
+      TLS port for the stand-in engine's postback receiver, served with the
+      broker's CA so the agent's https postback is trusted once the CA is in the
+      host store. Serve it to the agent as rewst_engine_host.
+    required: false
+    default: "8443"
 
 outputs:
   host:
     description: "Address the stub broker answers on"
     value: ${{ inputs.host }}
+  engine_url:
+    description: "Base URL of the stand-in engine: trigger at <engine_url>/webhooks/custom/trigger/<any>/<any>, control at <engine_url>/_control/..."
+    value: http://${{ inputs.host }}:${{ inputs.engine_port }}
+  engine_host:
+    description: "host:port to serve as rewst_engine_host so the agent posts results back to the fixture"
+    value: ${{ inputs.host }}:${{ inputs.postback_port }}
   log_file:
     description: "Path the broker's own log is written to"
     value: ${{ steps.paths.outputs.log_file }}
@@ -86,6 +106,8 @@ runs:
         PID_FILE: ${{ steps.paths.outputs.pid_file }}
         HOST: ${{ inputs.host }}
         PORT: ${{ inputs.port }}
+        ENGINE_PORT: ${{ inputs.engine_port }}
+        POSTBACK_PORT: ${{ inputs.postback_port }}
       run: |
         set -euo pipefail
         printf 'withhold' > "$MODE_FILE"
@@ -103,6 +125,8 @@ runs:
           -host "$HOST" \
           -ca-out "$CA_FILE" \
           -mode-file "$MODE_FILE" \
+          -engine-listen "$HOST:$ENGINE_PORT" \
+          -postback-listen ":$POSTBACK_PORT" \
           -log "$LOG_FILE" > /dev/null 2>&1 &
         echo $! > "$PID_FILE"
 
@@ -148,6 +172,8 @@ runs:
         PID_FILE: ${{ steps.paths.outputs.pid_file }}
         HOST: ${{ inputs.host }}
         PORT: ${{ inputs.port }}
+        ENGINE_PORT: ${{ inputs.engine_port }}
+        POSTBACK_PORT: ${{ inputs.postback_port }}
       run: |
         $ErrorActionPreference = 'Stop'
         Set-Content -Path $env:MODE_FILE -Value 'withhold' -NoNewline
@@ -172,6 +198,8 @@ runs:
           "-host", $env:HOST,
           "-ca-out", "`"$($env:CA_FILE)`"",
           "-mode-file", "`"$($env:MODE_FILE)`"",
+          "-engine-listen", "`"$($env:HOST):$($env:ENGINE_PORT)`"",
+          "-postback-listen", "`":$($env:POSTBACK_PORT)`"",
           "-log", "`"$($env:LOG_FILE)`""
         ) -join ' '
         $created = Invoke-CimMethod -ClassName Win32_Process -MethodName Create `

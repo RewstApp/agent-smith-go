@@ -47,6 +47,7 @@ import (
 	"log"
 	"math/big"
 	"net"
+	"net/http"
 	"os"
 	"strings"
 	"time"
@@ -88,6 +89,21 @@ func main() {
 		"",
 		fmt.Sprintf("path to a file containing %q to acknowledge subscriptions; "+
 			"any other content withholds SUBACK", modeAck),
+	)
+	engineListen := flag.String(
+		"engine-listen",
+		"",
+		"plain-HTTP address for the stand-in engine (trigger + control surface); empty disables (sc-117887)",
+	)
+	postbackListen := flag.String(
+		"postback-listen",
+		"",
+		"TLS address for the stand-in engine's postback receiver, served with the broker's CA; empty disables",
+	)
+	engineTimeout := flag.Duration(
+		"engine-timeout",
+		165*time.Second,
+		"how long the trigger waits for the device's postback before answering like the real engine's ceiling (408)",
 	)
 	logPath := flag.String(
 		"log",
@@ -131,6 +147,34 @@ func main() {
 	defer func() { _ = listener.Close() }()
 
 	log.Printf("stub broker listening on %s for %s (mode file %q)", *listen, *host, *modeFile)
+
+	postbackBase := ""
+	if *postbackListen != "" {
+		postbackBase = "https://" + hostPort(*host, *postbackListen)
+	}
+	h := newHub(postbackBase, *engineTimeout)
+	broker = h
+	if *engineListen != "" {
+		go func() {
+			log.Printf("stub engine (trigger + control) listening on http://%s", *engineListen)
+			if err := http.ListenAndServe(*engineListen, h.engineMux()); err != nil {
+				log.Fatalf("engine listener failed: %v", err)
+			}
+		}()
+	}
+	if *postbackListen != "" {
+		go func() {
+			srv := &http.Server{
+				Addr:      *postbackListen,
+				Handler:   h.postbackMux(),
+				TLSConfig: tlsConfig.Clone(),
+			}
+			log.Printf("stub engine postback receiver listening on %s", postbackBase)
+			if err := srv.ListenAndServeTLS("", ""); err != nil {
+				log.Fatalf("postback listener failed: %v", err)
+			}
+		}()
+	}
 
 	for {
 		conn, err := listener.Accept()
@@ -239,11 +283,20 @@ func acknowledgesSubscriptions(modeFile string) bool {
 	return strings.TrimSpace(string(content)) == modeAck
 }
 
+// broker is the hub the connection handlers report to; set once in main.
+var broker *hub
+
 func serve(conn net.Conn, modeFile string) {
 	defer func() { _ = conn.Close() }()
 
 	remote := conn.RemoteAddr().String()
 	log.Printf("[%s] connection accepted", remote)
+	client := &clientConn{conn: conn}
+	defer func() {
+		if client.clientID != "" && broker != nil {
+			broker.disconnected(client.clientID, client)
+		}
+	}()
 
 	for {
 		packetType, flags, payload, err := readPacket(conn)
@@ -257,9 +310,14 @@ func serve(conn net.Conn, modeFile string) {
 
 		switch packetType {
 		case pktConnect:
-			log.Printf("[%s] CONNECT -> CONNACK", remote)
+			if id, err := connectClientID(payload); err == nil {
+				client.clientID = id
+			} else {
+				log.Printf("[%s] CONNECT without a parseable client id: %v", remote, err)
+			}
+			log.Printf("[%s] CONNECT (client %q) -> CONNACK", remote, client.clientID)
 			// Variable header: session-present flag 0, return code 0 (accepted).
-			if err := writePacket(conn, pktConnack, 0, []byte{0x00, 0x00}); err != nil {
+			if err := client.write(pktConnack, 0, []byte{0x00, 0x00}); err != nil {
 				log.Printf("[%s] failed to send CONNACK: %v", remote, err)
 				return
 			}
@@ -270,7 +328,7 @@ func serve(conn net.Conn, modeFile string) {
 			// it the client would tear the connection down on ping timeout and
 			// exercise the ordinary connection-lost path instead.
 			log.Printf("[%s] PINGREQ -> PINGRESP", remote)
-			if err := writePacket(conn, pktPingresp, 0, nil); err != nil {
+			if err := client.write(pktPingresp, 0, nil); err != nil {
 				log.Printf("[%s] failed to send PINGRESP: %v", remote, err)
 				return
 			}
@@ -289,14 +347,14 @@ func serve(conn net.Conn, modeFile string) {
 			// One granted-QoS byte per requested topic filter; the agent
 			// subscribes to exactly one, and QoS 1 is granted regardless of what
 			// it asked for (a broker may grant lower, never higher).
-			if err := writePacket(
-				conn,
-				pktSuback,
-				0,
-				[]byte{packetID[0], packetID[1], 0x01},
-			); err != nil {
+			suback := []byte{packetID[0], packetID[1], 0x01}
+			if err := client.write(pktSuback, 0, suback); err != nil {
 				log.Printf("[%s] failed to send SUBACK: %v", remote, err)
 				return
+			}
+			// The device is now listening: deliver whatever it is owed.
+			if client.clientID != "" && broker != nil {
+				broker.subscribed(client.clientID, client)
 			}
 
 		case pktUnsubscribe:
@@ -310,7 +368,7 @@ func serve(conn net.Conn, modeFile string) {
 				break
 			}
 			log.Printf("[%s] UNSUBSCRIBE -> UNSUBACK", remote)
-			if err := writePacket(conn, pktUnsuback, 0, packetID); err != nil {
+			if err := client.write(pktUnsuback, 0, packetID); err != nil {
 				log.Printf("[%s] failed to send UNSUBACK: %v", remote, err)
 				return
 			}
@@ -335,11 +393,20 @@ func serve(conn net.Conn, modeFile string) {
 			}
 			packetID := payload[2+topicLen : 2+topicLen+2]
 			log.Printf("[%s] PUBLISH (qos 1) -> PUBACK", remote)
-			if err := writePacket(conn, pktPuback, 0, packetID); err != nil {
+			if err := client.write(pktPuback, 0, packetID); err != nil {
 				log.Printf("[%s] failed to send PUBACK: %v", remote, err)
 				return
 			}
 
+		case pktPuback:
+			// The device acknowledged a C2D message we published to it.
+			if len(payload) < 2 {
+				log.Printf("[%s] malformed PUBACK", remote)
+				return
+			}
+			if client.clientID != "" && broker != nil {
+				broker.puback(client.clientID, uint16(payload[0])<<8|uint16(payload[1]))
+			}
 		case pktDisconnect:
 			log.Printf("[%s] DISCONNECT", remote)
 			return
@@ -416,4 +483,15 @@ func encodeRemainingLength(length int) []byte {
 			return encoded
 		}
 	}
+}
+
+// hostPort joins the advertised host with the port part of a listen address
+// (":8443" or "127.0.0.1:8443"), so the postback URL points at the address the
+// certificate was issued for.
+func hostPort(host, listen string) string {
+	_, port, err := net.SplitHostPort(listen)
+	if err != nil {
+		return listen
+	}
+	return net.JoinHostPort(host, port)
 }

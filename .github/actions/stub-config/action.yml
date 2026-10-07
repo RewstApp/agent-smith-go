@@ -57,6 +57,18 @@ inputs:
     required: false
     default: "1073741824"
 
+  device_id:
+    description: "device_id served in the configuration (sc-117887: a per-run id keeps hermetic jobs from sharing a device)"
+    required: false
+    default: "stub-device-id"
+  hub_host:
+    description: "azure_iot_hub_host served in the configuration; a .invalid host unless the scenario expects the agent to connect (to the stub broker)"
+    required: false
+    default: "hub.invalid"
+  engine_host:
+    description: "rewst_engine_host served in the configuration (host[:port]); a .invalid host unless the scenario expects postbacks (to the stub engine)"
+    required: false
+    default: "engine.invalid"
 outputs:
   url:
     description: "Config endpoint URL to pass as --config-url"
@@ -102,6 +114,9 @@ runs:
         PORT: ${{ inputs.port }}
         ORG_ID: ${{ inputs.org_id }}
         OVERSIZED_BYTES: ${{ inputs.oversized_bytes }}
+        DEVICE_ID: ${{ inputs.device_id }}
+        HUB_HOST: ${{ inputs.hub_host }}
+        ENGINE_HOST: ${{ inputs.engine_host }}
       run: |
         set -euo pipefail
         printf 'oversized' > "$MODE_FILE"
@@ -118,6 +133,9 @@ runs:
           -mode-file "$MODE_FILE" \
           -org-id "$ORG_ID" \
           -oversized-bytes "$OVERSIZED_BYTES" \
+          -device-id "$DEVICE_ID" \
+          -hub-host "$HUB_HOST" \
+          -engine-host "$ENGINE_HOST" \
           -log "$LOG_FILE" > /dev/null 2>&1 &
         echo $! > "$PID_FILE"
         echo "Stub config endpoint started (pid $(cat "$PID_FILE"))"
@@ -134,6 +152,9 @@ runs:
         PORT: ${{ inputs.port }}
         ORG_ID: ${{ inputs.org_id }}
         OVERSIZED_BYTES: ${{ inputs.oversized_bytes }}
+        DEVICE_ID: ${{ inputs.device_id }}
+        HUB_HOST: ${{ inputs.hub_host }}
+        ENGINE_HOST: ${{ inputs.engine_host }}
       run: |
         $ErrorActionPreference = 'Stop'
         Set-Content -Path $env:MODE_FILE -Value 'oversized' -NoNewline
@@ -156,6 +177,9 @@ runs:
           "-mode-file", "`"$($env:MODE_FILE)`"",
           "-org-id", "`"$($env:ORG_ID)`"",
           "-oversized-bytes", $env:OVERSIZED_BYTES,
+          "-device-id", "`"$($env:DEVICE_ID)`"",
+          "-hub-host", "`"$($env:HUB_HOST)`"",
+          "-engine-host", "`"$($env:ENGINE_HOST)`"",
           "-log", "`"$($env:LOG_FILE)`""
         ) -join ' '
         $created = Invoke-CimMethod -ClassName Win32_Process -MethodName Create `
