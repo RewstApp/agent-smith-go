@@ -3,7 +3,6 @@ package main
 import (
 	"errors"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -342,111 +341,6 @@ func TestWaitForServiceDeregistration_NeverDisappears(t *testing.T) {
 	}
 	if clock.slept < 30*time.Second {
 		t.Errorf("expected the full deadline to be waited out, waited %s", clock.slept)
-	}
-}
-
-// ── writeFileAtomic ───────────────────────────────────────────────────────────
-
-func TestWriteFileAtomic_ReplacesExistingFile(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "agent")
-	if err := os.WriteFile(path, []byte("old binary"), utils.DefaultExecutableFileMod); err != nil {
-		t.Fatalf("failed to seed the file: %v", err)
-	}
-
-	err := writeFileAtomic(
-		utils.NewFileSystem(),
-		path,
-		[]byte("new binary"),
-		utils.DefaultExecutableFileMod,
-	)
-	if err != nil {
-		t.Fatalf("expected the write to succeed, got %v", err)
-	}
-
-	got, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("failed to read the file back: %v", err)
-	}
-	if string(got) != "new binary" {
-		t.Errorf("expected the new contents, got %q", got)
-	}
-	if _, err := os.Stat(path + ".new"); !os.IsNotExist(err) {
-		t.Errorf("expected the temporary file to be gone, stat returned %v", err)
-	}
-}
-
-// failingRenameFS commits nothing: it models the destination being unwritable at
-// the moment of the rename, which is exactly the sharing violation Windows
-// raises when the old process is still holding the image.
-type failingRenameFS struct {
-	utils.FileSystem
-}
-
-func (f *failingRenameFS) Rename(string, string) error {
-	return errors.New("sharing violation")
-}
-
-// A failed commit must leave the installed binary byte-identical rather than
-// truncated: the endpoint keeps running the old agent instead of nothing at all.
-func TestWriteFileAtomic_FailedCommitLeavesOriginalIntact(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "agent")
-	original := []byte("old binary contents")
-	if err := os.WriteFile(path, original, utils.DefaultExecutableFileMod); err != nil {
-		t.Fatalf("failed to seed the file: %v", err)
-	}
-
-	fsys := &failingRenameFS{FileSystem: utils.NewFileSystem()}
-	err := writeFileAtomic(fsys, path, []byte("new"), utils.DefaultExecutableFileMod)
-	if err == nil {
-		t.Fatal("expected the write to fail")
-	}
-
-	got, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("failed to read the file back: %v", err)
-	}
-	if string(got) != string(original) {
-		t.Errorf("expected the original contents preserved, got %q", got)
-	}
-	if _, err := os.Stat(path + ".new"); !os.IsNotExist(err) {
-		t.Errorf("expected the temporary file to be cleaned up, stat returned %v", err)
-	}
-}
-
-func TestWriteFileAtomic_WriteFailureLeavesOriginalIntact(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "agent")
-	original := []byte("old binary contents")
-	if err := os.WriteFile(path, original, utils.DefaultExecutableFileMod); err != nil {
-		t.Fatalf("failed to seed the file: %v", err)
-	}
-
-	fsys := &mockFileSystem{
-		writeFileFunc: func(name string, _ []byte, _ os.FileMode) error {
-			if !strings.HasSuffix(name, ".new") {
-				t.Errorf("expected the write to target a temporary file, got %q", name)
-			}
-			return errors.New("no space left on device")
-		},
-	}
-
-	if err := writeFileAtomic(
-		fsys,
-		path,
-		[]byte("new"),
-		utils.DefaultExecutableFileMod,
-	); err == nil {
-		t.Fatal("expected the write to fail")
-	}
-
-	got, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("failed to read the file back: %v", err)
-	}
-	if string(got) != string(original) {
-		t.Errorf("expected the original contents preserved, got %q", got)
 	}
 }
 

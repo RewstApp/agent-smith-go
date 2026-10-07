@@ -18,6 +18,29 @@ import (
 // second sleep, used here as the signal to wait on instead of the symptom.
 const errSharingViolation = syscall.Errno(32)
 
+// syncPath fsyncs the file at name. Windows has no directory fsync
+// (FlushFileBuffers on a directory handle is refused), so a directory is a
+// no-op here: NTFS journals the rename itself, and the file sync before the
+// rename is the durability bound WriteFileAtomic documents for this platform.
+func syncPath(name string) error {
+	info, err := os.Stat(name)
+	if err != nil {
+		return err
+	}
+	if info.IsDir() {
+		return nil
+	}
+	f, err := os.OpenFile(name, os.O_RDWR, 0)
+	if err != nil {
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		return err
+	}
+	return f.Close()
+}
+
 // executableInUse probes whether name is currently running. A successful open
 // means no process holds the image and the file can be replaced; a sharing
 // violation means the old process is still alive.

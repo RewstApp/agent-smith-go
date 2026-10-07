@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"os"
 	"strings"
 	"time"
 
@@ -238,32 +237,4 @@ func waitForServiceDeregistration(
 
 		opts.sleep(opts.pollInterval)
 	}
-}
-
-// writeFileAtomic writes data to path without ever exposing a partially written
-// file: the bytes go to a temporary file alongside the destination and are then
-// renamed into place, which is a single atomic operation on every platform the
-// agent runs on. A failed or interrupted write therefore leaves the previous
-// file byte-identical instead of truncated — the same pattern the postback spool
-// uses for its entries.
-//
-// The temporary file lives in the destination directory so the rename never
-// crosses a filesystem boundary.
-func writeFileAtomic(fsys utils.FileSystem, path string, data []byte, perm os.FileMode) error {
-	tempPath := path + ".new"
-
-	if err := fsys.WriteFile(tempPath, data, perm); err != nil {
-		return err
-	}
-
-	if err := fsys.Rename(tempPath, path); err != nil {
-		// Leave the destination as it was and take the half-written temp file with
-		// us, so a retry does not inherit it.
-		if removeErr := fsys.Remove(tempPath); removeErr != nil && !os.IsNotExist(removeErr) {
-			return fmt.Errorf("%w (temporary file %s left behind: %v)", err, tempPath, removeErr)
-		}
-		return err
-	}
-
-	return nil
 }
