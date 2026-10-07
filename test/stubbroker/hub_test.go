@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"mime/multipart"
@@ -176,8 +177,14 @@ func TestFixture_TriggerDeliversAndReturnsThePostback(t *testing.T) {
 	if err := json.Unmarshal(m.Payload(), &msg); err != nil || msg.PostID == "" {
 		t.Fatalf("bad C2D payload %s: %v", m.Payload(), err)
 	}
-	if msg.Commands != `echo "hello world"` {
-		t.Errorf("commands = %q; the JSON quoting the suite sends was not unwrapped", msg.Commands)
+	decoded, err := base64.StdEncoding.DecodeString(msg.Commands)
+	if err != nil || string(decoded) != `echo "hello world"` {
+		t.Errorf(
+			"commands = %q (decoded %q, %v); want the suite's quoting unwrapped, base64-encoded",
+			msg.Commands,
+			decoded,
+			err,
+		)
 	}
 	m.Ack()
 	result := `{"error":"","output":"hello world\n"}`
@@ -228,7 +235,7 @@ func TestFixture_UnacknowledgedMessageIsRedeliveredWithDup(t *testing.T) {
 		engineURL+"/_control/enqueue",
 		"application/json",
 		bytes.NewBufferString(
-			`{"device_id":"dev-2","payload":{"post_id":"p1","commands":"sleep 1"}}`,
+			`{"device_id":"dev-2","post_id":"p1","commands":"sleep 1"}`,
 		),
 	)
 	if err != nil || resp.StatusCode != 200 {
@@ -318,11 +325,12 @@ func TestFixture_PostURLIsDefinedForSelfPostingScripts(t *testing.T) {
 		m.Ack()
 		var msg struct{ Commands string }
 		_ = json.Unmarshal(m.Payload(), &msg)
+		decoded, _ := base64.StdEncoding.DecodeString(msg.Commands)
 		if !bytes.HasPrefix(
-			[]byte(msg.Commands),
+			decoded,
 			[]byte(`$post_url = "`+postbackBase+`/webhooks/custom/action/`),
 		) {
-			t.Fatalf("commands did not get $post_url defined: %q", msg.Commands)
+			t.Fatalf("commands did not get $post_url defined: %q", decoded)
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("no delivery")

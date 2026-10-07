@@ -23,6 +23,7 @@ package main
 
 import (
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -304,9 +305,8 @@ func (h *hub) handleTrigger(w http.ResponseWriter, r *http.Request) {
 			commands,
 		)
 	}
-	msg, _ := json.Marshal(map[string]string{"post_id": postID, "commands": commands})
 	ch := h.waitFor(postID)
-	h.enqueue(deviceID, msg)
+	h.enqueue(deviceID, commandPayload(postID, commands))
 	log.Printf("engine: trigger for %s -> post_id %s", deviceID, postID)
 
 	select {
@@ -353,19 +353,45 @@ func (h *hub) handlePostback(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte(`{}`))
 }
 
+// commandPayload is the C2D message the real engine sends for a command: the
+// script is base64-encoded in the "commands" field, which the agent decodes
+// before executing (a plain string fails with "illegal base64 data").
+func commandPayload(postID, commands string) json.RawMessage {
+	msg, _ := json.Marshal(map[string]string{
+		"post_id":  postID,
+		"commands": base64.StdEncoding.EncodeToString([]byte(commands)),
+	})
+	return msg
+}
+
 // handleEnqueue lets the harness owe a device a message without waiting for a
-// result - the way to queue many commands and then kill the agent.
+// result - the way to queue many commands and then kill the agent. Either a
+// plain {post_id, commands} pair (encoded here exactly as the trigger would) or
+// a raw payload to deliver verbatim.
 func (h *hub) handleEnqueue(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		DeviceID string          `json:"device_id"`
+		PostID   string          `json:"post_id"`
+		Commands string          `json:"commands"`
 		Payload  json.RawMessage `json:"payload"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.DeviceID == "" ||
-		len(req.Payload) == 0 {
-		http.Error(w, `{"error":"device_id and payload are required"}`, http.StatusBadRequest)
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.DeviceID == "" {
+		http.Error(w, `{"error":"device_id is required"}`, http.StatusBadRequest)
 		return
 	}
-	m := h.enqueue(req.DeviceID, req.Payload)
+	payload := req.Payload
+	if len(payload) == 0 {
+		if req.PostID == "" || req.Commands == "" {
+			http.Error(
+				w,
+				`{"error":"post_id and commands, or a raw payload, are required"}`,
+				http.StatusBadRequest,
+			)
+			return
+		}
+		payload = commandPayload(req.PostID, req.Commands)
+	}
+	m := h.enqueue(req.DeviceID, payload)
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]string{"id": m.ID})
 }
