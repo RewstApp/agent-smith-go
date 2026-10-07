@@ -10,9 +10,12 @@ $commands = $env:COMMANDS
 # The matrix passes the command JSON-quoted, as the real engine expects; the
 # control surface takes the bare string inside a JSON payload.
 try { $commands = $commands | ConvertFrom-Json -ErrorAction Stop } catch { }
+# post_id and commands go at the top level so the fixture encodes the script
+# the way the real engine does (UTF-16LE, then base64). A raw `payload` would
+# be delivered byte-for-byte and the agent would reject the plain text as
+# illegal base64 - posting back an error at once instead of running for 30s.
 for ($i = 1; $i -le $count; $i++) {
-  $payload = @{ post_id = "hermetic-$i"; commands = $commands } | ConvertTo-Json -Compress
-  $body = @{ device_id = $env:DEVICE_ID; payload = ($payload | ConvertFrom-Json) } | ConvertTo-Json -Compress -Depth 5
+  $body = @{ device_id = $env:DEVICE_ID; post_id = "hermetic-$i"; commands = $commands } | ConvertTo-Json -Compress
   $resp = Invoke-RestMethod -Method Post -Uri "$($env:ENGINE_URL)/_control/enqueue" -ContentType 'application/json' -Body $body -TimeoutSec 30
   Write-Output "enqueued hermetic-$i as $($resp.id)"
 }

@@ -11,10 +11,19 @@ $count = [int]$env:COUNT
 $expected = 1..$count | ForEach-Object { "hermetic-$_" }
 $deadline = (Get-Date).AddSeconds([int]$env:TIMEOUT_SECONDS)
 $all = @()
+$lastError = ''
 while ($true) {
   try {
-    $all = @(Invoke-RestMethod -Method Get -Uri "$($env:ENGINE_URL)/_control/postbacks" -TimeoutSec 30)
-  } catch { $all = @() }
+    # Invoke-RestMethod hands a JSON array back as one Object[] value; wrapping
+    # that in @() makes a single-element array whose only element is the whole
+    # list, and the filter below then matches nothing. Pipe it through
+    # ForEach-Object to unroll it into one object per postback.
+    $all = @(Invoke-RestMethod -Method Get -Uri "$($env:ENGINE_URL)/_control/postbacks" -TimeoutSec 30 | ForEach-Object { $_ })
+    $lastError = ''
+  } catch {
+    $all = @()
+    $lastError = $_.Exception.Message
+  }
   $seen = @($all | Where-Object { $expected -contains $_.post_id })
   if ($seen.Count -ge $count -or (Get-Date) -ge $deadline) { break }
   Start-Sleep -Seconds 2
@@ -23,6 +32,8 @@ $seenIds = @($seen | ForEach-Object { $_.post_id } | Sort-Object)
 Write-Output "reported: $($seenIds -join ', ')"
 $missing = @($expected | Where-Object { $seenIds -notcontains $_ })
 if ($missing.Count -gt 0) {
+  if ($lastError) { Write-Output "last control-surface error: $lastError" }
+  Write-Output "postbacks the engine holds: $(@($all | ForEach-Object { $_.post_id }) -join ', ')"
   Write-Error "postbacks never arrived for: $($missing -join ', ')"
   exit 1
 }
