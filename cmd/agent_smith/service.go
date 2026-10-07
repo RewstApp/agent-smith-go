@@ -236,6 +236,7 @@ func (svc *serviceContext) Execute(
 				defer func() { _ = out.Close() }()
 				return detachedCommand(path, args, out, out).Start()
 			},
+			svc, // the updater waits for in-flight commands before restarting us
 		)
 		runner := agent.NewAutoUpdateRunner(
 			logger,
@@ -453,6 +454,9 @@ func (svc *serviceContext) startWorkers(
 						"worker", i,
 						"queue_length", len(msgQueue),
 					)
+					if svc.parkIfUpdatePending(item, logger) {
+						continue
+					}
 					svc.processInboundGuarded(i, item, ctx, device, logger, notifier)
 				case <-ctx.Done():
 					logger.Debug("Message worker stopped: service stopping", "worker", i)
@@ -949,7 +953,51 @@ func (svc *serviceContext) processInboundGuarded(
 	notifier plugins.NotifierWrapper,
 ) {
 	defer utils.Recover(logger, "worker", workerId, "scope", "processMessage")
+	svc.executing.Add(1)
+	defer svc.executing.Add(-1)
 	svc.processInbound(item, ctx, device, logger, notifier)
+}
+
+// Executing implements agent.CommandActivity: the number of commands in flight.
+func (svc *serviceContext) Executing() int {
+	return int(svc.executing.Load())
+}
+
+// HoldNewCommands implements agent.CommandActivity: park every journaled
+// command dequeued in the next d. A later call replaces the deadline.
+func (svc *serviceContext) HoldNewCommands(d time.Duration) {
+	svc.holdUntil.Store(time.Now().Add(d).UnixNano())
+}
+
+// ReleaseNewCommands implements agent.CommandActivity: lift the hold.
+func (svc *serviceContext) ReleaseNewCommands() {
+	svc.holdUntil.Store(0)
+}
+
+// commandsHeld reports whether an update is pending and new commands are to be
+// parked rather than executed.
+func (svc *serviceContext) commandsHeld() bool {
+	until := svc.holdUntil.Load()
+	return until != 0 && time.Now().UnixNano() < until
+}
+
+// parkIfUpdatePending leaves a journaled command for the restarted agent when
+// an update is pending, and reports whether it did. The entry is still pending
+// and not started, so the next process replays it exactly as if it had been
+// queued when the old one died; ownership is released so that, if the restart
+// never comes and the hold lapses, this process's next connection cycle replays
+// it instead. An unjournaled command (the journal is failing) cannot be parked
+// without losing it, so it runs; the update's wait covers it like any other.
+func (svc *serviceContext) parkIfUpdatePending(item inboundMessage, logger hclog.Logger) bool {
+	if item.Key == "" || !svc.commandsHeld() {
+		return false
+	}
+	svc.owned.Delete(item.Key)
+	logger.Info(
+		"Holding queued command for the pending update; it runs after the restart",
+		"key", item.Key,
+	)
+	return true
 }
 
 // processInbound brackets processMessage with the journal's lifecycle: the

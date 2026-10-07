@@ -1090,6 +1090,46 @@ Rejection happens before the body is unmarshalled, so a truncated payload can
 never be partially applied: the install fails with the size error and the
 existing installation, if any, is left untouched.
 
+### Updating Only Between Commands
+
+An update stops the service, replaces the binary and starts it again. Until
+sc-119836 nothing checked whether a command was executing at that moment: the
+stop cancelled the workers, which killed the running command's process tree,
+and the next start reported it to the engine as `interrupted` — a half-applied
+installer whose cause was the agent upgrading itself. Since sc-118039 that was
+the **only** remaining path on which the agent killed a running command for a
+reason unrelated to the command, and a release is followed fleet-wide by a wave
+of update checks, so the overlap concentrated in the hour after each Agent Smith
+release.
+
+The updater now consults the service (`agent.CommandActivity`, implemented by
+the service context's in-flight counter) after the download and before it
+launches the `--update` helper:
+
+- If a command is executing, it logs `Deferring update until in-flight commands
+  finish` at Info with the count and re-checks every 30 seconds. The download
+  is kept, so however long the wait, it is not repeated.
+- While an update is pending the workers **park** every journaled command they
+  dequeue instead of executing it (`Holding queued command for the pending
+  update; it runs after the restart`). The entry stays pending and not started
+  in the journal, so the restarted agent replays it exactly as if it had been
+  queued when the old process died. This is the bound that keeps a steady stream
+  of commands from deferring the update forever. A command the journal could
+  not record cannot be parked without losing it, so it runs, and the wait covers
+  it like any other.
+- The wait is bounded by the per-command timeout plus one minute: every command
+  either finishes or is killed by its own deadline inside the timeout, so only a
+  command the deadline failed to end can exceed it. Past the bound the update
+  proceeds and says so at Warn (`Proceeding with update although commands are
+  still executing`), so a hung command cannot block a security release
+  indefinitely; that command is reported as `interrupted`, as before.
+- The hold outlives the launch by ten minutes, which the helper's stop needs
+  only seconds of. If the helper never stops the process (it crashed before the
+  stop), the hold lapses and the parked commands are replayed on the next
+  connection cycle rather than being refused for the rest of the process's
+  life. A helper that fails to start, or an updater stopped mid-wait, lifts the
+  hold at once.
+
 ### Capped and Jittered Auto-Update Retries
 
 When an update check or download fails, the agent retries on an exponential

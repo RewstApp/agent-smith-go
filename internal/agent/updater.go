@@ -180,9 +180,49 @@ func resolveLatestReleaseUrl(logger hclog.Logger, dataDir string, defaultUrl str
 
 type RunCommandFunc = func(path string, args []string) error
 
+// CommandActivity is the updater's view of command execution in the service,
+// so that an update - which stops the service, replaces the binary and starts
+// it again - is not launched while a command is executing (sc-119836). Since
+// sc-118039 the update was the only remaining path on which the agent killed a
+// running command for a reason unrelated to the command: a long installer that
+// overlapped an update check landing on a new release was cut off part-way and
+// reported to the engine as interrupted by the agent's own upgrade.
+type CommandActivity interface {
+	// Executing reports how many commands are executing at this moment.
+	Executing() int
+	// HoldNewCommands stops the workers from starting any new queued command for
+	// the next d (a later call replaces the deadline). Held commands stay
+	// journaled and run after the restart. Without the hold a steady stream of
+	// commands could keep Executing above zero and defer an update forever.
+	HoldNewCommands(d time.Duration)
+	// ReleaseNewCommands lifts the hold, for an update that will not happen
+	// after all (the updater was stopped mid-wait, or the helper failed to
+	// start).
+	ReleaseNewCommands()
+}
+
 const (
 	checkTimeout    = 30 * time.Second
 	downloadTimeout = 5 * time.Minute
+
+	// updateIdlePollInterval is how often a deferred update re-checks whether
+	// the in-flight commands have finished.
+	updateIdlePollInterval = 30 * time.Second
+
+	// updateIdleWaitMargin is added to the per-command timeout to form the
+	// longest a deferred update will wait: every command either finishes or
+	// is killed by its own deadline within the timeout, so a wait that long
+	// plus a margin for the postback can only be exceeded by a command the
+	// timeout itself failed to end. Past it the update proceeds and says so at
+	// Warn, so a hung command cannot block a security release indefinitely.
+	updateIdleWaitMargin = time.Minute
+
+	// updateHoldDuration is how long new commands stay parked once the helper
+	// has been launched. The helper stops this process within seconds, and a
+	// helper that never does (crashed before the stop) must not leave the
+	// agent refusing commands for the rest of its life: when the hold lapses
+	// the parked commands are replayed on the next connection cycle.
+	updateHoldDuration = 10 * time.Minute
 
 	// updatesDirMod is the mode of the directory downloaded installers are
 	// written to. It is deliberately tighter than utils.DefaultDirMod: the agent
@@ -221,6 +261,15 @@ type defaultUpdater struct {
 	// once at construction from the device's org id so tests can point it at a
 	// scratch directory instead of the real installation path.
 	updatesDir string
+	// activity, when set, defers the restart while commands are executing; see
+	// waitForIdle. nil (the config-mode and test paths) means no deferral.
+	activity CommandActivity
+	// idlePoll, idleMaxWait and holdDuration are the deferral's cadence, ceiling
+	// and post-launch hold; zero means the documented defaults (idleMaxWait is
+	// then derived from the device's per-command timeout). Tests shorten them.
+	idlePoll     time.Duration
+	idleMaxWait  time.Duration
+	holdDuration time.Duration
 }
 
 func NewUpdater(
@@ -229,6 +278,7 @@ func NewUpdater(
 	latestReleaseUrl string,
 	githubToken string,
 	runCommand RunCommandFunc,
+	activity CommandActivity,
 ) Updater {
 	return &defaultUpdater{
 		logger:           logger,
@@ -240,6 +290,7 @@ func NewUpdater(
 		downloadClient:   &http.Client{Timeout: downloadTimeout},
 		chmod:            os.Chmod,
 		updatesDir:       GetUpdatesDirectory(device.RewstOrgId),
+		activity:         activity,
 	}
 }
 
@@ -475,7 +526,95 @@ func (u *defaultUpdater) Run(ctx context.Context) error {
 		return err
 	}
 
-	return u.Update(executablePath)
+	// The download is done and kept: however long the wait, it is not repeated.
+	if err := u.waitForIdle(ctx); err != nil {
+		return err
+	}
+
+	if err := u.Update(executablePath); err != nil {
+		// No restart is coming; let the workers take commands again.
+		if u.activity != nil {
+			u.activity.ReleaseNewCommands()
+		}
+		return err
+	}
+	return nil
+}
+
+// waitForIdle defers launching the update helper until no command is
+// executing, so the restart cannot cut a running command off part-way
+// (sc-119836). New queued commands are parked first - they stay journaled and
+// run after the restart - so a steady stream cannot keep the count above zero
+// and defer the update forever; that hold is the bound. The wait itself is
+// bounded by the per-command timeout plus a margin: past it the update
+// proceeds with a Warn, because a command the per-command deadline failed to
+// end must not block a security release. The wait is interruptible by the
+// updater stopping, in which case the hold is lifted.
+func (u *defaultUpdater) waitForIdle(ctx context.Context) error {
+	if u.activity == nil {
+		return nil
+	}
+	poll, maxWait, hold := u.idlePoll, u.idleMaxWait, u.holdDuration
+	if poll <= 0 {
+		poll = updateIdlePollInterval
+	}
+	if maxWait <= 0 {
+		maxWait = u.device.ResolvedCommandTimeout() + updateIdleWaitMargin
+	}
+	if hold <= 0 {
+		hold = updateHoldDuration
+	}
+
+	// Park new commands for the whole wait plus the helper's own window; the
+	// hold is re-armed to the shorter post-launch window once the wait ends.
+	u.activity.HoldNewCommands(maxWait + hold)
+	defer u.activity.HoldNewCommands(hold)
+
+	executing := u.activity.Executing()
+	if executing == 0 {
+		return nil
+	}
+	u.logger.Info(
+		"Deferring update until in-flight commands finish",
+		"executing", executing,
+		"poll_interval", poll,
+		"max_wait", maxWait,
+	)
+
+	started := time.Now()
+	deadline := time.NewTimer(maxWait)
+	defer deadline.Stop()
+	ticker := time.NewTicker(poll)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			u.activity.ReleaseNewCommands()
+			u.logger.Info(
+				"Update deferral abandoned: updater stopping",
+				"executing", u.activity.Executing(),
+				"waited", time.Since(started),
+			)
+			return ctx.Err()
+		case <-deadline.C:
+			u.logger.Warn(
+				"Proceeding with update although commands are still executing; "+
+					"they will be reported to the engine as interrupted",
+				"executing", u.activity.Executing(),
+				"waited", time.Since(started),
+				"max_wait", maxWait,
+			)
+			return nil
+		case <-ticker.C:
+			if n := u.activity.Executing(); n == 0 {
+				u.logger.Info(
+					"In-flight commands finished; proceeding with update",
+					"waited", time.Since(started),
+				)
+				return nil
+			}
+		}
+	}
 }
 
 // isNewerVersion reports whether latest is a semantically newer version than
