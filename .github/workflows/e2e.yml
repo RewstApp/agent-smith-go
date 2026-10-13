@@ -2921,11 +2921,12 @@ jobs:
         env:
           LOG_FILE: ${{ matrix.log_file }}
           BASELINE: ${{ (steps.sweep_baseline_unix.outputs.saved || steps.sweep_baseline_windows.outputs.saved) }}
+          COMMAND: ${{ matrix.sweep_commands }}
         run: |
           set -euo pipefail
           # Resolve pwsh up front: sudo resets PATH via secure_path on some runners.
           pwsh_path="$(command -v pwsh)"
-          sudo --preserve-env=LOG_FILE,BASELINE,GITHUB_OUTPUT "$pwsh_path" -NoProfile -File "$GITHUB_WORKSPACE/.github/workflows/it-scripts/capture-the-in-flight-script-file-path.ps1"
+          sudo --preserve-env=LOG_FILE,BASELINE,COMMAND,GITHUB_OUTPUT "$pwsh_path" -NoProfile -File "$GITHUB_WORKSPACE/.github/workflows/it-scripts/capture-the-in-flight-script-file-path.ps1"
 
       - name: Capture the in-flight script file path (Windows)
         if: runner.os == 'Windows'
@@ -2934,6 +2935,7 @@ jobs:
         env:
           LOG_FILE: ${{ matrix.log_file }}
           BASELINE: ${{ (steps.sweep_baseline_unix.outputs.saved || steps.sweep_baseline_windows.outputs.saved) }}
+          COMMAND: ${{ matrix.sweep_commands }}
         run: |
           & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/capture-the-in-flight-script-file-path.ps1"
 
