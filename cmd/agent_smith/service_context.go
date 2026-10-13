@@ -68,6 +68,20 @@ type serviceContext struct {
 	// counter exposed for observability beyond the per-drop error log.
 	droppedMessages atomic.Int64
 
+	// executing counts the commands in flight across every worker pool; it is
+	// what the auto-updater consults (agent.CommandActivity) before it launches
+	// the helper that stops this process, so an update never cuts a running
+	// command off part-way (sc-119836).
+	executing atomic.Int32
+
+	// holdUntil, when in the future (unix nanoseconds), makes the workers park
+	// every journaled command they dequeue instead of executing it: an update
+	// is pending and the command will run after the restart. The bound that
+	// keeps a steady stream of commands from deferring the update forever. A
+	// hold that lapses without a restart (the helper never stopped us) hands
+	// the parked commands to the next connection cycle's replay.
+	holdUntil atomic.Int64
+
 	// journalDegraded is true while the command journal is failing writes, so
 	// the failure and the eventual recovery are each reported exactly once.
 	journalDegraded atomic.Bool
