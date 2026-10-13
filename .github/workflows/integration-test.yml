@@ -17,9 +17,9 @@ on:
           - ubuntu-latest
           - macos-latest
 
-concurrency:
-  group: e2e
-  cancel-in-progress: false
+# No concurrency group here: the called e2e.yml carries the `e2e` group, and a
+# caller holding the same group deadlocks against it ("Canceling since a
+# deadlock was detected for concurrency group 'e2e'").
 
 jobs:
   e2e:
