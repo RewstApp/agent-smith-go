@@ -328,7 +328,7 @@ func TestRunUpdate_ReplacesExecutableAtomically(t *testing.T) {
 
 	agentExecutablePath := agent.GetAgentExecutablePath("test-org")
 	for _, name := range writes {
-		if !strings.HasSuffix(name, ".new") {
+		if !strings.HasSuffix(name, utils.AtomicTempSuffix) {
 			t.Errorf("expected every write to target a temporary file, got %q", name)
 		}
 		if name == agentExecutablePath {
@@ -338,7 +338,8 @@ func TestRunUpdate_ReplacesExecutableAtomically(t *testing.T) {
 
 	committed := false
 	for _, rename := range renames {
-		if rename[1] == agentExecutablePath && rename[0] == agentExecutablePath+".new" {
+		temp := agentExecutablePath + utils.AtomicTempSuffix
+		if rename[1] == agentExecutablePath && rename[0] == temp {
 			committed = true
 		}
 	}
@@ -362,7 +363,7 @@ func TestRunUpdate_ExecutableCommitFails_RestartsService(t *testing.T) {
 		readFileFunc:   func(string) ([]byte, error) { return validDeviceJSON("test-org"), nil },
 		writeFileFunc:  func(string, []byte, os.FileMode) error { return nil },
 		renameFunc: func(oldPath string, _ string) error {
-			if oldPath == agentExecutablePath+".new" {
+			if oldPath == agentExecutablePath+utils.AtomicTempSuffix {
 				return errors.New("sharing violation")
 			}
 			return nil
@@ -382,7 +383,7 @@ func TestRunUpdate_ExecutableCommitFails_RestartsService(t *testing.T) {
 	if !svc.startCalled {
 		t.Error("expected the service to be restarted after a failed executable write")
 	}
-	if len(removedTemps) != 1 || removedTemps[0] != agentExecutablePath+".new" {
+	if len(removedTemps) != 1 || removedTemps[0] != agentExecutablePath+utils.AtomicTempSuffix {
 		t.Errorf("expected the uncommitted temporary file to be cleaned up, got %v", removedTemps)
 	}
 }

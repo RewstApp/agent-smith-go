@@ -84,14 +84,18 @@ type journalTombstone struct {
 //
 // One JSON file per pending entry and one tombstone per completed one, named
 // by a hash of the key so a redelivery can be looked up directly and so
-// post_id's colons never reach a Windows filename. Writes are temp-then-rename
-// like the postback spool's.
+// post_id's colons never reach a Windows filename. Writes go through
+// utils.WriteFileAtomic like the postback spool's: temp-then-rename with an
+// fsync of the file and of the directory, so an entry that has been written -
+// and therefore a command that has been acknowledged - survives a power loss,
+// not only a process crash (sc-119835).
 type commandJournal struct {
 	mu         sync.Mutex
 	dir        string
 	maxPending int
 	maxAge     time.Duration
 	now        func() time.Time
+	fs         utils.FileSystem
 }
 
 func newCommandJournal(dir string, maxPending int, maxAge time.Duration) *commandJournal {
@@ -101,7 +105,13 @@ func newCommandJournal(dir string, maxPending int, maxAge time.Duration) *comman
 	if maxAge <= 0 {
 		maxAge = defaultJournalMaxAge
 	}
-	return &commandJournal{dir: dir, maxPending: maxPending, maxAge: maxAge, now: time.Now}
+	return &commandJournal{
+		dir:        dir,
+		maxPending: maxPending,
+		maxAge:     maxAge,
+		now:        time.Now,
+		fs:         utils.NewFileSystem(),
+	}
 }
 
 // journalKey derives the de-duplication key for a received payload: the
@@ -299,19 +309,17 @@ func (j *commandJournal) readLocked(path string) (journalEntry, error) {
 	return entry, nil
 }
 
-// writeLocked commits v to path atomically: a crash between the temp write and
-// the rename leaves either the previous file or nothing, never a torn entry.
+// writeLocked commits v to path atomically and durably: a crash between the
+// temp write and the rename leaves either the previous file or nothing, never
+// a torn entry, and the record is fsynced before the call returns so the
+// PUBACK that follows a put still means "on disk". markStarted, complete (the
+// tombstone) and put all come through here.
 func (j *commandJournal) writeLocked(path string, v any) error {
 	data, err := json.Marshal(v)
 	if err != nil {
 		return fmt.Errorf("marshal journal record: %w", err)
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, utils.DefaultFileMod); err != nil {
-		return fmt.Errorf("write journal record: %w", err)
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		_ = os.Remove(tmp)
+	if err := utils.WriteFileAtomic(j.fs, path, data, utils.DefaultFileMod); err != nil {
 		return fmt.Errorf("commit journal record: %w", err)
 	}
 	return nil

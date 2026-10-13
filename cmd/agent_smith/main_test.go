@@ -76,6 +76,7 @@ type mockFileSystem struct {
 	removeAllFunc        func(path string) error
 	renameFunc           func(oldPath string, newPath string) error
 	removeFunc           func(name string) error
+	syncFunc             func(name string) error
 	executableInUseFunc  func(name string) (bool, error)
 	ensureSecureDirFunc  func(path string) error
 	ensureSecureFileFunc func(path string) error
@@ -116,6 +117,13 @@ func (m *mockFileSystem) Remove(name string) error {
 		return nil
 	}
 	return m.removeFunc(name)
+}
+
+func (m *mockFileSystem) Sync(name string) error {
+	if m.syncFunc == nil {
+		return nil
+	}
+	return m.syncFunc(name)
 }
 
 func (m *mockFileSystem) ExecutableInUse(name string) (bool, error) {

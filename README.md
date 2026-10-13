@@ -192,7 +192,20 @@ it is written to `<data directory>/command_journal`, one file per command. The
 acknowledgement therefore means *"durably accepted"*, not *"buffered in
 memory"*. If the agent process dies — a crash, an OOM kill, a force-stop, host
 power loss — with commands queued or executing, their journal entries survive
-and the next start replays them:
+and the next start replays them. *Durably* includes power loss: every journal
+record is written through `utils.WriteFileAtomic`, which writes a temporary file,
+fsyncs it, renames it into place and then fsyncs the directory (the file sync is
+the bound on Windows, which has no directory fsync), so the PUBACK is sent only
+once the entry is on the storage device rather than in the page cache. Until
+sc-119835 the write was temp-then-rename without any fsync, which is atomic
+against a crash of the agent process but not against a power loss or kernel
+panic: the rename could reach the disk with the file's contents still in memory,
+leaving a zero-length entry that the next start logged as unreadable and removed
+— the command neither ran nor was reported. The same helper backs the postback
+spool, the config file and the agent binary. The one remaining gap is a
+filesystem or device that acknowledges fsync before the data is actually durable,
+which is outside the agent's control. The per-write cost is recorded on every
+Test workflow run (`Record the per-write fsync cost`). After a restart:
 
 - a command that had **not started** executes exactly as it would have;
 - a command that **had started** is **reported back to the engine as
@@ -939,11 +952,14 @@ Nothing is written or deleted now until the process is observed to be gone:
   probe failure is not evidence a process is alive, and must not wedge every
   update on an endpoint where it can never succeed.
 
-The agent executable and the config file are also written **atomically** — to a
-temporary file in the destination directory, then renamed into place, the same
-pattern the postback spool uses. An interrupted or failed write therefore leaves
-the previous file byte-identical rather than truncated: the endpoint keeps running
-the old agent instead of a binary that cannot start.
+The agent executable and the config file are also written **atomically and
+durably** — through `utils.WriteFileAtomic`, the same helper the command journal
+and the postback spool use: a temporary file in the destination directory,
+fsynced, then renamed into place, then the directory fsynced. An interrupted or
+failed write therefore leaves the previous file byte-identical rather than
+truncated, and a host that loses power right after an update has either the old
+binary or the complete new one on disk: the endpoint keeps running an agent
+instead of a binary that cannot start.
 
 ### Completing Uninstall When a Directory Cannot Be Removed
 

@@ -234,7 +234,7 @@ func runUpdate(params *updateContext) {
 	// the service unable to start at all. SecureFileMode (0600) is what keeps
 	// the SharedAccessKey and GitHub token it contains from being
 	// plaintext-readable by any other local account (sc-108849).
-	err = writeFileAtomic(params.FS, configFilePath, configBytes, utils.SecureFileMode)
+	err = utils.WriteFileAtomic(params.FS, configFilePath, configBytes, utils.SecureFileMode)
 	if err != nil {
 		logger.Error("Failed to save config", "error", err)
 		return
@@ -258,7 +258,7 @@ func runUpdate(params *updateContext) {
 	// Written atomically so a failure here leaves the installed binary exactly as
 	// it was: the endpoint keeps running the old agent rather than a truncated
 	// one that cannot start.
-	err = writeFileAtomic(
+	err = utils.WriteFileAtomic(
 		params.FS,
 		agentExecutablePath,
 		execFileBytes,

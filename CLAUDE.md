@@ -75,7 +75,9 @@ Required tools:
   deadline aborts before writing or deleting anything, leaves the installation
   intact, and restarts the service that was stopped so a failed update cannot
   leave an endpoint offline. The agent executable and config file are written to a
-  temp file and atomically renamed into place, so a failed write leaves the
+  temp file, fsynced, atomically renamed into place and the directory fsynced
+  (`utils.WriteFileAtomic`, shared with the command journal and postback spool,
+  sc-119835), so a failed write or a power loss leaves the
   previous file byte-identical. See the README's "Waiting for the Old Agent
   Process to Exit" section. Once the uninstall path reaches the point of deleting
   installed files, it removes the data, program and scripts directories

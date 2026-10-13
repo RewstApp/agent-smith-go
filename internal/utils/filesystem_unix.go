@@ -9,6 +9,22 @@ import (
 	"syscall"
 )
 
+// syncPath fsyncs the file or directory at name. Directories can be opened and
+// synced like files on Linux and macOS, which is what makes a rename durable:
+// the new directory entry is forced to the device along with the data the
+// preceding file sync already wrote.
+func syncPath(name string) error {
+	f, err := os.Open(name)
+	if err != nil {
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		return err
+	}
+	return f.Close()
+}
+
 // executableInUse probes whether name is currently running. Linux and macOS both
 // refuse to open a running image for writing with ETXTBSY ("text file busy"),
 // which is a direct statement from the kernel that the process is still alive —

@@ -38,6 +38,12 @@ type FileSystem interface {
 	// Remove deletes a single file. It is used to clean up the temporary file of
 	// an atomic write that could not be committed.
 	Remove(name string) error
+	// Sync forces the file or directory at name to the storage device (fsync).
+	// WriteFileAtomic calls it on the temporary file before the rename and on
+	// the parent directory after it, so a write that has returned survives a
+	// power loss, not only a process crash. On Windows a directory cannot be
+	// fsynced and the call is a no-op for one.
+	Sync(name string) error
 	// ExecutableInUse reports whether the file at name is currently held open as
 	// a running image by some process. It is a real observation, not a guess: the
 	// probe opens the file for writing, which a running executable refuses with a
@@ -97,6 +103,10 @@ func (*defaultFileSystem) Rename(oldPath string, newPath string) error {
 
 func (*defaultFileSystem) Remove(name string) error {
 	return os.Remove(name)
+}
+
+func (*defaultFileSystem) Sync(name string) error {
+	return syncPath(name)
 }
 
 func (*defaultFileSystem) ExecutableInUse(name string) (bool, error) {

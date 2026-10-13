@@ -150,7 +150,7 @@ func runConfig(params *configContext) error {
 	// performing this install — an explicit per-file EnsureSecureFile call
 	// would strip that inherited grant and lock the service out of its own
 	// config file.
-	err = writeFileAtomic(params.FS, configFilePath, configBytes, utils.SecureFileMode)
+	err = utils.WriteFileAtomic(params.FS, configFilePath, configBytes, utils.SecureFileMode)
 	if err != nil {
 		return fmt.Errorf("failed to save config: %w", err)
 	}
@@ -308,7 +308,7 @@ func runConfig(params *configContext) error {
 
 	// Written atomically so a failure here leaves any previously installed binary
 	// byte-identical instead of truncated.
-	err = writeFileAtomic(
+	err = utils.WriteFileAtomic(
 		params.FS,
 		agentExecutablePath,
 		execFileBytes,
