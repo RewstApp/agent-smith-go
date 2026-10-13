@@ -24,7 +24,11 @@ func newTestSpoolWithAttempts(
 	maxAttempts int,
 ) *postbackSpool {
 	t.Helper()
-	s := newPostbackSpool(t.TempDir(), maxEntries, maxAge, maxAttempts, hclog.NewNullLogger())
+	dir := t.TempDir()
+	// Evidence established, as for any agent after its first cycle; the
+	// clock-evidence tests build their own spool without it.
+	primeHeartbeat(t, filepath.Join(dir, spoolHeartbeatFile), time.Now())
+	s := newPostbackSpool(dir, maxEntries, maxAge, maxAttempts, hclog.NewNullLogger())
 	// Count every rejection: the production spacing exists to survive a wholesale
 	// outage across fast reconnects, and tests that drive a budget to exhaustion
 	// would otherwise have to wait it out. Its own behaviour is covered by
