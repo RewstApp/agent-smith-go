@@ -47,6 +47,20 @@ func runCapture(t *testing.T, logFile, command string, baseline string) (int, st
 	return code, string(b), string(outputs)
 }
 
+// stepOutputs parses a GITHUB_OUTPUT file into key/value pairs. pwsh writes
+// CRLF line endings on Windows, so lines are trimmed rather than matched
+// with a literal newline.
+func stepOutputs(raw string) map[string]string {
+	m := map[string]string{}
+	for _, ln := range strings.Split(raw, "\n") {
+		ln = strings.TrimRight(ln, "\r")
+		if k, v, ok := strings.Cut(ln, "="); ok {
+			m[k] = v
+		}
+	}
+	return m
+}
+
 // The scenario's long-running command is still on disk; a foreign command
 // that arrived later has finished and its script is gone. The capture must
 // pick the former, not the newest log line (run 38442590289).
@@ -72,11 +86,12 @@ func TestCaptureInFlight_PicksTheStillPresentScriptHoldingTheCommand(t *testing.
 	if code != 0 {
 		t.Fatalf("exit %d\n%s", code, out)
 	}
-	if !strings.Contains(outputs, "path="+ours+"\n") {
-		t.Errorf("captured %q, want our script %s", outputs, ours)
+	got := stepOutputs(outputs)
+	if got["path"] != ours {
+		t.Errorf("captured %q, want our script %s", got["path"], ours)
 	}
-	if !strings.Contains(outputs, "scripts_dir="+dir+"\n") {
-		t.Errorf("scripts_dir missing from %q", outputs)
+	if got["scripts_dir"] != dir {
+		t.Errorf("scripts_dir = %q, want %s", got["scripts_dir"], dir)
 	}
 }
 
@@ -100,8 +115,8 @@ func TestCaptureInFlight_IgnoresLinesWithinTheBaseline(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit %d\n%s", code, out)
 	}
-	if !strings.Contains(outputs, "path="+ours+"\n") {
-		t.Errorf("captured %q, want %s", outputs, ours)
+	if got := stepOutputs(outputs)["path"]; got != ours {
+		t.Errorf("captured %q, want %s", got, ours)
 	}
 }
 
