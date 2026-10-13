@@ -1,0 +1,31 @@
+# Bridge for the rename to e2e.yml (sc-126317). GitHub registers dispatchable
+# workflows from the default branch, so e2e.yml cannot be dispatched on the
+# branch that introduces it; this file keeps the old, registered name and calls
+# the new workflow. Delete it once e2e.yml is on main.
+name: Integration Test (bridge to E2E)
+
+on:
+  workflow_dispatch:
+    inputs:
+      os:
+        description: "Platform to test"
+        required: true
+        type: choice
+        options:
+          - all
+          - windows-latest
+          - ubuntu-latest
+          - macos-latest
+
+concurrency:
+  group: e2e
+  cancel-in-progress: false
+
+jobs:
+  e2e:
+    permissions:
+      contents: read
+    uses: ./.github/workflows/e2e.yml
+    with:
+      os: ${{ inputs.os }}
+    secrets: inherit
