@@ -3570,6 +3570,22 @@ jobs:
           service: ${{ matrix.service }}
           config_dir: ${{ matrix.config_dir }}
 
+      - name: Send success command
+        timeout-minutes: 20
+        uses: ./.github/actions/send-command
+        with:
+          trigger_url: ${{ vars.IT_SEND_COMMAND_TRIGGER_URL }}
+          device_id: ${{ steps.setup.outputs.device_id }}
+          commands: ${{ matrix.success_commands }}
+          expected_output: ${{ matrix.success_output }}
+
+      - name: Check logs for successful command
+        timeout-minutes: 5
+        uses: ./.github/actions/assert-log-contains
+        with:
+          log_file: ${{ matrix.log_file }}
+          patterns: ${{ matrix.success_patterns }}
+
       # ---- Wedged Windows service stop scenario (sc-106108) ----
       # windowsService.Stop() polled the service state every 250ms in an
       # unbounded loop, so a service that never reached Stopped hung its caller
