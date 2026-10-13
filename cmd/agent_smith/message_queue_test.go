@@ -154,12 +154,12 @@ func TestEnqueueMessage_EnqueuesWhenSlotAvailable(t *testing.T) {
 	logger := hclog.NewNullLogger()
 	notifier := &recordingNotifierWrapper{}
 
-	msgQueue := make(chan inboundMessage, 1)
-	draining := make(chan struct{})
+	q := newCycleQueue(1)
+	msgQueue := q.ch
 
 	payload := validPayload("echo hi")
 	item := inboundMessage{Payload: payload}
-	if ok := svc.enqueueMessage(item, msgQueue, draining, 1, logger, notifier); !ok {
+	if ok := svc.enqueueMessage(item, q, 1, logger, notifier); !ok {
 		t.Fatal("expected enqueueMessage to report success when a slot is free")
 	}
 
@@ -189,8 +189,8 @@ func TestEnqueueMessage_BackPressureBlocksThenSucceeds(t *testing.T) {
 	logger := hclog.NewNullLogger()
 	notifier := &recordingNotifierWrapper{}
 
-	msgQueue := make(chan inboundMessage, 1)
-	draining := make(chan struct{})
+	q := newCycleQueue(1)
+	msgQueue := q.ch
 
 	// Pre-fill the queue so the next enqueue must wait.
 	msgQueue <- inboundMessage{Payload: validPayload("echo first")}
@@ -198,7 +198,7 @@ func TestEnqueueMessage_BackPressureBlocksThenSucceeds(t *testing.T) {
 	done := make(chan bool, 1)
 	go func() {
 		done <- svc.enqueueMessage(
-			inboundMessage{Payload: validPayload("echo second")}, msgQueue, draining, 1, logger, notifier)
+			inboundMessage{Payload: validPayload("echo second")}, q, 1, logger, notifier)
 	}()
 
 	// The enqueue must not complete while the queue stays full.
@@ -237,17 +237,16 @@ func TestEnqueueMessage_DropsLoudlyOnDrain(t *testing.T) {
 	logger := hclog.NewNullLogger()
 	notifier := &recordingNotifierWrapper{}
 
-	msgQueue := make(chan inboundMessage, 1)
-	draining := make(chan struct{})
+	q := newCycleQueue(1)
+	msgQueue := q.ch
 
 	// Fill the queue and signal teardown so the only available branch is drain.
 	msgQueue <- inboundMessage{Payload: validPayload("echo full")}
-	close(draining)
+	q.startDraining()
 
 	ok := svc.enqueueMessage(
 		inboundMessage{Payload: validPayload("echo overflow")},
-		msgQueue,
-		draining,
+		q,
 		1,
 		logger,
 		notifier,
@@ -277,8 +276,8 @@ func TestEnqueueMessage_DrainUnblocksBackPressure(t *testing.T) {
 	logger := hclog.NewNullLogger()
 	notifier := &recordingNotifierWrapper{}
 
-	msgQueue := make(chan inboundMessage, 1)
-	draining := make(chan struct{})
+	q := newCycleQueue(1)
+	msgQueue := q.ch
 
 	// Fill the queue so the enqueue blocks.
 	msgQueue <- inboundMessage{Payload: validPayload("echo full")}
@@ -286,7 +285,7 @@ func TestEnqueueMessage_DrainUnblocksBackPressure(t *testing.T) {
 	done := make(chan bool, 1)
 	go func() {
 		done <- svc.enqueueMessage(
-			inboundMessage{Payload: validPayload("echo blocked")}, msgQueue, draining, 1, logger, notifier)
+			inboundMessage{Payload: validPayload("echo blocked")}, q, 1, logger, notifier)
 	}()
 
 	// Confirm it is blocked.
@@ -297,7 +296,7 @@ func TestEnqueueMessage_DrainUnblocksBackPressure(t *testing.T) {
 	}
 
 	// Teardown: closing draining must release the blocked enqueue as a drop.
-	close(draining)
+	q.startDraining()
 	select {
 	case ok := <-done:
 		if ok {

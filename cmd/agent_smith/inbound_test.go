@@ -104,8 +104,8 @@ func TestReceiveMessage_JournalsBeforeAckingThenEnqueues(t *testing.T) {
 	svc := svcWithJournal(t, &countingExecutor{})
 	logger := hclog.NewNullLogger()
 	notifier := &recordingNotifierWrapper{}
-	queue := make(chan inboundMessage, 1)
-	draining := make(chan struct{})
+	q := newCycleQueue(1)
+	queue := q.ch
 
 	payload := postbackPayload("echo hi", "id:1")
 	key := journalKey(payload)
@@ -113,7 +113,7 @@ func TestReceiveMessage_JournalsBeforeAckingThenEnqueues(t *testing.T) {
 	msg := &fakeMQTTMessage{payload: payload}
 	msg.onAck = func() { journaledAtAck = fileExists(svc.journal.pendingPath(key)) }
 
-	svc.receiveMessage(msg, queue, draining, 1, logger, notifier)
+	svc.receiveMessage(msg, q, 1, logger, notifier)
 
 	if msg.ackCount() != 1 {
 		t.Fatalf("acked %d times, want exactly once", msg.ackCount())
@@ -141,13 +141,13 @@ func TestReceiveMessage_RedeliveryIsAckedAndNotEnqueued(t *testing.T) {
 	svc := svcWithJournal(t, &countingExecutor{})
 	logger := hclog.NewNullLogger()
 	notifier := &recordingNotifierWrapper{}
-	queue := make(chan inboundMessage, 2)
-	draining := make(chan struct{})
+	q := newCycleQueue(2)
+	queue := q.ch
 	payload := postbackPayload("echo hi", "id:dup")
 
-	svc.receiveMessage(&fakeMQTTMessage{payload: payload}, queue, draining, 2, logger, notifier)
+	svc.receiveMessage(&fakeMQTTMessage{payload: payload}, q, 2, logger, notifier)
 	dup := &fakeMQTTMessage{payload: payload, dup: true}
-	svc.receiveMessage(dup, queue, draining, 2, logger, notifier)
+	svc.receiveMessage(dup, q, 2, logger, notifier)
 
 	if dup.ackCount() != 1 {
 		t.Errorf("redelivery acked %d times, want 1", dup.ackCount())
@@ -165,7 +165,7 @@ func TestReceiveMessage_RedeliveryIsAckedAndNotEnqueued(t *testing.T) {
 		t.Fatal(err)
 	}
 	late := &fakeMQTTMessage{payload: payload, dup: true}
-	svc.receiveMessage(late, queue, draining, 2, logger, notifier)
+	svc.receiveMessage(late, q, 2, logger, notifier)
 	if late.ackCount() != 1 || len(queue) != 0 {
 		t.Errorf(
 			"late redelivery after completion: acks=%d queued=%d, want 1 and 0",
@@ -179,12 +179,12 @@ func TestReceiveMessage_JournalFailureDegradesToInMemoryAndReportsOnce(t *testin
 	svc := svcWithBrokenJournal(t, &countingExecutor{})
 	logger := hclog.NewNullLogger()
 	notifier := &recordingNotifierWrapper{}
-	queue := make(chan inboundMessage, 4)
-	draining := make(chan struct{})
+	q := newCycleQueue(4)
+	queue := q.ch
 
 	for i := 0; i < 3; i++ {
 		m := &fakeMQTTMessage{payload: postbackPayload("echo hi", "id:"+string(rune('a'+i)))}
-		svc.receiveMessage(m, queue, draining, 4, logger, notifier)
+		svc.receiveMessage(m, q, 4, logger, notifier)
 		if m.ackCount() != 1 {
 			t.Errorf(
 				"message %d acked %d times while degraded, want 1 (commands must still run)",
@@ -211,7 +211,7 @@ func TestReceiveMessage_JournalFailureDegradesToInMemoryAndReportsOnce(t *testin
 	// Recovery: swap in a working journal; the next success clears the flag once.
 	svc.journal = newCommandJournal(filepath.Join(t.TempDir(), "j"), 100, time.Hour)
 	recovered := &fakeMQTTMessage{payload: postbackPayload("echo hi", "id:z")}
-	svc.receiveMessage(recovered, queue, draining, 4, logger, notifier)
+	svc.receiveMessage(recovered, q, 4, logger, notifier)
 	if svc.journalDegraded.Load() {
 		t.Error("journalDegraded still set after a successful write")
 	}
@@ -221,14 +221,14 @@ func TestReceiveMessage_DrainingJournaledIsAckedAndKeptForReplay(t *testing.T) {
 	svc := svcWithJournal(t, &countingExecutor{})
 	logger := hclog.NewNullLogger()
 	notifier := &recordingNotifierWrapper{}
-	queue := make(chan inboundMessage, 1)
+	q := newCycleQueue(1)
+	queue := q.ch
 	queue <- inboundMessage{Payload: validPayload("echo full")}
-	draining := make(chan struct{})
-	close(draining)
+	q.startDraining()
 
 	payload := postbackPayload("echo late", "id:late")
 	m := &fakeMQTTMessage{payload: payload}
-	svc.receiveMessage(m, queue, draining, 1, logger, notifier)
+	svc.receiveMessage(m, q, 1, logger, notifier)
 
 	if m.ackCount() != 1 {
 		t.Errorf("journaled message arriving during teardown acked %d times, want 1", m.ackCount())
@@ -249,13 +249,13 @@ func TestReceiveMessage_DrainingUnjournaledIsLeftUnackedAndCounted(t *testing.T)
 	svc := svcWithBrokenJournal(t, &countingExecutor{})
 	logger := hclog.NewNullLogger()
 	notifier := &recordingNotifierWrapper{}
-	queue := make(chan inboundMessage, 1)
+	q := newCycleQueue(1)
+	queue := q.ch
 	queue <- inboundMessage{Payload: validPayload("echo full")}
-	draining := make(chan struct{})
-	close(draining)
+	q.startDraining()
 
 	m := &fakeMQTTMessage{payload: postbackPayload("echo lost", "id:lost")}
-	svc.receiveMessage(m, queue, draining, 1, logger, notifier)
+	svc.receiveMessage(m, q, 1, logger, notifier)
 
 	if m.ackCount() != 0 {
 		t.Errorf(
@@ -393,15 +393,15 @@ func TestReplayJournal_ExecutesUnstartedReportsStartedDiscardsExpired(t *testing
 		t.Fatal(err)
 	}
 
-	queue := make(chan inboundMessage, 4)
+	q := newCycleQueue(4)
+	queue := q.ch
 	notifier := &recordingNotifierWrapper{}
 	fresh, expired := svc.snapshotJournal(hclog.NewNullLogger())
 	svc.replayJournal(
 		context.Background(),
 		fresh,
 		expired,
-		queue,
-		make(chan struct{}),
+		q,
 		4,
 		device,
 		hclog.NewNullLogger(),
@@ -470,18 +470,17 @@ func TestReplayJournal_StopsAtTeardownLeavingRestJournaled(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	queue := make(chan inboundMessage, 1)
+	q := newCycleQueue(1)
+	queue := q.ch
 	queue <- inboundMessage{Payload: validPayload("echo full")}
-	draining := make(chan struct{})
-	close(draining)
+	q.startDraining()
 
 	fresh, expired := svc.snapshotJournal(hclog.NewNullLogger())
 	svc.replayJournal(
 		context.Background(),
 		fresh,
 		expired,
-		queue,
-		draining,
+		q,
 		1,
 		agent.Device{},
 		hclog.NewNullLogger(),
@@ -507,8 +506,7 @@ func TestReplayJournal_NoJournalIsANoop(t *testing.T) {
 		context.Background(),
 		fresh,
 		expired,
-		make(chan inboundMessage, 1),
-		make(chan struct{}),
+		newCycleQueue(1),
 		1,
 		agent.Device{},
 		hclog.NewNullLogger(),
@@ -552,14 +550,14 @@ func TestReplayJournal_IgnoresEntriesAcceptedAfterTheSnapshot(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	queue := make(chan inboundMessage, 4)
+	q := newCycleQueue(4)
+	queue := q.ch
 	notifier := &recordingNotifierWrapper{}
 	svc.replayJournal(
 		context.Background(),
 		fresh,
 		expired,
-		queue,
-		make(chan struct{}),
+		q,
 		4,
 		deviceWithEngine(strings.TrimPrefix(engine.URL, "http://")),
 		hclog.NewNullLogger(),
@@ -643,7 +641,8 @@ func TestStartWorkers_RunningCommandSurvivesCycleEnd(t *testing.T) {
 	svc.HTTPClient = &http.Client{Transport: &schemeRewriteTransport{scheme: "http"}}
 	device := deviceWithEngine(strings.TrimPrefix(engine.URL, "http://"))
 
-	queue := make(chan inboundMessage, 2)
+	q := newCycleQueue(2)
+	queue := q.ch
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	svc.startWorkers(ctx, queue, 1, device, hclog.NewNullLogger(), &recordingNotifierWrapper{})
@@ -689,7 +688,8 @@ func TestStartWorkers_RunningCommandSurvivesCycleEnd(t *testing.T) {
 func TestStartWorkers_QueuedCommandsRunAfterCycleEnd(t *testing.T) {
 	exec := &countingExecutor{result: []byte(`{"error":"","output":"ok"}`)}
 	svc := svcWithJournal(t, exec)
-	queue := make(chan inboundMessage, 4)
+	q := newCycleQueue(4)
+	queue := q.ch
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -732,9 +732,9 @@ func TestStartWorkers_QueuedCommandsRunAfterCycleEnd(t *testing.T) {
 func TestSnapshotJournal_SkipsKeysOwnedByThisProcess(t *testing.T) {
 	svc := svcWithJournal(t, &countingExecutor{})
 	logger := hclog.NewNullLogger()
-	queue := make(chan inboundMessage, 4)
+	q := newCycleQueue(4)
 	msg := &fakeMQTTMessage{payload: postbackPayload("echo mine", "id:mine")}
-	svc.receiveMessage(msg, queue, make(chan struct{}), 4, logger, &recordingNotifierWrapper{})
+	svc.receiveMessage(msg, q, 4, logger, &recordingNotifierWrapper{})
 
 	leftover := postbackPayload("echo theirs", "id:theirs")
 	if _, err := svc.journal.put(journalKey(leftover), leftover); err != nil {
@@ -762,7 +762,8 @@ func TestStopWorkers_CancelsRunningCommandAndWaits(t *testing.T) {
 		return []byte(`{"error":"cancelled","output":""}`)
 	}}
 	svc := svcWithJournal(t, exec)
-	queue := make(chan inboundMessage, 1)
+	q := newCycleQueue(1)
+	queue := q.ch
 	ctx, cancel := context.WithCancel(context.Background())
 	svc.startWorkers(
 		ctx,
