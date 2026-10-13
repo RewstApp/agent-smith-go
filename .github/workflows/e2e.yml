@@ -2120,7 +2120,7 @@ jobs:
           Write-Output "::endgroup::"
 
 
-  # ---- Output bounds: stdout/stderr floods, timeout composition ----
+  # ---- Output bounds: stdout and stderr floods ----
   output-bounds:
     permissions:
       contents: read
@@ -2483,6 +2483,142 @@ jobs:
           min_produced_bytes: "209715200"
           max_rss_mb: "250"
 
+      # Every scenario above asserts on the agent log; when one fails, the log is
+      # the evidence. Dump its tail so triage does not need a re-run with extra
+      # steps (three runs on 2026-09-22 were diagnosed from postback bodies alone).
+      - name: Dump agent log on failure (Unix)
+        if: failure() && runner.os != 'Windows'
+        shell: bash
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+        run: |
+          echo "::group::Last 400 agent log lines ($LOG_FILE)"
+          sudo tail -n 400 "$LOG_FILE" || echo "(no log file)"
+          echo "::endgroup::"
+
+      - name: Dump agent log on failure (Windows)
+        if: failure() && runner.os == 'Windows'
+        shell: pwsh
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+        run: |
+          Write-Output "::group::Last 400 agent log lines ($env:LOG_FILE)"
+          if (Test-Path $env:LOG_FILE) { Get-Content $env:LOG_FILE -Tail 400 } else { Write-Output "(no log file)" }
+          Write-Output "::endgroup::"
+
+
+  # ---- Output bound and command timeout composed ----
+  timeout-composition:
+    permissions:
+      contents: read
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    needs: [build, build-integration-test, set-matrix, output-bounds]
+    # Chained behind the previous scenario job, not parallel to it: the live
+    # config endpoint gives every install on a platform the same device id, so
+    # two scenario agents at once kick each other off IoT Hub and commands land
+    # on whichever holds the connection. Parallelism returns with the hermetic
+    # migration (sc-126319), where each job has its own device identity. The
+    # chain never skips a scenario because an earlier one failed: each starts
+    # from a fresh install and reports on its own.
+    if: ${{ !cancelled() }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.set-matrix.outputs.matrix) }}
+    runs-on: ${{ matrix.os }}
+    # Provisional bound; re-measured from the first chained runs (README
+    # "Bounding the e2e jobs").
+    timeout-minutes: 30
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      # Fresh install from the live config endpoint; every scenario job starts here.
+      # Bounded below the job so a hung install is attributed to this step.
+      - name: Set up the scenario
+        timeout-minutes: 20
+        id: setup
+        uses: ./.github/actions/e2e-setup
+        with:
+          os: ${{ matrix.os }}
+          binary: ${{ matrix.binary }}
+          it_binary: ${{ matrix.it_binary }}
+          config_url: ${{ vars.IT_CONFIG_URL }}
+          config_secret: ${{ secrets.IT_CONFIG_SECRET }}
+          org_id: ${{ vars.IT_ORG_ID }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          service: ${{ matrix.service }}
+          config_dir: ${{ matrix.config_dir }}
+
+      - name: Send success command
+        timeout-minutes: 20
+        uses: ./.github/actions/send-command
+        with:
+          trigger_url: ${{ vars.IT_SEND_COMMAND_TRIGGER_URL }}
+          device_id: ${{ steps.setup.outputs.device_id }}
+          commands: ${{ matrix.success_commands }}
+          expected_output: ${{ matrix.success_output }}
+
+      - name: Check logs for successful command
+        timeout-minutes: 5
+        uses: ./.github/actions/assert-log-contains
+        with:
+          log_file: ${{ matrix.log_file }}
+          patterns: ${{ matrix.success_patterns }}
+
+      # ---- Bounded command output scenario (sc-106105) ----
+      # A command's stdout and stderr used to be buffered whole in memory, so the
+      # agent's heap tracked however much a script decided to write and a verbose
+      # one could OOM-kill the service. Configure a deliberately small ceiling,
+      # flood it by three orders of magnitude, and assert the two properties that
+      # matter: the agent's RSS stays near the ceiling instead of near the output
+      # size, and the discarded output is reported rather than silently dropped.
+      #
+      # The release binary is installed first with the per-command timeout raised
+      # well past the floods' runtime, because the earlier timeout scenario left a
+      # 5s deadline in the config that would kill these commands mid-write, and
+      # the SAS scenario left the IT binary running with a 90s token lifetime
+      # whose reconnect would cancel them. --logging-level is deliberately not
+      # passed: it resets to the default (Info), which keeps the Warn under test
+      # visible while leaving the debug handler that dumps whole command outputs
+      # into the log switched off. --disable-agent-postback is likewise not
+      # passed, so the truncated result actually traverses the postback path
+      # on every platform.
+      #
+      # Coverage note: these steps assert on the agent log, which is where the
+      # byte counts are observable on the endpoint. The same counts are what the
+      # postback carries as truncated/output_bytes_produced/output_bytes_kept -
+      # both come from one value computed once per command - but the postback body
+      # is never logged, so confirming the workflow's received payload stays a
+      # Rewst-side QA step.
+      - name: Resolve the scripts directory (Unix)
+        if: runner.os != 'Windows'
+        id: scripts_dir_unix
+        shell: bash
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+        run: |
+          set -euo pipefail
+          # Resolve pwsh up front: sudo resets PATH via secure_path on some runners.
+          pwsh_path="$(command -v pwsh)"
+          sudo --preserve-env=LOG_FILE,GITHUB_OUTPUT "$pwsh_path" -NoProfile -File "$GITHUB_WORKSPACE/.github/workflows/it-scripts/resolve-the-scripts-directory.ps1"
+
+      - name: Resolve the scripts directory (Windows)
+        if: runner.os == 'Windows'
+        id: scripts_dir_windows
+        shell: pwsh
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+        run: |
+          & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/resolve-the-scripts-directory.ps1"
+
+      - name: Snapshot temp script files before the output floods
+        timeout-minutes: 5
+        uses: ./.github/actions/assert-no-orphaned-scripts
+        with:
+          mode: snapshot
+          scripts_dir: ${{ (steps.scripts_dir_unix.outputs.path || steps.scripts_dir_windows.outputs.path) }}
+
       # Captured before the update below restarts the service, for the same
       # reason as the bounded-output baseline.
       - name: Capture timeout-composition baseline counts (Unix)
@@ -2658,7 +2794,7 @@ jobs:
       contents: read
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-    needs: [build, build-integration-test, set-matrix, output-bounds]
+    needs: [build, build-integration-test, set-matrix, timeout-composition]
     # Chained behind the previous scenario job, not parallel to it: the live
     # config endpoint gives every install on a platform the same device id, so
     # two scenario agents at once kick each other off IoT Hub and commands land

@@ -368,7 +368,7 @@ func TestScenarioJobsArePresentAndSmall(t *testing.T) {
 	const maxSteps = 40
 	want := []string{
 		"lifecycle", "auto-update", "update-retry", "connection", "wedged-broker",
-		"command-timeouts", "output-bounds", "sweeps", "wedged-stop",
+		"command-timeouts", "output-bounds", "timeout-composition", "sweeps", "wedged-stop",
 		"test-hermetic", "test-service-user", "test-config-response-cap",
 	}
 	all := jobs(workflow(t))
