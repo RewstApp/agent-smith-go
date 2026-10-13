@@ -238,7 +238,7 @@ func TestEveryIntegrationJobIsBounded(t *testing.T) {
 // "exceeded the maximum execution time" on the job.
 func TestEveryWaitingStepIsBounded(t *testing.T) {
 	waiting := regexp.MustCompile(
-		`(?m)^\s+uses: \./\.github/actions/(install-agent|run-agent|send-command|wait-for-log-line|stub-[a-z]+|wedged-service|assert-log-[a-z]+)$|it-scripts/(wait-for|assert)`,
+		`(?m)^\s+uses: \./\.github/actions/(e2e-setup|install-agent|run-agent|send-command|wait-for-log-line|stub-[a-z]+|wedged-service|assert-log-[a-z]+)$|it-scripts/(wait-for|assert)`,
 	)
 	lines := workflow(t)
 	starts := []int{}

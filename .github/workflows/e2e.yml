@@ -9,7 +9,7 @@ name: E2E
 # cancel-in-progress is off deliberately: a queued re-dispatch must not kill
 # a run that is mid-suite with a real agent installed on the runner.
 concurrency:
-  group: e2e
+  group: integration-test
   cancel-in-progress: false
 
 on:
@@ -28,7 +28,8 @@ on:
   # workflows from the default branch, so a renamed workflow cannot be
   # dispatched on the branch that renames it. The integration-test.yml bridge
   # on that branch calls this one so the rename PR can gate itself; the bridge
-  # is deleted once e2e.yml is on main (sc-126317).
+  # is deleted once e2e.yml is on main, and the concurrency group below is
+  # renamed to e2e at the same time (sc-126317).
   workflow_call:
     inputs:
       os:
@@ -53,7 +54,7 @@ jobs:
       matrix:
         os: ${{ fromJson(inputs.os == 'all' && '[''windows-latest'',''ubuntu-latest'',''macos-latest'']' || format('[{0}{1}{0}]', '''', inputs.os)) }}
     runs-on: ${{ matrix.os }}
-    # 2x the p95 of the last 20 runs (see README "Bounding the integration jobs").
+    # 2x the p95 of the last 20 runs (see README "Bounding the e2e jobs").
     timeout-minutes: 10
     steps:
       - name: Checkout code
@@ -92,7 +93,7 @@ jobs:
     permissions:
       contents: read
     runs-on: ubuntu-latest
-    # 2x the p95 of the last 20 runs (see README "Bounding the integration jobs").
+    # 2x the p95 of the last 20 runs (see README "Bounding the e2e jobs").
     timeout-minutes: 5
     outputs:
       matrix: ${{ steps.gen.outputs.matrix }}
@@ -184,7 +185,7 @@ jobs:
               # fixed, unlike the old $TMPDIR-based path, so it can be a
               # static matrix value rather than resolved from the log.
               scripts_dir = "/etc/rewst_remote_agent/$orgId/scripts"
-              # The main `test` job's install-agent call does not pass
+              # The scenario jobs' e2e-setup install-agent call does not pass
               # --service-username (that only happens in the separate
               # test-service-user job below), so the service here runs as the
               # platform default account.
@@ -245,7 +246,7 @@ jobs:
               # fixed, unlike the old $TMPDIR-based path, so it can be a
               # static matrix value rather than resolved from the log.
               scripts_dir = "/Library/Application Support/rewst_remote_agent/$orgId/scripts"
-              # The main `test` job's install-agent call does not pass
+              # The scenario jobs' e2e-setup install-agent call does not pass
               # --service-username (that only happens in the separate
               # test-service-user job below), so the service here runs as the
               # platform default account.
@@ -282,7 +283,7 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJson(needs.set-matrix.outputs.matrix) }}
     runs-on: ${{ matrix.os }}
-    # Initial bound; re-measured from the first runs after the split (README
+    # Provisional bound; re-measured from the first chained runs (README
     # "Bounding the e2e jobs").
     timeout-minutes: 25
     steps:
@@ -290,8 +291,9 @@ jobs:
         uses: actions/checkout@v5
 
       # Fresh install from the live config endpoint; every scenario job starts here.
+      # Bounded below the job so a hung install is attributed to this step.
       - name: Set up the scenario
-        timeout-minutes: 25
+        timeout-minutes: 20
         id: setup
         uses: ./.github/actions/e2e-setup
         with:
@@ -521,12 +523,20 @@ jobs:
       contents: read
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-    needs: [build, build-integration-test, set-matrix]
+    needs: [build, build-integration-test, set-matrix, lifecycle]
+    # Chained behind the previous scenario job, not parallel to it: the live
+    # config endpoint gives every install on a platform the same device id, so
+    # two scenario agents at once kick each other off IoT Hub and commands land
+    # on whichever holds the connection. Parallelism returns with the hermetic
+    # migration (sc-126319), where each job has its own device identity. The
+    # chain never skips a scenario because an earlier one failed: each starts
+    # from a fresh install and reports on its own.
+    if: ${{ !cancelled() }}
     strategy:
       fail-fast: false
       matrix: ${{ fromJson(needs.set-matrix.outputs.matrix) }}
     runs-on: ${{ matrix.os }}
-    # Initial bound; re-measured from the first runs after the split (README
+    # Provisional bound; re-measured from the first chained runs (README
     # "Bounding the e2e jobs").
     timeout-minutes: 30
     steps:
@@ -534,8 +544,9 @@ jobs:
         uses: actions/checkout@v5
 
       # Fresh install from the live config endpoint; every scenario job starts here.
+      # Bounded below the job so a hung install is attributed to this step.
       - name: Set up the scenario
-        timeout-minutes: 25
+        timeout-minutes: 20
         id: setup
         uses: ./.github/actions/e2e-setup
         with:
@@ -899,368 +910,26 @@ jobs:
           Write-Output "::endgroup::"
 
 
-  # ---- Auto-update retry schedule and stop during backoff ----
-  update-retry:
-    permissions:
-      contents: read
-    env:
-      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-    needs: [build, build-integration-test, set-matrix]
-    strategy:
-      fail-fast: false
-      matrix: ${{ fromJson(needs.set-matrix.outputs.matrix) }}
-    runs-on: ${{ matrix.os }}
-    # Initial bound; re-measured from the first runs after the split (README
-    # "Bounding the e2e jobs").
-    timeout-minutes: 30
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v5
-
-      # Fresh install from the live config endpoint; every scenario job starts here.
-      - name: Set up the scenario
-        timeout-minutes: 25
-        id: setup
-        uses: ./.github/actions/e2e-setup
-        with:
-          os: ${{ matrix.os }}
-          binary: ${{ matrix.binary }}
-          it_binary: ${{ matrix.it_binary }}
-          config_url: ${{ vars.IT_CONFIG_URL }}
-          config_secret: ${{ secrets.IT_CONFIG_SECRET }}
-          org_id: ${{ vars.IT_ORG_ID }}
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          service: ${{ matrix.service }}
-          config_dir: ${{ matrix.config_dir }}
-
-      # ---- Capped and jittered auto-update retry scenario (sc-106110) ----
-      # The auto-update retry delay was base * (1 << attempt) with no ceiling and
-      # no jitter. Unjittered, every agent that failed against the release
-      # endpoint at the same moment retried at the same instants, so an outage or
-      # rate limit was sustained by the fleet trying to recover from it; uncapped,
-      # a large retry count overflowed the shift into a negative duration, which
-      # made the wait return immediately and spun the loop against the endpoint.
-      #
-      # A GitHub outage is not something CI can arrange and an unroutable address
-      # produces connection errors rather than the HTTP failure the ticket
-      # describes, so the agent is pointed at the test/stubrelease fixture through
-      # the override file the integration build honors. The fixture fails every
-      # request until it is flipped, which puts the agent into retryWithBackoff
-      # with the shortened build knobs - base 2s, 6 retries, 30s check interval,
-      # so the cap is a quarter of that interval (7.5s) - and makes a full
-      # schedule observable in under a minute.
-      #
-      # Fleet-wide de-synchronization needs many agents and is covered by unit
-      # tests over the schedule itself. What one endpoint can show, and what these
-      # steps assert, is that every slot is strictly positive, bounded by the cap,
-      # varies rather than repeating, and is never served back to back.
-      - name: Start stub release endpoint (failing)
-        timeout-minutes: 15
-        id: stub_release
-        uses: ./.github/actions/stub-release
-        with:
-          mode: start
-
-      - name: Capture auto-update retry baseline counts (Unix)
-        if: runner.os != 'Windows'
-        id: retry_baseline_unix
-        shell: bash
-        env:
-          LOG_FILE: ${{ matrix.log_file }}
-        run: |
-          set -euo pipefail
-          # Resolve pwsh up front: sudo resets PATH via secure_path on some runners.
-          pwsh_path="$(command -v pwsh)"
-          sudo --preserve-env=LOG_FILE,GITHUB_OUTPUT "$pwsh_path" -NoProfile -File "$GITHUB_WORKSPACE/.github/workflows/it-scripts/capture-auto-update-retry-baseline-counts.ps1"
-
-      - name: Capture auto-update retry baseline counts (Windows)
-        if: runner.os == 'Windows'
-        id: retry_baseline_windows
-        shell: pwsh
-        env:
-          LOG_FILE: ${{ matrix.log_file }}
-        run: |
-          & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/capture-auto-update-retry-baseline-counts.ps1"
-
-      # Written before the install, because the updater reads the override when a
-      # service cycle constructs it - a file written afterwards would not be seen
-      # until the next restart, and the agent would spend the scenario updating
-      # itself from the real releases API instead.
-      - name: Point the agent at the stub release endpoint
-        timeout-minutes: 5
-        uses: ./.github/actions/set-release-url
-        with:
-          mode: set
-          config_dir: ${{ matrix.config_dir }}
-          org_id: ${{ vars.IT_ORG_ID }}
-          url: ${{ steps.stub_release.outputs.url }}
-
-      - name: Install integration test binary with auto-updates on
-        timeout-minutes: 10
-        uses: ./.github/actions/run-agent
-        with:
-          binary: ${{ matrix.it_binary }}
-          args: --update --org-id ${{ vars.IT_ORG_ID }} --github-token ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Wait for the update retry schedule to run (Unix)
-        timeout-minutes: 6
-        if: runner.os != 'Windows'
-        shell: bash
-        env:
-          LOG_FILE: ${{ matrix.log_file }}
-          BASELINE: ${{ (steps.retry_baseline_unix.outputs.retrying || steps.retry_baseline_windows.outputs.retrying) }}
-        run: |
-          set -euo pipefail
-          # Resolve pwsh up front: sudo resets PATH via secure_path on some runners.
-          pwsh_path="$(command -v pwsh)"
-          sudo --preserve-env=LOG_FILE,BASELINE "$pwsh_path" -NoProfile -File "$GITHUB_WORKSPACE/.github/workflows/it-scripts/wait-for-the-update-retry-schedule-to-run.ps1"
-
-      - name: Wait for the update retry schedule to run (Windows)
-        timeout-minutes: 6
-        if: runner.os == 'Windows'
-        shell: pwsh
-        env:
-          LOG_FILE: ${{ matrix.log_file }}
-          BASELINE: ${{ (steps.retry_baseline_unix.outputs.retrying || steps.retry_baseline_windows.outputs.retrying) }}
-        run: |
-          & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/wait-for-the-update-retry-schedule-to-run.ps1"
-
-      # Flipped mid-sequence - the fixture re-reads its mode per request - so the
-      # recovery is the agent's own next retry, not a restart.
-      - name: Serve a valid release payload mid-sequence
-        timeout-minutes: 15
-        uses: ./.github/actions/stub-release
-        with:
-          mode: ok
-
-      - name: Assert the update succeeds on a retry (Unix)
-        timeout-minutes: 6
-        if: runner.os != 'Windows'
-        shell: bash
-        env:
-          LOG_FILE: ${{ matrix.log_file }}
-          BASELINE: ${{ (steps.retry_baseline_unix.outputs.succeeded || steps.retry_baseline_windows.outputs.succeeded) }}
-        run: |
-          set -euo pipefail
-          # Resolve pwsh up front: sudo resets PATH via secure_path on some runners.
-          pwsh_path="$(command -v pwsh)"
-          sudo --preserve-env=LOG_FILE,BASELINE "$pwsh_path" -NoProfile -File "$GITHUB_WORKSPACE/.github/workflows/it-scripts/assert-the-update-succeeds-on-a-retry.ps1"
-
-      - name: Assert the update succeeds on a retry (Windows)
-        timeout-minutes: 6
-        if: runner.os == 'Windows'
-        shell: pwsh
-        env:
-          LOG_FILE: ${{ matrix.log_file }}
-          BASELINE: ${{ (steps.retry_baseline_unix.outputs.succeeded || steps.retry_baseline_windows.outputs.succeeded) }}
-        run: |
-          & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/assert-the-update-succeeds-on-a-retry.ps1"
-
-      - name: Assert the retry schedule is capped, jittered and never immediate (Unix)
-        timeout-minutes: 6
-        if: runner.os != 'Windows'
-        shell: bash
-        env:
-          LOG_FILE: ${{ matrix.log_file }}
-          BASELINE: ${{ (steps.retry_baseline_unix.outputs.retrying || steps.retry_baseline_windows.outputs.retrying) }}
-        run: |
-          set -euo pipefail
-          # Resolve pwsh up front: sudo resets PATH via secure_path on some runners.
-          pwsh_path="$(command -v pwsh)"
-          sudo --preserve-env=LOG_FILE,BASELINE "$pwsh_path" -NoProfile -File "$GITHUB_WORKSPACE/.github/workflows/it-scripts/assert-the-retry-schedule-is-capped-jittered-and-never-immediate.ps1"
-
-      - name: Assert the retry schedule is capped, jittered and never immediate (Windows)
-        timeout-minutes: 6
-        if: runner.os == 'Windows'
-        shell: pwsh
-        env:
-          LOG_FILE: ${{ matrix.log_file }}
-          BASELINE: ${{ (steps.retry_baseline_unix.outputs.retrying || steps.retry_baseline_windows.outputs.retrying) }}
-        run: |
-          & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/assert-the-retry-schedule-is-capped-jittered-and-never-immediate.ps1"
-
-      - name: Fail the release endpoint again for the stop check
-        timeout-minutes: 15
-        uses: ./.github/actions/stub-release
-        with:
-          mode: fail
-
-      - name: Capture stop-during-backoff baseline counts (Unix)
-        if: runner.os != 'Windows'
-        id: retry_stop_baseline_unix
-        shell: bash
-        env:
-          LOG_FILE: ${{ matrix.log_file }}
-        run: |
-          set -euo pipefail
-          # Resolve pwsh up front: sudo resets PATH via secure_path on some runners.
-          pwsh_path="$(command -v pwsh)"
-          sudo --preserve-env=LOG_FILE,GITHUB_OUTPUT "$pwsh_path" -NoProfile -File "$GITHUB_WORKSPACE/.github/workflows/it-scripts/capture-stop-during-backoff-baseline-counts.ps1"
-
-      - name: Capture stop-during-backoff baseline counts (Windows)
-        if: runner.os == 'Windows'
-        id: retry_stop_baseline_windows
-        shell: pwsh
-        env:
-          LOG_FILE: ${{ matrix.log_file }}
-        run: |
-          & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/capture-stop-during-backoff-baseline-counts.ps1"
-
-      - name: Wait for a fresh backoff to be entered (Unix)
-        timeout-minutes: 6
-        if: runner.os != 'Windows'
-        shell: bash
-        env:
-          LOG_FILE: ${{ matrix.log_file }}
-          BASELINE: ${{ (steps.retry_stop_baseline_unix.outputs.retrying || steps.retry_stop_baseline_windows.outputs.retrying) }}
-        run: |
-          set -euo pipefail
-          # Resolve pwsh up front: sudo resets PATH via secure_path on some runners.
-          pwsh_path="$(command -v pwsh)"
-          sudo --preserve-env=LOG_FILE,BASELINE "$pwsh_path" -NoProfile -File "$GITHUB_WORKSPACE/.github/workflows/it-scripts/wait-for-a-fresh-backoff-to-be-entered.ps1"
-
-      - name: Wait for a fresh backoff to be entered (Windows)
-        timeout-minutes: 6
-        if: runner.os == 'Windows'
-        shell: pwsh
-        env:
-          LOG_FILE: ${{ matrix.log_file }}
-          BASELINE: ${{ (steps.retry_stop_baseline_unix.outputs.retrying || steps.retry_stop_baseline_windows.outputs.retrying) }}
-        run: |
-          & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/wait-for-a-fresh-backoff-to-be-entered.ps1"
-
-      - name: Assert a service stop during a backoff is prompt (Unix)
-        timeout-minutes: 6
-        if: runner.os != 'Windows'
-        shell: bash
-        env:
-          LOG_FILE: ${{ matrix.log_file }}
-          SERVICE: ${{ matrix.service }}
-          BASELINE: ${{ (steps.retry_stop_baseline_unix.outputs.stopped || steps.retry_stop_baseline_windows.outputs.stopped) }}
-        run: |
-          set -euo pipefail
-          # Resolve pwsh up front: sudo resets PATH via secure_path on some runners.
-          pwsh_path="$(command -v pwsh)"
-          sudo --preserve-env=LOG_FILE,SERVICE,BASELINE "$pwsh_path" -NoProfile -File "$GITHUB_WORKSPACE/.github/workflows/it-scripts/assert-a-service-stop-during-a-backoff-is-prompt.ps1"
-
-      - name: Assert a service stop during a backoff is prompt (Windows)
-        timeout-minutes: 6
-        if: runner.os == 'Windows'
-        shell: pwsh
-        env:
-          LOG_FILE: ${{ matrix.log_file }}
-          SERVICE: ${{ matrix.service }}
-          BASELINE: ${{ (steps.retry_stop_baseline_unix.outputs.stopped || steps.retry_stop_baseline_windows.outputs.stopped) }}
-        run: |
-          & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/assert-a-service-stop-during-a-backoff-is-prompt.ps1"
-
-      # The restore steps run under always() so a failed assertion above cannot
-      # leave the rest of the job running an agent that points at a stub release
-      # endpoint (or leave the service stopped for the scenarios that follow).
-      - name: Capture restore baseline counts (Unix)
-        if: (always()) && runner.os != 'Windows'
-        id: retry_restore_baseline_unix
-        shell: bash
-        env:
-          LOG_FILE: ${{ matrix.log_file }}
-        run: |
-          set -euo pipefail
-          # Resolve pwsh up front: sudo resets PATH via secure_path on some runners.
-          pwsh_path="$(command -v pwsh)"
-          sudo --preserve-env=LOG_FILE,GITHUB_OUTPUT "$pwsh_path" -NoProfile -File "$GITHUB_WORKSPACE/.github/workflows/it-scripts/capture-restore-baseline-counts.ps1"
-
-      - name: Capture restore baseline counts (Windows)
-        if: (always()) && runner.os == 'Windows'
-        id: retry_restore_baseline_windows
-        shell: pwsh
-        env:
-          LOG_FILE: ${{ matrix.log_file }}
-        run: |
-          & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/capture-restore-baseline-counts.ps1"
-
-      - name: Clear the release url override
-        timeout-minutes: 5
-        if: always()
-        uses: ./.github/actions/set-release-url
-        with:
-          mode: clear
-          config_dir: ${{ matrix.config_dir }}
-          org_id: ${{ vars.IT_ORG_ID }}
-
-      - name: Stop stub release endpoint
-        timeout-minutes: 15
-        if: always()
-        uses: ./.github/actions/stub-release
-        with:
-          mode: stop
-
-      - name: Reinstall the release binary after the retry scenario
-        timeout-minutes: 10
-        if: always()
-        uses: ./.github/actions/run-agent
-        with:
-          binary: ${{ matrix.binary }}
-          args: --update --org-id ${{ vars.IT_ORG_ID }} --no-auto-updates --github-token ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Wait for resubscription after the retry scenario (Unix)
-        timeout-minutes: 6
-        if: (always()) && runner.os != 'Windows'
-        shell: bash
-        env:
-          LOG_FILE: ${{ matrix.log_file }}
-          BASELINE: ${{ (steps.retry_restore_baseline_unix.outputs.subscribed || steps.retry_restore_baseline_windows.outputs.subscribed) }}
-        run: |
-          set -euo pipefail
-          # Resolve pwsh up front: sudo resets PATH via secure_path on some runners.
-          pwsh_path="$(command -v pwsh)"
-          sudo --preserve-env=LOG_FILE,BASELINE "$pwsh_path" -NoProfile -File "$GITHUB_WORKSPACE/.github/workflows/it-scripts/wait-for-resubscription-after-the-retry-scenario.ps1"
-
-      - name: Wait for resubscription after the retry scenario (Windows)
-        timeout-minutes: 6
-        if: (always()) && runner.os == 'Windows'
-        shell: pwsh
-        env:
-          LOG_FILE: ${{ matrix.log_file }}
-          BASELINE: ${{ (steps.retry_restore_baseline_unix.outputs.subscribed || steps.retry_restore_baseline_windows.outputs.subscribed) }}
-        run: |
-          & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/wait-for-resubscription-after-the-retry-scenario.ps1"
-
-      # Every scenario above asserts on the agent log; when one fails, the log is
-      # the evidence. Dump its tail so triage does not need a re-run with extra
-      # steps (three runs on 2026-09-22 were diagnosed from postback bodies alone).
-      - name: Dump agent log on failure (Unix)
-        if: failure() && runner.os != 'Windows'
-        shell: bash
-        env:
-          LOG_FILE: ${{ matrix.log_file }}
-        run: |
-          echo "::group::Last 400 agent log lines ($LOG_FILE)"
-          sudo tail -n 400 "$LOG_FILE" || echo "(no log file)"
-          echo "::endgroup::"
-
-      - name: Dump agent log on failure (Windows)
-        if: failure() && runner.os == 'Windows'
-        shell: pwsh
-        env:
-          LOG_FILE: ${{ matrix.log_file }}
-        run: |
-          Write-Output "::group::Last 400 agent log lines ($env:LOG_FILE)"
-          if (Test-Path $env:LOG_FILE) { Get-Content $env:LOG_FILE -Tail 400 } else { Write-Output "(no log file)" }
-          Write-Output "::endgroup::"
-
-
   # ---- Connection: reconnect after disruption, SAS renewal ----
   connection:
     permissions:
       contents: read
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-    needs: [build, build-integration-test, set-matrix]
+    needs: [build, build-integration-test, set-matrix, auto-update]
+    # Chained behind the previous scenario job, not parallel to it: the live
+    # config endpoint gives every install on a platform the same device id, so
+    # two scenario agents at once kick each other off IoT Hub and commands land
+    # on whichever holds the connection. Parallelism returns with the hermetic
+    # migration (sc-126319), where each job has its own device identity. The
+    # chain never skips a scenario because an earlier one failed: each starts
+    # from a fresh install and reports on its own.
+    if: ${{ !cancelled() }}
     strategy:
       fail-fast: false
       matrix: ${{ fromJson(needs.set-matrix.outputs.matrix) }}
     runs-on: ${{ matrix.os }}
-    # Initial bound; re-measured from the first runs after the split (README
+    # Provisional bound; re-measured from the first chained runs (README
     # "Bounding the e2e jobs").
     timeout-minutes: 30
     steps:
@@ -1268,8 +937,9 @@ jobs:
         uses: actions/checkout@v5
 
       # Fresh install from the live config endpoint; every scenario job starts here.
+      # Bounded below the job so a hung install is attributed to this step.
       - name: Set up the scenario
-        timeout-minutes: 25
+        timeout-minutes: 20
         id: setup
         uses: ./.github/actions/e2e-setup
         with:
@@ -1595,12 +1265,20 @@ jobs:
       contents: read
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-    needs: [build, build-integration-test, set-matrix]
+    needs: [build, build-integration-test, set-matrix, connection]
+    # Chained behind the previous scenario job, not parallel to it: the live
+    # config endpoint gives every install on a platform the same device id, so
+    # two scenario agents at once kick each other off IoT Hub and commands land
+    # on whichever holds the connection. Parallelism returns with the hermetic
+    # migration (sc-126319), where each job has its own device identity. The
+    # chain never skips a scenario because an earlier one failed: each starts
+    # from a fresh install and reports on its own.
+    if: ${{ !cancelled() }}
     strategy:
       fail-fast: false
       matrix: ${{ fromJson(needs.set-matrix.outputs.matrix) }}
     runs-on: ${{ matrix.os }}
-    # Initial bound; re-measured from the first runs after the split (README
+    # Provisional bound; re-measured from the first chained runs (README
     # "Bounding the e2e jobs").
     timeout-minutes: 30
     steps:
@@ -1608,8 +1286,9 @@ jobs:
         uses: actions/checkout@v5
 
       # Fresh install from the live config endpoint; every scenario job starts here.
+      # Bounded below the job so a hung install is attributed to this step.
       - name: Set up the scenario
-        timeout-minutes: 25
+        timeout-minutes: 20
         id: setup
         uses: ./.github/actions/e2e-setup
         with:
@@ -1622,6 +1301,22 @@ jobs:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           service: ${{ matrix.service }}
           config_dir: ${{ matrix.config_dir }}
+
+      - name: Send success command
+        timeout-minutes: 20
+        uses: ./.github/actions/send-command
+        with:
+          trigger_url: ${{ vars.IT_SEND_COMMAND_TRIGGER_URL }}
+          device_id: ${{ steps.setup.outputs.device_id }}
+          commands: ${{ matrix.success_commands }}
+          expected_output: ${{ matrix.success_output }}
+
+      - name: Check logs for successful command
+        timeout-minutes: 5
+        uses: ./.github/actions/assert-log-contains
+        with:
+          log_file: ${{ matrix.log_file }}
+          patterns: ${{ matrix.success_patterns }}
 
       # ---- Withheld-SUBACK scenario (sc-106107) ----
       # The reconnection scenario above severs the connection, which keepalive
@@ -1943,12 +1638,20 @@ jobs:
       contents: read
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-    needs: [build, build-integration-test, set-matrix]
+    needs: [build, build-integration-test, set-matrix, wedged-broker]
+    # Chained behind the previous scenario job, not parallel to it: the live
+    # config endpoint gives every install on a platform the same device id, so
+    # two scenario agents at once kick each other off IoT Hub and commands land
+    # on whichever holds the connection. Parallelism returns with the hermetic
+    # migration (sc-126319), where each job has its own device identity. The
+    # chain never skips a scenario because an earlier one failed: each starts
+    # from a fresh install and reports on its own.
+    if: ${{ !cancelled() }}
     strategy:
       fail-fast: false
       matrix: ${{ fromJson(needs.set-matrix.outputs.matrix) }}
     runs-on: ${{ matrix.os }}
-    # Initial bound; re-measured from the first runs after the split (README
+    # Provisional bound; re-measured from the first chained runs (README
     # "Bounding the e2e jobs").
     timeout-minutes: 30
     steps:
@@ -1956,8 +1659,9 @@ jobs:
         uses: actions/checkout@v5
 
       # Fresh install from the live config endpoint; every scenario job starts here.
+      # Bounded below the job so a hung install is attributed to this step.
       - name: Set up the scenario
-        timeout-minutes: 25
+        timeout-minutes: 20
         id: setup
         uses: ./.github/actions/e2e-setup
         with:
@@ -2422,12 +2126,20 @@ jobs:
       contents: read
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-    needs: [build, build-integration-test, set-matrix]
+    needs: [build, build-integration-test, set-matrix, command-timeouts]
+    # Chained behind the previous scenario job, not parallel to it: the live
+    # config endpoint gives every install on a platform the same device id, so
+    # two scenario agents at once kick each other off IoT Hub and commands land
+    # on whichever holds the connection. Parallelism returns with the hermetic
+    # migration (sc-126319), where each job has its own device identity. The
+    # chain never skips a scenario because an earlier one failed: each starts
+    # from a fresh install and reports on its own.
+    if: ${{ !cancelled() }}
     strategy:
       fail-fast: false
       matrix: ${{ fromJson(needs.set-matrix.outputs.matrix) }}
     runs-on: ${{ matrix.os }}
-    # Initial bound; re-measured from the first runs after the split (README
+    # Provisional bound; re-measured from the first chained runs (README
     # "Bounding the e2e jobs").
     timeout-minutes: 30
     steps:
@@ -2435,8 +2147,9 @@ jobs:
         uses: actions/checkout@v5
 
       # Fresh install from the live config endpoint; every scenario job starts here.
+      # Bounded below the job so a hung install is attributed to this step.
       - name: Set up the scenario
-        timeout-minutes: 25
+        timeout-minutes: 20
         id: setup
         uses: ./.github/actions/e2e-setup
         with:
@@ -2449,6 +2162,22 @@ jobs:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           service: ${{ matrix.service }}
           config_dir: ${{ matrix.config_dir }}
+
+      - name: Send success command
+        timeout-minutes: 20
+        uses: ./.github/actions/send-command
+        with:
+          trigger_url: ${{ vars.IT_SEND_COMMAND_TRIGGER_URL }}
+          device_id: ${{ steps.setup.outputs.device_id }}
+          commands: ${{ matrix.success_commands }}
+          expected_output: ${{ matrix.success_output }}
+
+      - name: Check logs for successful command
+        timeout-minutes: 5
+        uses: ./.github/actions/assert-log-contains
+        with:
+          log_file: ${{ matrix.log_file }}
+          patterns: ${{ matrix.success_patterns }}
 
       # ---- Bounded command output scenario (sc-106105) ----
       # A command's stdout and stderr used to be buffered whole in memory, so the
@@ -2929,12 +2658,20 @@ jobs:
       contents: read
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-    needs: [build, build-integration-test, set-matrix]
+    needs: [build, build-integration-test, set-matrix, output-bounds]
+    # Chained behind the previous scenario job, not parallel to it: the live
+    # config endpoint gives every install on a platform the same device id, so
+    # two scenario agents at once kick each other off IoT Hub and commands land
+    # on whichever holds the connection. Parallelism returns with the hermetic
+    # migration (sc-126319), where each job has its own device identity. The
+    # chain never skips a scenario because an earlier one failed: each starts
+    # from a fresh install and reports on its own.
+    if: ${{ !cancelled() }}
     strategy:
       fail-fast: false
       matrix: ${{ fromJson(needs.set-matrix.outputs.matrix) }}
     runs-on: ${{ matrix.os }}
-    # Initial bound; re-measured from the first runs after the split (README
+    # Provisional bound; re-measured from the first chained runs (README
     # "Bounding the e2e jobs").
     timeout-minutes: 30
     steps:
@@ -2942,8 +2679,9 @@ jobs:
         uses: actions/checkout@v5
 
       # Fresh install from the live config endpoint; every scenario job starts here.
+      # Bounded below the job so a hung install is attributed to this step.
       - name: Set up the scenario
-        timeout-minutes: 25
+        timeout-minutes: 20
         id: setup
         uses: ./.github/actions/e2e-setup
         with:
@@ -3288,23 +3026,389 @@ jobs:
           Write-Output "::endgroup::"
 
 
+  # ---- Auto-update retry schedule and stop during backoff ----
+  update-retry:
+    permissions:
+      contents: read
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    needs: [build, build-integration-test, set-matrix, sweeps]
+    # Chained behind the previous scenario job, not parallel to it: the live
+    # config endpoint gives every install on a platform the same device id, so
+    # two scenario agents at once kick each other off IoT Hub and commands land
+    # on whichever holds the connection. Parallelism returns with the hermetic
+    # migration (sc-126319), where each job has its own device identity. The
+    # chain never skips a scenario because an earlier one failed: each starts
+    # from a fresh install and reports on its own.
+    if: ${{ !cancelled() }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.set-matrix.outputs.matrix) }}
+    runs-on: ${{ matrix.os }}
+    # Provisional bound; re-measured from the first chained runs (README
+    # "Bounding the e2e jobs").
+    timeout-minutes: 30
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      # Fresh install from the live config endpoint; every scenario job starts here.
+      # Bounded below the job so a hung install is attributed to this step.
+      - name: Set up the scenario
+        timeout-minutes: 20
+        id: setup
+        uses: ./.github/actions/e2e-setup
+        with:
+          os: ${{ matrix.os }}
+          binary: ${{ matrix.binary }}
+          it_binary: ${{ matrix.it_binary }}
+          config_url: ${{ vars.IT_CONFIG_URL }}
+          config_secret: ${{ secrets.IT_CONFIG_SECRET }}
+          org_id: ${{ vars.IT_ORG_ID }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          service: ${{ matrix.service }}
+          config_dir: ${{ matrix.config_dir }}
+
+      # ---- Capped and jittered auto-update retry scenario (sc-106110) ----
+      # The auto-update retry delay was base * (1 << attempt) with no ceiling and
+      # no jitter. Unjittered, every agent that failed against the release
+      # endpoint at the same moment retried at the same instants, so an outage or
+      # rate limit was sustained by the fleet trying to recover from it; uncapped,
+      # a large retry count overflowed the shift into a negative duration, which
+      # made the wait return immediately and spun the loop against the endpoint.
+      #
+      # A GitHub outage is not something CI can arrange and an unroutable address
+      # produces connection errors rather than the HTTP failure the ticket
+      # describes, so the agent is pointed at the test/stubrelease fixture through
+      # the override file the integration build honors. The fixture fails every
+      # request until it is flipped, which puts the agent into retryWithBackoff
+      # with the shortened build knobs - base 2s, 6 retries, 30s check interval,
+      # so the cap is a quarter of that interval (7.5s) - and makes a full
+      # schedule observable in under a minute.
+      #
+      # Fleet-wide de-synchronization needs many agents and is covered by unit
+      # tests over the schedule itself. What one endpoint can show, and what these
+      # steps assert, is that every slot is strictly positive, bounded by the cap,
+      # varies rather than repeating, and is never served back to back.
+      - name: Start stub release endpoint (failing)
+        timeout-minutes: 15
+        id: stub_release
+        uses: ./.github/actions/stub-release
+        with:
+          mode: start
+
+      - name: Capture auto-update retry baseline counts (Unix)
+        if: runner.os != 'Windows'
+        id: retry_baseline_unix
+        shell: bash
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+        run: |
+          set -euo pipefail
+          # Resolve pwsh up front: sudo resets PATH via secure_path on some runners.
+          pwsh_path="$(command -v pwsh)"
+          sudo --preserve-env=LOG_FILE,GITHUB_OUTPUT "$pwsh_path" -NoProfile -File "$GITHUB_WORKSPACE/.github/workflows/it-scripts/capture-auto-update-retry-baseline-counts.ps1"
+
+      - name: Capture auto-update retry baseline counts (Windows)
+        if: runner.os == 'Windows'
+        id: retry_baseline_windows
+        shell: pwsh
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+        run: |
+          & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/capture-auto-update-retry-baseline-counts.ps1"
+
+      # Written before the install, because the updater reads the override when a
+      # service cycle constructs it - a file written afterwards would not be seen
+      # until the next restart, and the agent would spend the scenario updating
+      # itself from the real releases API instead.
+      - name: Point the agent at the stub release endpoint
+        timeout-minutes: 5
+        uses: ./.github/actions/set-release-url
+        with:
+          mode: set
+          config_dir: ${{ matrix.config_dir }}
+          org_id: ${{ vars.IT_ORG_ID }}
+          url: ${{ steps.stub_release.outputs.url }}
+
+      - name: Install integration test binary with auto-updates on
+        timeout-minutes: 10
+        uses: ./.github/actions/run-agent
+        with:
+          binary: ${{ matrix.it_binary }}
+          args: --update --org-id ${{ vars.IT_ORG_ID }} --github-token ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Wait for the update retry schedule to run (Unix)
+        timeout-minutes: 6
+        if: runner.os != 'Windows'
+        shell: bash
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+          BASELINE: ${{ (steps.retry_baseline_unix.outputs.retrying || steps.retry_baseline_windows.outputs.retrying) }}
+        run: |
+          set -euo pipefail
+          # Resolve pwsh up front: sudo resets PATH via secure_path on some runners.
+          pwsh_path="$(command -v pwsh)"
+          sudo --preserve-env=LOG_FILE,BASELINE "$pwsh_path" -NoProfile -File "$GITHUB_WORKSPACE/.github/workflows/it-scripts/wait-for-the-update-retry-schedule-to-run.ps1"
+
+      - name: Wait for the update retry schedule to run (Windows)
+        timeout-minutes: 6
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+          BASELINE: ${{ (steps.retry_baseline_unix.outputs.retrying || steps.retry_baseline_windows.outputs.retrying) }}
+        run: |
+          & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/wait-for-the-update-retry-schedule-to-run.ps1"
+
+      # Flipped mid-sequence - the fixture re-reads its mode per request - so the
+      # recovery is the agent's own next retry, not a restart.
+      - name: Serve a valid release payload mid-sequence
+        timeout-minutes: 15
+        uses: ./.github/actions/stub-release
+        with:
+          mode: ok
+
+      - name: Assert the update succeeds on a retry (Unix)
+        timeout-minutes: 6
+        if: runner.os != 'Windows'
+        shell: bash
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+          BASELINE: ${{ (steps.retry_baseline_unix.outputs.succeeded || steps.retry_baseline_windows.outputs.succeeded) }}
+        run: |
+          set -euo pipefail
+          # Resolve pwsh up front: sudo resets PATH via secure_path on some runners.
+          pwsh_path="$(command -v pwsh)"
+          sudo --preserve-env=LOG_FILE,BASELINE "$pwsh_path" -NoProfile -File "$GITHUB_WORKSPACE/.github/workflows/it-scripts/assert-the-update-succeeds-on-a-retry.ps1"
+
+      - name: Assert the update succeeds on a retry (Windows)
+        timeout-minutes: 6
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+          BASELINE: ${{ (steps.retry_baseline_unix.outputs.succeeded || steps.retry_baseline_windows.outputs.succeeded) }}
+        run: |
+          & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/assert-the-update-succeeds-on-a-retry.ps1"
+
+      - name: Assert the retry schedule is capped, jittered and never immediate (Unix)
+        timeout-minutes: 6
+        if: runner.os != 'Windows'
+        shell: bash
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+          BASELINE: ${{ (steps.retry_baseline_unix.outputs.retrying || steps.retry_baseline_windows.outputs.retrying) }}
+        run: |
+          set -euo pipefail
+          # Resolve pwsh up front: sudo resets PATH via secure_path on some runners.
+          pwsh_path="$(command -v pwsh)"
+          sudo --preserve-env=LOG_FILE,BASELINE "$pwsh_path" -NoProfile -File "$GITHUB_WORKSPACE/.github/workflows/it-scripts/assert-the-retry-schedule-is-capped-jittered-and-never-immediate.ps1"
+
+      - name: Assert the retry schedule is capped, jittered and never immediate (Windows)
+        timeout-minutes: 6
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+          BASELINE: ${{ (steps.retry_baseline_unix.outputs.retrying || steps.retry_baseline_windows.outputs.retrying) }}
+        run: |
+          & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/assert-the-retry-schedule-is-capped-jittered-and-never-immediate.ps1"
+
+      - name: Fail the release endpoint again for the stop check
+        timeout-minutes: 15
+        uses: ./.github/actions/stub-release
+        with:
+          mode: fail
+
+      - name: Capture stop-during-backoff baseline counts (Unix)
+        if: runner.os != 'Windows'
+        id: retry_stop_baseline_unix
+        shell: bash
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+        run: |
+          set -euo pipefail
+          # Resolve pwsh up front: sudo resets PATH via secure_path on some runners.
+          pwsh_path="$(command -v pwsh)"
+          sudo --preserve-env=LOG_FILE,GITHUB_OUTPUT "$pwsh_path" -NoProfile -File "$GITHUB_WORKSPACE/.github/workflows/it-scripts/capture-stop-during-backoff-baseline-counts.ps1"
+
+      - name: Capture stop-during-backoff baseline counts (Windows)
+        if: runner.os == 'Windows'
+        id: retry_stop_baseline_windows
+        shell: pwsh
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+        run: |
+          & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/capture-stop-during-backoff-baseline-counts.ps1"
+
+      - name: Wait for a fresh backoff to be entered (Unix)
+        timeout-minutes: 6
+        if: runner.os != 'Windows'
+        shell: bash
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+          BASELINE: ${{ (steps.retry_stop_baseline_unix.outputs.retrying || steps.retry_stop_baseline_windows.outputs.retrying) }}
+        run: |
+          set -euo pipefail
+          # Resolve pwsh up front: sudo resets PATH via secure_path on some runners.
+          pwsh_path="$(command -v pwsh)"
+          sudo --preserve-env=LOG_FILE,BASELINE "$pwsh_path" -NoProfile -File "$GITHUB_WORKSPACE/.github/workflows/it-scripts/wait-for-a-fresh-backoff-to-be-entered.ps1"
+
+      - name: Wait for a fresh backoff to be entered (Windows)
+        timeout-minutes: 6
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+          BASELINE: ${{ (steps.retry_stop_baseline_unix.outputs.retrying || steps.retry_stop_baseline_windows.outputs.retrying) }}
+        run: |
+          & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/wait-for-a-fresh-backoff-to-be-entered.ps1"
+
+      - name: Assert a service stop during a backoff is prompt (Unix)
+        timeout-minutes: 6
+        if: runner.os != 'Windows'
+        shell: bash
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+          SERVICE: ${{ matrix.service }}
+          BASELINE: ${{ (steps.retry_stop_baseline_unix.outputs.stopped || steps.retry_stop_baseline_windows.outputs.stopped) }}
+        run: |
+          set -euo pipefail
+          # Resolve pwsh up front: sudo resets PATH via secure_path on some runners.
+          pwsh_path="$(command -v pwsh)"
+          sudo --preserve-env=LOG_FILE,SERVICE,BASELINE "$pwsh_path" -NoProfile -File "$GITHUB_WORKSPACE/.github/workflows/it-scripts/assert-a-service-stop-during-a-backoff-is-prompt.ps1"
+
+      - name: Assert a service stop during a backoff is prompt (Windows)
+        timeout-minutes: 6
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+          SERVICE: ${{ matrix.service }}
+          BASELINE: ${{ (steps.retry_stop_baseline_unix.outputs.stopped || steps.retry_stop_baseline_windows.outputs.stopped) }}
+        run: |
+          & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/assert-a-service-stop-during-a-backoff-is-prompt.ps1"
+
+      # The restore steps run under always() so a failed assertion above cannot
+      # leave the rest of the job running an agent that points at a stub release
+      # endpoint (or leave the service stopped for the scenarios that follow).
+      - name: Capture restore baseline counts (Unix)
+        if: (always()) && runner.os != 'Windows'
+        id: retry_restore_baseline_unix
+        shell: bash
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+        run: |
+          set -euo pipefail
+          # Resolve pwsh up front: sudo resets PATH via secure_path on some runners.
+          pwsh_path="$(command -v pwsh)"
+          sudo --preserve-env=LOG_FILE,GITHUB_OUTPUT "$pwsh_path" -NoProfile -File "$GITHUB_WORKSPACE/.github/workflows/it-scripts/capture-restore-baseline-counts.ps1"
+
+      - name: Capture restore baseline counts (Windows)
+        if: (always()) && runner.os == 'Windows'
+        id: retry_restore_baseline_windows
+        shell: pwsh
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+        run: |
+          & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/capture-restore-baseline-counts.ps1"
+
+      - name: Clear the release url override
+        timeout-minutes: 5
+        if: always()
+        uses: ./.github/actions/set-release-url
+        with:
+          mode: clear
+          config_dir: ${{ matrix.config_dir }}
+          org_id: ${{ vars.IT_ORG_ID }}
+
+      - name: Stop stub release endpoint
+        timeout-minutes: 15
+        if: always()
+        uses: ./.github/actions/stub-release
+        with:
+          mode: stop
+
+      - name: Reinstall the release binary after the retry scenario
+        timeout-minutes: 10
+        if: always()
+        uses: ./.github/actions/run-agent
+        with:
+          binary: ${{ matrix.binary }}
+          args: --update --org-id ${{ vars.IT_ORG_ID }} --no-auto-updates --github-token ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Wait for resubscription after the retry scenario (Unix)
+        timeout-minutes: 6
+        if: (always()) && runner.os != 'Windows'
+        shell: bash
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+          BASELINE: ${{ (steps.retry_restore_baseline_unix.outputs.subscribed || steps.retry_restore_baseline_windows.outputs.subscribed) }}
+        run: |
+          set -euo pipefail
+          # Resolve pwsh up front: sudo resets PATH via secure_path on some runners.
+          pwsh_path="$(command -v pwsh)"
+          sudo --preserve-env=LOG_FILE,BASELINE "$pwsh_path" -NoProfile -File "$GITHUB_WORKSPACE/.github/workflows/it-scripts/wait-for-resubscription-after-the-retry-scenario.ps1"
+
+      - name: Wait for resubscription after the retry scenario (Windows)
+        timeout-minutes: 6
+        if: (always()) && runner.os == 'Windows'
+        shell: pwsh
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+          BASELINE: ${{ (steps.retry_restore_baseline_unix.outputs.subscribed || steps.retry_restore_baseline_windows.outputs.subscribed) }}
+        run: |
+          & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/wait-for-resubscription-after-the-retry-scenario.ps1"
+
+      # Every scenario above asserts on the agent log; when one fails, the log is
+      # the evidence. Dump its tail so triage does not need a re-run with extra
+      # steps (three runs on 2026-09-22 were diagnosed from postback bodies alone).
+      - name: Dump agent log on failure (Unix)
+        if: failure() && runner.os != 'Windows'
+        shell: bash
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+        run: |
+          echo "::group::Last 400 agent log lines ($LOG_FILE)"
+          sudo tail -n 400 "$LOG_FILE" || echo "(no log file)"
+          echo "::endgroup::"
+
+      - name: Dump agent log on failure (Windows)
+        if: failure() && runner.os == 'Windows'
+        shell: pwsh
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+        run: |
+          Write-Output "::group::Last 400 agent log lines ($env:LOG_FILE)"
+          if (Test-Path $env:LOG_FILE) { Get-Content $env:LOG_FILE -Tail 400 } else { Write-Output "(no log file)" }
+          Write-Output "::endgroup::"
+
+
   # ---- Windows: wedged stop aborts update/uninstall, locked directory uninstall ----
   wedged-stop:
     permissions:
       contents: read
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-    needs: [build, build-integration-test, set-matrix]
+    needs: [build, build-integration-test, set-matrix, update-retry]
+    # Chained behind the previous scenario job, not parallel to it: the live
+    # config endpoint gives every install on a platform the same device id, so
+    # two scenario agents at once kick each other off IoT Hub and commands land
+    # on whichever holds the connection. Parallelism returns with the hermetic
+    # migration (sc-126319), where each job has its own device identity. The
+    # chain never skips a scenario because an earlier one failed: each starts
+    # from a fresh install and reports on its own.
     # The scenarios here are Windows-only (job object, SCM StopPending, sharing
     # violations); the job is skipped outright when windows-latest is not in the
     # dispatch rather than installing an agent on the other platforms to skip
     # every step.
-    if: contains(fromJson(needs.set-matrix.outputs.matrix).*.os, 'windows-latest')
+    if: ${{ !cancelled() && contains(fromJson(needs.set-matrix.outputs.matrix).include.*.os, 'windows-latest') }}
     strategy:
       fail-fast: false
       matrix: ${{ fromJson(needs.set-matrix.outputs.windows_matrix) }}
     runs-on: ${{ matrix.os }}
-    # Initial bound; re-measured from the first runs after the split (README
+    # Provisional bound; re-measured from the first chained runs (README
     # "Bounding the e2e jobs").
     timeout-minutes: 25
     steps:
@@ -3312,8 +3416,9 @@ jobs:
         uses: actions/checkout@v5
 
       # Fresh install from the live config endpoint; every scenario job starts here.
+      # Bounded below the job so a hung install is attributed to this step.
       - name: Set up the scenario
-        timeout-minutes: 25
+        timeout-minutes: 20
         id: setup
         uses: ./.github/actions/e2e-setup
         with:
@@ -3932,7 +4037,7 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJson(needs.set-matrix.outputs.matrix) }}
     runs-on: ${{ matrix.os }}
-    # 2x the p95 of the last 20 runs (see README "Bounding the integration jobs").
+    # 2x the p95 of the last 20 runs (see README "Bounding the e2e jobs").
     timeout-minutes: 10
     steps:
       - name: Checkout code
@@ -4069,7 +4174,7 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJson(needs.set-matrix.outputs.matrix) }}
     runs-on: ${{ matrix.os }}
-    # 2x the p95 of the last 20 runs (see README "Bounding the integration jobs").
+    # 2x the p95 of the last 20 runs (see README "Bounding the e2e jobs").
     timeout-minutes: 5
     env:
       # 10 MiB, matching maxConfigResponseSize in cmd/agent_smith/config_context.go.
