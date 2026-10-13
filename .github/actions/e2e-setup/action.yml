@@ -1,0 +1,86 @@
+name: E2E scenario setup
+description: >-
+  The shared start of every e2e scenario job: inject the PowerShell profile
+  noise the Windows scenarios must tolerate, install the release agent from the
+  live config endpoint, check the install output and the service, and resolve
+  the device id. Every scenario job starts from exactly this state, so a
+  scenario never inherits what an earlier one left behind (sc-126317).
+
+inputs:
+  os:
+    description: "Matrix os"
+    required: true
+  binary:
+    description: "Release binary name under ./dist"
+    required: true
+  it_binary:
+    description: "Integration-test binary name under ./dist"
+    required: true
+  config_url:
+    description: "Rewst config endpoint"
+    required: true
+  config_secret:
+    description: "Config endpoint secret"
+    required: true
+  org_id:
+    description: "Org id"
+    required: true
+  github_token:
+    description: "Token for downloading build artifacts"
+    required: true
+  service:
+    description: "Service name to check after install"
+    required: true
+  config_dir:
+    description: "Directory the config file is written to"
+    required: true
+
+outputs:
+  device_id:
+    description: "The device id the config endpoint assigned to this install"
+    value: ${{ steps.config.outputs.device_id }}
+  azure_iot_hub_host:
+    description: "The broker host the config names"
+    value: ${{ steps.config.outputs.azure_iot_hub_host }}
+  install_output_path:
+    description: "Path of the captured install output"
+    value: ${{ steps.install_agent.outputs.install_output_path }}
+
+runs:
+  using: composite
+  steps:
+    - name: Inject PowerShell profile noise
+      if: inputs.os == 'windows-latest'
+      id: inject_profile_noise
+      uses: ./.github/actions/inject-profile-noise
+
+    - name: Install agent
+      id: install_agent
+      uses: ./.github/actions/install-agent
+      with:
+        os: ${{ inputs.os }}
+        binary: ${{ inputs.binary }}
+        it_binary: ${{ inputs.it_binary }}
+        config_url: ${{ inputs.config_url }}
+        config_secret: ${{ inputs.config_secret }}
+        org_id: ${{ inputs.org_id }}
+        github_token: ${{ inputs.github_token }}
+
+    - name: Check install output for profile noise
+      if: inputs.os == 'windows-latest'
+      uses: ./.github/actions/check-profile-noise
+      with:
+        install_output_path: ${{ steps.install_agent.outputs.install_output_path }}
+        noise: ${{ steps.inject_profile_noise.outputs.noise }}
+
+    - name: Check service
+      uses: ./.github/actions/check-service
+      with:
+        service: ${{ inputs.service }}
+
+    - name: Validate config and get device id
+      id: config
+      uses: ./.github/actions/validate-config
+      with:
+        config_dir: ${{ inputs.config_dir }}
+        org_id: ${{ inputs.org_id }}
