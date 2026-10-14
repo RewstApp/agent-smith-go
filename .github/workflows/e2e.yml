@@ -9,7 +9,7 @@ name: E2E
 # cancel-in-progress is off deliberately: a queued re-dispatch must not kill
 # a run that is mid-suite with a real agent installed on the runner.
 concurrency:
-  group: integration-test
+  group: e2e
   cancel-in-progress: false
 
 on:
@@ -24,18 +24,6 @@ on:
           - windows-latest
           - ubuntu-latest
           - macos-latest
-  # workflow_call exists for one reason: GitHub registers dispatchable
-  # workflows from the default branch, so a renamed workflow cannot be
-  # dispatched on the branch that renames it. The integration-test.yml bridge
-  # on that branch calls this one so the rename PR can gate itself; the bridge
-  # is deleted once e2e.yml is on main, and the concurrency group below is
-  # renamed to e2e at the same time (sc-126317).
-  workflow_call:
-    inputs:
-      os:
-        description: "Platform to test: all, windows-latest, ubuntu-latest or macos-latest"
-        required: true
-        type: string
 
 jobs:
   build:
