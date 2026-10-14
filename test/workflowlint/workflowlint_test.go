@@ -1,5 +1,5 @@
 // Package workflowlint pins structural rules on .github/workflows/
-// integration-test.yml that the suite's own history shows are easy to break
+// e2e.yml that the suite's own history shows are easy to break
 // by copy-paste and expensive to find afterwards. It runs under a plain
 // `go test ./...` so the test workflow enforces them on every PR.
 package workflowlint
@@ -14,7 +14,7 @@ import (
 
 func workflow(t *testing.T) []string {
 	t.Helper()
-	p := filepath.Join("..", "..", ".github", "workflows", "integration-test.yml")
+	p := filepath.Join("..", "..", ".github", "workflows", "e2e.yml")
 	b, err := os.ReadFile(p)
 	if err != nil {
 		t.Fatalf("reading %s: %v", p, err)
@@ -238,7 +238,7 @@ func TestEveryIntegrationJobIsBounded(t *testing.T) {
 // "exceeded the maximum execution time" on the job.
 func TestEveryWaitingStepIsBounded(t *testing.T) {
 	waiting := regexp.MustCompile(
-		`(?m)^\s+uses: \./\.github/actions/(install-agent|run-agent|send-command|wait-for-log-line|stub-[a-z]+|wedged-service|assert-log-[a-z]+)$|it-scripts/(wait-for|assert)`,
+		`(?m)^\s+uses: \./\.github/actions/(e2e-setup|install-agent|run-agent|send-command|wait-for-log-line|stub-[a-z]+|wedged-service|assert-log-[a-z]+)$|it-scripts/(wait-for|assert)`,
 	)
 	lines := workflow(t)
 	starts := []int{}
@@ -355,5 +355,43 @@ func TestInlineSleepsAreInsidePollLoops(t *testing.T) {
 		if !inLoop {
 			t.Errorf("line %d: sleep outside a poll loop: %s", i+1, strings.TrimSpace(ln))
 		}
+	}
+}
+
+// The e2e workflow is split into scenario-scoped jobs that each start from a
+// fresh install (sc-126317): a failure names its scenario in the job list and
+// costs only that scenario's minutes, and the run finishes in the time of the
+// longest job rather than the sum of them. Both halves of that are lost if a
+// job grows back into a catch-all, so every scenario job is pinned by name and
+// bounded in size.
+func TestScenarioJobsArePresentAndSmall(t *testing.T) {
+	const maxSteps = 40
+	want := []string{
+		"lifecycle", "auto-update", "update-retry", "connection", "wedged-broker",
+		"command-timeouts", "output-bounds", "timeout-composition", "sweeps", "wedged-stop",
+		"test-hermetic", "test-service-user", "test-config-response-cap",
+	}
+	all := jobs(workflow(t))
+	for _, name := range want {
+		block, ok := all[name]
+		if !ok {
+			t.Errorf("job %q is missing from e2e.yml", name)
+			continue
+		}
+		n := 0
+		for _, ln := range block {
+			if strings.HasPrefix(ln, "      - ") {
+				n++
+			}
+		}
+		if n > maxSteps {
+			t.Errorf(
+				"job %q has %d steps, over the %d-step bound: split the scenario",
+				name, n, maxSteps,
+			)
+		}
+	}
+	if _, ok := all["test"]; ok {
+		t.Error("the catch-all `test` job is back; scenarios belong in their own jobs")
 	}
 }
