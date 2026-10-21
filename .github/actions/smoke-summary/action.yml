@@ -1,0 +1,38 @@
+name: Live smoke summary
+description: >-
+  Record a live (non-gating) smoke job's outcome in the run's job summary, so
+  a persistent Rewst- or hub-side problem stays visible per run even though it
+  no longer fails the run (sc-126320). The merge gate is the hermetic jobs; a
+  red smoke is investigated against the known engine-side signatures (daily
+  IoT Hub quota, expired integration token, 408 at the engine ceiling, the
+  transient 404) before anyone looks at the branch.
+
+inputs:
+  job:
+    description: "Job name"
+    required: true
+  outcome:
+    description: "job.status at the end of the job"
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Write the smoke summary
+      shell: pwsh
+      env:
+        JOB: ${{ inputs.job }}
+        OUTCOME: ${{ inputs.outcome }}
+        OS: ${{ runner.os }}
+      run: |
+        $icon = if ($env:OUTCOME -eq 'success') { ':white_check_mark:' } else { ':warning:' }
+        $lines = @(
+          "### $icon Live smoke ``$($env:JOB)`` on $($env:OS): **$($env:OUTCOME)**",
+          "",
+          "Non-gating. The merge gate is the hermetic jobs; a red smoke is checked against the",
+          "engine-side signatures first (IoT Hub daily quota, expired integration token, 408 at",
+          "the engine ceiling, transient 404 'Workflow was not found') - see the agent log dump",
+          "above and the README's e2e section."
+        )
+        $lines -join "`n" >> $env:GITHUB_STEP_SUMMARY
+        Write-Output "Live smoke $($env:JOB): $($env:OUTCOME)"

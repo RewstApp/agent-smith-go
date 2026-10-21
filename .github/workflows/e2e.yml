@@ -26,16 +26,16 @@ on:
           - macos-latest
 
 jobs:
-  # ---- Lifecycle: install, commands, logging, syslog, uninstall ----
-  # ---- Auto-update: happy path, tampered and missing digests ----
+  # ---- Live smoke - Lifecycle: install, commands, logging, syslog, uninstall ----
+  # ---- Live smoke - Auto-update: happy path, tampered and missing digests ----
   # ---- Connection: reconnect after disruption, SAS renewal ----
-  # ---- Broker withholding SUBACK: bounded subscribe, prompt stop, recovery ----
+  # ---- Live smoke - Broker withholding SUBACK: bounded subscribe, prompt stop, recovery ----
   # ---- Command timeouts: default and configured ----
   # ---- Output bounds: stdout and stderr floods ----
   # ---- Output bound and command timeout composed ----
-  # ---- Startup sweeps: stranded scripts and installers ----
-  # ---- Auto-update retry schedule and stop during backoff ----
-  # ---- Windows-only: postback disabled, child-process kill, wedged stop aborts update/uninstall, locked directory uninstall ----
+  # ---- Live smoke - Startup sweeps: stranded scripts and installers ----
+  # ---- Live smoke - Auto-update retry schedule and stop during backoff ----
+  # ---- Live smoke, Windows-only: postback disabled, child-process kill, wedged stop aborts update/uninstall, locked directory uninstall ----
   # ---- Config-fetch response size ceiling (sc-112405) ----
   # Config mode read the config endpoint's POST response with a bare
   # io.ReadAll. configHTTPTimeout (5 minutes) bounded the request in time but
@@ -204,9 +204,15 @@ jobs:
           $winJson = ConvertTo-Json -InputObject @{ include = $winEntries } -Depth 10 -Compress
           "windows_matrix=$winJson" >> $env:GITHUB_OUTPUT
 
-  lifecycle:
+  live-lifecycle:
     permissions:
       contents: read
+    # Live smoke (sc-126320): installs from the Rewst config endpoint and talks
+    # to the real hub and engine, so it can go red for reasons that are not
+    # the agent (the hub's daily quota, an expired integration token, the
+    # engine's ceiling). It no longer gates the merge - the hermetic jobs do -
+    # and reports its outcome in the job summary instead.
+    continue-on-error: true
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     needs: [build, build-integration-test, set-matrix]
@@ -401,12 +407,26 @@ jobs:
         with:
           log_file: ${{ matrix.log_file }}
 
-  auto-update:
+      - name: Record the live smoke outcome
+        if: always()
+        uses: ./.github/actions/smoke-summary
+        with:
+          job: live-lifecycle
+          outcome: ${{ job.status }}
+
+
+  live-auto-update:
     permissions:
       contents: read
+    # Live smoke (sc-126320): installs from the Rewst config endpoint and talks
+    # to the real hub and engine, so it can go red for reasons that are not
+    # the agent (the hub's daily quota, an expired integration token, the
+    # engine's ceiling). It no longer gates the merge - the hermetic jobs do -
+    # and reports its outcome in the job summary instead.
+    continue-on-error: true
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-    needs: [build, build-integration-test, set-matrix, lifecycle]
+    needs: [build, build-integration-test, set-matrix, live-lifecycle]
     # Chained behind the previous scenario job, not parallel to it: the live
     # config endpoint gives every install on a platform the same device id, so
     # two scenario agents at once kick each other off IoT Hub and commands land
@@ -745,12 +765,26 @@ jobs:
         with:
           log_file: ${{ matrix.log_file }}
 
-  wedged-broker:
+      - name: Record the live smoke outcome
+        if: always()
+        uses: ./.github/actions/smoke-summary
+        with:
+          job: live-auto-update
+          outcome: ${{ job.status }}
+
+
+  live-wedged-broker:
     permissions:
       contents: read
+    # Live smoke (sc-126320): installs from the Rewst config endpoint and talks
+    # to the real hub and engine, so it can go red for reasons that are not
+    # the agent (the hub's daily quota, an expired integration token, the
+    # engine's ceiling). It no longer gates the merge - the hermetic jobs do -
+    # and reports its outcome in the job summary instead.
+    continue-on-error: true
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-    needs: [build, build-integration-test, set-matrix, auto-update]
+    needs: [build, build-integration-test, set-matrix, live-auto-update]
     # Chained behind the previous scenario job, not parallel to it: the live
     # config endpoint gives every install on a platform the same device id, so
     # two scenario agents at once kick each other off IoT Hub and commands land
@@ -1003,12 +1037,26 @@ jobs:
         with:
           log_file: ${{ matrix.log_file }}
 
-  sweeps:
+      - name: Record the live smoke outcome
+        if: always()
+        uses: ./.github/actions/smoke-summary
+        with:
+          job: live-wedged-broker
+          outcome: ${{ job.status }}
+
+
+  live-sweeps:
     permissions:
       contents: read
+    # Live smoke (sc-126320): installs from the Rewst config endpoint and talks
+    # to the real hub and engine, so it can go red for reasons that are not
+    # the agent (the hub's daily quota, an expired integration token, the
+    # engine's ceiling). It no longer gates the merge - the hermetic jobs do -
+    # and reports its outcome in the job summary instead.
+    continue-on-error: true
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-    needs: [build, build-integration-test, set-matrix, wedged-broker]
+    needs: [build, build-integration-test, set-matrix, live-wedged-broker]
     # Chained behind the previous scenario job, not parallel to it: the live
     # config endpoint gives every install on a platform the same device id, so
     # two scenario agents at once kick each other off IoT Hub and commands land
@@ -1237,12 +1285,26 @@ jobs:
         with:
           log_file: ${{ matrix.log_file }}
 
-  update-retry:
+      - name: Record the live smoke outcome
+        if: always()
+        uses: ./.github/actions/smoke-summary
+        with:
+          job: live-sweeps
+          outcome: ${{ job.status }}
+
+
+  live-update-retry:
     permissions:
       contents: read
+    # Live smoke (sc-126320): installs from the Rewst config endpoint and talks
+    # to the real hub and engine, so it can go red for reasons that are not
+    # the agent (the hub's daily quota, an expired integration token, the
+    # engine's ceiling). It no longer gates the merge - the hermetic jobs do -
+    # and reports its outcome in the job summary instead.
+    continue-on-error: true
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-    needs: [build, build-integration-test, set-matrix, sweeps]
+    needs: [build, build-integration-test, set-matrix, live-sweeps]
     # Chained behind the previous scenario job, not parallel to it: the live
     # config endpoint gives every install on a platform the same device id, so
     # two scenario agents at once kick each other off IoT Hub and commands land
@@ -1448,12 +1510,26 @@ jobs:
         with:
           log_file: ${{ matrix.log_file }}
 
-  windows-only:
+      - name: Record the live smoke outcome
+        if: always()
+        uses: ./.github/actions/smoke-summary
+        with:
+          job: live-update-retry
+          outcome: ${{ job.status }}
+
+
+  live-windows-only:
     permissions:
       contents: read
+    # Live smoke (sc-126320): installs from the Rewst config endpoint and talks
+    # to the real hub and engine, so it can go red for reasons that are not
+    # the agent (the hub's daily quota, an expired integration token, the
+    # engine's ceiling). It no longer gates the merge - the hermetic jobs do -
+    # and reports its outcome in the job summary instead.
+    continue-on-error: true
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-    needs: [build, build-integration-test, set-matrix, update-retry]
+    needs: [build, build-integration-test, set-matrix, live-update-retry]
     # Chained behind the previous scenario job, not parallel to it: the live
     # config endpoint gives every install on a platform the same device id, so
     # two scenario agents at once kick each other off IoT Hub and commands land
@@ -1897,6 +1973,14 @@ jobs:
         uses: ./.github/actions/dump-agent-log
         with:
           log_file: ${{ matrix.log_file }}
+
+      - name: Record the live smoke outcome
+        if: always()
+        uses: ./.github/actions/smoke-summary
+        with:
+          job: live-windows-only
+          outcome: ${{ job.status }}
+
 
   # ---- Hermetic: command timeouts (default and configured) ----
   hermetic-command-timeouts:
@@ -2996,7 +3080,6 @@ jobs:
     needs: [set-matrix, build]
     permissions:
       contents: read
-    continue-on-error: true
     strategy:
       fail-fast: false
       matrix: ${{ fromJson(needs.set-matrix.outputs.matrix) }}
@@ -3193,9 +3276,15 @@ jobs:
         with:
           mode: stop
 
-  test-service-user:
+  live-service-user:
     permissions:
       contents: read
+    # Live smoke (sc-126320): installs from the Rewst config endpoint and talks
+    # to the real hub and engine, so it can go red for reasons that are not
+    # the agent (the hub's daily quota, an expired integration token, the
+    # engine's ceiling). It no longer gates the merge - the hermetic jobs do -
+    # and reports its outcome in the job summary instead.
+    continue-on-error: true
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     needs: [build, build-integration-test, set-matrix]
@@ -3294,6 +3383,14 @@ jobs:
         uses: ./.github/actions/remove-service-user
         with:
           username: ${{ matrix.service_user }}
+
+      - name: Record the live smoke outcome
+        if: always()
+        uses: ./.github/actions/smoke-summary
+        with:
+          job: live-service-user
+          outcome: ${{ job.status }}
+
 
   test-config-response-cap:
     permissions:
