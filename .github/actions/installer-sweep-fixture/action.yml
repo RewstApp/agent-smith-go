@@ -22,31 +22,12 @@ inputs:
 runs:
   using: composite
   steps:
-    - name: Run installer sweep fixture (Unix)
-      if: runner.os != 'Windows'
-      shell: bash
-      env:
-        MODE: ${{ inputs.mode }}
-        UPDATES_DIR: ${{ inputs.updates_dir }}
-        STALE_AGE_HOURS: ${{ inputs.stale_age_hours }}
-      run: |
-        set -euo pipefail
-        # Resolve pwsh up front: sudo resets PATH via secure_path on some runners.
-        pwsh_path="$(command -v pwsh)"
-        sudo "$pwsh_path" -NoProfile -File "$GITHUB_ACTION_PATH/fixture.ps1" \
-          -Mode "$MODE" \
-          -UpdatesDir "$UPDATES_DIR" \
-          -StaleAgeHours "$STALE_AGE_HOURS"
-
-    - name: Run installer sweep fixture (Windows)
-      if: runner.os == 'Windows'
+    - name: Run installer sweep fixture
       shell: pwsh
       env:
         MODE: ${{ inputs.mode }}
         UPDATES_DIR: ${{ inputs.updates_dir }}
         STALE_AGE_HOURS: ${{ inputs.stale_age_hours }}
       run: |
-        & "$env:GITHUB_ACTION_PATH/fixture.ps1" `
-          -Mode $env:MODE `
-          -UpdatesDir $env:UPDATES_DIR `
-          -StaleAgeHours ([int]$env:STALE_AGE_HOURS)
+        . "$env:GITHUB_WORKSPACE/.github/actions/_lib/Invoke-Elevated.ps1"
+        Invoke-Elevated -Script "$env:GITHUB_ACTION_PATH/fixture.ps1" -Arguments @{ Mode = $env:MODE; UpdatesDir = $env:UPDATES_DIR; StaleAgeHours = ([int]$env:STALE_AGE_HOURS) }

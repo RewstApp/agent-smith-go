@@ -38,27 +38,7 @@ inputs:
 runs:
   using: composite
   steps:
-    - name: Wait for log line (Unix)
-      if: runner.os != 'Windows'
-      shell: bash
-      env:
-        LOG_FILE: ${{ inputs.log_file }}
-        PATTERN: ${{ inputs.pattern }}
-        MAX_ATTEMPTS: ${{ inputs.max_attempts }}
-        INTERVAL: ${{ inputs.interval_seconds }}
-        BASELINE_COUNT: ${{ inputs.baseline_count }}
-      run: |
-        set -euo pipefail
-        # Resolve pwsh up front: sudo resets PATH via secure_path on some runners.
-        pwsh_path="$(command -v pwsh)"
-        args=(-LogFile "$LOG_FILE" -Pattern "$PATTERN" -MaxAttempts "$MAX_ATTEMPTS" -IntervalSeconds "$INTERVAL")
-        if [ -n "$BASELINE_COUNT" ]; then
-          args+=(-BaselineCount "$BASELINE_COUNT")
-        fi
-        sudo "$pwsh_path" -NoProfile -File "$GITHUB_ACTION_PATH/wait.ps1" "${args[@]}"
-
-    - name: Wait for log line (Windows)
-      if: runner.os == 'Windows'
+    - name: Wait for log line
       shell: pwsh
       env:
         LOG_FILE: ${{ inputs.log_file }}
@@ -67,6 +47,7 @@ runs:
         INTERVAL: ${{ inputs.interval_seconds }}
         BASELINE_COUNT: ${{ inputs.baseline_count }}
       run: |
+        . "$env:GITHUB_WORKSPACE/.github/actions/_lib/Invoke-Elevated.ps1"
         $waitArgs = @{
           LogFile         = $env:LOG_FILE
           Pattern         = $env:PATTERN
@@ -74,4 +55,4 @@ runs:
           IntervalSeconds = [int]$env:INTERVAL
         }
         if ($env:BASELINE_COUNT) { $waitArgs.BaselineCount = [int]$env:BASELINE_COUNT }
-        & "$env:GITHUB_ACTION_PATH/wait.ps1" @waitArgs
+        Invoke-Elevated -Script "$env:GITHUB_ACTION_PATH/wait.ps1" -Arguments $waitArgs

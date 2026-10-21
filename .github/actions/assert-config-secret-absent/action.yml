@@ -20,27 +20,12 @@ inputs:
 runs:
   using: composite
   steps:
-    - name: Assert secret absent from config.json (Unix)
-      if: runner.os != 'Windows'
-      shell: bash
-      env:
-        CONFIG_DIR: ${{ inputs.config_dir }}
-        ORG_ID: ${{ inputs.org_id }}
-        SECRET: ${{ inputs.secret }}
-      run: |
-        set -euo pipefail
-        # Resolve pwsh up front: sudo resets PATH via secure_path on some runners.
-        pwsh_path="$(command -v pwsh)"
-        sudo --preserve-env=SECRET "$pwsh_path" -NoProfile -File "$GITHUB_ACTION_PATH/assert.ps1" \
-          -ConfigDir "$CONFIG_DIR" \
-          -OrgId "$ORG_ID"
-
-    - name: Assert secret absent from config.json (Windows)
-      if: runner.os == 'Windows'
+    - name: Assert secret absent from config.json
       shell: pwsh
       env:
         CONFIG_DIR: ${{ inputs.config_dir }}
         ORG_ID: ${{ inputs.org_id }}
         SECRET: ${{ inputs.secret }}
       run: |
-        & "$env:GITHUB_ACTION_PATH/assert.ps1" -ConfigDir $env:CONFIG_DIR -OrgId $env:ORG_ID
+        . "$env:GITHUB_WORKSPACE/.github/actions/_lib/Invoke-Elevated.ps1"
+        Invoke-Elevated -Script "$env:GITHUB_ACTION_PATH/assert.ps1" -Arguments @{ ConfigDir = $env:CONFIG_DIR; OrgId = $env:ORG_ID }

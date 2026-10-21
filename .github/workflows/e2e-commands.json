@@ -1,0 +1,45 @@
+{
+  "_comment": "Commands the e2e scenarios send, by scenario name and platform family (unix = Linux and macOS). Each value is the exact form the Rewst trigger expects (JSON-quoted); send-command, assert-log-contains and the it-scripts resolve a scenario name here so the workflow and matrix carry no per-platform command text (sc-126318).",
+  "success": {
+    "unix": "\"echo \\\"hello world\\\"\"",
+    "windows": "\"[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12\n\n$PS_Results = New-Object -TypeName psobject\n\n# Start of typed powershell\n$PS_Results | Add-Member -MemberType NoteProperty -Name \\\"error\\\" -Value \\\"\\\"\n$PS_Results | Add-Member -MemberType NoteProperty -Name \\\"output\\\" -Value \\\"hello world`n\\\"\n\n# Post results back to Rewst\n$postData = $PS_Results | ConvertTo-Json\nInvoke-RestMethod -Method \\\"Post\\\" -Uri $post_url -Body $postData -ContentType \\\"application/json\\\"\"",
+    "expected_output": "hello world",
+    "patterns": {
+      "unix": "Command completed\nSending postback\nPostback sent",
+      "windows": "Command completed\nSending postback\nPostback already sent"
+    },
+    "_note": "The Windows form is the engine's typed-PowerShell self-posting script, which is why its log pattern ends in 'Postback already sent' where unix ends in 'Postback sent'."
+  },
+  "failure": {
+    "unix": "\"exit 1\"",
+    "windows": "\"[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12\n\n$PS_Results = New-Object -TypeName psobject\n\n# Start of typed powershell\nthrow \\\"this is a test error\\\"\n\n# Post results back to Rewst\n$postData = $PS_Results | ConvertTo-Json\nInvoke-RestMethod -Method \\\"Post\\\" -Uri $post_url -Body $postData -ContentType \\\"application/json\\\"\""
+  },
+  "timeout": {
+    "unix": "\"sleep 30\"",
+    "windows": "\"Start-Sleep -Seconds 30\""
+  },
+  "sweep": {
+    "unix": "\"sleep 180\"",
+    "windows": "\"Start-Sleep -Seconds 180\"",
+    "_note": "Long enough to outlive the engine's ~165 s ceiling: the sweep scenario force-kills the agent while this is still running."
+  },
+  "verbose": {
+    "unix": "\"yes x | head -c 209715200\"",
+    "windows": "\"$chunk = [string]::new([char]120, 1048576); 1..200 | ForEach-Object { $chunk }\"",
+    "_note": "200 MiB to stdout, then a clean exit. Quote-free and backslash-free so it survives the trip through the trigger's JSON-quoted commands field unchanged, and byte-exact so the produced counts the agent reports are predictable; three orders of magnitude past the ceiling the scenario configures, so the RSS ceiling asserted while it runs is far below what buffering the output whole would cost (sc-106105)."
+  },
+  "verbose_stderr": {
+    "unix": "\"echo keep-stdout; yes e | head -c 209715200 >&2\"",
+    "windows": "\"Write-Output keep-stdout; $chunk = [string]::new([char]101, 1048576); 1..200 | ForEach-Object { [Console]::Error.Write($chunk) }\"",
+    "_note": "A short stdout line, then 200 MiB to stderr (sc-106105; see verbose)."
+  },
+  "verbose_hang": {
+    "unix": "\"yes x | head -c 209715200; sleep 60\"",
+    "windows": "\"$chunk = [string]::new([char]120, 1048576); 1..200 | ForEach-Object { $chunk }; Start-Sleep -Seconds 60\"",
+    "_note": "200 MiB to stdout, then a hang past the command timeout (sc-106105; see verbose)."
+  },
+  "child_process_hang": {
+    "windows": "\"Start-Process -FilePath powershell -ArgumentList '-NoProfile','-Command','Start-Sleep -Seconds 91743' -WindowStyle Hidden; Start-Sleep -Seconds 30\"",
+    "_note": "Windows-only descendant-tree kill scenario (sc-108853): spawns a detached child via Start-Process tagged with a distinctive sleep duration (91743 s) used purely as a process-list marker, then hangs the parent past the configured command timeout. Single quotes stand in for the nested double quotes Start-Process's -ArgumentList would otherwise need, keeping the payload double-quote- and backslash-free like the verbose scripts."
+  }
+}

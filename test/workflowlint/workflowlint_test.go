@@ -125,8 +125,8 @@ func TestMatrixDefinesNoExtraFlagValues(t *testing.T) {
 
 // --disable-agent-postback only bites on Windows (the PowerShell executor's
 // AlwaysPostback() is false there). Exactly one step verifies it, and that
-// step must say it is Windows-only, so no other scenario runs with the agent
-// postback disabled on one platform.
+// step must sit in the Windows-only job, so no other scenario runs with the
+// agent postback disabled on one platform.
 func TestDisableAgentPostbackIsExplicitAndWindowsOnly(t *testing.T) {
 	var carriers []step
 	for _, s := range steps(t) {
@@ -144,21 +144,28 @@ func TestDisableAgentPostbackIsExplicitAndWindowsOnly(t *testing.T) {
 		)
 	}
 	s := carriers[0]
-	if !strings.Contains(s.cond, "windows") {
+	// Since sc-126318 the workflow carries no platform conditions; the step is
+	// Windows-only because it lives in the job whose matrix is Windows-only.
+	if job := jobOf(workflow(t), s.line); job != "windows-only" {
 		t.Errorf(
-			"line %d, step %q passes --disable-agent-postback without a Windows-only `if:` (got %q)",
+			"line %d, step %q passes --disable-agent-postback from job %q; "+
+				"it belongs in the windows-only job",
 			s.line,
 			s.name,
-			s.cond,
+			job,
 		)
 	}
-	if !strings.Contains(strings.ToLower(s.name), "windows") {
-		t.Errorf(
-			"line %d, step %q should name windows in its title so the platform difference is visible in the job summary",
-			s.line,
-			s.name,
-		)
+}
+
+// jobOf returns the name of the job that contains the given 1-based line.
+func jobOf(lines []string, line int) string {
+	header := regexp.MustCompile(`^  ([a-z][a-z0-9-]*):\s*$`)
+	for i := line - 1; i >= 0; i-- {
+		if m := header.FindStringSubmatch(lines[i]); m != nil {
+			return m[1]
+		}
 	}
+	return ""
 }
 
 // The Windows-only script that re-runs an update by hand must not smuggle a
@@ -238,7 +245,7 @@ func TestEveryIntegrationJobIsBounded(t *testing.T) {
 // "exceeded the maximum execution time" on the job.
 func TestEveryWaitingStepIsBounded(t *testing.T) {
 	waiting := regexp.MustCompile(
-		`(?m)^\s+uses: \./\.github/actions/(e2e-setup|install-agent|run-agent|send-command|wait-for-log-line|stub-[a-z]+|wedged-service|assert-log-[a-z]+)$|it-scripts/(wait-for|assert)`,
+		`(?m)^\s+uses: \./\.github/actions/(e2e-setup|install-agent|run-agent|send-command|wait-for-log-line|await-service-respawn|stub-[a-z]+|wedged-service|assert-log-[a-z]+)$|it-scripts/(wait-for|assert)|^\s+script: (wait-for|assert)`,
 	)
 	lines := workflow(t)
 	starts := []int{}
@@ -368,7 +375,7 @@ func TestScenarioJobsArePresentAndSmall(t *testing.T) {
 	const maxSteps = 40
 	want := []string{
 		"lifecycle", "auto-update", "update-retry", "connection", "wedged-broker",
-		"command-timeouts", "output-bounds", "timeout-composition", "sweeps", "wedged-stop",
+		"command-timeouts", "output-bounds", "timeout-composition", "sweeps", "windows-only",
 		"test-hermetic", "test-service-user", "test-config-response-cap",
 	}
 	all := jobs(workflow(t))
@@ -393,5 +400,73 @@ func TestScenarioJobsArePresentAndSmall(t *testing.T) {
 	}
 	if _, ok := all["test"]; ok {
 		t.Error("the catch-all `test` job is back; scenarios belong in their own jobs")
+	}
+}
+
+// The e2e workflow must not branch on the platform (sc-126318): every twin
+// pair of `(Unix)`/`(Windows)` steps was a place the two platforms could
+// drift, and every drift read as a flake. Platform differences that genuinely
+// exist live inside the composite actions (it-script's elevation, the service
+// actions' systemctl/launchctl/sc.exe) or in the Windows-only job's matrix,
+// never as a condition on a workflow step.
+func TestWorkflowHasNoPlatformBranches(t *testing.T) {
+	for i, ln := range workflow(t) {
+		if strings.Contains(ln, "runner.os") {
+			t.Errorf(
+				"line %d branches on runner.os; move the platform difference into the action: %s",
+				i+1, strings.TrimSpace(ln),
+			)
+		}
+		if regexp.MustCompile(`matrix\.os\s*==`).MatchString(ln) {
+			t.Errorf(
+				"line %d branches on matrix.os; use the windows-only job or an action input: %s",
+				i+1, strings.TrimSpace(ln),
+			)
+		}
+		if regexp.MustCompile(`- name: .*\((Unix|Windows|Linux|macOS)\)\s*$`).MatchString(ln) {
+			t.Errorf("line %d is a platform twin step: %s", i+1, strings.TrimSpace(ln))
+		}
+	}
+}
+
+// The matrix describes an install - where the binary, config, log and
+// service live on each platform - and nothing else. Per-platform command
+// text lives in the catalog (.github/workflows/e2e-commands.json) and is
+// resolved by scenario name, so a command cannot drift between platforms
+// inside the workflow (sc-126318).
+func TestMatrixCarriesOnlyInstallFacts(t *testing.T) {
+	allowed := map[string]bool{
+		"os": true, "binary": true, "it_binary": true, "config_dir": true, "log_file": true,
+		"service": true, "scripts_dir": true, "scripts_dir_owner": true, "program_dir": true,
+		"uninstall_paths": true, "service_user": true, "service_username_arg": true,
+		"service_identity": true,
+	}
+	lines := workflow(t)
+	start, end := -1, -1
+	for i, ln := range lines {
+		if strings.Contains(ln, "$entries = @(") {
+			start = i
+		}
+		if start >= 0 && strings.Contains(ln, "$payload = @{ include = $entries }") {
+			end = i
+			break
+		}
+	}
+	if start < 0 || end < 0 {
+		t.Fatal("could not find the matrix entries in set-matrix")
+	}
+	key := regexp.MustCompile(`^\s+([a-z_]+) = `)
+	for i := start; i < end; i++ {
+		m := key.FindStringSubmatch(lines[i])
+		if m == nil {
+			continue
+		}
+		if !allowed[m[1]] {
+			t.Errorf(
+				"line %d: matrix key %q is not an install fact; commands and patterns belong in e2e-commands.json",
+				i+1,
+				m[1],
+			)
+		}
 	}
 }

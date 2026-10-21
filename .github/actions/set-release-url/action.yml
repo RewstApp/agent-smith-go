@@ -32,26 +32,7 @@ inputs:
 runs:
   using: composite
   steps:
-    - name: Set release url (Unix)
-      if: runner.os != 'Windows'
-      shell: bash
-      env:
-        CONFIG_DIR: ${{ inputs.config_dir }}
-        ORG_ID: ${{ inputs.org_id }}
-        MODE: ${{ inputs.mode }}
-        URL: ${{ inputs.url }}
-        FILE_NAME: ${{ inputs.file_name }}
-      run: |
-        set -euo pipefail
-        # Resolve pwsh up front: sudo resets PATH via secure_path on some runners.
-        pwsh_path="$(command -v pwsh)"
-        sudo "$pwsh_path" -NoProfile -File "$GITHUB_ACTION_PATH/fixture.ps1" \
-          -OverrideFile "$CONFIG_DIR/$ORG_ID/$FILE_NAME" \
-          -Mode "$MODE" \
-          -Url "$URL"
-
-    - name: Set release url (Windows)
-      if: runner.os == 'Windows'
+    - name: Set release url
       shell: pwsh
       env:
         CONFIG_DIR: ${{ inputs.config_dir }}
@@ -60,7 +41,5 @@ runs:
         URL: ${{ inputs.url }}
         FILE_NAME: ${{ inputs.file_name }}
       run: |
-        & "$env:GITHUB_ACTION_PATH/fixture.ps1" `
-          -OverrideFile (Join-Path (Join-Path $env:CONFIG_DIR $env:ORG_ID) $env:FILE_NAME) `
-          -Mode $env:MODE `
-          -Url $env:URL
+        . "$env:GITHUB_WORKSPACE/.github/actions/_lib/Invoke-Elevated.ps1"
+        Invoke-Elevated -Script "$env:GITHUB_ACTION_PATH/fixture.ps1" -Arguments @{ OverrideFile = (Join-Path (Join-Path $env:CONFIG_DIR $env:ORG_ID) $env:FILE_NAME); Mode = $env:MODE; Url = $env:URL }

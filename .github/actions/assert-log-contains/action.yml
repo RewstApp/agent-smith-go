@@ -14,7 +14,15 @@ inputs:
     required: true
   patterns:
     description: "Newline-separated list of required substrings"
-    required: true
+    required: false
+    default: ""
+  scenario:
+    description: >-
+      Name of an entry in .github/workflows/e2e-commands.json whose
+      `patterns` for this platform family are asserted instead of `patterns`
+      (sc-126318).
+    required: false
+    default: ""
   timeout_seconds:
     description: "How long to keep polling for the patterns before failing. Success returns as soon as every pattern is present."
     required: false
@@ -31,39 +39,16 @@ inputs:
 runs:
   using: composite
   steps:
-    - name: Assert log contains (Unix)
-      if: runner.os != 'Windows'
-      shell: bash
-      env:
-        LOG_FILE: ${{ inputs.log_file }}
-        PATTERNS: ${{ inputs.patterns }}
-        TIMEOUT_SECONDS: ${{ inputs.timeout_seconds }}
-        INTERVAL_SECONDS: ${{ inputs.interval_seconds }}
-        SUBSCRIBED: ${{ inputs.subscribed_topic_qos }}
-      run: |
-        set -euo pipefail
-        # Resolve pwsh up front: sudo resets PATH via secure_path on some runners.
-        pwsh_path="$(command -v pwsh)"
-        sudo "$pwsh_path" -NoProfile -File "$GITHUB_ACTION_PATH/assert.ps1" \
-          -LogFile "$LOG_FILE" \
-          -Patterns "$PATTERNS" \
-          -TimeoutSeconds "$TIMEOUT_SECONDS" \
-          -IntervalSeconds "$INTERVAL_SECONDS" \
-          -SubscribedTopicQos "$SUBSCRIBED"
-
-    - name: Assert log contains (Windows)
-      if: runner.os == 'Windows'
+    - name: Assert log contains
       shell: pwsh
       env:
         LOG_FILE: ${{ inputs.log_file }}
         PATTERNS: ${{ inputs.patterns }}
+        SCENARIO: ${{ inputs.scenario }}
+        CATALOG: ${{ github.workspace }}/.github/workflows/e2e-commands.json
         TIMEOUT_SECONDS: ${{ inputs.timeout_seconds }}
         INTERVAL_SECONDS: ${{ inputs.interval_seconds }}
         SUBSCRIBED: ${{ inputs.subscribed_topic_qos }}
       run: |
-        & "$env:GITHUB_ACTION_PATH/assert.ps1" `
-          -LogFile $env:LOG_FILE `
-          -Patterns $env:PATTERNS `
-          -TimeoutSeconds ([int]$env:TIMEOUT_SECONDS) `
-          -IntervalSeconds ([int]$env:INTERVAL_SECONDS) `
-          -SubscribedTopicQos $env:SUBSCRIBED
+        . "$env:GITHUB_WORKSPACE/.github/actions/_lib/Invoke-Elevated.ps1"
+        Invoke-Elevated -Script "$env:GITHUB_ACTION_PATH/assert.ps1" -Arguments @{ LogFile = $env:LOG_FILE; Patterns = $env:PATTERNS; Scenario = $env:SCENARIO; Catalog = $env:CATALOG; TimeoutSeconds = ([int]$env:TIMEOUT_SECONDS); IntervalSeconds = ([int]$env:INTERVAL_SECONDS); SubscribedTopicQos = $env:SUBSCRIBED }

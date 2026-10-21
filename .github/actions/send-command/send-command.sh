@@ -47,14 +47,33 @@
 # from action.yml so test/sendcommand can run it against stub servers.
 set -uo pipefail
 
+fail() { echo "::error title=send-command: $1::$2"; exit 1; }
+warn() { echo "::warning title=send-command: $1::$2"; }
+
+# A scenario name resolves to the command for this platform family from the
+# catalog, so the workflow and the matrix carry no per-platform command text
+# (sc-126318). An explicit COMMANDS / EXPECTED_OUTPUT still wins, which is also
+# how test/sendcommand drives the script without the catalog.
+SCENARIO="${SCENARIO:-}"
+COMMANDS="${COMMANDS:-}"
+EXPECTED_OUTPUT="${EXPECTED_OUTPUT:-}"
+if [ -n "$SCENARIO" ]; then
+  catalog="${E2E_CATALOG:-${GITHUB_WORKSPACE:-.}/.github/workflows/e2e-commands.json}"
+  family=unix
+  [ "${RUNNER_OS:-}" = "Windows" ] && family=windows
+  if [ -z "$COMMANDS" ]; then
+    COMMANDS="$(jq -er --arg s "$SCENARIO" --arg f "$family" '.[$s][$f]' "$catalog")" \
+      || fail "unknown scenario" "scenario '$SCENARIO' has no '$family' command in $catalog"
+  fi
+  if [ -z "$EXPECTED_OUTPUT" ]; then
+    EXPECTED_OUTPUT="$(jq -r --arg s "$SCENARIO" '.[$s].expected_output // ""' "$catalog")"
+  fi
+fi
+
 : "${TRIGGER_URL:?}" "${DEVICE_ID:?}" "${COMMANDS:?}"
 MAX_TIME="${MAX_TIME:-300}"
 ALLOW_ENGINE_TIMEOUT="${ALLOW_ENGINE_TIMEOUT:-false}"
 RETRY_DELAY="${RETRY_DELAY:-10}"
-EXPECTED_OUTPUT="${EXPECTED_OUTPUT:-}"
-
-fail() { echo "::error title=send-command: $1::$2"; exit 1; }
-warn() { echo "::warning title=send-command: $1::$2"; }
 
 # Body and status come back on one stream - curl appends the status as a final
 # line - rather than via --output to a temp file. On windows-latest this runs

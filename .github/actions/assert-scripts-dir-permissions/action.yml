@@ -24,25 +24,11 @@ inputs:
 runs:
   using: composite
   steps:
-    - name: Assert scripts directory permissions (Unix)
-      if: runner.os != 'Windows'
-      shell: bash
-      env:
-        SCRIPTS_DIR: ${{ inputs.scripts_dir }}
-        EXPECTED_OWNER: ${{ inputs.expected_owner }}
-      run: |
-        set -euo pipefail
-        # Resolve pwsh up front: sudo resets PATH via secure_path on some runners.
-        pwsh_path="$(command -v pwsh)"
-        sudo "$pwsh_path" -NoProfile -File "$GITHUB_ACTION_PATH/fixture.ps1" \
-          -ScriptsDir "$SCRIPTS_DIR" \
-          -ExpectedOwner "$EXPECTED_OWNER"
-
-    - name: Assert scripts directory permissions (Windows)
-      if: runner.os == 'Windows'
+    - name: Assert scripts directory permissions
       shell: pwsh
       env:
         SCRIPTS_DIR: ${{ inputs.scripts_dir }}
         EXPECTED_OWNER: ${{ inputs.expected_owner }}
       run: |
-        & "$env:GITHUB_ACTION_PATH/fixture.ps1" -ScriptsDir $env:SCRIPTS_DIR -ExpectedOwner $env:EXPECTED_OWNER
+        . "$env:GITHUB_WORKSPACE/.github/actions/_lib/Invoke-Elevated.ps1"
+        Invoke-Elevated -Script "$env:GITHUB_ACTION_PATH/fixture.ps1" -Arguments @{ ScriptsDir = $env:SCRIPTS_DIR; ExpectedOwner = $env:EXPECTED_OWNER }

@@ -39,15 +39,20 @@ type stubEngine struct {
 	mu        sync.Mutex
 	responses []response
 	requests  int
-	server    *httptest.Server
+	// lastCommands is the commands form field of the most recent request, so a
+	// test can check what the script actually sent.
+	lastCommands string
+	server       *httptest.Server
 }
 
 func newStubEngine(t *testing.T, responses ...response) *stubEngine {
 	t.Helper()
 	s := &stubEngine{responses: responses}
 	s.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseMultipartForm(1 << 20)
 		s.mu.Lock()
 		defer s.mu.Unlock()
+		s.lastCommands = r.FormValue("commands")
 		i := s.requests
 		if i >= len(s.responses) {
 			i = len(s.responses) - 1
@@ -480,5 +485,99 @@ func TestOutputs_NothingWrittenOnFailure(t *testing.T) {
 	}
 	if outputs != "" {
 		t.Errorf("a failed send wrote step outputs: %q", outputs)
+	}
+}
+
+func (s *stubEngine) commands() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.lastCommands
+}
+
+func catalogPath(t *testing.T) string {
+	t.Helper()
+	p, err := filepath.Abs(filepath.Join("..", "..", ".github", "workflows", "e2e-commands.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(p); err != nil {
+		t.Fatalf("catalog not found at %s: %v", p, err)
+	}
+	return p
+}
+
+// A scenario name resolves to the catalog's command for the runner's platform
+// family and to its expected output, so the workflow carries neither
+// (sc-126318). COMMANDS is cleared because run() always sets it.
+func TestScenario_ResolvesTheUnixCommandAndExpectedOutput(t *testing.T) {
+	engine := newStubEngine(t, response{200, goodBody})
+	code, out := run(t, engine.server.URL,
+		"COMMANDS=", "SCENARIO=success", "RUNNER_OS=Linux", "E2E_CATALOG="+catalogPath(t))
+	if code != 0 {
+		t.Fatalf("exit %d\n%s", code, out)
+	}
+	// curl's --form treats the catalog value's surrounding quotes as form
+	// quoting and unescapes the inner ones, so the engine receives the bare
+	// command - exactly what the matrix string produced before.
+	if got := engine.commands(); got != `echo "hello world"` {
+		t.Errorf("sent commands %q, want the catalog's unix success command", got)
+	}
+	wantContains(t, out, "class: success")
+}
+
+func TestScenario_ResolvesTheWindowsCommand(t *testing.T) {
+	engine := newStubEngine(t, response{200, goodBody})
+	code, out := run(t, engine.server.URL,
+		"COMMANDS=", "SCENARIO=timeout", "RUNNER_OS=Windows", "E2E_CATALOG="+catalogPath(t))
+	if code != 0 {
+		t.Fatalf("exit %d\n%s", code, out)
+	}
+	if got := engine.commands(); got != `Start-Sleep -Seconds 30` {
+		t.Errorf("sent commands %q, want the catalog's windows timeout command", got)
+	}
+}
+
+// The expected output from the catalog is enforced: a foreign result fails as
+// wrong-result exactly as it does with an explicit expected_output.
+func TestScenario_ExpectedOutputFromTheCatalogIsEnforced(t *testing.T) {
+	engine := newStubEngine(t, response{200, otherBody})
+	code, out := run(t, engine.server.URL,
+		"COMMANDS=", "SCENARIO=success", "RUNNER_OS=Linux", "E2E_CATALOG="+catalogPath(t))
+	if code == 0 {
+		t.Fatal("expected wrong-result to fail")
+	}
+	// The script prints the expectation shell-escaped (printf %q), hence the
+	// backslash.
+	wantContains(t, out, "wrong-result", `the expected hello\ world`)
+}
+
+func TestScenario_UnknownNameFailsBeforeSending(t *testing.T) {
+	engine := newStubEngine(t, response{200, goodBody})
+	code, out := run(t, engine.server.URL,
+		"COMMANDS=", "SCENARIO=no-such-scenario", "RUNNER_OS=Linux", "E2E_CATALOG="+catalogPath(t))
+	if code == 0 {
+		t.Fatal("expected an unknown scenario to fail")
+	}
+	wantContains(t, out, "unknown scenario")
+	if engine.count() != 0 {
+		t.Errorf("the engine was called %d times for an unknown scenario", engine.count())
+	}
+}
+
+func TestScenario_ExplicitCommandsWinOverTheScenario(t *testing.T) {
+	engine := newStubEngine(t, response{200, goodBody})
+	code, out := run(
+		t,
+		engine.server.URL,
+		`COMMANDS="echo explicit"`,
+		"SCENARIO=timeout",
+		"RUNNER_OS=Linux",
+		"E2E_CATALOG="+catalogPath(t),
+	)
+	if code != 0 {
+		t.Fatalf("exit %d\n%s", code, out)
+	}
+	if got := engine.commands(); got != `echo explicit` {
+		t.Errorf("sent commands %q, want the explicit value", got)
 	}
 }

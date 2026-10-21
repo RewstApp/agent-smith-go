@@ -1,0 +1,93 @@
+name: Run an e2e helper script
+description: >-
+  Run one of the PowerShell helpers under .github/workflows/it-scripts as the
+  privileged user on every platform. The scripts read their inputs from the
+  environment the calling step sets and write step outputs through
+  GITHUB_OUTPUT, so the caller is one platform-neutral step. The agent's log,
+  config and scripts directories are root-owned on Linux and macOS, hence sudo
+  there; the environment is preserved whole (sudo -E, which the runner's
+  unrestricted sudoers permits) rather than through a per-step allow-list that
+  drifted between twins (sc-126318). This action is the single place the
+  workflow's helper steps branch on the platform.
+
+inputs:
+  script:
+    description: "Helper name under .github/workflows/it-scripts, without the .ps1 suffix"
+    required: true
+
+# The helpers write their results to GITHUB_OUTPUT under these names; a
+# composite action must list what it exposes, so the union of every helper's
+# outputs is declared here. A helper that does not write a name leaves it empty.
+outputs:
+  subscribed:
+    description: "Step output `subscribed` written by the helper, when it writes one"
+    value: ${{ steps.unix.outputs.subscribed || steps.windows.outputs.subscribed }}
+  completed:
+    description: "Step output `completed` written by the helper, when it writes one"
+    value: ${{ steps.unix.outputs.completed || steps.windows.outputs.completed }}
+  truncated:
+    description: "Step output `truncated` written by the helper, when it writes one"
+    value: ${{ steps.unix.outputs.truncated || steps.windows.outputs.truncated }}
+  timed_out:
+    description: "Step output `timed_out` written by the helper, when it writes one"
+    value: ${{ steps.unix.outputs.timed_out || steps.windows.outputs.timed_out }}
+  path:
+    description: "Step output `path` written by the helper, when it writes one"
+    value: ${{ steps.unix.outputs.path || steps.windows.outputs.path }}
+  swept:
+    description: "Step output `swept` written by the helper, when it writes one"
+    value: ${{ steps.unix.outputs.swept || steps.windows.outputs.swept }}
+  retrying:
+    description: "Step output `retrying` written by the helper, when it writes one"
+    value: ${{ steps.unix.outputs.retrying || steps.windows.outputs.retrying }}
+  succeeded:
+    description: "Step output `succeeded` written by the helper, when it writes one"
+    value: ${{ steps.unix.outputs.succeeded || steps.windows.outputs.succeeded }}
+  stopped:
+    description: "Step output `stopped` written by the helper, when it writes one"
+    value: ${{ steps.unix.outputs.stopped || steps.windows.outputs.stopped }}
+  started:
+    description: "Step output `started` written by the helper, when it writes one"
+    value: ${{ steps.unix.outputs.started || steps.windows.outputs.started }}
+  scripts_dir:
+    description: "Step output `scripts_dir` written by the helper, when it writes one"
+    value: ${{ steps.unix.outputs.scripts_dir || steps.windows.outputs.scripts_dir }}
+  saved:
+    description: "Step output `saved` written by the helper, when it writes one"
+    value: ${{ steps.unix.outputs.saved || steps.windows.outputs.saved }}
+  renewed:
+    description: "Step output `renewed` written by the helper, when it writes one"
+    value: ${{ steps.unix.outputs.renewed || steps.windows.outputs.renewed }}
+  lost:
+    description: "Step output `lost` written by the helper, when it writes one"
+    value: ${{ steps.unix.outputs.lost || steps.windows.outputs.lost }}
+  backoffs:
+    description: "Step output `backoffs` written by the helper, when it writes one"
+    value: ${{ steps.unix.outputs.backoffs || steps.windows.outputs.backoffs }}
+  attempt:
+    description: "Step output `attempt` written by the helper, when it writes one"
+    value: ${{ steps.unix.outputs.attempt || steps.windows.outputs.attempt }}
+
+runs:
+  using: composite
+  steps:
+    - name: Run helper (Unix, elevated)
+      id: unix
+      if: runner.os != 'Windows'
+      shell: bash
+      env:
+        IT_SCRIPT: ${{ inputs.script }}
+      run: |
+        set -euo pipefail
+        # Resolve pwsh up front: sudo resets PATH via secure_path on some runners.
+        pwsh_path="$(command -v pwsh)"
+        sudo -E "$pwsh_path" -NoProfile -File "$GITHUB_WORKSPACE/.github/workflows/it-scripts/$IT_SCRIPT.ps1"
+
+    - name: Run helper (Windows)
+      id: windows
+      if: runner.os == 'Windows'
+      shell: pwsh
+      env:
+        IT_SCRIPT: ${{ inputs.script }}
+      run: |
+        & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/$env:IT_SCRIPT.ps1"

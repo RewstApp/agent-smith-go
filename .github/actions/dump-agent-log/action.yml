@@ -1,0 +1,32 @@
+name: Dump the agent log
+description: >-
+  Print the last 400 lines of the agent log into a collapsed group, for the
+  failure path of a scenario job. The log is root-owned on Linux and macOS.
+
+inputs:
+  log_file:
+    description: "Path to the agent log file"
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Dump agent log (Unix)
+      if: runner.os != 'Windows'
+      shell: bash
+      env:
+        LOG_FILE: ${{ inputs.log_file }}
+      run: |
+        echo "::group::Last 400 agent log lines ($LOG_FILE)"
+        sudo tail -n 400 "$LOG_FILE" || echo "(no log file)"
+        echo "::endgroup::"
+
+    - name: Dump agent log (Windows)
+      if: runner.os == 'Windows'
+      shell: pwsh
+      env:
+        LOG_FILE: ${{ inputs.log_file }}
+      run: |
+        Write-Output "::group::Last 400 agent log lines ($env:LOG_FILE)"
+        if (Test-Path $env:LOG_FILE) { Get-Content $env:LOG_FILE -Tail 400 } else { Write-Output "(no log file)" }
+        Write-Output "::endgroup::"

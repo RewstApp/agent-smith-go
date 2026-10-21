@@ -14,9 +14,13 @@
 # sent, so the candidates are matched on content (sc-126317).
 $baseline = [int]$env:BASELINE
 $command = $env:COMMAND
+if (-not $command -and $env:SCENARIO) {
+  . "$PSScriptRoot/lib/E2ECommands.ps1"
+  $command = Get-E2ECommand -Scenario $env:SCENARIO
+}
 try { $command = $command | ConvertFrom-Json -ErrorAction Stop } catch { }
 if (-not $command) {
-  Write-Error "COMMAND is required: the script file is identified by the command it holds"
+  Write-Error "COMMAND or SCENARIO is required: the script file is identified by the command it holds"
   exit 1
 }
 for ($i = 1; $i -le 60; $i++) {
