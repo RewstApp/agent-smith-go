@@ -148,7 +148,8 @@ func TestDisableAgentPostbackIsExplicitAndWindowsOnly(t *testing.T) {
 	// Windows-only because it lives in the job whose matrix is Windows-only.
 	if job := jobOf(workflow(t), s.line); job != "windows-only" {
 		t.Errorf(
-			"line %d, step %q passes --disable-agent-postback from job %q; it belongs in the windows-only job",
+			"line %d, step %q passes --disable-agent-postback from job %q; "+
+				"it belongs in the windows-only job",
 			s.line,
 			s.name,
 			job,
@@ -411,10 +412,16 @@ func TestScenarioJobsArePresentAndSmall(t *testing.T) {
 func TestWorkflowHasNoPlatformBranches(t *testing.T) {
 	for i, ln := range workflow(t) {
 		if strings.Contains(ln, "runner.os") {
-			t.Errorf("line %d branches on runner.os; move the platform difference into the action: %s", i+1, strings.TrimSpace(ln))
+			t.Errorf(
+				"line %d branches on runner.os; move the platform difference into the action: %s",
+				i+1, strings.TrimSpace(ln),
+			)
 		}
 		if regexp.MustCompile(`matrix\.os\s*==`).MatchString(ln) {
-			t.Errorf("line %d branches on matrix.os; use the windows-only job or an action input: %s", i+1, strings.TrimSpace(ln))
+			t.Errorf(
+				"line %d branches on matrix.os; use the windows-only job or an action input: %s",
+				i+1, strings.TrimSpace(ln),
+			)
 		}
 		if regexp.MustCompile(`- name: .*\((Unix|Windows|Linux|macOS)\)\s*$`).MatchString(ln) {
 			t.Errorf("line %d is a platform twin step: %s", i+1, strings.TrimSpace(ln))
