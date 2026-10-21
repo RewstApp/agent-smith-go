@@ -512,7 +512,8 @@ func TestMergeGateIsHermeticAndTheLiveSuiteIsASmoke(t *testing.T) {
 		if !strings.HasPrefix(name, "live-") && coe {
 			t.Errorf("job %q is not a live smoke but carries continue-on-error; it must gate", name)
 		}
-		if strings.HasPrefix(name, "live-") && !strings.Contains(strings.Join(block, "\n"), "actions/smoke-summary") {
+		recorded := strings.Contains(strings.Join(block, "\n"), "actions/smoke-summary")
+		if strings.HasPrefix(name, "live-") && !recorded {
 			t.Errorf("live job %q does not record its outcome in the job summary", name)
 		}
 	}
