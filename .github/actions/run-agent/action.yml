@@ -16,6 +16,9 @@ runs:
       if: runner.os != 'Windows'
       shell: bash
       run: |
+        # A downloaded artifact is not executable; make it so here rather than
+        # with a platform-conditioned step in every job that runs the binary.
+        chmod +x "./dist/${{ inputs.binary }}"
         sudo "./dist/${{ inputs.binary }}" ${{ inputs.args }}
 
     - name: Run agent (Windows)

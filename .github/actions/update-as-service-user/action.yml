@@ -1,0 +1,60 @@
+name: Re-register the service as a service account via the update flow
+description: >-
+  Run the agent's --update with --service-username so the service is
+  re-registered under the provisioned account. Windows accounts need the
+  password the provisioning step generated; Unix accounts have none, and the
+  agent rejects an empty --service-password, so the platform difference lives
+  here rather than as twin steps in the job (sc-126318).
+
+inputs:
+  binary:
+    description: "Agent binary under ./dist"
+    required: true
+  org_id:
+    description: "Org id"
+    required: true
+  github_token:
+    description: "GitHub token for the update's artifact access"
+    required: true
+  service_username:
+    description: "Service account name"
+    required: true
+  service_password:
+    description: "Service account password (Windows only)"
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Re-register via update flow (Unix)
+      if: runner.os != 'Windows'
+      shell: bash
+      env:
+        BINARY: ${{ inputs.binary }}
+        ORG_ID: ${{ inputs.org_id }}
+        GH_TOKEN: ${{ inputs.github_token }}
+        SERVICE_USERNAME: ${{ inputs.service_username }}
+      run: |
+        sudo "./dist/$BINARY" \
+          --update \
+          --org-id "$ORG_ID" \
+          --github-token "$GH_TOKEN" \
+          --service-username "$SERVICE_USERNAME"
+
+    - name: Re-register via update flow (Windows)
+      if: runner.os == 'Windows'
+      shell: pwsh
+      env:
+        BINARY: ${{ inputs.binary }}
+        ORG_ID: ${{ inputs.org_id }}
+        GH_TOKEN: ${{ inputs.github_token }}
+        SERVICE_USERNAME: ${{ inputs.service_username }}
+        SERVICE_PASSWORD: ${{ inputs.service_password }}
+      run: |
+        & "./dist/$env:BINARY" `
+          --update `
+          --org-id $env:ORG_ID `
+          --github-token $env:GH_TOKEN `
+          --service-username $env:SERVICE_USERNAME `
+          --service-password $env:SERVICE_PASSWORD
