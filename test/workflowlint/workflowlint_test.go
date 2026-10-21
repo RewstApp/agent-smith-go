@@ -146,10 +146,10 @@ func TestDisableAgentPostbackIsExplicitAndWindowsOnly(t *testing.T) {
 	s := carriers[0]
 	// Since sc-126318 the workflow carries no platform conditions; the step is
 	// Windows-only because it lives in the job whose matrix is Windows-only.
-	if job := jobOf(workflow(t), s.line); job != "windows-only" {
+	if job := jobOf(workflow(t), s.line); job != "live-windows-only" {
 		t.Errorf(
 			"line %d, step %q passes --disable-agent-postback from job %q; "+
-				"it belongs in the windows-only job",
+				"it belongs in the live-windows-only job",
 			s.line,
 			s.name,
 			job,
@@ -374,10 +374,11 @@ func TestInlineSleepsAreInsidePollLoops(t *testing.T) {
 func TestScenarioJobsArePresentAndSmall(t *testing.T) {
 	const maxSteps = 40
 	want := []string{
-		"lifecycle", "auto-update", "wedged-broker", "sweeps", "update-retry", "windows-only",
+		"live-lifecycle", "live-auto-update", "live-wedged-broker", "live-sweeps",
+		"live-update-retry", "live-windows-only", "live-service-user",
 		"hermetic-command-timeouts", "hermetic-output-bounds", "hermetic-timeout-composition",
 		"hermetic-connection", "hermetic-child-process",
-		"test-hermetic", "test-service-user", "test-config-response-cap",
+		"test-hermetic", "test-config-response-cap",
 	}
 	all := jobs(workflow(t))
 	for _, name := range want {
@@ -485,6 +486,34 @@ func TestHermeticJobsNeverCallTheLiveEngine(t *testing.T) {
 			if strings.Contains(ln, "IT_SEND_COMMAND_TRIGGER_URL") {
 				t.Errorf("job %q sends through the live engine: %s", name, strings.TrimSpace(ln))
 			}
+		}
+	}
+}
+
+// The merge gate is hermetic (sc-126320): every job that talks to the live
+// Rewst engine or IoT Hub is a `live-*` smoke with continue-on-error, so its
+// red - the hub's daily quota, an expired token, the engine's ceiling - never
+// fails the run; and no hermetic or stub-only job may carry
+// continue-on-error, or a real agent regression would pass unnoticed.
+func TestMergeGateIsHermeticAndTheLiveSuiteIsASmoke(t *testing.T) {
+	for name, block := range jobs(workflow(t)) {
+		if name == "build" {
+			continue
+		}
+		coe := false
+		for _, ln := range block {
+			if strings.TrimSpace(ln) == "continue-on-error: true" {
+				coe = true
+			}
+		}
+		if strings.HasPrefix(name, "live-") && !coe {
+			t.Errorf("live job %q gates the run; it must carry continue-on-error: true", name)
+		}
+		if !strings.HasPrefix(name, "live-") && coe {
+			t.Errorf("job %q is not a live smoke but carries continue-on-error; it must gate", name)
+		}
+		if strings.HasPrefix(name, "live-") && !strings.Contains(strings.Join(block, "\n"), "actions/smoke-summary") {
+			t.Errorf("live job %q does not record its outcome in the job summary", name)
 		}
 	}
 }
