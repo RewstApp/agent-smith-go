@@ -30,12 +30,12 @@ jobs:
   # ---- Auto-update: happy path, tampered and missing digests ----
   # ---- Connection: reconnect after disruption, SAS renewal ----
   # ---- Broker withholding SUBACK: bounded subscribe, prompt stop, recovery ----
-  # ---- Command timeouts: default, configured, child-process kill ----
+  # ---- Command timeouts: default and configured ----
   # ---- Output bounds: stdout and stderr floods ----
   # ---- Output bound and command timeout composed ----
   # ---- Startup sweeps: stranded scripts and installers ----
   # ---- Auto-update retry schedule and stop during backoff ----
-  # ---- Windows-only: postback disabled, wedged stop aborts update/uninstall, locked directory uninstall ----
+  # ---- Windows-only: postback disabled, child-process kill, wedged stop aborts update/uninstall, locked directory uninstall ----
   # ---- Config-fetch response size ceiling (sc-112405) ----
   # Config mode read the config endpoint's POST response with a bare
   # io.ReadAll. configHTTPTimeout (5 minutes) bounded the request in time but
@@ -436,15 +436,6 @@ jobs:
       # Windows-only matrix value that seven unrelated update steps inherited).
       # The syslog update below runs without it, which re-enables the agent
       # postback - every --update resets the option from its own flags.
-
-      - name: Send test command (windows postback verification)
-        timeout-minutes: 20
-        uses: ./.github/actions/send-command
-        with:
-          trigger_url: ${{ vars.IT_SEND_COMMAND_TRIGGER_URL }}
-          device_id: ${{ steps.setup.outputs.device_id }}
-          commands: ${{ matrix.success_commands }}
-          expected_output: ${{ matrix.success_output }}
 
       - name: Update agent with syslog
         timeout-minutes: 10
@@ -1521,142 +1512,6 @@ jobs:
           LOG_FILE: ${{ matrix.log_file }}
           BASELINE: ${{ steps.timeout_baseline.outputs.completed }}
 
-      - name: Baseline "Subscribed to messages" before the child-process timeout update
-        id: bl_sub_child_update
-        uses: ./.github/actions/capture-log-count
-        with:
-          log_file: ${{ matrix.log_file }}
-          pattern: "Subscribed to messages"
-
-      - name: Enable a longer command timeout for the child-process scenario
-        timeout-minutes: 10
-        uses: ./.github/actions/run-agent
-        with:
-          binary: ${{ matrix.binary }}
-          args: --update --org-id ${{ vars.IT_ORG_ID }} --command-timeout-seconds 15 --github-token ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Wait for fresh subscription after child-process-scenario timeout update
-        timeout-minutes: 6
-        uses: ./.github/actions/wait-for-log-line
-        with:
-          log_file: ${{ matrix.log_file }}
-          pattern: Subscribed to messages
-          baseline_count: ${{ steps.bl_sub_child_update.outputs.count }}
-          max_attempts: "60"
-          interval_seconds: "2"
-
-      - name: Capture child-process-kill baseline counts
-        id: child_process_kill_baseline
-        shell: pwsh
-        env:
-          LOG_FILE: ${{ matrix.log_file }}
-        run: |
-          & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/capture-command-timeout-baseline-counts.ps1"
-
-      # send-command (the composite action used everywhere else in this file)
-      # blocks until the device's postback round-trips back - confirmed by the
-      # first attempt at this scenario, where that call alone took ~11-25s for
-      # a 5-15s configured timeout. For every other scenario that is fine
-      # because they only ever inspect the agent's log afterward, but here it
-      # means the full timeout+kill cycle has already completed by the time a
-      # following step could check the child's *live* process state - too
-      # late to distinguish "job object correctly killed it" from "it never
-      # spawned at all", which is exactly the distinction this scenario needs
-      # to make. So the same curl call is sent in the background here, polled
-      # for the child appearing while it (and the parent's timeout) are still
-      # running, and only then waited on for its own completion.
-
-      - name: Send command that spawns a child process and hangs, then wait for it to start
-        timeout-minutes: 6
-        shell: bash
-        env:
-          TRIGGER_URL: ${{ vars.IT_SEND_COMMAND_TRIGGER_URL }}
-          DEVICE_ID: ${{ steps.setup.outputs.device_id }}
-          COMMANDS: ${{ matrix.child_process_hang_commands }}
-        run: |
-          # This scenario cannot use the send-command action (it needs the call
-          # backgrounded so it can inspect the child's live process state), but it
-          # must not re-introduce the bug that action exists to fix: a discarded
-          # response means an engine that never dispatched the command is reported
-          # as success, and the assertion below fails instead. Same checks, inline.
-          # Unlike the sweep scenario this one does not depend on the engine
-          # timeout - it reinstalls with a 15s command timeout above, so the
-          # postback round-trips long before the engine's ceiling.
-          set -uo pipefail
-          resp="$RUNNER_TEMP/child-scenario-response.json"
-          curl --silent --show-error --location \
-            --max-time 300 \
-            --write-out '\n%{http_code}' \
-            --form "device_id=\"$DEVICE_ID\"" \
-            --form "commands=$COMMANDS" \
-            "$TRIGGER_URL" > "$resp" &
-          curl_pid=$!
-
-          pwsh -NoProfile -File "$GITHUB_WORKSPACE/.github/workflows/it-scripts/wait-for-child-process-to-start.ps1"
-
-          curl_exit=0
-          wait "$curl_pid" || curl_exit=$?
-
-          response="$(cat "$resp")"
-          http_code="$(printf '%s' "$response" | tail -n 1)"
-          body="$(printf '%s' "$response" | sed '$d')"
-          echo "Response body: ${body}"
-
-          if [ "$curl_exit" -ne 0 ]; then
-            echo "::error title=send-command (child-process): request failed::curl exited $curl_exit; the command was not dispatched to the device"
-            exit 1
-          fi
-
-          if [ "$http_code" = "408" ] || printf '%s' "$body" | grep -qF 'did not complete in a reasonable amount of time'; then
-            echo "::error title=send-command (child-process): Rewst engine timed out::the engine did not dispatch the command before giving up (HTTP $http_code). Engine-side, NOT a regression in the code under test - re-dispatch rather than investigating the diff."
-            exit 1
-          fi
-
-          case "$http_code" in
-            2??) ;;
-            *)
-              echo "::error title=send-command (child-process): HTTP $http_code::the Rewst engine returned $http_code; the command was not dispatched to the device"
-              exit 1
-              ;;
-          esac
-
-      - name: Assert hanging parent command was killed by the timeout (child-process scenario)
-        timeout-minutes: 6
-        shell: pwsh
-        env:
-          LOG_FILE: ${{ matrix.log_file }}
-          BASELINE: ${{ steps.child_process_kill_baseline.outputs.timed_out }}
-        run: |
-          & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/assert-hanging-command-was-killed-by-the-timeout.ps1"
-
-      - name: Assert the child process did not survive the timeout kill
-        timeout-minutes: 6
-        shell: pwsh
-        run: |
-          & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/assert-child-process-terminated.ps1"
-
-      - name: Send command after child-process scenario
-        timeout-minutes: 20
-        uses: ./.github/actions/send-command
-        with:
-          trigger_url: ${{ vars.IT_SEND_COMMAND_TRIGGER_URL }}
-          device_id: ${{ steps.setup.outputs.device_id }}
-          commands: ${{ matrix.success_commands }}
-          expected_output: ${{ matrix.success_output }}
-
-      - name: Assert worker pool recovered after child-process scenario
-        timeout-minutes: 6
-        shell: pwsh
-        env:
-          LOG_FILE: ${{ matrix.log_file }}
-          BASELINE: ${{ steps.child_process_kill_baseline.outputs.completed }}
-        run: |
-          & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/assert-worker-pool-recovered-after-timeout.ps1"
-
-      # Every scenario above asserts on the agent log; when one fails, the log is
-      # the evidence. Dump its tail so triage does not need a re-run with extra
-      # steps (three runs on 2026-09-22 were diagnosed from postback bodies alone).
-
       - name: Dump agent log on failure
         if: failure()
         uses: ./.github/actions/dump-agent-log
@@ -2675,6 +2530,15 @@ jobs:
           binary: ${{ matrix.binary }}
           args: --update --org-id ${{ vars.IT_ORG_ID }} --no-auto-updates --disable-agent-postback --github-token ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Send test command (postback verification)
+        timeout-minutes: 20
+        uses: ./.github/actions/send-command
+        with:
+          trigger_url: ${{ vars.IT_SEND_COMMAND_TRIGGER_URL }}
+          device_id: ${{ steps.setup.outputs.device_id }}
+          commands: ${{ matrix.success_commands }}
+          expected_output: ${{ matrix.success_output }}
+
       - name: Check logs for command received
         timeout-minutes: 5
         uses: ./.github/actions/assert-log-contains
@@ -2688,6 +2552,142 @@ jobs:
         with:
           log_file: ${{ matrix.log_file }}
           pattern: Postback already sent
+
+      - name: Baseline "Subscribed to messages" before the child-process timeout update
+        id: bl_sub_child_update
+        uses: ./.github/actions/capture-log-count
+        with:
+          log_file: ${{ matrix.log_file }}
+          pattern: "Subscribed to messages"
+
+      - name: Enable a longer command timeout for the child-process scenario
+        timeout-minutes: 10
+        uses: ./.github/actions/run-agent
+        with:
+          binary: ${{ matrix.binary }}
+          args: --update --org-id ${{ vars.IT_ORG_ID }} --command-timeout-seconds 15 --github-token ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Wait for fresh subscription after child-process-scenario timeout update
+        timeout-minutes: 6
+        uses: ./.github/actions/wait-for-log-line
+        with:
+          log_file: ${{ matrix.log_file }}
+          pattern: Subscribed to messages
+          baseline_count: ${{ steps.bl_sub_child_update.outputs.count }}
+          max_attempts: "60"
+          interval_seconds: "2"
+
+      - name: Capture child-process-kill baseline counts
+        id: child_process_kill_baseline
+        shell: pwsh
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+        run: |
+          & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/capture-command-timeout-baseline-counts.ps1"
+
+      # send-command (the composite action used everywhere else in this file)
+      # blocks until the device's postback round-trips back - confirmed by the
+      # first attempt at this scenario, where that call alone took ~11-25s for
+      # a 5-15s configured timeout. For every other scenario that is fine
+      # because they only ever inspect the agent's log afterward, but here it
+      # means the full timeout+kill cycle has already completed by the time a
+      # following step could check the child's *live* process state - too
+      # late to distinguish "job object correctly killed it" from "it never
+      # spawned at all", which is exactly the distinction this scenario needs
+      # to make. So the same curl call is sent in the background here, polled
+      # for the child appearing while it (and the parent's timeout) are still
+      # running, and only then waited on for its own completion.
+
+      - name: Send command that spawns a child process and hangs, then wait for it to start
+        timeout-minutes: 6
+        shell: bash
+        env:
+          TRIGGER_URL: ${{ vars.IT_SEND_COMMAND_TRIGGER_URL }}
+          DEVICE_ID: ${{ steps.setup.outputs.device_id }}
+          COMMANDS: ${{ matrix.child_process_hang_commands }}
+        run: |
+          # This scenario cannot use the send-command action (it needs the call
+          # backgrounded so it can inspect the child's live process state), but it
+          # must not re-introduce the bug that action exists to fix: a discarded
+          # response means an engine that never dispatched the command is reported
+          # as success, and the assertion below fails instead. Same checks, inline.
+          # Unlike the sweep scenario this one does not depend on the engine
+          # timeout - it reinstalls with a 15s command timeout above, so the
+          # postback round-trips long before the engine's ceiling.
+          set -uo pipefail
+          resp="$RUNNER_TEMP/child-scenario-response.json"
+          curl --silent --show-error --location \
+            --max-time 300 \
+            --write-out '\n%{http_code}' \
+            --form "device_id=\"$DEVICE_ID\"" \
+            --form "commands=$COMMANDS" \
+            "$TRIGGER_URL" > "$resp" &
+          curl_pid=$!
+
+          pwsh -NoProfile -File "$GITHUB_WORKSPACE/.github/workflows/it-scripts/wait-for-child-process-to-start.ps1"
+
+          curl_exit=0
+          wait "$curl_pid" || curl_exit=$?
+
+          response="$(cat "$resp")"
+          http_code="$(printf '%s' "$response" | tail -n 1)"
+          body="$(printf '%s' "$response" | sed '$d')"
+          echo "Response body: ${body}"
+
+          if [ "$curl_exit" -ne 0 ]; then
+            echo "::error title=send-command (child-process): request failed::curl exited $curl_exit; the command was not dispatched to the device"
+            exit 1
+          fi
+
+          if [ "$http_code" = "408" ] || printf '%s' "$body" | grep -qF 'did not complete in a reasonable amount of time'; then
+            echo "::error title=send-command (child-process): Rewst engine timed out::the engine did not dispatch the command before giving up (HTTP $http_code). Engine-side, NOT a regression in the code under test - re-dispatch rather than investigating the diff."
+            exit 1
+          fi
+
+          case "$http_code" in
+            2??) ;;
+            *)
+              echo "::error title=send-command (child-process): HTTP $http_code::the Rewst engine returned $http_code; the command was not dispatched to the device"
+              exit 1
+              ;;
+          esac
+
+      - name: Assert hanging parent command was killed by the timeout (child-process scenario)
+        timeout-minutes: 6
+        shell: pwsh
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+          BASELINE: ${{ steps.child_process_kill_baseline.outputs.timed_out }}
+        run: |
+          & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/assert-hanging-command-was-killed-by-the-timeout.ps1"
+
+      - name: Assert the child process did not survive the timeout kill
+        timeout-minutes: 6
+        shell: pwsh
+        run: |
+          & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/assert-child-process-terminated.ps1"
+
+      - name: Send command after child-process scenario
+        timeout-minutes: 20
+        uses: ./.github/actions/send-command
+        with:
+          trigger_url: ${{ vars.IT_SEND_COMMAND_TRIGGER_URL }}
+          device_id: ${{ steps.setup.outputs.device_id }}
+          commands: ${{ matrix.success_commands }}
+          expected_output: ${{ matrix.success_output }}
+
+      - name: Assert worker pool recovered after child-process scenario
+        timeout-minutes: 6
+        shell: pwsh
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+          BASELINE: ${{ steps.child_process_kill_baseline.outputs.completed }}
+        run: |
+          & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/assert-worker-pool-recovered-after-timeout.ps1"
+
+      # Every scenario above asserts on the agent log; when one fails, the log is
+      # the evidence. Dump its tail so triage does not need a re-run with extra
+      # steps (three runs on 2026-09-22 were diagnosed from postback bodies alone).
 
       - name: Capture installed file hashes before the wedge
         id: wedge_hashes
