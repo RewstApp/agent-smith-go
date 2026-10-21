@@ -7,10 +7,12 @@
 # macOS (the agent's log, config and scripts directories are root-owned). The
 # environment is preserved whole (sudo -E; the runner's unrestricted sudoers
 # permits it) so GITHUB_OUTPUT and the step's variables reach the script.
-# Arguments are passed as "-Name value" pairs; the called script binds them
-# to its typed parameters, so an [int] computed here arrives as the same
-# integer there. A null value is omitted, which is how an optional parameter
-# is left at its default.
+# On Windows the hashtable is splatted so every entry binds by parameter
+# name (an array splat would pass "-Name" as a positional value); under sudo
+# the pairs go on the command line as "-Name value", and the called script
+# binds them to its typed parameters. A null value is omitted, which is how an
+# optional parameter is left at its default. A non-zero exit from the script
+# becomes this step's exit code.
 #
 # This is the one place the composite actions branch on the platform for the
 # helpers whose logic is identical everywhere (sc-126318). Actions whose
@@ -22,18 +24,21 @@ function Invoke-Elevated {
     [Parameter(Mandatory)][string]$Script,
     [hashtable]$Arguments = @{}
   )
+  $bound = @{}
   $argv = @()
   foreach ($key in $Arguments.Keys) {
     $value = $Arguments[$key]
     if ($null -eq $value) { continue }
+    $bound[$key] = $value
     $argv += "-$key"
     $argv += "$value"
   }
+  $global:LASTEXITCODE = 0
   if ($IsWindows) {
-    & $Script @argv
+    & $Script @bound
   } else {
     $pwsh = (Get-Command pwsh).Source
     sudo -E $pwsh -NoProfile -File $Script @argv
   }
-  if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+  if ($LASTEXITCODE) { exit $LASTEXITCODE }
 }

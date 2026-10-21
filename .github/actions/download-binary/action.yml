@@ -1,0 +1,32 @@
+name: Download the agent binary
+description: >-
+  Download the build artifact for this platform into ./dist and make it
+  executable where that matters. A downloaded artifact is not executable on
+  Linux and macOS, and the jobs that run the binary directly (not through
+  run-agent) used to carry a platform-conditioned chmod step for it
+  (sc-126318).
+
+inputs:
+  name:
+    description: "Artifact name"
+    required: true
+  path:
+    description: "Directory to download into"
+    required: false
+    default: ./dist
+
+runs:
+  using: composite
+  steps:
+    - name: Download artifact
+      uses: actions/download-artifact@v8
+      with:
+        name: ${{ inputs.name }}
+        path: ${{ inputs.path }}
+
+    - name: Make the binaries executable (Unix)
+      if: runner.os != 'Windows'
+      shell: bash
+      env:
+        DIST: ${{ inputs.path }}
+      run: chmod +x "$DIST"/*

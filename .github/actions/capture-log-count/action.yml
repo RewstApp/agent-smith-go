@@ -17,12 +17,13 @@ inputs:
 outputs:
   count:
     description: "Occurrences of pattern in the log right now (0 if the file does not exist)"
-    value: ${{ steps.unix.outputs.count || steps.windows.outputs.count }}
+    value: ${{ steps.run.outputs.count }}
 
 runs:
   using: composite
   steps:
-    - name: Count
+    - id: run
+      name: Count
       shell: pwsh
       env:
         LOG_FILE: ${{ inputs.log_file }}

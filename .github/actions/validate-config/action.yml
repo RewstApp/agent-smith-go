@@ -17,15 +17,16 @@ inputs:
 outputs:
   device_id:
     description: "device_id read from config.json"
-    value: ${{ steps.parse-unix.outputs.device_id || steps.parse-windows.outputs.device_id }}
+    value: ${{ steps.run.outputs.device_id }}
   azure_iot_hub_host:
     description: "azure_iot_hub_host read from config.json (the MQTT broker host)"
-    value: ${{ steps.parse-unix.outputs.azure_iot_hub_host || steps.parse-windows.outputs.azure_iot_hub_host }}
+    value: ${{ steps.run.outputs.azure_iot_hub_host }}
 
 runs:
   using: composite
   steps:
-    - name: Parse and validate config.json
+    - id: run
+      name: Parse and validate config.json
       shell: pwsh
       env:
         CONFIG_DIR: ${{ inputs.config_dir }}

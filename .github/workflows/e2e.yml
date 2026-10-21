@@ -2959,10 +2959,9 @@ jobs:
         uses: actions/checkout@v5
 
       - name: Download compiled binary
-        uses: actions/download-artifact@v8
+        uses: ./.github/actions/download-binary
         with:
           name: ${{ matrix.os }}
-          path: ./dist
 
       - name: Start stub broker and engine
         id: stub_broker
@@ -3278,10 +3277,9 @@ jobs:
       # mode directly, since the oversized leg expects it to fail.
 
       - name: Download compiled binary
-        uses: actions/download-artifact@v8
+        uses: ./.github/actions/download-binary
         with:
           name: ${{ matrix.os }}
-          path: ./dist
 
       - name: Start stub config endpoint
         timeout-minutes: 15
