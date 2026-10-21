@@ -143,7 +143,8 @@ func TestCaptureInFlight_ResolvesTheCommandFromTheCatalogScenario(t *testing.T) 
 		t.Fatal(err)
 	}
 	logFile := filepath.Join(dir, "agent.log")
-	if err := os.WriteFile(logFile, []byte("Command saved to: message_id=a path="+ours+"\n"), 0o600); err != nil {
+	logLine := "Command saved to: message_id=a path=" + ours + "\n"
+	if err := os.WriteFile(logFile, []byte(logLine), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	catalog, err := filepath.Abs(

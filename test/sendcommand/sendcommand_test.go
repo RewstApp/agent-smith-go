@@ -546,7 +546,9 @@ func TestScenario_ExpectedOutputFromTheCatalogIsEnforced(t *testing.T) {
 	if code == 0 {
 		t.Fatal("expected wrong-result to fail")
 	}
-	wantContains(t, out, "wrong-result", "hello world")
+	// The script prints the expectation shell-escaped (printf %q), hence the
+	// backslash.
+	wantContains(t, out, "wrong-result", `the expected hello\ world`)
 }
 
 func TestScenario_UnknownNameFailsBeforeSending(t *testing.T) {
