@@ -69,6 +69,14 @@ runs:
       with:
         name: ${{ inputs.os }}
 
+    # The default-timeout and SAS-renewal scenarios re-install with the
+    # integration-test build (shorter internal deadlines), so it must be in
+    # ./dist too, as install-agent arranges for the live jobs.
+    - name: Download integration test binary
+      uses: ./.github/actions/download-binary
+      with:
+        name: it-${{ inputs.os }}
+
     - name: Start stub broker and engine
       id: broker
       uses: ./.github/actions/stub-broker
