@@ -30,7 +30,11 @@ description: >
 
 inputs:
   mode:
-    description: "start, ack, withhold, or stop"
+    description: >-
+      start, ack, withhold, offline, online, or stop. offline drops the
+      device's connections and refuses its CONNECT for offline_seconds (the
+      hermetic stand-in for severing the network path, sc-126319); online
+      lifts that early. Both need engine_url and device_id.
     required: true
   host:
     description: "Address the broker answers on, issues its certificate for, and the agent connects to"
@@ -47,6 +51,18 @@ inputs:
       send-command action posts here instead of to engine.rewst.io.
     required: false
     default: "8080"
+  engine_url:
+    description: "The fixture's engine base URL (its start output), for the offline/online controls"
+    required: false
+    default: ""
+  device_id:
+    description: "Device to take offline or bring back online"
+    required: false
+    default: ""
+  offline_seconds:
+    description: "How long the device stays refused unless brought online first"
+    required: false
+    default: "45"
   postback_port:
     description: >
       TLS port for the stand-in engine's postback receiver, served with the
@@ -281,6 +297,29 @@ runs:
         # live connection without a reconnect.
         Set-Content -Path $env:MODE_FILE -Value $env:MODE -NoNewline
         Write-Output "Stub broker mode set to $($env:MODE)"
+
+    - name: Take the device offline
+      if: inputs.mode == 'offline'
+      shell: pwsh
+      env:
+        ENGINE_URL: ${{ inputs.engine_url }}
+        DEVICE_ID: ${{ inputs.device_id }}
+        SECONDS: ${{ inputs.offline_seconds }}
+      run: |
+        if (-not $env:ENGINE_URL -or -not $env:DEVICE_ID) { Write-Error "offline needs engine_url and device_id"; exit 1 }
+        $r = Invoke-RestMethod -Method Post -Uri "$($env:ENGINE_URL)/_control/devices/$($env:DEVICE_ID)/offline?seconds=$($env:SECONDS)" -TimeoutSec 30
+        Write-Output "Device $($env:DEVICE_ID) offline for $($r.offline_seconds)s; dropped $($r.dropped) connection(s)"
+
+    - name: Bring the device back online
+      if: inputs.mode == 'online'
+      shell: pwsh
+      env:
+        ENGINE_URL: ${{ inputs.engine_url }}
+        DEVICE_ID: ${{ inputs.device_id }}
+      run: |
+        if (-not $env:ENGINE_URL -or -not $env:DEVICE_ID) { Write-Error "online needs engine_url and device_id"; exit 1 }
+        Invoke-RestMethod -Method Post -Uri "$($env:ENGINE_URL)/_control/devices/$($env:DEVICE_ID)/online" -TimeoutSec 30 | Out-Null
+        Write-Output "Device $($env:DEVICE_ID) online"
 
     - name: Report broker log
       if: inputs.mode == 'stop'

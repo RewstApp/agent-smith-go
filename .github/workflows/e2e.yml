@@ -745,232 +745,12 @@ jobs:
         with:
           log_file: ${{ matrix.log_file }}
 
-  connection:
-    permissions:
-      contents: read
-    env:
-      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-    needs: [build, build-integration-test, set-matrix, auto-update]
-    # Chained behind the previous scenario job, not parallel to it: the live
-    # config endpoint gives every install on a platform the same device id, so
-    # two scenario agents at once kick each other off IoT Hub and commands land
-    # on whichever holds the connection. Parallelism returns with the hermetic
-    # migration (sc-126319), where each job has its own device identity. The
-    # chain never skips a scenario because an earlier one failed: each starts
-    # from a fresh install and reports on its own.
-    if: ${{ !cancelled() }}
-    strategy:
-      fail-fast: false
-      matrix: ${{ fromJson(needs.set-matrix.outputs.matrix) }}
-    runs-on: ${{ matrix.os }}
-    # Provisional bound; re-measured from the first chained runs (README
-    # "Bounding the e2e jobs").
-    timeout-minutes: 30
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v5
-
-      # Fresh install from the live config endpoint; every scenario job starts here.
-      # Bounded below the job so a hung install is attributed to this step.
-
-      - name: Set up the scenario
-        timeout-minutes: 20
-        id: setup
-        uses: ./.github/actions/e2e-setup
-        with:
-          os: ${{ matrix.os }}
-          binary: ${{ matrix.binary }}
-          it_binary: ${{ matrix.it_binary }}
-          config_url: ${{ vars.IT_CONFIG_URL }}
-          config_secret: ${{ secrets.IT_CONFIG_SECRET }}
-          org_id: ${{ vars.IT_ORG_ID }}
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          service: ${{ matrix.service }}
-          config_dir: ${{ matrix.config_dir }}
-
-      # ---- MQTT reconnection scenario ----
-      # Force a transient broker outage and verify the agent tears down, backs
-      # off, resubscribes, and resumes command delivery exactly once. Counts are
-      # captured up front and compared as deltas because the log already contains
-      # "Subscribed to messages"/"Command completed" lines from earlier cycles
-      # (the service has restarted several times by now and the log is not reset
-      # while the service holds it open).
-
-      - name: Capture reconnect baseline counts
-        id: reconnect_baseline
-        uses: ./.github/actions/it-script
-        with:
-          script: capture-reconnect-baseline-counts
-        env:
-          LOG_FILE: ${{ matrix.log_file }}
-
-      - name: Baseline "Connection lost" before the broker disruption
-        id: bl_connection_lost
-        uses: ./.github/actions/capture-log-count
-        with:
-          log_file: ${{ matrix.log_file }}
-          pattern: "Connection lost"
-
-      - name: Disrupt broker connection
-        timeout-minutes: 5
-        uses: ./.github/actions/disrupt-connection
-        with:
-          mode: block
-          host: ${{ steps.setup.outputs.azure_iot_hub_host }}
-
-      - name: Wait for connection lost detection
-        timeout-minutes: 6
-        uses: ./.github/actions/wait-for-log-line
-        with:
-          log_file: ${{ matrix.log_file }}
-          pattern: Connection lost
-          baseline_count: ${{ steps.bl_connection_lost.outputs.count }}
-          max_attempts: "60"
-          interval_seconds: "2"
-
-      - name: Assert connection lost and reconnect/backoff activity
-        timeout-minutes: 5
-        uses: ./.github/actions/assert-log-contains
-        with:
-          log_file: ${{ matrix.log_file }}
-          patterns: |
-            Connection lost
-            Reconnecting in
-            Reconnecting...
-
-      - name: Restore broker connection
-        timeout-minutes: 5
-        if: always()
-        uses: ./.github/actions/disrupt-connection
-        with:
-          mode: restore
-          host: ${{ steps.setup.outputs.azure_iot_hub_host }}
-
-      - name: Wait for fresh subscription after reconnect
-        timeout-minutes: 6
-        uses: ./.github/actions/it-script
-        with:
-          script: wait-for-fresh-subscription-after-reconnect
-        env:
-          LOG_FILE: ${{ matrix.log_file }}
-          BASELINE: ${{ steps.reconnect_baseline.outputs.subscribed }}
-
-      - name: Send command after reconnect
-        timeout-minutes: 20
-        uses: ./.github/actions/send-command
-        with:
-          trigger_url: ${{ vars.IT_SEND_COMMAND_TRIGGER_URL }}
-          device_id: ${{ steps.setup.outputs.device_id }}
-          scenario: success
-
-      - name: Assert command executed exactly once after reconnect
-        timeout-minutes: 6
-        uses: ./.github/actions/it-script
-        with:
-          script: assert-command-executed-exactly-once-after-reconnect
-        env:
-          LOG_FILE: ${{ matrix.log_file }}
-          BASELINE: ${{ steps.reconnect_baseline.outputs.completed }}
-
-      - name: Baseline "Subscribed to messages" before the short-SAS install
-        id: bl_sub_sas_update
-        uses: ./.github/actions/capture-log-count
-        with:
-          log_file: ${{ matrix.log_file }}
-          pattern: "Subscribed to messages"
-
-      # Baseline before the event so the wait below needs a *new* line (sc-117884).
-
-      - name: Baseline "Renewing SAS token before expiry" before the short-SAS install
-        id: bl_sas_renewed
-        uses: ./.github/actions/capture-log-count
-        with:
-          log_file: ${{ matrix.log_file }}
-          pattern: "Renewing SAS token before expiry"
-
-      - name: Install IT binary with short SAS token lifetime
-        timeout-minutes: 10
-        uses: ./.github/actions/run-agent
-        with:
-          binary: ${{ matrix.it_binary }}
-          args: --update --org-id ${{ vars.IT_ORG_ID }} --no-auto-updates --github-token ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Wait for fresh subscription after SAS lifetime update
-        timeout-minutes: 6
-        uses: ./.github/actions/wait-for-log-line
-        with:
-          log_file: ${{ matrix.log_file }}
-          pattern: Subscribed to messages
-          baseline_count: ${{ steps.bl_sub_sas_update.outputs.count }}
-          max_attempts: "60"
-          interval_seconds: "2"
-
-      - name: Capture SAS renewal baseline counts
-        id: sas_renewal_baseline
-        uses: ./.github/actions/it-script
-        with:
-          script: capture-sas-renewal-baseline-counts
-        env:
-          LOG_FILE: ${{ matrix.log_file }}
-
-      - name: Wait for proactive SAS token renewal
-        timeout-minutes: 6
-        uses: ./.github/actions/wait-for-log-line
-        with:
-          log_file: ${{ matrix.log_file }}
-          pattern: Renewing SAS token before expiry
-          baseline_count: ${{ steps.bl_sas_renewed.outputs.count }}
-          max_attempts: "60"
-          interval_seconds: "2"
-
-      - name: Assert SAS token renewed and agent resubscribed with fresh token
-        timeout-minutes: 6
-        uses: ./.github/actions/it-script
-        with:
-          script: assert-sas-token-renewed-and-agent-resubscribed-with-fresh-token
-        env:
-          LOG_FILE: ${{ matrix.log_file }}
-          RENEWED_BASELINE: ${{ steps.sas_renewal_baseline.outputs.renewed }}
-          SUBSCRIBED_BASELINE: ${{ steps.sas_renewal_baseline.outputs.subscribed }}
-
-      - name: Assert SAS renewal was graceful (no forced disconnect)
-        timeout-minutes: 6
-        uses: ./.github/actions/it-script
-        with:
-          script: assert-sas-renewal-was-graceful-no-forced-disconnect
-        env:
-          LOG_FILE: ${{ matrix.log_file }}
-          LOST_BASELINE: ${{ steps.sas_renewal_baseline.outputs.lost }}
-
-      - name: Send command after SAS renewal
-        timeout-minutes: 20
-        uses: ./.github/actions/send-command
-        with:
-          trigger_url: ${{ vars.IT_SEND_COMMAND_TRIGGER_URL }}
-          device_id: ${{ steps.setup.outputs.device_id }}
-          scenario: success
-
-      - name: Assert command delivery continues after SAS renewal
-        timeout-minutes: 6
-        uses: ./.github/actions/it-script
-        with:
-          script: assert-command-delivery-continues-after-sas-renewal
-        env:
-          LOG_FILE: ${{ matrix.log_file }}
-          BASELINE: ${{ steps.sas_renewal_baseline.outputs.completed }}
-
-      - name: Dump agent log on failure
-        if: failure()
-        uses: ./.github/actions/dump-agent-log
-        with:
-          log_file: ${{ matrix.log_file }}
-
   wedged-broker:
     permissions:
       contents: read
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-    needs: [build, build-integration-test, set-matrix, connection]
+    needs: [build, build-integration-test, set-matrix, auto-update]
     # Chained behind the previous scenario job, not parallel to it: the live
     # config endpoint gives every install on a platform the same device id, so
     # two scenario agents at once kick each other off IoT Hub and commands land
@@ -1223,693 +1003,12 @@ jobs:
         with:
           log_file: ${{ matrix.log_file }}
 
-  command-timeouts:
-    permissions:
-      contents: read
-    env:
-      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-    needs: [build, build-integration-test, set-matrix, wedged-broker]
-    # Chained behind the previous scenario job, not parallel to it: the live
-    # config endpoint gives every install on a platform the same device id, so
-    # two scenario agents at once kick each other off IoT Hub and commands land
-    # on whichever holds the connection. Parallelism returns with the hermetic
-    # migration (sc-126319), where each job has its own device identity. The
-    # chain never skips a scenario because an earlier one failed: each starts
-    # from a fresh install and reports on its own.
-    if: ${{ !cancelled() }}
-    strategy:
-      fail-fast: false
-      matrix: ${{ fromJson(needs.set-matrix.outputs.matrix) }}
-    runs-on: ${{ matrix.os }}
-    # Provisional bound; re-measured from the first chained runs (README
-    # "Bounding the e2e jobs").
-    timeout-minutes: 30
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v5
-
-      # Fresh install from the live config endpoint; every scenario job starts here.
-      # Bounded below the job so a hung install is attributed to this step.
-
-      - name: Set up the scenario
-        timeout-minutes: 20
-        id: setup
-        uses: ./.github/actions/e2e-setup
-        with:
-          os: ${{ matrix.os }}
-          binary: ${{ matrix.binary }}
-          it_binary: ${{ matrix.it_binary }}
-          config_url: ${{ vars.IT_CONFIG_URL }}
-          config_secret: ${{ secrets.IT_CONFIG_SECRET }}
-          org_id: ${{ vars.IT_ORG_ID }}
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          service: ${{ matrix.service }}
-          config_dir: ${{ matrix.config_dir }}
-
-      # ---- Default command execution timeout scenario (sc-108852) ----
-      # command_timeout_seconds has not been touched anywhere earlier in this job
-      # (the explicit-timeout scenario right below is the first place that
-      # configures it), so this proves the timeout applies out of the box rather
-      # than only when an operator opts in. The IT binary is built with
-      # defaultCommandTimeoutOverrideStr=5s (see scripts/build_integration_test.ps1)
-      # so the production 30-minute default can be exercised in seconds; that
-      # override only ever replaces the fallback constant and stops applying the
-      # moment command_timeout_seconds is configured, which the following
-      # scenario (still on this same device) proves separately.
-      # --no-auto-updates keeps this binary running for the scenario's duration.
-      # Count the subscriptions already in the log before the reinstall, so the
-      # wait below can be a delta against it. "Subscribed to messages" is written
-      # on every connect, so a bare match returns on the first poll against a line
-      # from an earlier scenario and the step waits for nothing. On Windows the
-      # service restart is slow enough that "Send hanging command..." below then
-      # reached the engine before the restarted agent had resubscribed: the engine
-      # held the command, never dispatched it, and gave up at its own ceiling
-      # ~167s later. That surfaced as the send failing (or, before the send
-      # checked its response, as the *assertion* failing on a device that never
-      # received the command - the agent log showed zero "Command timed out").
-
-      - name: Capture subscription baseline before the default-timeout install
-        id: default_timeout_sub_baseline
-        uses: ./.github/actions/it-script
-        with:
-          script: capture-restore-baseline-counts
-        env:
-          LOG_FILE: ${{ matrix.log_file }}
-
-      - name: Install IT binary to exercise the default command timeout
-        timeout-minutes: 10
-        uses: ./.github/actions/run-agent
-        with:
-          binary: ${{ matrix.it_binary }}
-          args: --update --org-id ${{ vars.IT_ORG_ID }} --no-auto-updates --github-token ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Wait for fresh subscription after default-timeout binary install
-        timeout-minutes: 6
-        uses: ./.github/actions/wait-for-log-line
-        with:
-          log_file: ${{ matrix.log_file }}
-          pattern: Subscribed to messages
-          max_attempts: "60"
-          interval_seconds: "2"
-          baseline_count: ${{ steps.default_timeout_sub_baseline.outputs.subscribed }}
-
-      - name: Capture default-command-timeout baseline counts
-        id: default_timeout_baseline
-        uses: ./.github/actions/it-script
-        with:
-          script: capture-command-timeout-baseline-counts
-        env:
-          LOG_FILE: ${{ matrix.log_file }}
-
-      - name: Send hanging command with no command_timeout_seconds configured
-        timeout-minutes: 20
-        uses: ./.github/actions/send-command
-        with:
-          trigger_url: ${{ vars.IT_SEND_COMMAND_TRIGGER_URL }}
-          device_id: ${{ steps.setup.outputs.device_id }}
-          scenario: timeout
-
-      - name: Assert hanging command was killed by the default timeout
-        timeout-minutes: 6
-        uses: ./.github/actions/it-script
-        with:
-          script: assert-hanging-command-was-killed-by-the-timeout
-        env:
-          LOG_FILE: ${{ matrix.log_file }}
-          BASELINE: ${{ steps.default_timeout_baseline.outputs.timed_out }}
-
-      - name: Send command after default timeout
-        timeout-minutes: 20
-        uses: ./.github/actions/send-command
-        with:
-          trigger_url: ${{ vars.IT_SEND_COMMAND_TRIGGER_URL }}
-          device_id: ${{ steps.setup.outputs.device_id }}
-          scenario: success
-
-      - name: Assert worker pool recovered after default timeout
-        timeout-minutes: 6
-        uses: ./.github/actions/it-script
-        with:
-          script: assert-worker-pool-recovered-after-timeout
-        env:
-          LOG_FILE: ${{ matrix.log_file }}
-          BASELINE: ${{ steps.default_timeout_baseline.outputs.completed }}
-
-      - name: Baseline "Subscribed to messages" before the short-timeout update
-        id: bl_sub_timeout_update
-        uses: ./.github/actions/capture-log-count
-        with:
-          log_file: ${{ matrix.log_file }}
-          pattern: "Subscribed to messages"
-
-      - name: Enable short command timeout
-        timeout-minutes: 10
-        uses: ./.github/actions/run-agent
-        with:
-          binary: ${{ matrix.binary }}
-          args: --update --org-id ${{ vars.IT_ORG_ID }} --command-timeout-seconds 5 --github-token ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Wait for fresh subscription after timeout update
-        timeout-minutes: 6
-        uses: ./.github/actions/wait-for-log-line
-        with:
-          log_file: ${{ matrix.log_file }}
-          pattern: Subscribed to messages
-          baseline_count: ${{ steps.bl_sub_timeout_update.outputs.count }}
-          max_attempts: "60"
-          interval_seconds: "2"
-
-      - name: Capture command-timeout baseline counts
-        id: timeout_baseline
-        uses: ./.github/actions/it-script
-        with:
-          script: capture-command-timeout-baseline-counts
-        env:
-          LOG_FILE: ${{ matrix.log_file }}
-
-      - name: Send hanging command
-        timeout-minutes: 20
-        uses: ./.github/actions/send-command
-        with:
-          trigger_url: ${{ vars.IT_SEND_COMMAND_TRIGGER_URL }}
-          device_id: ${{ steps.setup.outputs.device_id }}
-          scenario: timeout
-
-      - name: Assert hanging command was killed by the timeout
-        timeout-minutes: 6
-        uses: ./.github/actions/it-script
-        with:
-          script: assert-hanging-command-was-killed-by-the-timeout
-        env:
-          LOG_FILE: ${{ matrix.log_file }}
-          BASELINE: ${{ steps.timeout_baseline.outputs.timed_out }}
-
-      - name: Send command after timeout
-        timeout-minutes: 20
-        uses: ./.github/actions/send-command
-        with:
-          trigger_url: ${{ vars.IT_SEND_COMMAND_TRIGGER_URL }}
-          device_id: ${{ steps.setup.outputs.device_id }}
-          scenario: success
-
-      - name: Assert worker pool recovered after timeout
-        timeout-minutes: 6
-        uses: ./.github/actions/it-script
-        with:
-          script: assert-worker-pool-recovered-after-timeout
-        env:
-          LOG_FILE: ${{ matrix.log_file }}
-          BASELINE: ${{ steps.timeout_baseline.outputs.completed }}
-
-      - name: Dump agent log on failure
-        if: failure()
-        uses: ./.github/actions/dump-agent-log
-        with:
-          log_file: ${{ matrix.log_file }}
-
-  output-bounds:
-    permissions:
-      contents: read
-    env:
-      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-    needs: [build, build-integration-test, set-matrix, command-timeouts]
-    # Chained behind the previous scenario job, not parallel to it: the live
-    # config endpoint gives every install on a platform the same device id, so
-    # two scenario agents at once kick each other off IoT Hub and commands land
-    # on whichever holds the connection. Parallelism returns with the hermetic
-    # migration (sc-126319), where each job has its own device identity. The
-    # chain never skips a scenario because an earlier one failed: each starts
-    # from a fresh install and reports on its own.
-    if: ${{ !cancelled() }}
-    strategy:
-      fail-fast: false
-      matrix: ${{ fromJson(needs.set-matrix.outputs.matrix) }}
-    runs-on: ${{ matrix.os }}
-    # Provisional bound; re-measured from the first chained runs (README
-    # "Bounding the e2e jobs").
-    timeout-minutes: 30
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v5
-
-      # Fresh install from the live config endpoint; every scenario job starts here.
-      # Bounded below the job so a hung install is attributed to this step.
-
-      - name: Set up the scenario
-        timeout-minutes: 20
-        id: setup
-        uses: ./.github/actions/e2e-setup
-        with:
-          os: ${{ matrix.os }}
-          binary: ${{ matrix.binary }}
-          it_binary: ${{ matrix.it_binary }}
-          config_url: ${{ vars.IT_CONFIG_URL }}
-          config_secret: ${{ secrets.IT_CONFIG_SECRET }}
-          org_id: ${{ vars.IT_ORG_ID }}
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          service: ${{ matrix.service }}
-          config_dir: ${{ matrix.config_dir }}
-
-      - name: Send success command
-        timeout-minutes: 20
-        uses: ./.github/actions/send-command
-        with:
-          trigger_url: ${{ vars.IT_SEND_COMMAND_TRIGGER_URL }}
-          device_id: ${{ steps.setup.outputs.device_id }}
-          scenario: success
-
-      - name: Check logs for successful command
-        timeout-minutes: 5
-        uses: ./.github/actions/assert-log-contains
-        with:
-          log_file: ${{ matrix.log_file }}
-          scenario: success
-
-      # ---- Bounded command output scenario (sc-106105) ----
-      # A command's stdout and stderr used to be buffered whole in memory, so the
-      # agent's heap tracked however much a script decided to write and a verbose
-      # one could OOM-kill the service. Configure a deliberately small ceiling,
-      # flood it by three orders of magnitude, and assert the two properties that
-      # matter: the agent's RSS stays near the ceiling instead of near the output
-      # size, and the discarded output is reported rather than silently dropped.
-      #
-      # The release binary is installed first with the per-command timeout raised
-      # well past the floods' runtime, because the earlier timeout scenario left a
-      # 5s deadline in the config that would kill these commands mid-write, and
-      # the SAS scenario left the IT binary running with a 90s token lifetime
-      # whose reconnect would cancel them. --logging-level is deliberately not
-      # passed: it resets to the default (Info), which keeps the Warn under test
-      # visible while leaving the debug handler that dumps whole command outputs
-      # into the log switched off. --disable-agent-postback is likewise not
-      # passed, so the truncated result actually traverses the postback path
-      # on every platform.
-      #
-      # Coverage note: these steps assert on the agent log, which is where the
-      # byte counts are observable on the endpoint. The same counts are what the
-      # postback carries as truncated/output_bytes_produced/output_bytes_kept -
-      # both come from one value computed once per command - but the postback body
-      # is never logged, so confirming the workflow's received payload stays a
-      # Rewst-side QA step.
-
-      - name: Resolve the scripts directory
-        id: scripts_dir
-        uses: ./.github/actions/it-script
-        with:
-          script: resolve-the-scripts-directory
-        env:
-          LOG_FILE: ${{ matrix.log_file }}
-
-      - name: Snapshot temp script files before the output floods
-        timeout-minutes: 5
-        uses: ./.github/actions/assert-no-orphaned-scripts
-        with:
-          mode: snapshot
-          scripts_dir: ${{ steps.scripts_dir.outputs.path }}
-
-      # Captured before the update below restarts the service: the restart's own
-      # "Subscribed to messages" line must land after this snapshot for the delta
-      # wait to mean anything.
-
-      - name: Capture bounded-output baseline counts
-        id: output_baseline
-        uses: ./.github/actions/it-script
-        with:
-          script: capture-bounded-output-baseline-counts
-        env:
-          LOG_FILE: ${{ matrix.log_file }}
-
-      - name: Configure a small output ceiling
-        timeout-minutes: 10
-        uses: ./.github/actions/run-agent
-        with:
-          binary: ${{ matrix.binary }}
-          args: --update --org-id ${{ vars.IT_ORG_ID }} --no-auto-updates --max-output-bytes 262144 --command-timeout-seconds 600 --github-token ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Assert a non-positive output ceiling is rejected
-        shell: pwsh
-        env:
-          BINARY: ${{ matrix.binary }}
-          ORG_ID: ${{ vars.IT_ORG_ID }}
-        run: |
-          # The bound must not be disablable by configuration: a non-positive
-          # value is refused outright rather than accepted as "no limit" (a
-          # hand-edited config falls back to the documented default instead).
-          foreach ($value in @('0', '-1')) {
-            if ($IsWindows) {
-              $out = & "./dist/$env:BINARY" --update --org-id $env:ORG_ID --max-output-bytes $value 2>&1 | Out-String
-            } else {
-              $out = & sudo "./dist/$env:BINARY" --update --org-id $env:ORG_ID --max-output-bytes $value 2>&1 | Out-String
-            }
-            $code = $LASTEXITCODE
-            if ($code -eq 0) {
-              Write-Output $out
-              Write-Error "--max-output-bytes $value was accepted (exit 0); the bound must not be disablable"
-              exit 1
-            }
-            if ($out -notmatch 'invalid max-output-bytes: must be a positive integer') {
-              Write-Output $out
-              Write-Error "--max-output-bytes $value was rejected without the expected validation message"
-              exit 1
-            }
-            Write-Output "OK: --max-output-bytes $value rejected (exit $code) with the expected message"
-          }
-          # Explicit success: the runner appends "exit $LASTEXITCODE" to pwsh
-          # steps, and the last thing this step ran was a deliberately failing
-          # agent invocation, so falling off the end would report that failure as
-          # the step's own.
-          exit 0
-
-      - name: Wait for fresh subscription after the output ceiling update
-        timeout-minutes: 6
-        uses: ./.github/actions/it-script
-        with:
-          script: wait-for-fresh-subscription-after-the-output-ceiling-update
-        env:
-          LOG_FILE: ${{ matrix.log_file }}
-          BASELINE: ${{ steps.output_baseline.outputs.subscribed }}
-
-      - name: Send stdout flood command
-        id: send_stdout_flood
-        timeout-minutes: 20
-        uses: ./.github/actions/send-command
-        with:
-          trigger_url: ${{ vars.IT_SEND_COMMAND_TRIGGER_URL }}
-          device_id: ${{ steps.setup.outputs.device_id }}
-          scenario: verbose
-
-      - name: Assert the stdout flood was bounded
-        timeout-minutes: 5
-        uses: ./.github/actions/assert-output-bounded
-        with:
-          service: ${{ matrix.service }}
-          log_file: ${{ matrix.log_file }}
-          baseline_truncations: ${{ steps.output_baseline.outputs.truncated }}
-          # A retried send may have run the command twice (run 37633504250: the
-          # engine answered a transient 404 after dispatching, and the retry
-          # produced a second truncation warning two seconds after the first).
-          dispatches: ${{ steps.send_stdout_flood.outputs.attempts }}
-          expected_ceiling_bytes: "262144"
-          # At least the whole ceiling, since stdout alone floods it. The upper
-          # bound carries 4 KiB of headroom rather than being exact because the
-          # shell contributes a preamble of its own that is not this scenario's to
-          # control - on Windows the run deliberately injects a
-          # PROFILE_NOISE_<guid> marker into the all-users PowerShell profile,
-          # which every agent-spawned PowerShell echoes. What the bound has to
-          # catch is a stream that was not capped at all, and that would land
-          # near the 200 MiB produced, not a few bytes over.
-          min_kept_bytes: "262144"
-          max_kept_bytes: "266240"
-          min_produced_bytes: "209715200"
-          max_rss_mb: "250"
-
-      - name: Assert the flooding command still succeeded
-        timeout-minutes: 6
-        uses: ./.github/actions/it-script
-        with:
-          script: assert-the-flooding-command-still-succeeded
-        env:
-          LOG_FILE: ${{ matrix.log_file }}
-          BASELINE: ${{ steps.output_baseline.outputs.completed }}
-
-      - name: Capture small-output baseline counts
-        id: small_output_baseline
-        uses: ./.github/actions/it-script
-        with:
-          script: capture-small-output-baseline-counts
-        env:
-          LOG_FILE: ${{ matrix.log_file }}
-
-      - name: Send ordinary command after the flood
-        timeout-minutes: 20
-        uses: ./.github/actions/send-command
-        with:
-          trigger_url: ${{ vars.IT_SEND_COMMAND_TRIGGER_URL }}
-          device_id: ${{ steps.setup.outputs.device_id }}
-          scenario: success
-
-      - name: Assert output below the ceiling is untouched and the worker recovered
-        timeout-minutes: 6
-        uses: ./.github/actions/it-script
-        with:
-          script: assert-output-below-the-ceiling-is-untouched-and-the-worker-recovered
-        env:
-          LOG_FILE: ${{ matrix.log_file }}
-          COMPLETED_BASELINE: ${{ steps.small_output_baseline.outputs.completed }}
-          TRUNCATED_BASELINE: ${{ steps.small_output_baseline.outputs.truncated }}
-
-      - name: Capture stderr-flood baseline counts
-        id: stderr_flood_baseline
-        uses: ./.github/actions/it-script
-        with:
-          script: capture-stderr-flood-baseline-counts
-        env:
-          LOG_FILE: ${{ matrix.log_file }}
-
-      - name: Send stderr flood command
-        id: send_stderr_flood
-        timeout-minutes: 20
-        uses: ./.github/actions/send-command
-        with:
-          trigger_url: ${{ vars.IT_SEND_COMMAND_TRIGGER_URL }}
-          device_id: ${{ steps.setup.outputs.device_id }}
-          scenario: verbose_stderr
-
-      - name: Assert stderr is bounded independently of stdout
-        timeout-minutes: 5
-        uses: ./.github/actions/assert-output-bounded
-        with:
-          service: ${{ matrix.service }}
-          log_file: ${{ matrix.log_file }}
-          baseline_truncations: ${{ steps.stderr_flood_baseline.outputs.truncated }}
-          dispatches: ${{ steps.send_stderr_flood.outputs.attempts }}
-          expected_ceiling_bytes: "262144"
-          # Above the ceiling on purpose: the script floods stderr to its full
-          # ceiling AND writes a short stdout line, so the kept total can only
-          # exceed the ceiling if the two streams have separate budgets. A shared
-          # budget would cap the total at 262144 and starve one of them. The upper
-          # bound has the same 4 KiB of headroom as the stdout flood, for the same
-          # reason: the stdout side carries the shell's preamble as well as the
-          # scenario's own line.
-          min_kept_bytes: "262145"
-          max_kept_bytes: "266240"
-          min_produced_bytes: "209715200"
-          max_rss_mb: "250"
-
-      # Every scenario above asserts on the agent log; when one fails, the log is
-      # the evidence. Dump its tail so triage does not need a re-run with extra
-      # steps (three runs on 2026-09-22 were diagnosed from postback bodies alone).
-
-      - name: Dump agent log on failure
-        if: failure()
-        uses: ./.github/actions/dump-agent-log
-        with:
-          log_file: ${{ matrix.log_file }}
-
-  timeout-composition:
-    permissions:
-      contents: read
-    env:
-      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-    needs: [build, build-integration-test, set-matrix, output-bounds]
-    # Chained behind the previous scenario job, not parallel to it: the live
-    # config endpoint gives every install on a platform the same device id, so
-    # two scenario agents at once kick each other off IoT Hub and commands land
-    # on whichever holds the connection. Parallelism returns with the hermetic
-    # migration (sc-126319), where each job has its own device identity. The
-    # chain never skips a scenario because an earlier one failed: each starts
-    # from a fresh install and reports on its own.
-    if: ${{ !cancelled() }}
-    strategy:
-      fail-fast: false
-      matrix: ${{ fromJson(needs.set-matrix.outputs.matrix) }}
-    runs-on: ${{ matrix.os }}
-    # Provisional bound; re-measured from the first chained runs (README
-    # "Bounding the e2e jobs").
-    timeout-minutes: 30
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v5
-
-      # Fresh install from the live config endpoint; every scenario job starts here.
-      # Bounded below the job so a hung install is attributed to this step.
-
-      - name: Set up the scenario
-        timeout-minutes: 20
-        id: setup
-        uses: ./.github/actions/e2e-setup
-        with:
-          os: ${{ matrix.os }}
-          binary: ${{ matrix.binary }}
-          it_binary: ${{ matrix.it_binary }}
-          config_url: ${{ vars.IT_CONFIG_URL }}
-          config_secret: ${{ secrets.IT_CONFIG_SECRET }}
-          org_id: ${{ vars.IT_ORG_ID }}
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          service: ${{ matrix.service }}
-          config_dir: ${{ matrix.config_dir }}
-
-      - name: Send success command
-        timeout-minutes: 20
-        uses: ./.github/actions/send-command
-        with:
-          trigger_url: ${{ vars.IT_SEND_COMMAND_TRIGGER_URL }}
-          device_id: ${{ steps.setup.outputs.device_id }}
-          scenario: success
-
-      - name: Check logs for successful command
-        timeout-minutes: 5
-        uses: ./.github/actions/assert-log-contains
-        with:
-          log_file: ${{ matrix.log_file }}
-          scenario: success
-
-      # ---- Bounded command output scenario (sc-106105) ----
-      # A command's stdout and stderr used to be buffered whole in memory, so the
-      # agent's heap tracked however much a script decided to write and a verbose
-      # one could OOM-kill the service. Configure a deliberately small ceiling,
-      # flood it by three orders of magnitude, and assert the two properties that
-      # matter: the agent's RSS stays near the ceiling instead of near the output
-      # size, and the discarded output is reported rather than silently dropped.
-      #
-      # The release binary is installed first with the per-command timeout raised
-      # well past the floods' runtime, because the earlier timeout scenario left a
-      # 5s deadline in the config that would kill these commands mid-write, and
-      # the SAS scenario left the IT binary running with a 90s token lifetime
-      # whose reconnect would cancel them. --logging-level is deliberately not
-      # passed: it resets to the default (Info), which keeps the Warn under test
-      # visible while leaving the debug handler that dumps whole command outputs
-      # into the log switched off. --disable-agent-postback is likewise not
-      # passed, so the truncated result actually traverses the postback path
-      # on every platform.
-      #
-      # Coverage note: these steps assert on the agent log, which is where the
-      # byte counts are observable on the endpoint. The same counts are what the
-      # postback carries as truncated/output_bytes_produced/output_bytes_kept -
-      # both come from one value computed once per command - but the postback body
-      # is never logged, so confirming the workflow's received payload stays a
-      # Rewst-side QA step.
-
-      - name: Resolve the scripts directory
-        id: scripts_dir
-        uses: ./.github/actions/it-script
-        with:
-          script: resolve-the-scripts-directory
-        env:
-          LOG_FILE: ${{ matrix.log_file }}
-
-      - name: Snapshot temp script files before the output floods
-        timeout-minutes: 5
-        uses: ./.github/actions/assert-no-orphaned-scripts
-        with:
-          mode: snapshot
-          scripts_dir: ${{ steps.scripts_dir.outputs.path }}
-
-      # Captured before the update below restarts the service, for the same
-      # reason as the bounded-output baseline.
-
-      - name: Capture timeout-composition baseline counts
-        id: compose_baseline
-        uses: ./.github/actions/it-script
-        with:
-          script: capture-timeout-composition-baseline-counts
-        env:
-          LOG_FILE: ${{ matrix.log_file }}
-
-      - name: Shorten the command timeout for the composition check
-        timeout-minutes: 10
-        uses: ./.github/actions/run-agent
-        with:
-          binary: ${{ matrix.binary }}
-          args: --update --org-id ${{ vars.IT_ORG_ID }} --no-auto-updates --max-output-bytes 262144 --command-timeout-seconds 30 --github-token ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Wait for fresh subscription after the timeout update
-        timeout-minutes: 6
-        uses: ./.github/actions/it-script
-        with:
-          script: wait-for-fresh-subscription-after-the-timeout-update
-        env:
-          LOG_FILE: ${{ matrix.log_file }}
-          BASELINE: ${{ steps.compose_baseline.outputs.subscribed }}
-
-      - name: Send verbose command that then hangs
-        id: send_verbose_hang
-        timeout-minutes: 20
-        uses: ./.github/actions/send-command
-        with:
-          trigger_url: ${{ vars.IT_SEND_COMMAND_TRIGGER_URL }}
-          device_id: ${{ steps.setup.outputs.device_id }}
-          scenario: verbose_hang
-
-      - name: Assert the hanging command's output was still bounded
-        timeout-minutes: 5
-        uses: ./.github/actions/assert-output-bounded
-        with:
-          service: ${{ matrix.service }}
-          log_file: ${{ matrix.log_file }}
-          baseline_truncations: ${{ steps.compose_baseline.outputs.truncated }}
-          dispatches: ${{ steps.send_verbose_hang.outputs.attempts }}
-          expected_ceiling_bytes: "262144"
-          # Same headroom as the other floods: stdout fills the ceiling on its
-          # own, and anything the shell adds on either stream is incidental.
-          min_kept_bytes: "262144"
-          max_kept_bytes: "266240"
-          # Lower than the flood's full 200 MiB: the command is killed at its
-          # deadline, so only the volume written before the kill is counted.
-          min_produced_bytes: "104857600"
-          max_rss_mb: "250"
-          # The warning lands once the deadline kills the process group, and
-          # cmd.WaitDelay can hold Run for up to 10s more after that.
-          max_attempts: "120"
-
-      - name: Assert the hanging command also timed out and released its worker
-        timeout-minutes: 6
-        uses: ./.github/actions/it-script
-        with:
-          script: assert-the-hanging-command-also-timed-out-and-released-its-worker
-        env:
-          LOG_FILE: ${{ matrix.log_file }}
-          TIMED_OUT_BASELINE: ${{ steps.compose_baseline.outputs.timed_out }}
-
-      - name: Send command after the verbose timeout
-        timeout-minutes: 20
-        uses: ./.github/actions/send-command
-        with:
-          trigger_url: ${{ vars.IT_SEND_COMMAND_TRIGGER_URL }}
-          device_id: ${{ steps.setup.outputs.device_id }}
-          scenario: success
-
-      - name: Assert the worker recovered after the verbose timeout
-        timeout-minutes: 6
-        uses: ./.github/actions/it-script
-        with:
-          script: assert-the-worker-recovered-after-the-verbose-timeout
-        env:
-          LOG_FILE: ${{ matrix.log_file }}
-          BASELINE: ${{ steps.compose_baseline.outputs.completed }}
-
-      - name: Assert the output floods left no orphaned script files
-        timeout-minutes: 5
-        uses: ./.github/actions/assert-no-orphaned-scripts
-        with:
-          mode: assert
-          scripts_dir: ${{ steps.scripts_dir.outputs.path }}
-
-      # Every scenario above asserts on the agent log; when one fails, the log is
-      # the evidence. Dump its tail so triage does not need a re-run with extra
-      # steps (three runs on 2026-09-22 were diagnosed from postback bodies alone).
-
-      - name: Dump agent log on failure
-        if: failure()
-        uses: ./.github/actions/dump-agent-log
-        with:
-          log_file: ${{ matrix.log_file }}
-
   sweeps:
     permissions:
       contents: read
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-    needs: [build, build-integration-test, set-matrix, timeout-composition]
+    needs: [build, build-integration-test, set-matrix, wedged-broker]
     # Chained behind the previous scenario job, not parallel to it: the live
     # config endpoint gives every install on a platform the same device id, so
     # two scenario agents at once kick each other off IoT Hub and commands land
@@ -2456,146 +1555,6 @@ jobs:
           log_file: ${{ matrix.log_file }}
           pattern: Postback already sent
 
-      - name: Baseline "Subscribed to messages" before the child-process timeout update
-        id: bl_sub_child_update
-        uses: ./.github/actions/capture-log-count
-        with:
-          log_file: ${{ matrix.log_file }}
-          pattern: "Subscribed to messages"
-
-      - name: Enable a longer command timeout for the child-process scenario
-        timeout-minutes: 10
-        uses: ./.github/actions/run-agent
-        with:
-          binary: ${{ matrix.binary }}
-          args: --update --org-id ${{ vars.IT_ORG_ID }} --command-timeout-seconds 15 --github-token ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Wait for fresh subscription after child-process-scenario timeout update
-        timeout-minutes: 6
-        uses: ./.github/actions/wait-for-log-line
-        with:
-          log_file: ${{ matrix.log_file }}
-          pattern: Subscribed to messages
-          baseline_count: ${{ steps.bl_sub_child_update.outputs.count }}
-          max_attempts: "60"
-          interval_seconds: "2"
-
-      - name: Capture child-process-kill baseline counts
-        id: child_process_kill_baseline
-        shell: pwsh
-        env:
-          LOG_FILE: ${{ matrix.log_file }}
-        run: |
-          & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/capture-command-timeout-baseline-counts.ps1"
-
-      # send-command (the composite action used everywhere else in this file)
-      # blocks until the device's postback round-trips back - confirmed by the
-      # first attempt at this scenario, where that call alone took ~11-25s for
-      # a 5-15s configured timeout. For every other scenario that is fine
-      # because they only ever inspect the agent's log afterward, but here it
-      # means the full timeout+kill cycle has already completed by the time a
-      # following step could check the child's *live* process state - too
-      # late to distinguish "job object correctly killed it" from "it never
-      # spawned at all", which is exactly the distinction this scenario needs
-      # to make. So the same curl call is sent in the background here, polled
-      # for the child appearing while it (and the parent's timeout) are still
-      # running, and only then waited on for its own completion.
-
-      - name: Send command that spawns a child process and hangs, then wait for it to start
-        timeout-minutes: 6
-        shell: bash
-        env:
-          TRIGGER_URL: ${{ vars.IT_SEND_COMMAND_TRIGGER_URL }}
-          DEVICE_ID: ${{ steps.setup.outputs.device_id }}
-          SCENARIO: child_process_hang
-          E2E_CATALOG: ${{ github.workspace }}/.github/workflows/e2e-commands.json
-        run: |
-          # The command comes from the catalog like every other send; this job
-          # is Windows-only, hence the windows family.
-          COMMANDS="$(jq -er --arg s "$SCENARIO" '.[$s].windows' "$E2E_CATALOG")" \
-            || { echo "::error::scenario $SCENARIO has no windows command in $E2E_CATALOG"; exit 1; }
-          # This scenario cannot use the send-command action (it needs the call
-          # backgrounded so it can inspect the child's live process state), but it
-          # must not re-introduce the bug that action exists to fix: a discarded
-          # response means an engine that never dispatched the command is reported
-          # as success, and the assertion below fails instead. Same checks, inline.
-          # Unlike the sweep scenario this one does not depend on the engine
-          # timeout - it reinstalls with a 15s command timeout above, so the
-          # postback round-trips long before the engine's ceiling.
-          set -uo pipefail
-          resp="$RUNNER_TEMP/child-scenario-response.json"
-          curl --silent --show-error --location \
-            --max-time 300 \
-            --write-out '\n%{http_code}' \
-            --form "device_id=\"$DEVICE_ID\"" \
-            --form "commands=$COMMANDS" \
-            "$TRIGGER_URL" > "$resp" &
-          curl_pid=$!
-
-          pwsh -NoProfile -File "$GITHUB_WORKSPACE/.github/workflows/it-scripts/wait-for-child-process-to-start.ps1"
-
-          curl_exit=0
-          wait "$curl_pid" || curl_exit=$?
-
-          response="$(cat "$resp")"
-          http_code="$(printf '%s' "$response" | tail -n 1)"
-          body="$(printf '%s' "$response" | sed '$d')"
-          echo "Response body: ${body}"
-
-          if [ "$curl_exit" -ne 0 ]; then
-            echo "::error title=send-command (child-process): request failed::curl exited $curl_exit; the command was not dispatched to the device"
-            exit 1
-          fi
-
-          if [ "$http_code" = "408" ] || printf '%s' "$body" | grep -qF 'did not complete in a reasonable amount of time'; then
-            echo "::error title=send-command (child-process): Rewst engine timed out::the engine did not dispatch the command before giving up (HTTP $http_code). Engine-side, NOT a regression in the code under test - re-dispatch rather than investigating the diff."
-            exit 1
-          fi
-
-          case "$http_code" in
-            2??) ;;
-            *)
-              echo "::error title=send-command (child-process): HTTP $http_code::the Rewst engine returned $http_code; the command was not dispatched to the device"
-              exit 1
-              ;;
-          esac
-
-      - name: Assert hanging parent command was killed by the timeout (child-process scenario)
-        timeout-minutes: 6
-        shell: pwsh
-        env:
-          LOG_FILE: ${{ matrix.log_file }}
-          BASELINE: ${{ steps.child_process_kill_baseline.outputs.timed_out }}
-        run: |
-          & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/assert-hanging-command-was-killed-by-the-timeout.ps1"
-
-      - name: Assert the child process did not survive the timeout kill
-        timeout-minutes: 6
-        shell: pwsh
-        run: |
-          & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/assert-child-process-terminated.ps1"
-
-      - name: Send command after child-process scenario
-        timeout-minutes: 20
-        uses: ./.github/actions/send-command
-        with:
-          trigger_url: ${{ vars.IT_SEND_COMMAND_TRIGGER_URL }}
-          device_id: ${{ steps.setup.outputs.device_id }}
-          scenario: success
-
-      - name: Assert worker pool recovered after child-process scenario
-        timeout-minutes: 6
-        shell: pwsh
-        env:
-          LOG_FILE: ${{ matrix.log_file }}
-          BASELINE: ${{ steps.child_process_kill_baseline.outputs.completed }}
-        run: |
-          & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/assert-worker-pool-recovered-after-timeout.ps1"
-
-      # Every scenario above asserts on the agent log; when one fails, the log is
-      # the evidence. Dump its tail so triage does not need a re-run with extra
-      # steps (three runs on 2026-09-22 were diagnosed from postback bodies alone).
-
       - name: Capture installed file hashes before the wedge
         id: wedge_hashes
         shell: pwsh
@@ -2938,6 +1897,1100 @@ jobs:
         uses: ./.github/actions/dump-agent-log
         with:
           log_file: ${{ matrix.log_file }}
+
+  # ---- Hermetic: command timeouts (default and configured) ----
+  hermetic-command-timeouts:
+    permissions:
+      contents: read
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    needs: [build, build-integration-test, set-matrix]
+    # Hermetic: own device id, no Rewst or Azure, so it runs in parallel with
+    # every other job and gates the merge from day one (the kill-and-replay
+    # job keeps its soak-period continue-on-error separately).
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.set-matrix.outputs.matrix) }}
+    runs-on: ${{ matrix.os }}
+    # Provisional bound; re-measured from the first runs (README "Bounding the e2e jobs").
+    timeout-minutes: 25
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      # Stub broker, stand-in engine and stub config endpoint on the runner, then
+      # an install from them under this job's own device id (sc-126319).
+      - name: Set up the hermetic scenario
+        timeout-minutes: 20
+        id: setup
+        uses: ./.github/actions/hermetic-setup
+        with:
+          os: ${{ matrix.os }}
+          binary: ${{ matrix.binary }}
+          org_id: ${{ vars.IT_ORG_ID }}
+          device_id: hermetic-${{ github.run_id }}-${{ matrix.os }}-command-timeouts
+          service: ${{ matrix.service }}
+          log_file: ${{ matrix.log_file }}
+
+      - name: Capture subscription baseline before the default-timeout install
+        id: default_timeout_sub_baseline
+        uses: ./.github/actions/it-script
+        with:
+          script: capture-restore-baseline-counts
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+
+      - name: Install IT binary to exercise the default command timeout
+        timeout-minutes: 10
+        uses: ./.github/actions/run-agent
+        with:
+          binary: ${{ matrix.it_binary }}
+          args: --update --org-id ${{ vars.IT_ORG_ID }} --no-auto-updates --github-token ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Wait for fresh subscription after default-timeout binary install
+        timeout-minutes: 6
+        uses: ./.github/actions/wait-for-log-line
+        with:
+          log_file: ${{ matrix.log_file }}
+          pattern: Subscribed to messages
+          max_attempts: "60"
+          interval_seconds: "2"
+          baseline_count: ${{ steps.default_timeout_sub_baseline.outputs.subscribed }}
+
+      - name: Capture default-command-timeout baseline counts
+        id: default_timeout_baseline
+        uses: ./.github/actions/it-script
+        with:
+          script: capture-command-timeout-baseline-counts
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+
+      - name: Send hanging command with no command_timeout_seconds configured
+        timeout-minutes: 20
+        uses: ./.github/actions/send-command
+        with:
+          trigger_url: ${{ steps.setup.outputs.trigger_url }}
+          device_id: ${{ steps.setup.outputs.device_id }}
+          scenario: timeout
+
+      - name: Assert hanging command was killed by the default timeout
+        timeout-minutes: 6
+        uses: ./.github/actions/it-script
+        with:
+          script: assert-hanging-command-was-killed-by-the-timeout
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+          BASELINE: ${{ steps.default_timeout_baseline.outputs.timed_out }}
+
+      - name: Send command after default timeout
+        timeout-minutes: 20
+        uses: ./.github/actions/send-command
+        with:
+          trigger_url: ${{ steps.setup.outputs.trigger_url }}
+          device_id: ${{ steps.setup.outputs.device_id }}
+          scenario: success
+
+      - name: Assert worker pool recovered after default timeout
+        timeout-minutes: 6
+        uses: ./.github/actions/it-script
+        with:
+          script: assert-worker-pool-recovered-after-timeout
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+          BASELINE: ${{ steps.default_timeout_baseline.outputs.completed }}
+
+      - name: Baseline "Subscribed to messages" before the short-timeout update
+        id: bl_sub_timeout_update
+        uses: ./.github/actions/capture-log-count
+        with:
+          log_file: ${{ matrix.log_file }}
+          pattern: "Subscribed to messages"
+
+      - name: Enable short command timeout
+        timeout-minutes: 10
+        uses: ./.github/actions/run-agent
+        with:
+          binary: ${{ matrix.binary }}
+          args: --update --org-id ${{ vars.IT_ORG_ID }} --command-timeout-seconds 5 --github-token ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Wait for fresh subscription after timeout update
+        timeout-minutes: 6
+        uses: ./.github/actions/wait-for-log-line
+        with:
+          log_file: ${{ matrix.log_file }}
+          pattern: Subscribed to messages
+          baseline_count: ${{ steps.bl_sub_timeout_update.outputs.count }}
+          max_attempts: "60"
+          interval_seconds: "2"
+
+      - name: Capture command-timeout baseline counts
+        id: timeout_baseline
+        uses: ./.github/actions/it-script
+        with:
+          script: capture-command-timeout-baseline-counts
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+
+      - name: Send hanging command
+        timeout-minutes: 20
+        uses: ./.github/actions/send-command
+        with:
+          trigger_url: ${{ steps.setup.outputs.trigger_url }}
+          device_id: ${{ steps.setup.outputs.device_id }}
+          scenario: timeout
+
+      - name: Assert hanging command was killed by the timeout
+        timeout-minutes: 6
+        uses: ./.github/actions/it-script
+        with:
+          script: assert-hanging-command-was-killed-by-the-timeout
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+          BASELINE: ${{ steps.timeout_baseline.outputs.timed_out }}
+
+      - name: Send command after timeout
+        timeout-minutes: 20
+        uses: ./.github/actions/send-command
+        with:
+          trigger_url: ${{ steps.setup.outputs.trigger_url }}
+          device_id: ${{ steps.setup.outputs.device_id }}
+          scenario: success
+
+      - name: Assert worker pool recovered after timeout
+        timeout-minutes: 6
+        uses: ./.github/actions/it-script
+        with:
+          script: assert-worker-pool-recovered-after-timeout
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+          BASELINE: ${{ steps.timeout_baseline.outputs.completed }}
+
+      - name: Dump agent log on failure
+        if: failure()
+        uses: ./.github/actions/dump-agent-log
+        with:
+          log_file: ${{ matrix.log_file }}
+
+      - name: Stop stub config endpoint
+        timeout-minutes: 5
+        if: always()
+        uses: ./.github/actions/stub-config
+        with:
+          mode: stop
+
+      - name: Stop stub broker and engine
+        timeout-minutes: 5
+        if: always()
+        uses: ./.github/actions/stub-broker
+        with:
+          mode: stop
+
+
+  # ---- Hermetic: stdout and stderr floods bounded ----
+  hermetic-output-bounds:
+    permissions:
+      contents: read
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    needs: [build, build-integration-test, set-matrix]
+    # Hermetic: own device id, no Rewst or Azure, so it runs in parallel with
+    # every other job and gates the merge from day one (the kill-and-replay
+    # job keeps its soak-period continue-on-error separately).
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.set-matrix.outputs.matrix) }}
+    runs-on: ${{ matrix.os }}
+    # Provisional bound; re-measured from the first runs (README "Bounding the e2e jobs").
+    timeout-minutes: 25
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      # Stub broker, stand-in engine and stub config endpoint on the runner, then
+      # an install from them under this job's own device id (sc-126319).
+      - name: Set up the hermetic scenario
+        timeout-minutes: 20
+        id: setup
+        uses: ./.github/actions/hermetic-setup
+        with:
+          os: ${{ matrix.os }}
+          binary: ${{ matrix.binary }}
+          org_id: ${{ vars.IT_ORG_ID }}
+          device_id: hermetic-${{ github.run_id }}-${{ matrix.os }}-output-bounds
+          service: ${{ matrix.service }}
+          log_file: ${{ matrix.log_file }}
+
+      - name: Send success command
+        timeout-minutes: 20
+        uses: ./.github/actions/send-command
+        with:
+          trigger_url: ${{ steps.setup.outputs.trigger_url }}
+          device_id: ${{ steps.setup.outputs.device_id }}
+          scenario: success
+
+      - name: Check logs for successful command
+        timeout-minutes: 5
+        uses: ./.github/actions/assert-log-contains
+        with:
+          log_file: ${{ matrix.log_file }}
+          scenario: success
+
+      # ---- Bounded command output scenario (sc-106105) ----
+      # A command's stdout and stderr used to be buffered whole in memory, so the
+      # agent's heap tracked however much a script decided to write and a verbose
+      # one could OOM-kill the service. Configure a deliberately small ceiling,
+      # flood it by three orders of magnitude, and assert the two properties that
+      # matter: the agent's RSS stays near the ceiling instead of near the output
+      # size, and the discarded output is reported rather than silently dropped.
+      #
+      # The release binary is installed first with the per-command timeout raised
+      # well past the floods' runtime, because the earlier timeout scenario left a
+      # 5s deadline in the config that would kill these commands mid-write, and
+      # the SAS scenario left the IT binary running with a 90s token lifetime
+      # whose reconnect would cancel them. --logging-level is deliberately not
+      # passed: it resets to the default (Info), which keeps the Warn under test
+      # visible while leaving the debug handler that dumps whole command outputs
+      # into the log switched off. --disable-agent-postback is likewise not
+      # passed, so the truncated result actually traverses the postback path
+      # on every platform.
+      #
+      # Coverage note: these steps assert on the agent log, which is where the
+      # byte counts are observable on the endpoint. The same counts are what the
+      # postback carries as truncated/output_bytes_produced/output_bytes_kept -
+      # both come from one value computed once per command - but the postback body
+      # is never logged, so confirming the workflow's received payload stays a
+      # Rewst-side QA step.
+
+      - name: Resolve the scripts directory
+        id: scripts_dir
+        uses: ./.github/actions/it-script
+        with:
+          script: resolve-the-scripts-directory
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+
+      - name: Snapshot temp script files before the output floods
+        timeout-minutes: 5
+        uses: ./.github/actions/assert-no-orphaned-scripts
+        with:
+          mode: snapshot
+          scripts_dir: ${{ steps.scripts_dir.outputs.path }}
+
+      # Captured before the update below restarts the service: the restart's own
+      # "Subscribed to messages" line must land after this snapshot for the delta
+      # wait to mean anything.
+
+      - name: Capture bounded-output baseline counts
+        id: output_baseline
+        uses: ./.github/actions/it-script
+        with:
+          script: capture-bounded-output-baseline-counts
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+
+      - name: Configure a small output ceiling
+        timeout-minutes: 10
+        uses: ./.github/actions/run-agent
+        with:
+          binary: ${{ matrix.binary }}
+          args: --update --org-id ${{ vars.IT_ORG_ID }} --no-auto-updates --max-output-bytes 262144 --command-timeout-seconds 600 --github-token ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Assert a non-positive output ceiling is rejected
+        shell: pwsh
+        env:
+          BINARY: ${{ matrix.binary }}
+          ORG_ID: ${{ vars.IT_ORG_ID }}
+        run: |
+          # The bound must not be disablable by configuration: a non-positive
+          # value is refused outright rather than accepted as "no limit" (a
+          # hand-edited config falls back to the documented default instead).
+          foreach ($value in @('0', '-1')) {
+            if ($IsWindows) {
+              $out = & "./dist/$env:BINARY" --update --org-id $env:ORG_ID --max-output-bytes $value 2>&1 | Out-String
+            } else {
+              $out = & sudo "./dist/$env:BINARY" --update --org-id $env:ORG_ID --max-output-bytes $value 2>&1 | Out-String
+            }
+            $code = $LASTEXITCODE
+            if ($code -eq 0) {
+              Write-Output $out
+              Write-Error "--max-output-bytes $value was accepted (exit 0); the bound must not be disablable"
+              exit 1
+            }
+            if ($out -notmatch 'invalid max-output-bytes: must be a positive integer') {
+              Write-Output $out
+              Write-Error "--max-output-bytes $value was rejected without the expected validation message"
+              exit 1
+            }
+            Write-Output "OK: --max-output-bytes $value rejected (exit $code) with the expected message"
+          }
+          # Explicit success: the runner appends "exit $LASTEXITCODE" to pwsh
+          # steps, and the last thing this step ran was a deliberately failing
+          # agent invocation, so falling off the end would report that failure as
+          # the step's own.
+          exit 0
+
+      - name: Wait for fresh subscription after the output ceiling update
+        timeout-minutes: 6
+        uses: ./.github/actions/it-script
+        with:
+          script: wait-for-fresh-subscription-after-the-output-ceiling-update
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+          BASELINE: ${{ steps.output_baseline.outputs.subscribed }}
+
+      - name: Send stdout flood command
+        id: send_stdout_flood
+        timeout-minutes: 20
+        uses: ./.github/actions/send-command
+        with:
+          trigger_url: ${{ steps.setup.outputs.trigger_url }}
+          device_id: ${{ steps.setup.outputs.device_id }}
+          scenario: verbose
+
+      - name: Assert the stdout flood was bounded
+        timeout-minutes: 5
+        uses: ./.github/actions/assert-output-bounded
+        with:
+          service: ${{ matrix.service }}
+          log_file: ${{ matrix.log_file }}
+          baseline_truncations: ${{ steps.output_baseline.outputs.truncated }}
+          # A retried send may have run the command twice (run 37633504250: the
+          # engine answered a transient 404 after dispatching, and the retry
+          # produced a second truncation warning two seconds after the first).
+          dispatches: ${{ steps.send_stdout_flood.outputs.attempts }}
+          expected_ceiling_bytes: "262144"
+          # At least the whole ceiling, since stdout alone floods it. The upper
+          # bound carries 4 KiB of headroom rather than being exact because the
+          # shell contributes a preamble of its own that is not this scenario's to
+          # control - on Windows the run deliberately injects a
+          # PROFILE_NOISE_<guid> marker into the all-users PowerShell profile,
+          # which every agent-spawned PowerShell echoes. What the bound has to
+          # catch is a stream that was not capped at all, and that would land
+          # near the 200 MiB produced, not a few bytes over.
+          min_kept_bytes: "262144"
+          max_kept_bytes: "266240"
+          min_produced_bytes: "209715200"
+          max_rss_mb: "250"
+
+      - name: Assert the flooding command still succeeded
+        timeout-minutes: 6
+        uses: ./.github/actions/it-script
+        with:
+          script: assert-the-flooding-command-still-succeeded
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+          BASELINE: ${{ steps.output_baseline.outputs.completed }}
+
+      - name: Capture small-output baseline counts
+        id: small_output_baseline
+        uses: ./.github/actions/it-script
+        with:
+          script: capture-small-output-baseline-counts
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+
+      - name: Send ordinary command after the flood
+        timeout-minutes: 20
+        uses: ./.github/actions/send-command
+        with:
+          trigger_url: ${{ steps.setup.outputs.trigger_url }}
+          device_id: ${{ steps.setup.outputs.device_id }}
+          scenario: success
+
+      - name: Assert output below the ceiling is untouched and the worker recovered
+        timeout-minutes: 6
+        uses: ./.github/actions/it-script
+        with:
+          script: assert-output-below-the-ceiling-is-untouched-and-the-worker-recovered
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+          COMPLETED_BASELINE: ${{ steps.small_output_baseline.outputs.completed }}
+          TRUNCATED_BASELINE: ${{ steps.small_output_baseline.outputs.truncated }}
+
+      - name: Capture stderr-flood baseline counts
+        id: stderr_flood_baseline
+        uses: ./.github/actions/it-script
+        with:
+          script: capture-stderr-flood-baseline-counts
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+
+      - name: Send stderr flood command
+        id: send_stderr_flood
+        timeout-minutes: 20
+        uses: ./.github/actions/send-command
+        with:
+          trigger_url: ${{ steps.setup.outputs.trigger_url }}
+          device_id: ${{ steps.setup.outputs.device_id }}
+          scenario: verbose_stderr
+
+      - name: Assert stderr is bounded independently of stdout
+        timeout-minutes: 5
+        uses: ./.github/actions/assert-output-bounded
+        with:
+          service: ${{ matrix.service }}
+          log_file: ${{ matrix.log_file }}
+          baseline_truncations: ${{ steps.stderr_flood_baseline.outputs.truncated }}
+          dispatches: ${{ steps.send_stderr_flood.outputs.attempts }}
+          expected_ceiling_bytes: "262144"
+          # Above the ceiling on purpose: the script floods stderr to its full
+          # ceiling AND writes a short stdout line, so the kept total can only
+          # exceed the ceiling if the two streams have separate budgets. A shared
+          # budget would cap the total at 262144 and starve one of them. The upper
+          # bound has the same 4 KiB of headroom as the stdout flood, for the same
+          # reason: the stdout side carries the shell's preamble as well as the
+          # scenario's own line.
+          min_kept_bytes: "262145"
+          max_kept_bytes: "266240"
+          min_produced_bytes: "209715200"
+          max_rss_mb: "250"
+
+      # Every scenario above asserts on the agent log; when one fails, the log is
+      # the evidence. Dump its tail so triage does not need a re-run with extra
+      # steps (three runs on 2026-09-22 were diagnosed from postback bodies alone).
+
+      - name: Dump agent log on failure
+        if: failure()
+        uses: ./.github/actions/dump-agent-log
+        with:
+          log_file: ${{ matrix.log_file }}
+
+      - name: Stop stub config endpoint
+        timeout-minutes: 5
+        if: always()
+        uses: ./.github/actions/stub-config
+        with:
+          mode: stop
+
+      - name: Stop stub broker and engine
+        timeout-minutes: 5
+        if: always()
+        uses: ./.github/actions/stub-broker
+        with:
+          mode: stop
+
+
+  # ---- Hermetic: output bound and command timeout composed ----
+  hermetic-timeout-composition:
+    permissions:
+      contents: read
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    needs: [build, build-integration-test, set-matrix]
+    # Hermetic: own device id, no Rewst or Azure, so it runs in parallel with
+    # every other job and gates the merge from day one (the kill-and-replay
+    # job keeps its soak-period continue-on-error separately).
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.set-matrix.outputs.matrix) }}
+    runs-on: ${{ matrix.os }}
+    # Provisional bound; re-measured from the first runs (README "Bounding the e2e jobs").
+    timeout-minutes: 25
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      # Stub broker, stand-in engine and stub config endpoint on the runner, then
+      # an install from them under this job's own device id (sc-126319).
+      - name: Set up the hermetic scenario
+        timeout-minutes: 20
+        id: setup
+        uses: ./.github/actions/hermetic-setup
+        with:
+          os: ${{ matrix.os }}
+          binary: ${{ matrix.binary }}
+          org_id: ${{ vars.IT_ORG_ID }}
+          device_id: hermetic-${{ github.run_id }}-${{ matrix.os }}-timeout-composition
+          service: ${{ matrix.service }}
+          log_file: ${{ matrix.log_file }}
+
+      - name: Send success command
+        timeout-minutes: 20
+        uses: ./.github/actions/send-command
+        with:
+          trigger_url: ${{ steps.setup.outputs.trigger_url }}
+          device_id: ${{ steps.setup.outputs.device_id }}
+          scenario: success
+
+      - name: Check logs for successful command
+        timeout-minutes: 5
+        uses: ./.github/actions/assert-log-contains
+        with:
+          log_file: ${{ matrix.log_file }}
+          scenario: success
+
+      # ---- Bounded command output scenario (sc-106105) ----
+      # A command's stdout and stderr used to be buffered whole in memory, so the
+      # agent's heap tracked however much a script decided to write and a verbose
+      # one could OOM-kill the service. Configure a deliberately small ceiling,
+      # flood it by three orders of magnitude, and assert the two properties that
+      # matter: the agent's RSS stays near the ceiling instead of near the output
+      # size, and the discarded output is reported rather than silently dropped.
+      #
+      # The release binary is installed first with the per-command timeout raised
+      # well past the floods' runtime, because the earlier timeout scenario left a
+      # 5s deadline in the config that would kill these commands mid-write, and
+      # the SAS scenario left the IT binary running with a 90s token lifetime
+      # whose reconnect would cancel them. --logging-level is deliberately not
+      # passed: it resets to the default (Info), which keeps the Warn under test
+      # visible while leaving the debug handler that dumps whole command outputs
+      # into the log switched off. --disable-agent-postback is likewise not
+      # passed, so the truncated result actually traverses the postback path
+      # on every platform.
+      #
+      # Coverage note: these steps assert on the agent log, which is where the
+      # byte counts are observable on the endpoint. The same counts are what the
+      # postback carries as truncated/output_bytes_produced/output_bytes_kept -
+      # both come from one value computed once per command - but the postback body
+      # is never logged, so confirming the workflow's received payload stays a
+      # Rewst-side QA step.
+
+      - name: Resolve the scripts directory
+        id: scripts_dir
+        uses: ./.github/actions/it-script
+        with:
+          script: resolve-the-scripts-directory
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+
+      - name: Snapshot temp script files before the output floods
+        timeout-minutes: 5
+        uses: ./.github/actions/assert-no-orphaned-scripts
+        with:
+          mode: snapshot
+          scripts_dir: ${{ steps.scripts_dir.outputs.path }}
+
+      # Captured before the update below restarts the service, for the same
+      # reason as the bounded-output baseline.
+
+      - name: Capture timeout-composition baseline counts
+        id: compose_baseline
+        uses: ./.github/actions/it-script
+        with:
+          script: capture-timeout-composition-baseline-counts
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+
+      - name: Shorten the command timeout for the composition check
+        timeout-minutes: 10
+        uses: ./.github/actions/run-agent
+        with:
+          binary: ${{ matrix.binary }}
+          args: --update --org-id ${{ vars.IT_ORG_ID }} --no-auto-updates --max-output-bytes 262144 --command-timeout-seconds 30 --github-token ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Wait for fresh subscription after the timeout update
+        timeout-minutes: 6
+        uses: ./.github/actions/it-script
+        with:
+          script: wait-for-fresh-subscription-after-the-timeout-update
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+          BASELINE: ${{ steps.compose_baseline.outputs.subscribed }}
+
+      - name: Send verbose command that then hangs
+        id: send_verbose_hang
+        timeout-minutes: 20
+        uses: ./.github/actions/send-command
+        with:
+          trigger_url: ${{ steps.setup.outputs.trigger_url }}
+          device_id: ${{ steps.setup.outputs.device_id }}
+          scenario: verbose_hang
+
+      - name: Assert the hanging command's output was still bounded
+        timeout-minutes: 5
+        uses: ./.github/actions/assert-output-bounded
+        with:
+          service: ${{ matrix.service }}
+          log_file: ${{ matrix.log_file }}
+          baseline_truncations: ${{ steps.compose_baseline.outputs.truncated }}
+          dispatches: ${{ steps.send_verbose_hang.outputs.attempts }}
+          expected_ceiling_bytes: "262144"
+          # Same headroom as the other floods: stdout fills the ceiling on its
+          # own, and anything the shell adds on either stream is incidental.
+          min_kept_bytes: "262144"
+          max_kept_bytes: "266240"
+          # Lower than the flood's full 200 MiB: the command is killed at its
+          # deadline, so only the volume written before the kill is counted.
+          min_produced_bytes: "104857600"
+          max_rss_mb: "250"
+          # The warning lands once the deadline kills the process group, and
+          # cmd.WaitDelay can hold Run for up to 10s more after that.
+          max_attempts: "120"
+
+      - name: Assert the hanging command also timed out and released its worker
+        timeout-minutes: 6
+        uses: ./.github/actions/it-script
+        with:
+          script: assert-the-hanging-command-also-timed-out-and-released-its-worker
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+          TIMED_OUT_BASELINE: ${{ steps.compose_baseline.outputs.timed_out }}
+
+      - name: Send command after the verbose timeout
+        timeout-minutes: 20
+        uses: ./.github/actions/send-command
+        with:
+          trigger_url: ${{ steps.setup.outputs.trigger_url }}
+          device_id: ${{ steps.setup.outputs.device_id }}
+          scenario: success
+
+      - name: Assert the worker recovered after the verbose timeout
+        timeout-minutes: 6
+        uses: ./.github/actions/it-script
+        with:
+          script: assert-the-worker-recovered-after-the-verbose-timeout
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+          BASELINE: ${{ steps.compose_baseline.outputs.completed }}
+
+      - name: Assert the output floods left no orphaned script files
+        timeout-minutes: 5
+        uses: ./.github/actions/assert-no-orphaned-scripts
+        with:
+          mode: assert
+          scripts_dir: ${{ steps.scripts_dir.outputs.path }}
+
+      # Every scenario above asserts on the agent log; when one fails, the log is
+      # the evidence. Dump its tail so triage does not need a re-run with extra
+      # steps (three runs on 2026-09-22 were diagnosed from postback bodies alone).
+
+      - name: Dump agent log on failure
+        if: failure()
+        uses: ./.github/actions/dump-agent-log
+        with:
+          log_file: ${{ matrix.log_file }}
+
+      - name: Stop stub config endpoint
+        timeout-minutes: 5
+        if: always()
+        uses: ./.github/actions/stub-config
+        with:
+          mode: stop
+
+      - name: Stop stub broker and engine
+        timeout-minutes: 5
+        if: always()
+        uses: ./.github/actions/stub-broker
+        with:
+          mode: stop
+
+
+  # ---- Hermetic: reconnect after the broker drops the device, SAS renewal ----
+  hermetic-connection:
+    permissions:
+      contents: read
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    needs: [build, build-integration-test, set-matrix]
+    # Hermetic: own device id, no Rewst or Azure, so it runs in parallel with
+    # every other job and gates the merge from day one (the kill-and-replay
+    # job keeps its soak-period continue-on-error separately).
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.set-matrix.outputs.matrix) }}
+    runs-on: ${{ matrix.os }}
+    # Provisional bound; re-measured from the first runs (README "Bounding the e2e jobs").
+    timeout-minutes: 25
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      # Stub broker, stand-in engine and stub config endpoint on the runner, then
+      # an install from them under this job's own device id (sc-126319).
+      - name: Set up the hermetic scenario
+        timeout-minutes: 20
+        id: setup
+        uses: ./.github/actions/hermetic-setup
+        with:
+          os: ${{ matrix.os }}
+          binary: ${{ matrix.binary }}
+          org_id: ${{ vars.IT_ORG_ID }}
+          device_id: hermetic-${{ github.run_id }}-${{ matrix.os }}-connection
+          service: ${{ matrix.service }}
+          log_file: ${{ matrix.log_file }}
+
+      - name: Capture reconnect baseline counts
+        id: reconnect_baseline
+        uses: ./.github/actions/it-script
+        with:
+          script: capture-reconnect-baseline-counts
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+
+      - name: Baseline "Connection lost" before the broker disruption
+        id: bl_connection_lost
+        uses: ./.github/actions/capture-log-count
+        with:
+          log_file: ${{ matrix.log_file }}
+          pattern: "Connection lost"
+
+      - name: Take the device offline at the stub broker
+        timeout-minutes: 5
+        uses: ./.github/actions/stub-broker
+        with:
+          mode: offline
+          engine_url: ${{ steps.setup.outputs.engine_url }}
+          device_id: ${{ steps.setup.outputs.device_id }}
+          offline_seconds: "45"
+
+      - name: Wait for connection lost detection
+        timeout-minutes: 6
+        uses: ./.github/actions/wait-for-log-line
+        with:
+          log_file: ${{ matrix.log_file }}
+          pattern: Connection lost
+          baseline_count: ${{ steps.bl_connection_lost.outputs.count }}
+          max_attempts: "60"
+          interval_seconds: "2"
+
+      - name: Assert connection lost and reconnect/backoff activity
+        timeout-minutes: 5
+        uses: ./.github/actions/assert-log-contains
+        with:
+          log_file: ${{ matrix.log_file }}
+          patterns: |
+            Connection lost
+            Reconnecting in
+            Reconnecting...
+
+      - name: Bring the device back online at the stub broker
+        timeout-minutes: 5
+        if: always()
+        uses: ./.github/actions/stub-broker
+        with:
+          mode: online
+          engine_url: ${{ steps.setup.outputs.engine_url }}
+          device_id: ${{ steps.setup.outputs.device_id }}
+
+      - name: Wait for fresh subscription after reconnect
+        timeout-minutes: 6
+        uses: ./.github/actions/it-script
+        with:
+          script: wait-for-fresh-subscription-after-reconnect
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+          BASELINE: ${{ steps.reconnect_baseline.outputs.subscribed }}
+
+      - name: Send command after reconnect
+        timeout-minutes: 20
+        uses: ./.github/actions/send-command
+        with:
+          trigger_url: ${{ steps.setup.outputs.trigger_url }}
+          device_id: ${{ steps.setup.outputs.device_id }}
+          scenario: success
+
+      - name: Assert command executed exactly once after reconnect
+        timeout-minutes: 6
+        uses: ./.github/actions/it-script
+        with:
+          script: assert-command-executed-exactly-once-after-reconnect
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+          BASELINE: ${{ steps.reconnect_baseline.outputs.completed }}
+
+      - name: Baseline "Subscribed to messages" before the short-SAS install
+        id: bl_sub_sas_update
+        uses: ./.github/actions/capture-log-count
+        with:
+          log_file: ${{ matrix.log_file }}
+          pattern: "Subscribed to messages"
+
+      # Baseline before the event so the wait below needs a *new* line (sc-117884).
+
+      - name: Baseline "Renewing SAS token before expiry" before the short-SAS install
+        id: bl_sas_renewed
+        uses: ./.github/actions/capture-log-count
+        with:
+          log_file: ${{ matrix.log_file }}
+          pattern: "Renewing SAS token before expiry"
+
+      - name: Install IT binary with short SAS token lifetime
+        timeout-minutes: 10
+        uses: ./.github/actions/run-agent
+        with:
+          binary: ${{ matrix.it_binary }}
+          args: --update --org-id ${{ vars.IT_ORG_ID }} --no-auto-updates --github-token ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Wait for fresh subscription after SAS lifetime update
+        timeout-minutes: 6
+        uses: ./.github/actions/wait-for-log-line
+        with:
+          log_file: ${{ matrix.log_file }}
+          pattern: Subscribed to messages
+          baseline_count: ${{ steps.bl_sub_sas_update.outputs.count }}
+          max_attempts: "60"
+          interval_seconds: "2"
+
+      - name: Capture SAS renewal baseline counts
+        id: sas_renewal_baseline
+        uses: ./.github/actions/it-script
+        with:
+          script: capture-sas-renewal-baseline-counts
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+
+      - name: Wait for proactive SAS token renewal
+        timeout-minutes: 6
+        uses: ./.github/actions/wait-for-log-line
+        with:
+          log_file: ${{ matrix.log_file }}
+          pattern: Renewing SAS token before expiry
+          baseline_count: ${{ steps.bl_sas_renewed.outputs.count }}
+          max_attempts: "60"
+          interval_seconds: "2"
+
+      - name: Assert SAS token renewed and agent resubscribed with fresh token
+        timeout-minutes: 6
+        uses: ./.github/actions/it-script
+        with:
+          script: assert-sas-token-renewed-and-agent-resubscribed-with-fresh-token
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+          RENEWED_BASELINE: ${{ steps.sas_renewal_baseline.outputs.renewed }}
+          SUBSCRIBED_BASELINE: ${{ steps.sas_renewal_baseline.outputs.subscribed }}
+
+      - name: Assert SAS renewal was graceful (no forced disconnect)
+        timeout-minutes: 6
+        uses: ./.github/actions/it-script
+        with:
+          script: assert-sas-renewal-was-graceful-no-forced-disconnect
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+          LOST_BASELINE: ${{ steps.sas_renewal_baseline.outputs.lost }}
+
+      - name: Send command after SAS renewal
+        timeout-minutes: 20
+        uses: ./.github/actions/send-command
+        with:
+          trigger_url: ${{ steps.setup.outputs.trigger_url }}
+          device_id: ${{ steps.setup.outputs.device_id }}
+          scenario: success
+
+      - name: Assert command delivery continues after SAS renewal
+        timeout-minutes: 6
+        uses: ./.github/actions/it-script
+        with:
+          script: assert-command-delivery-continues-after-sas-renewal
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+          BASELINE: ${{ steps.sas_renewal_baseline.outputs.completed }}
+
+      - name: Dump agent log on failure
+        if: failure()
+        uses: ./.github/actions/dump-agent-log
+        with:
+          log_file: ${{ matrix.log_file }}
+
+      - name: Stop stub config endpoint
+        timeout-minutes: 5
+        if: always()
+        uses: ./.github/actions/stub-config
+        with:
+          mode: stop
+
+      - name: Stop stub broker and engine
+        timeout-minutes: 5
+        if: always()
+        uses: ./.github/actions/stub-broker
+        with:
+          mode: stop
+
+
+  # ---- Hermetic, Windows-only: child-process kill through the job object ----
+  hermetic-child-process:
+    permissions:
+      contents: read
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    needs: [build, build-integration-test, set-matrix]
+    # Hermetic: own device id, no Rewst or Azure, so it runs in parallel with
+    # every other job and gates the merge from day one (the kill-and-replay
+    # job keeps its soak-period continue-on-error separately).
+    if: ${{ contains(fromJson(needs.set-matrix.outputs.matrix).include.*.os, 'windows-latest') }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.set-matrix.outputs.windows_matrix) }}
+    runs-on: ${{ matrix.os }}
+    # Provisional bound; re-measured from the first runs (README "Bounding the e2e jobs").
+    timeout-minutes: 25
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      # Stub broker, stand-in engine and stub config endpoint on the runner, then
+      # an install from them under this job's own device id (sc-126319).
+      - name: Set up the hermetic scenario
+        timeout-minutes: 20
+        id: setup
+        uses: ./.github/actions/hermetic-setup
+        with:
+          os: ${{ matrix.os }}
+          binary: ${{ matrix.binary }}
+          org_id: ${{ vars.IT_ORG_ID }}
+          device_id: hermetic-${{ github.run_id }}-${{ matrix.os }}-child-process
+          service: ${{ matrix.service }}
+          log_file: ${{ matrix.log_file }}
+
+      - name: Baseline "Subscribed to messages" before the child-process timeout update
+        id: bl_sub_child_update
+        uses: ./.github/actions/capture-log-count
+        with:
+          log_file: ${{ matrix.log_file }}
+          pattern: "Subscribed to messages"
+
+      - name: Enable a longer command timeout for the child-process scenario
+        timeout-minutes: 10
+        uses: ./.github/actions/run-agent
+        with:
+          binary: ${{ matrix.binary }}
+          args: --update --org-id ${{ vars.IT_ORG_ID }} --command-timeout-seconds 15 --github-token ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Wait for fresh subscription after child-process-scenario timeout update
+        timeout-minutes: 6
+        uses: ./.github/actions/wait-for-log-line
+        with:
+          log_file: ${{ matrix.log_file }}
+          pattern: Subscribed to messages
+          baseline_count: ${{ steps.bl_sub_child_update.outputs.count }}
+          max_attempts: "60"
+          interval_seconds: "2"
+
+      - name: Capture child-process-kill baseline counts
+        id: child_process_kill_baseline
+        shell: pwsh
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+        run: |
+          & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/capture-command-timeout-baseline-counts.ps1"
+
+      # send-command (the composite action used everywhere else in this file)
+      # blocks until the device's postback round-trips back - confirmed by the
+      # first attempt at this scenario, where that call alone took ~11-25s for
+      # a 5-15s configured timeout. For every other scenario that is fine
+      # because they only ever inspect the agent's log afterward, but here it
+      # means the full timeout+kill cycle has already completed by the time a
+      # following step could check the child's *live* process state - too
+      # late to distinguish "job object correctly killed it" from "it never
+      # spawned at all", which is exactly the distinction this scenario needs
+      # to make. So the same curl call is sent in the background here, polled
+      # for the child appearing while it (and the parent's timeout) are still
+      # running, and only then waited on for its own completion.
+
+      - name: Send command that spawns a child process and hangs, then wait for it to start
+        timeout-minutes: 6
+        shell: bash
+        env:
+          TRIGGER_URL: ${{ steps.setup.outputs.trigger_url }}
+          DEVICE_ID: ${{ steps.setup.outputs.device_id }}
+          SCENARIO: child_process_hang
+          E2E_CATALOG: ${{ github.workspace }}/.github/workflows/e2e-commands.json
+        run: |
+          # The command comes from the catalog like every other send; this job
+          # is Windows-only, hence the windows family.
+          COMMANDS="$(jq -er --arg s "$SCENARIO" '.[$s].windows' "$E2E_CATALOG")" \
+            || { echo "::error::scenario $SCENARIO has no windows command in $E2E_CATALOG"; exit 1; }
+          # This scenario cannot use the send-command action (it needs the call
+          # backgrounded so it can inspect the child's live process state), but it
+          # must not re-introduce the bug that action exists to fix: a discarded
+          # response means an engine that never dispatched the command is reported
+          # as success, and the assertion below fails instead. Same checks, inline.
+          # Unlike the sweep scenario this one does not depend on the engine
+          # timeout - it reinstalls with a 15s command timeout above, so the
+          # postback round-trips long before the engine's ceiling.
+          set -uo pipefail
+          resp="$RUNNER_TEMP/child-scenario-response.json"
+          curl --silent --show-error --location \
+            --max-time 300 \
+            --write-out '\n%{http_code}' \
+            --form "device_id=\"$DEVICE_ID\"" \
+            --form "commands=$COMMANDS" \
+            "$TRIGGER_URL" > "$resp" &
+          curl_pid=$!
+
+          pwsh -NoProfile -File "$GITHUB_WORKSPACE/.github/workflows/it-scripts/wait-for-child-process-to-start.ps1"
+
+          curl_exit=0
+          wait "$curl_pid" || curl_exit=$?
+
+          response="$(cat "$resp")"
+          http_code="$(printf '%s' "$response" | tail -n 1)"
+          body="$(printf '%s' "$response" | sed '$d')"
+          echo "Response body: ${body}"
+
+          if [ "$curl_exit" -ne 0 ]; then
+            echo "::error title=send-command (child-process): request failed::curl exited $curl_exit; the command was not dispatched to the device"
+            exit 1
+          fi
+
+          if [ "$http_code" = "408" ] || printf '%s' "$body" | grep -qF 'did not complete in a reasonable amount of time'; then
+            echo "::error title=send-command (child-process): Rewst engine timed out::the engine did not dispatch the command before giving up (HTTP $http_code). Engine-side, NOT a regression in the code under test - re-dispatch rather than investigating the diff."
+            exit 1
+          fi
+
+          case "$http_code" in
+            2??) ;;
+            *)
+              echo "::error title=send-command (child-process): HTTP $http_code::the Rewst engine returned $http_code; the command was not dispatched to the device"
+              exit 1
+              ;;
+          esac
+
+      - name: Assert hanging parent command was killed by the timeout (child-process scenario)
+        timeout-minutes: 6
+        shell: pwsh
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+          BASELINE: ${{ steps.child_process_kill_baseline.outputs.timed_out }}
+        run: |
+          & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/assert-hanging-command-was-killed-by-the-timeout.ps1"
+
+      - name: Assert the child process did not survive the timeout kill
+        timeout-minutes: 6
+        shell: pwsh
+        run: |
+          & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/assert-child-process-terminated.ps1"
+
+      - name: Send command after child-process scenario
+        timeout-minutes: 20
+        uses: ./.github/actions/send-command
+        with:
+          trigger_url: ${{ steps.setup.outputs.trigger_url }}
+          device_id: ${{ steps.setup.outputs.device_id }}
+          scenario: success
+
+      - name: Assert worker pool recovered after child-process scenario
+        timeout-minutes: 6
+        shell: pwsh
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+          BASELINE: ${{ steps.child_process_kill_baseline.outputs.completed }}
+        run: |
+          & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/assert-worker-pool-recovered-after-timeout.ps1"
+
+      # Every scenario above asserts on the agent log; when one fails, the log is
+      # the evidence. Dump its tail so triage does not need a re-run with extra
+      # steps (three runs on 2026-09-22 were diagnosed from postback bodies alone).
+
+      - name: Dump agent log on failure
+        if: failure()
+        uses: ./.github/actions/dump-agent-log
+        with:
+          log_file: ${{ matrix.log_file }}
+
+      - name: Stop stub config endpoint
+        timeout-minutes: 5
+        if: always()
+        uses: ./.github/actions/stub-config
+        with:
+          mode: stop
+
+      - name: Stop stub broker and engine
+        timeout-minutes: 5
+        if: always()
+        uses: ./.github/actions/stub-broker
+        with:
+          mode: stop
+
 
   test-hermetic:
     needs: [set-matrix, build]
