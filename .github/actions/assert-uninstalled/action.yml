@@ -15,21 +15,10 @@ inputs:
 runs:
   using: composite
   steps:
-    - name: Assert uninstalled (Unix)
-      if: runner.os != 'Windows'
-      shell: bash
-      env:
-        PATHS: ${{ inputs.paths }}
-      run: |
-        set -euo pipefail
-        # Resolve pwsh up front: sudo resets PATH via secure_path on some runners.
-        pwsh_path="$(command -v pwsh)"
-        sudo --preserve-env=PATHS "$pwsh_path" -NoProfile -File "$GITHUB_ACTION_PATH/assert.ps1"
-
-    - name: Assert uninstalled (Windows)
-      if: runner.os == 'Windows'
+    - name: Assert uninstalled
       shell: pwsh
       env:
         PATHS: ${{ inputs.paths }}
       run: |
-        & "$env:GITHUB_ACTION_PATH/assert.ps1"
+        . "$env:GITHUB_WORKSPACE/.github/actions/_lib/Invoke-Elevated.ps1"
+        Invoke-Elevated -Script "$env:GITHUB_ACTION_PATH/assert.ps1" -Arguments @{}

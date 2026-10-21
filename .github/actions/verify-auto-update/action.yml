@@ -22,31 +22,12 @@ inputs:
 runs:
   using: composite
   steps:
-    - name: Verify auto update completed (Unix)
-      if: runner.os != 'Windows'
-      shell: bash
-      env:
-        LOG_FILE: ${{ inputs.log_file }}
-        WAIT_SECONDS: ${{ inputs.wait_seconds }}
-        IT_VERSION: ${{ inputs.it_version }}
-      run: |
-        set -euo pipefail
-        # Resolve pwsh up front: sudo resets PATH via secure_path on some runners.
-        pwsh_path="$(command -v pwsh)"
-        sudo "$pwsh_path" -NoProfile -File "$GITHUB_ACTION_PATH/verify.ps1" \
-          -LogFile "$LOG_FILE" \
-          -WaitSeconds "$WAIT_SECONDS" \
-          -ItVersion "$IT_VERSION"
-
-    - name: Verify auto update completed (Windows)
-      if: runner.os == 'Windows'
+    - name: Verify auto update completed
       shell: pwsh
       env:
         LOG_FILE: ${{ inputs.log_file }}
         WAIT_SECONDS: ${{ inputs.wait_seconds }}
         IT_VERSION: ${{ inputs.it_version }}
       run: |
-        & "$env:GITHUB_ACTION_PATH/verify.ps1" `
-          -LogFile $env:LOG_FILE `
-          -WaitSeconds ([int]$env:WAIT_SECONDS) `
-          -ItVersion $env:IT_VERSION
+        . "$env:GITHUB_WORKSPACE/.github/actions/_lib/Invoke-Elevated.ps1"
+        Invoke-Elevated -Script "$env:GITHUB_ACTION_PATH/verify.ps1" -Arguments @{ LogFile = $env:LOG_FILE; WaitSeconds = ([int]$env:WAIT_SECONDS); ItVersion = $env:IT_VERSION }

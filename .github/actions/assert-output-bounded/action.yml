@@ -59,42 +59,7 @@ inputs:
 runs:
   using: composite
   steps:
-    - name: Assert output bounded (Unix)
-      if: runner.os != 'Windows'
-      shell: bash
-      env:
-        SERVICE: ${{ inputs.service }}
-        LOG_FILE: ${{ inputs.log_file }}
-        BASELINE_TRUNCATIONS: ${{ inputs.baseline_truncations }}
-        EXPECTED_CEILING_BYTES: ${{ inputs.expected_ceiling_bytes }}
-        MIN_KEPT_BYTES: ${{ inputs.min_kept_bytes }}
-        MAX_KEPT_BYTES: ${{ inputs.max_kept_bytes }}
-        MIN_PRODUCED_BYTES: ${{ inputs.min_produced_bytes }}
-        MAX_RSS_MB: ${{ inputs.max_rss_mb }}
-        DISPATCHES: ${{ inputs.dispatches }}
-        MAX_ATTEMPTS: ${{ inputs.max_attempts }}
-        INTERVAL_SECONDS: ${{ inputs.interval_seconds }}
-        SETTLE_SAMPLES: ${{ inputs.settle_samples }}
-      run: |
-        set -euo pipefail
-        # Resolve pwsh up front: sudo resets PATH via secure_path on some runners.
-        pwsh_path="$(command -v pwsh)"
-        sudo --preserve-env=GITHUB_STEP_SUMMARY "$pwsh_path" -NoProfile -File "$GITHUB_ACTION_PATH/assert.ps1" \
-          -Service "$SERVICE" \
-          -LogFile "$LOG_FILE" \
-          -BaselineTruncations "$BASELINE_TRUNCATIONS" \
-          -ExpectedCeilingBytes "$EXPECTED_CEILING_BYTES" \
-          -MinKeptBytes "$MIN_KEPT_BYTES" \
-          -MaxKeptBytes "$MAX_KEPT_BYTES" \
-          -MinProducedBytes "$MIN_PRODUCED_BYTES" \
-          -MaxRssMb "$MAX_RSS_MB" \
-          -Dispatches "${DISPATCHES:-1}" \
-          -MaxAttempts "$MAX_ATTEMPTS" \
-          -IntervalSeconds "$INTERVAL_SECONDS" \
-          -SettleSamples "$SETTLE_SAMPLES"
-
-    - name: Assert output bounded (Windows)
-      if: runner.os == 'Windows'
+    - name: Assert output bounded
       shell: pwsh
       env:
         SERVICE: ${{ inputs.service }}
@@ -110,17 +75,6 @@ runs:
         INTERVAL_SECONDS: ${{ inputs.interval_seconds }}
         SETTLE_SAMPLES: ${{ inputs.settle_samples }}
       run: |
+        . "$env:GITHUB_WORKSPACE/.github/actions/_lib/Invoke-Elevated.ps1"
         $dispatches = if ($env:DISPATCHES) { [int]$env:DISPATCHES } else { 1 }
-        & "$env:GITHUB_ACTION_PATH/assert.ps1" `
-          -Service $env:SERVICE `
-          -LogFile $env:LOG_FILE `
-          -BaselineTruncations ([int]$env:BASELINE_TRUNCATIONS) `
-          -ExpectedCeilingBytes ([int]$env:EXPECTED_CEILING_BYTES) `
-          -MinKeptBytes ([int]$env:MIN_KEPT_BYTES) `
-          -MaxKeptBytes ([int]$env:MAX_KEPT_BYTES) `
-          -MinProducedBytes ([long]$env:MIN_PRODUCED_BYTES) `
-          -MaxRssMb ([int]$env:MAX_RSS_MB) `
-          -Dispatches $dispatches `
-          -MaxAttempts ([int]$env:MAX_ATTEMPTS) `
-          -IntervalSeconds ([int]$env:INTERVAL_SECONDS) `
-          -SettleSamples ([int]$env:SETTLE_SAMPLES)
+        Invoke-Elevated -Script "$env:GITHUB_ACTION_PATH/assert.ps1" -Arguments @{ Service = $env:SERVICE; LogFile = $env:LOG_FILE; BaselineTruncations = ([int]$env:BASELINE_TRUNCATIONS); ExpectedCeilingBytes = ([int]$env:EXPECTED_CEILING_BYTES); MinKeptBytes = ([int]$env:MIN_KEPT_BYTES); MaxKeptBytes = ([int]$env:MAX_KEPT_BYTES); MinProducedBytes = ([long]$env:MIN_PRODUCED_BYTES); MaxRssMb = ([int]$env:MAX_RSS_MB); Dispatches = $dispatches; MaxAttempts = ([int]$env:MAX_ATTEMPTS); IntervalSeconds = ([int]$env:INTERVAL_SECONDS); SettleSamples = ([int]$env:SETTLE_SAMPLES) }

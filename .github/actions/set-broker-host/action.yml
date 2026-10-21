@@ -26,37 +26,14 @@ outputs:
 runs:
   using: composite
   steps:
-    - name: Set broker host (Unix)
-      id: rewrite_unix
-      if: runner.os != 'Windows'
-      shell: bash
-      env:
-        CONFIG_DIR: ${{ inputs.config_dir }}
-        ORG_ID: ${{ inputs.org_id }}
-        BROKER_HOST: ${{ inputs.host }}
-      run: |
-        set -euo pipefail
-        previous_file="$RUNNER_TEMP/agent-previous-broker-host"
-        # Resolve pwsh up front: sudo resets PATH via secure_path on some runners.
-        pwsh_path="$(command -v pwsh)"
-        sudo "$pwsh_path" -NoProfile -File "$GITHUB_ACTION_PATH/fixture.ps1" \
-          -ConfigFile "$CONFIG_DIR/$ORG_ID/config.json" \
-          -BrokerHost "$BROKER_HOST" \
-          -PreviousHostFile "$previous_file"
-        echo "previous_host=$(cat "$previous_file")" >> "$GITHUB_OUTPUT"
-
-    - name: Set broker host (Windows)
-      id: rewrite_windows
-      if: runner.os == 'Windows'
+    - name: Set broker host
       shell: pwsh
       env:
         CONFIG_DIR: ${{ inputs.config_dir }}
         ORG_ID: ${{ inputs.org_id }}
         BROKER_HOST: ${{ inputs.host }}
       run: |
+        . "$env:GITHUB_WORKSPACE/.github/actions/_lib/Invoke-Elevated.ps1"
         $previousFile = Join-Path $env:RUNNER_TEMP 'agent-previous-broker-host'
-        & "$env:GITHUB_ACTION_PATH/fixture.ps1" `
-          -ConfigFile (Join-Path (Join-Path $env:CONFIG_DIR $env:ORG_ID) 'config.json') `
-          -BrokerHost $env:BROKER_HOST `
-          -PreviousHostFile $previousFile
+        Invoke-Elevated -Script "$env:GITHUB_ACTION_PATH/fixture.ps1" -Arguments @{ ConfigFile = (Join-Path (Join-Path $env:CONFIG_DIR $env:ORG_ID) 'config.json'); BrokerHost = $env:BROKER_HOST; PreviousHostFile = $previousFile }
         "previous_host=$(Get-Content $previousFile -Raw)" >> $env:GITHUB_OUTPUT

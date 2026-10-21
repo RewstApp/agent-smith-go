@@ -25,26 +25,7 @@ inputs:
 runs:
   using: composite
   steps:
-    - name: Assert log missing (Unix)
-      if: runner.os != 'Windows'
-      shell: bash
-      env:
-        LOG_FILE: ${{ inputs.log_file }}
-        PATTERN: ${{ inputs.pattern }}
-        WAIT_SECONDS: ${{ inputs.wait_seconds }}
-        WAIT_FOR_FILE_SECONDS: ${{ inputs.wait_for_file_seconds }}
-      run: |
-        set -euo pipefail
-        # Resolve pwsh up front: sudo resets PATH via secure_path on some runners.
-        pwsh_path="$(command -v pwsh)"
-        sudo "$pwsh_path" -NoProfile -File "$GITHUB_ACTION_PATH/assert.ps1" \
-          -LogFile "$LOG_FILE" \
-          -Pattern "$PATTERN" \
-          -WaitSeconds "$WAIT_SECONDS" \
-          -WaitForFileSeconds "$WAIT_FOR_FILE_SECONDS"
-
-    - name: Assert log missing (Windows)
-      if: runner.os == 'Windows'
+    - name: Assert log missing
       shell: pwsh
       env:
         LOG_FILE: ${{ inputs.log_file }}
@@ -52,8 +33,5 @@ runs:
         WAIT_SECONDS: ${{ inputs.wait_seconds }}
         WAIT_FOR_FILE_SECONDS: ${{ inputs.wait_for_file_seconds }}
       run: |
-        & "$env:GITHUB_ACTION_PATH/assert.ps1" `
-          -LogFile $env:LOG_FILE `
-          -Pattern $env:PATTERN `
-          -WaitSeconds ([int]$env:WAIT_SECONDS) `
-          -WaitForFileSeconds ([int]$env:WAIT_FOR_FILE_SECONDS)
+        . "$env:GITHUB_WORKSPACE/.github/actions/_lib/Invoke-Elevated.ps1"
+        Invoke-Elevated -Script "$env:GITHUB_ACTION_PATH/assert.ps1" -Arguments @{ LogFile = $env:LOG_FILE; Pattern = $env:PATTERN; WaitSeconds = ([int]$env:WAIT_SECONDS); WaitForFileSeconds = ([int]$env:WAIT_FOR_FILE_SECONDS) }

@@ -22,24 +22,11 @@ outputs:
 runs:
   using: composite
   steps:
-    - name: Count (Unix)
-      id: unix
-      if: runner.os != 'Windows'
-      shell: bash
-      env:
-        LOG_FILE: ${{ inputs.log_file }}
-        PATTERN: ${{ inputs.pattern }}
-      run: |
-        set -euo pipefail
-        pwsh_path="$(command -v pwsh)"
-        sudo --preserve-env=LOG_FILE,PATTERN,GITHUB_OUTPUT "$pwsh_path" -NoProfile -File "$GITHUB_ACTION_PATH/count.ps1"
-
-    - name: Count (Windows)
-      id: windows
-      if: runner.os == 'Windows'
+    - name: Count
       shell: pwsh
       env:
         LOG_FILE: ${{ inputs.log_file }}
         PATTERN: ${{ inputs.pattern }}
       run: |
-        & "$env:GITHUB_ACTION_PATH/count.ps1"
+        . "$env:GITHUB_WORKSPACE/.github/actions/_lib/Invoke-Elevated.ps1"
+        Invoke-Elevated -Script "$env:GITHUB_ACTION_PATH/count.ps1" -Arguments @{}

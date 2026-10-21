@@ -39,32 +39,7 @@ inputs:
 runs:
   using: composite
   steps:
-    - name: Assert log contains (Unix)
-      if: runner.os != 'Windows'
-      shell: bash
-      env:
-        LOG_FILE: ${{ inputs.log_file }}
-        PATTERNS: ${{ inputs.patterns }}
-        SCENARIO: ${{ inputs.scenario }}
-        CATALOG: ${{ github.workspace }}/.github/workflows/e2e-commands.json
-        TIMEOUT_SECONDS: ${{ inputs.timeout_seconds }}
-        INTERVAL_SECONDS: ${{ inputs.interval_seconds }}
-        SUBSCRIBED: ${{ inputs.subscribed_topic_qos }}
-      run: |
-        set -euo pipefail
-        # Resolve pwsh up front: sudo resets PATH via secure_path on some runners.
-        pwsh_path="$(command -v pwsh)"
-        sudo "$pwsh_path" -NoProfile -File "$GITHUB_ACTION_PATH/assert.ps1" \
-          -LogFile "$LOG_FILE" \
-          -Patterns "$PATTERNS" \
-          -Scenario "$SCENARIO" \
-          -Catalog "$CATALOG" \
-          -TimeoutSeconds "$TIMEOUT_SECONDS" \
-          -IntervalSeconds "$INTERVAL_SECONDS" \
-          -SubscribedTopicQos "$SUBSCRIBED"
-
-    - name: Assert log contains (Windows)
-      if: runner.os == 'Windows'
+    - name: Assert log contains
       shell: pwsh
       env:
         LOG_FILE: ${{ inputs.log_file }}
@@ -75,11 +50,5 @@ runs:
         INTERVAL_SECONDS: ${{ inputs.interval_seconds }}
         SUBSCRIBED: ${{ inputs.subscribed_topic_qos }}
       run: |
-        & "$env:GITHUB_ACTION_PATH/assert.ps1" `
-          -LogFile $env:LOG_FILE `
-          -Patterns $env:PATTERNS `
-          -Scenario $env:SCENARIO `
-          -Catalog $env:CATALOG `
-          -TimeoutSeconds ([int]$env:TIMEOUT_SECONDS) `
-          -IntervalSeconds ([int]$env:INTERVAL_SECONDS) `
-          -SubscribedTopicQos $env:SUBSCRIBED
+        . "$env:GITHUB_WORKSPACE/.github/actions/_lib/Invoke-Elevated.ps1"
+        Invoke-Elevated -Script "$env:GITHUB_ACTION_PATH/assert.ps1" -Arguments @{ LogFile = $env:LOG_FILE; Patterns = $env:PATTERNS; Scenario = $env:SCENARIO; Catalog = $env:CATALOG; TimeoutSeconds = ([int]$env:TIMEOUT_SECONDS); IntervalSeconds = ([int]$env:INTERVAL_SECONDS); SubscribedTopicQos = $env:SUBSCRIBED }

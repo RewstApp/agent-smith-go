@@ -24,33 +24,13 @@ inputs:
 runs:
   using: composite
   steps:
-    - name: Assert no orphaned scripts (Unix)
-      if: runner.os != 'Windows'
-      shell: bash
-      env:
-        MODE: ${{ inputs.mode }}
-        SCRIPTS_DIR: ${{ inputs.scripts_dir }}
-        BASELINE_FILE: ${{ inputs.baseline_file }}
-      run: |
-        set -euo pipefail
-        baseline="${BASELINE_FILE:-$RUNNER_TEMP/agent-script-files.baseline}"
-        # Resolve pwsh up front: sudo resets PATH via secure_path on some runners.
-        pwsh_path="$(command -v pwsh)"
-        sudo "$pwsh_path" -NoProfile -File "$GITHUB_ACTION_PATH/fixture.ps1" \
-          -Mode "$MODE" \
-          -ScriptsDir "$SCRIPTS_DIR" \
-          -BaselineFile "$baseline"
-
-    - name: Assert no orphaned scripts (Windows)
-      if: runner.os == 'Windows'
+    - name: Assert no orphaned scripts
       shell: pwsh
       env:
         MODE: ${{ inputs.mode }}
         SCRIPTS_DIR: ${{ inputs.scripts_dir }}
         BASELINE_FILE: ${{ inputs.baseline_file }}
       run: |
+        . "$env:GITHUB_WORKSPACE/.github/actions/_lib/Invoke-Elevated.ps1"
         $baseline = if ($env:BASELINE_FILE) { $env:BASELINE_FILE } else { Join-Path $env:RUNNER_TEMP 'agent-script-files.baseline' }
-        & "$env:GITHUB_ACTION_PATH/fixture.ps1" `
-          -Mode $env:MODE `
-          -ScriptsDir $env:SCRIPTS_DIR `
-          -BaselineFile $baseline
+        Invoke-Elevated -Script "$env:GITHUB_ACTION_PATH/fixture.ps1" -Arguments @{ Mode = $env:MODE; ScriptsDir = $env:SCRIPTS_DIR; BaselineFile = $baseline }

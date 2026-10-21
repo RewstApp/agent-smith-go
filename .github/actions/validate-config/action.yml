@@ -25,27 +25,11 @@ outputs:
 runs:
   using: composite
   steps:
-    - name: Parse and validate config.json (Unix)
-      if: runner.os != 'Windows'
-      id: parse-unix
-      shell: bash
-      env:
-        CONFIG_DIR: ${{ inputs.config_dir }}
-        ORG_ID: ${{ inputs.org_id }}
-      run: |
-        set -euo pipefail
-        # Resolve pwsh up front: sudo resets PATH via secure_path on some runners.
-        pwsh_path="$(command -v pwsh)"
-        sudo --preserve-env=GITHUB_OUTPUT "$pwsh_path" -NoProfile -File "$GITHUB_ACTION_PATH/validate.ps1" \
-          -ConfigDir "$CONFIG_DIR" \
-          -OrgId "$ORG_ID"
-
-    - name: Parse and validate config.json (Windows)
-      if: runner.os == 'Windows'
-      id: parse-windows
+    - name: Parse and validate config.json
       shell: pwsh
       env:
         CONFIG_DIR: ${{ inputs.config_dir }}
         ORG_ID: ${{ inputs.org_id }}
       run: |
-        & "$env:GITHUB_ACTION_PATH/validate.ps1" -ConfigDir $env:CONFIG_DIR -OrgId $env:ORG_ID
+        . "$env:GITHUB_WORKSPACE/.github/actions/_lib/Invoke-Elevated.ps1"
+        Invoke-Elevated -Script "$env:GITHUB_ACTION_PATH/validate.ps1" -Arguments @{ ConfigDir = $env:CONFIG_DIR; OrgId = $env:ORG_ID }
