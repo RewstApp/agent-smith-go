@@ -31,6 +31,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -52,6 +53,14 @@ type deviceState struct {
 	subscriber *clientConn
 	delivered  int
 	nextPacket uint16
+	// conns is every accepted connection claiming this device id, subscribed
+	// or not, so an offline control can drop all of them.
+	conns map[*clientConn]struct{}
+	// offlineUntil, while in the future, makes the broker refuse the device's
+	// CONNECT (close without CONNACK) - the hermetic stand-in for severing the
+	// device's network path to the hub (sc-126319).
+	offlineUntil time.Time
+	connects     int
 }
 
 // clientConn is one accepted MQTT connection.
@@ -99,7 +108,7 @@ func newHub(postbackBase string, engineTimeout time.Duration) *hub {
 func (h *hub) device(id string) *deviceState {
 	d, ok := h.devices[id]
 	if !ok {
-		d = &deviceState{inflight: map[uint16]*pendingMessage{}}
+		d = &deviceState{inflight: map[uint16]*pendingMessage{}, conns: map[*clientConn]struct{}{}}
 		h.devices[id] = d
 	}
 	return d
@@ -161,6 +170,48 @@ func (h *hub) flushLocked(deviceID string, d *deviceState) {
 	}
 }
 
+// connected records a CONNECT from c for deviceID and reports whether the
+// broker accepts it. A device taken offline through the control surface is
+// refused until the offline window lapses or it is put back online.
+func (h *hub) connected(deviceID string, c *clientConn) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	d := h.device(deviceID)
+	if time.Now().Before(d.offlineUntil) {
+		return false
+	}
+	d.conns[c] = struct{}{}
+	d.connects++
+	return true
+}
+
+// setOffline drops every connection deviceID holds and refuses its CONNECTs
+// for the next d. Unacknowledged in-flight messages are requeued by the
+// connections' own disconnect handling, exactly as on a real network cut.
+func (h *hub) setOffline(deviceID string, dur time.Duration) int {
+	h.mu.Lock()
+	d := h.device(deviceID)
+	d.offlineUntil = time.Now().Add(dur)
+	conns := make([]*clientConn, 0, len(d.conns))
+	for c := range d.conns {
+		conns = append(conns, c)
+	}
+	h.mu.Unlock()
+	for _, c := range conns {
+		_ = c.conn.Close()
+	}
+	log.Printf("%s: offline for %s; dropped %d connection(s)", deviceID, dur, len(conns))
+	return len(conns)
+}
+
+// setOnline lets deviceID connect again.
+func (h *hub) setOnline(deviceID string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.device(deviceID).offlineUntil = time.Time{}
+	log.Printf("%s: online", deviceID)
+}
+
 // subscribed registers c as deviceID's live subscriber and flushes to it.
 func (h *hub) subscribed(deviceID string, c *clientConn) {
 	h.mu.Lock()
@@ -191,6 +242,7 @@ func (h *hub) disconnected(deviceID string, c *clientConn) {
 	if !ok {
 		return
 	}
+	delete(d.conns, c)
 	if d.subscriber == c {
 		d.subscriber = nil
 	}
@@ -207,16 +259,26 @@ func (h *hub) disconnected(deviceID string, c *clientConn) {
 }
 
 type deviceSnapshot struct {
-	Queued    int `json:"queued"`
-	Inflight  int `json:"inflight"`
-	Delivered int `json:"delivered"`
+	Queued    int  `json:"queued"`
+	Inflight  int  `json:"inflight"`
+	Delivered int  `json:"delivered"`
+	Connects  int  `json:"connects"`
+	Connected int  `json:"connected"`
+	Offline   bool `json:"offline"`
 }
 
 func (h *hub) snapshot(deviceID string) deviceSnapshot {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	d := h.device(deviceID)
-	return deviceSnapshot{Queued: len(d.queue), Inflight: len(d.inflight), Delivered: d.delivered}
+	return deviceSnapshot{
+		Queued:    len(d.queue),
+		Inflight:  len(d.inflight),
+		Delivered: d.delivered,
+		Connects:  d.connects,
+		Connected: len(d.conns),
+		Offline:   time.Now().Before(d.offlineUntil),
+	}
 }
 
 // recordPostback stores the first result for a post_id and reports whether it
@@ -409,10 +471,30 @@ func (h *hub) handleEnqueue(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]string{"id": m.ID})
 }
 
+// handleDevice serves /_control/devices/{id} (snapshot), and the offline and
+// online controls at /_control/devices/{id}/offline?seconds=N and
+// /_control/devices/{id}/online.
 func (h *hub) handleDevice(w http.ResponseWriter, r *http.Request) {
-	id := strings.TrimPrefix(r.URL.Path, "/_control/devices/")
+	rest := strings.TrimPrefix(r.URL.Path, "/_control/devices/")
+	id, action, _ := strings.Cut(rest, "/")
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(h.snapshot(id))
+	switch action {
+	case "offline":
+		seconds := 30
+		if s := r.URL.Query().Get("seconds"); s != "" {
+			if n, err := strconv.Atoi(s); err == nil && n > 0 {
+				seconds = n
+			}
+		}
+		dropped := h.setOffline(id, time.Duration(seconds)*time.Second)
+		_ = json.NewEncoder(w).
+			Encode(map[string]any{"device_id": id, "offline_seconds": seconds, "dropped": dropped})
+	case "online":
+		h.setOnline(id)
+		_ = json.NewEncoder(w).Encode(map[string]any{"device_id": id, "online": true})
+	default:
+		_ = json.NewEncoder(w).Encode(h.snapshot(id))
+	}
 }
 
 func (h *hub) handlePostbacks(w http.ResponseWriter, r *http.Request) {

@@ -245,7 +245,7 @@ func TestEveryIntegrationJobIsBounded(t *testing.T) {
 // "exceeded the maximum execution time" on the job.
 func TestEveryWaitingStepIsBounded(t *testing.T) {
 	waiting := regexp.MustCompile(
-		`(?m)^\s+uses: \./\.github/actions/(e2e-setup|install-agent|run-agent|send-command|wait-for-log-line|await-service-respawn|stub-[a-z]+|wedged-service|assert-log-[a-z]+)$|it-scripts/(wait-for|assert)|^\s+script: (wait-for|assert)`,
+		`(?m)^\s+uses: \./\.github/actions/(e2e-setup|hermetic-setup|install-agent|run-agent|send-command|wait-for-log-line|await-service-respawn|stub-[a-z]+|wedged-service|assert-log-[a-z]+)$|it-scripts/(wait-for|assert)|^\s+script: (wait-for|assert)`,
 	)
 	lines := workflow(t)
 	starts := []int{}
@@ -374,8 +374,9 @@ func TestInlineSleepsAreInsidePollLoops(t *testing.T) {
 func TestScenarioJobsArePresentAndSmall(t *testing.T) {
 	const maxSteps = 40
 	want := []string{
-		"lifecycle", "auto-update", "update-retry", "connection", "wedged-broker",
-		"command-timeouts", "output-bounds", "timeout-composition", "sweeps", "windows-only",
+		"lifecycle", "auto-update", "wedged-broker", "sweeps", "update-retry", "windows-only",
+		"hermetic-command-timeouts", "hermetic-output-bounds", "hermetic-timeout-composition",
+		"hermetic-connection", "hermetic-child-process",
 		"test-hermetic", "test-service-user", "test-config-response-cap",
 	}
 	all := jobs(workflow(t))
@@ -467,6 +468,23 @@ func TestMatrixCarriesOnlyInstallFacts(t *testing.T) {
 				i+1,
 				m[1],
 			)
+		}
+	}
+}
+
+// The command-path scenarios run against the stub broker and stand-in
+// engine, never the live Rewst engine (sc-126319): every send-command in a
+// hermetic job points at the fixture's trigger. The live jobs keep only the
+// round trips that need a real hub and engine.
+func TestHermeticJobsNeverCallTheLiveEngine(t *testing.T) {
+	for name, block := range jobs(workflow(t)) {
+		if !strings.HasPrefix(name, "hermetic-") {
+			continue
+		}
+		for _, ln := range block {
+			if strings.Contains(ln, "IT_SEND_COMMAND_TRIGGER_URL") {
+				t.Errorf("job %q sends through the live engine: %s", name, strings.TrimSpace(ln))
+			}
 		}
 	}
 }

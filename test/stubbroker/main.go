@@ -315,6 +315,17 @@ func serve(conn net.Conn, modeFile string) {
 			} else {
 				log.Printf("[%s] CONNECT without a parseable client id: %v", remote, err)
 			}
+			if broker != nil && client.clientID != "" &&
+				!broker.connected(client.clientID, client) {
+				// Offline through the control surface: close without a CONNACK, the
+				// way a severed network path looks to the agent.
+				log.Printf(
+					"[%s] CONNECT (client %q) refused: device offline",
+					remote,
+					client.clientID,
+				)
+				return
+			}
 			log.Printf("[%s] CONNECT (client %q) -> CONNACK", remote, client.clientID)
 			// Variable header: session-present flag 0, return code 0 (accepted).
 			if err := client.write(pktConnack, 0, []byte{0x00, 0x00}); err != nil {

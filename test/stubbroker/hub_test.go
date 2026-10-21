@@ -347,3 +347,48 @@ func decodeCommands(encoded string) (string, error) {
 	out, err := decoder.Bytes(raw)
 	return string(out), err
 }
+
+// The hermetic stand-in for cutting the device's network path (sc-126319):
+// taking a device offline drops its live connection, refuses its CONNECT
+// while offline, and lets it back once online - the agent then exercises the
+// same connection-lost, backoff and resubscribe path as on a real cut.
+func TestFixture_OfflineDropsRefusesThenReadmits(t *testing.T) {
+	brokerAddr, engineURL, _, clientTLS, h := startFixture(t)
+	const device = "offline-device"
+	client := connectDevice(t, brokerAddr, device, clientTLS, func(mqtt.Client, mqtt.Message) {})
+
+	resp, err := http.Post(engineURL+"/_control/devices/"+device+"/offline?seconds=60", "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	deadline := time.Now().Add(5 * time.Second)
+	for client.IsConnectionOpen() && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond) // sleep-ok: poll interval
+	}
+	if client.IsConnectionOpen() {
+		t.Fatal("the live connection survived the offline control")
+	}
+	if snap := h.snapshot(device); !snap.Offline || snap.Connected != 0 {
+		t.Fatalf("snapshot after offline = %+v", snap)
+	}
+
+	// A fresh CONNECT is refused while offline.
+	opts := mqtt.NewClientOptions().AddBroker("tls://" + brokerAddr).SetClientID(device).
+		SetTLSConfig(clientTLS).SetAutoReconnect(false).SetConnectTimeout(3 * time.Second)
+	retry := mqtt.NewClient(opts)
+	if tok := retry.Connect(); tok.WaitTimeout(5*time.Second) && tok.Error() == nil {
+		t.Fatal("CONNECT was accepted while the device was offline")
+	}
+
+	resp, err = http.Post(engineURL+"/_control/devices/"+device+"/online", "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	again := connectDevice(t, brokerAddr, device, clientTLS, func(mqtt.Client, mqtt.Message) {})
+	defer again.Disconnect(100)
+	if snap := h.snapshot(device); snap.Offline || snap.Connected != 1 || snap.Connects < 2 {
+		t.Fatalf("snapshot after online = %+v", snap)
+	}
+}

@@ -1,0 +1,121 @@
+name: Hermetic scenario setup
+description: >-
+  The shared start of every hermetic scenario job (sc-126319): download the
+  binary, start the stub broker and stand-in engine, serve a configuration
+  from the stub config endpoint that points the agent at them under a per-job
+  device id, install the agent from it, and wait for its subscription. No
+  request leaves the runner except to GitHub, so the job has its own device
+  identity and can run in parallel with every other hermetic job - which the
+  live scenarios cannot, since the live config endpoint issues one device id
+  per platform. The caller still stops the stubs in its own always() steps.
+
+inputs:
+  os:
+    description: "Matrix os (artifact name)"
+    required: true
+  binary:
+    description: "Release binary name under ./dist"
+    required: true
+  org_id:
+    description: "Org id"
+    required: true
+  device_id:
+    description: "Per-job device id the stub config endpoint hands the agent"
+    required: true
+  config_secret:
+    description: "Secret the stub config endpoint expects"
+    required: false
+    default: hermetic-secret
+  service:
+    description: "Service name to check after install"
+    required: true
+  log_file:
+    description: "Agent log file to wait on"
+    required: true
+  worker_count:
+    description: "--worker-count for the install"
+    required: false
+    default: "1"
+  extra_args:
+    description: "Further install arguments"
+    required: false
+    default: ""
+
+outputs:
+  engine_url:
+    description: "Stand-in engine base URL (trigger, control surface)"
+    value: ${{ steps.broker.outputs.engine_url }}
+  engine_host:
+    description: "host:port the agent posts results to"
+    value: ${{ steps.broker.outputs.engine_host }}
+  host:
+    description: "Stub broker host"
+    value: ${{ steps.broker.outputs.host }}
+  trigger_url:
+    description: "send-command trigger URL on the stand-in engine"
+    value: ${{ steps.broker.outputs.engine_url }}/webhooks/custom/trigger/hermetic/stub
+  device_id:
+    description: "The device id this job's agent runs as"
+    value: ${{ inputs.device_id }}
+  config_url:
+    description: "The stub config endpoint URL the agent was installed from"
+    value: ${{ steps.config.outputs.url }}
+
+runs:
+  using: composite
+  steps:
+    - name: Download compiled binary
+      uses: ./.github/actions/download-binary
+      with:
+        name: ${{ inputs.os }}
+
+    - name: Start stub broker and engine
+      id: broker
+      uses: ./.github/actions/stub-broker
+      with:
+        mode: start
+
+    - name: Acknowledge subscriptions
+      uses: ./.github/actions/stub-broker
+      with:
+        mode: ack
+
+    - name: Start stub config endpoint pointing at the fixture
+      id: config
+      uses: ./.github/actions/stub-config
+      with:
+        mode: start
+        org_id: ${{ inputs.org_id }}
+        device_id: ${{ inputs.device_id }}
+        hub_host: ${{ steps.broker.outputs.host }}
+        engine_host: ${{ steps.broker.outputs.engine_host }}
+
+    - name: Serve a valid configuration
+      uses: ./.github/actions/stub-config
+      with:
+        mode: ok
+
+    - name: Install agent against the fixture
+      uses: ./.github/actions/run-agent
+      with:
+        binary: ${{ inputs.binary }}
+        args: >-
+          --config-url ${{ steps.config.outputs.url }}
+          --config-secret ${{ inputs.config_secret }}
+          --org-id ${{ inputs.org_id }}
+          --no-auto-updates
+          --worker-count ${{ inputs.worker_count }}
+          ${{ inputs.extra_args }}
+
+    - name: Check service
+      uses: ./.github/actions/check-service
+      with:
+        service: ${{ inputs.service }}
+
+    - name: Wait for subscription to the fixture
+      uses: ./.github/actions/wait-for-log-line
+      with:
+        log_file: ${{ inputs.log_file }}
+        pattern: Subscribed to messages
+        baseline_count: "0"
+        max_attempts: "60"
