@@ -152,8 +152,10 @@ func TestCaptureInFlight_ResolvesTheCommandFromTheCatalogScenario(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	script, _ := filepath.Abs(filepath.Join("..", "..", ".github", "workflows", "it-scripts",
-		"capture-the-in-flight-script-file-path.ps1"))
+	script, _ := filepath.Abs(filepath.Join(
+		"..", "..", ".github", "workflows", "it-scripts",
+		"capture-the-in-flight-script-file-path.ps1",
+	))
 	out := filepath.Join(t.TempDir(), "output")
 	cmd := exec.Command(pwsh(t), "-NoProfile", "-File", script)
 	cmd.Env = append(os.Environ(),

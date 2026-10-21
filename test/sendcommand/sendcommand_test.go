@@ -516,7 +516,10 @@ func TestScenario_ResolvesTheUnixCommandAndExpectedOutput(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit %d\n%s", code, out)
 	}
-	if got := engine.commands(); got != `"echo \"hello world\""` {
+	// curl's --form treats the catalog value's surrounding quotes as form
+	// quoting and unescapes the inner ones, so the engine receives the bare
+	// command - exactly what the matrix string produced before.
+	if got := engine.commands(); got != `echo "hello world"` {
 		t.Errorf("sent commands %q, want the catalog's unix success command", got)
 	}
 	wantContains(t, out, "class: success")
@@ -529,7 +532,7 @@ func TestScenario_ResolvesTheWindowsCommand(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit %d\n%s", code, out)
 	}
-	if got := engine.commands(); got != `"Start-Sleep -Seconds 30"` {
+	if got := engine.commands(); got != `Start-Sleep -Seconds 30` {
 		t.Errorf("sent commands %q, want the catalog's windows timeout command", got)
 	}
 }
@@ -572,7 +575,7 @@ func TestScenario_ExplicitCommandsWinOverTheScenario(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit %d\n%s", code, out)
 	}
-	if got := engine.commands(); got != `"echo explicit"` {
+	if got := engine.commands(); got != `echo explicit` {
 		t.Errorf("sent commands %q, want the explicit value", got)
 	}
 }
