@@ -14,7 +14,15 @@ inputs:
     required: true
   patterns:
     description: "Newline-separated list of required substrings"
-    required: true
+    required: false
+    default: ""
+  scenario:
+    description: >-
+      Name of an entry in .github/workflows/e2e-commands.json whose
+      `patterns` for this platform family are asserted instead of `patterns`
+      (sc-126318).
+    required: false
+    default: ""
   timeout_seconds:
     description: "How long to keep polling for the patterns before failing. Success returns as soon as every pattern is present."
     required: false
@@ -37,6 +45,8 @@ runs:
       env:
         LOG_FILE: ${{ inputs.log_file }}
         PATTERNS: ${{ inputs.patterns }}
+        SCENARIO: ${{ inputs.scenario }}
+        CATALOG: ${{ github.workspace }}/.github/workflows/e2e-commands.json
         TIMEOUT_SECONDS: ${{ inputs.timeout_seconds }}
         INTERVAL_SECONDS: ${{ inputs.interval_seconds }}
         SUBSCRIBED: ${{ inputs.subscribed_topic_qos }}
@@ -47,6 +57,8 @@ runs:
         sudo "$pwsh_path" -NoProfile -File "$GITHUB_ACTION_PATH/assert.ps1" \
           -LogFile "$LOG_FILE" \
           -Patterns "$PATTERNS" \
+          -Scenario "$SCENARIO" \
+          -Catalog "$CATALOG" \
           -TimeoutSeconds "$TIMEOUT_SECONDS" \
           -IntervalSeconds "$INTERVAL_SECONDS" \
           -SubscribedTopicQos "$SUBSCRIBED"
@@ -57,6 +69,8 @@ runs:
       env:
         LOG_FILE: ${{ inputs.log_file }}
         PATTERNS: ${{ inputs.patterns }}
+        SCENARIO: ${{ inputs.scenario }}
+        CATALOG: ${{ github.workspace }}/.github/workflows/e2e-commands.json
         TIMEOUT_SECONDS: ${{ inputs.timeout_seconds }}
         INTERVAL_SECONDS: ${{ inputs.interval_seconds }}
         SUBSCRIBED: ${{ inputs.subscribed_topic_qos }}
@@ -64,6 +78,8 @@ runs:
         & "$env:GITHUB_ACTION_PATH/assert.ps1" `
           -LogFile $env:LOG_FILE `
           -Patterns $env:PATTERNS `
+          -Scenario $env:SCENARIO `
+          -Catalog $env:CATALOG `
           -TimeoutSeconds ([int]$env:TIMEOUT_SECONDS) `
           -IntervalSeconds ([int]$env:INTERVAL_SECONDS) `
           -SubscribedTopicQos $env:SUBSCRIBED

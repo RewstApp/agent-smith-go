@@ -7,6 +7,10 @@
 # postback assertion can check that every one is reported exactly once.
 $count = [int]$env:COUNT
 $commands = $env:COMMANDS
+if (-not $commands -and $env:SCENARIO) {
+  . "$PSScriptRoot/lib/E2ECommands.ps1"
+  $commands = Get-E2ECommand -Scenario $env:SCENARIO
+}
 # The matrix passes the command JSON-quoted, as the real engine expects; the
 # control surface takes the bare string inside a JSON payload.
 try { $commands = $commands | ConvertFrom-Json -ErrorAction Stop } catch { }

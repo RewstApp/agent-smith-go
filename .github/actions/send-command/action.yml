@@ -13,8 +13,21 @@ inputs:
     description: "Target device id"
     required: true
   commands:
-    description: "Raw value for the curl --form commands=... field. Should already include any surrounding quoting expected by the Rewst engine."
-    required: true
+    description: >-
+      Raw value for the curl --form commands=... field, already carrying the
+      quoting the Rewst engine expects. Leave empty and set `scenario` to take
+      the command from the catalog instead; when both are set, this wins.
+    required: false
+    default: ""
+  scenario:
+    description: >-
+      Name of an entry in .github/workflows/e2e-commands.json (success,
+      failure, timeout, sweep, verbose, ...). The command for this runner's
+      platform family and, unless `expected_output` is set, the catalog's
+      expected output are taken from it, so the workflow and the matrix carry
+      no per-platform command text (sc-126318).
+    required: false
+    default: ""
   expected_output:
     description: >-
       When set, a 2xx response must carry a command_results.output containing
@@ -80,6 +93,8 @@ runs:
         TRIGGER_URL: ${{ inputs.trigger_url }}
         DEVICE_ID: ${{ inputs.device_id }}
         COMMANDS: ${{ inputs.commands }}
+        SCENARIO: ${{ inputs.scenario }}
+        E2E_CATALOG: ${{ github.workspace }}/.github/workflows/e2e-commands.json
         EXPECTED_OUTPUT: ${{ inputs.expected_output }}
         MAX_TIME: ${{ inputs.max_time }}
         ALLOW_ENGINE_TIMEOUT: ${{ inputs.allow_engine_timeout }}

@@ -428,3 +428,45 @@ func TestWorkflowHasNoPlatformBranches(t *testing.T) {
 		}
 	}
 }
+
+// The matrix describes an install - where the binary, config, log and
+// service live on each platform - and nothing else. Per-platform command
+// text lives in the catalog (.github/workflows/e2e-commands.json) and is
+// resolved by scenario name, so a command cannot drift between platforms
+// inside the workflow (sc-126318).
+func TestMatrixCarriesOnlyInstallFacts(t *testing.T) {
+	allowed := map[string]bool{
+		"os": true, "binary": true, "it_binary": true, "config_dir": true, "log_file": true,
+		"service": true, "scripts_dir": true, "scripts_dir_owner": true, "program_dir": true,
+		"uninstall_paths": true, "service_user": true, "service_username_arg": true,
+		"service_identity": true,
+	}
+	lines := workflow(t)
+	start, end := -1, -1
+	for i, ln := range lines {
+		if strings.Contains(ln, "$entries = @(") {
+			start = i
+		}
+		if start >= 0 && strings.Contains(ln, "$payload = @{ include = $entries }") {
+			end = i
+			break
+		}
+	}
+	if start < 0 || end < 0 {
+		t.Fatal("could not find the matrix entries in set-matrix")
+	}
+	key := regexp.MustCompile(`^\s+([a-z_]+) = `)
+	for i := start; i < end; i++ {
+		m := key.FindStringSubmatch(lines[i])
+		if m == nil {
+			continue
+		}
+		if !allowed[m[1]] {
+			t.Errorf(
+				"line %d: matrix key %q is not an install fact; commands and patterns belong in e2e-commands.json",
+				i+1,
+				m[1],
+			)
+		}
+	}
+}

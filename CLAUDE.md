@@ -36,7 +36,7 @@ go test ./...
 go test -coverprofile=coverage.out ./... && go tool cover -html=coverage.out
 ```
 
-The end-to-end suite is `.github/workflows/e2e.yml` (manual dispatch only, `-f os=all|<runner>`, concurrency group `e2e` with one queued run: never dispatch while another is pending). It is split into scenario-scoped jobs that each start from a fresh install via `.github/actions/e2e-setup` (sc-126317); `test/workflowlint` pins the job list and caps each at 40 steps. The Go packages under `test/` are the integration tests and run under plain `go test ./...`.
+The end-to-end suite is `.github/workflows/e2e.yml` (manual dispatch only, `-f os=all|<runner>`, concurrency group `e2e` with one queued run: never dispatch while another is pending). It is split into scenario-scoped jobs that each start from a fresh install via `.github/actions/e2e-setup` (sc-126317); `test/workflowlint` pins the job list, caps each at 40 steps, and refuses platform conditions in the workflow: platform differences live inside the composite actions (`it-script` runs a helper as the privileged user on every platform) and scenario commands come from `.github/workflows/e2e-commands.json` by scenario name (sc-126318). The Go packages under `test/` are the integration tests and run under plain `go test ./...`.
 
 ## Development Dependencies
 

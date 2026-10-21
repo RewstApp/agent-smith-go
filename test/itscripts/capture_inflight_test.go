@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -124,7 +125,46 @@ func TestCaptureInFlight_RequiresTheCommand(t *testing.T) {
 	logFile := filepath.Join(t.TempDir(), "agent.log")
 	_ = os.WriteFile(logFile, []byte(""), 0o600)
 	code, out, _ := runCapture(t, logFile, "", "0")
-	if code == 0 || !strings.Contains(out, "COMMAND is required") {
+	if code == 0 || !strings.Contains(out, "is required") {
 		t.Fatalf("exit %d\n%s", code, out)
+	}
+}
+
+// With SCENARIO set and no COMMAND, the script takes the command from the
+// catalog for this platform family (sc-126318).
+func TestCaptureInFlight_ResolvesTheCommandFromTheCatalogScenario(t *testing.T) {
+	dir := t.TempDir()
+	ours := filepath.Join(dir, "exec-111.ps1")
+	body := "sleep 180\n"
+	if runtime.GOOS == "windows" {
+		body = "Start-Sleep -Seconds 180\n"
+	}
+	if err := os.WriteFile(ours, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	logFile := filepath.Join(dir, "agent.log")
+	if err := os.WriteFile(logFile, []byte("Command saved to: message_id=a path="+ours+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	catalog, err := filepath.Abs(
+		filepath.Join("..", "..", ".github", "workflows", "e2e-commands.json"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	script, _ := filepath.Abs(filepath.Join("..", "..", ".github", "workflows", "it-scripts",
+		"capture-the-in-flight-script-file-path.ps1"))
+	out := filepath.Join(t.TempDir(), "output")
+	cmd := exec.Command(pwsh(t), "-NoProfile", "-File", script)
+	cmd.Env = append(os.Environ(),
+		"LOG_FILE="+logFile, "BASELINE=0", "COMMAND=", "SCENARIO=sweep",
+		"E2E_CATALOG="+catalog, "GITHUB_OUTPUT="+out,
+	)
+	if b, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("%v\n%s", err, b)
+	}
+	raw, _ := os.ReadFile(out)
+	if got := stepOutputs(string(raw))["path"]; got != ours {
+		t.Errorf("captured %q, want %s", got, ours)
 	}
 }

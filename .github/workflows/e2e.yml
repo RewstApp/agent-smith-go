@@ -120,63 +120,9 @@ jobs:
           OS_INPUT: ${{ inputs.os }}
           ORG_ID: ${{ vars.IT_ORG_ID }}
         run: |
-          $winSuccess = @'
-          "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
-          $PS_Results = New-Object -TypeName psobject
-
-          # Start of typed powershell
-          $PS_Results | Add-Member -MemberType NoteProperty -Name \"error\" -Value \"\"
-          $PS_Results | Add-Member -MemberType NoteProperty -Name \"output\" -Value \"hello world`n\"
-
-          # Post results back to Rewst
-          $postData = $PS_Results | ConvertTo-Json
-          Invoke-RestMethod -Method \"Post\" -Uri $post_url -Body $postData -ContentType \"application/json\""
-          '@
-
-          $winFailure = @'
-          "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-
-          $PS_Results = New-Object -TypeName psobject
-
-          # Start of typed powershell
-          throw \"this is a test error\"
-
-          # Post results back to Rewst
-          $postData = $PS_Results | ConvertTo-Json
-          Invoke-RestMethod -Method \"Post\" -Uri $post_url -Body $postData -ContentType \"application/json\""
-          '@
 
           $orgId = $env:ORG_ID
-
-          # Output-flood scripts for the bounded-output scenario (sc-106105).
-          # Deliberately quote-free and backslash-free so they survive the trip
-          # through the trigger's JSON-quoted commands field unchanged, and
-          # byte-exact so the produced counts the agent reports are predictable:
-          #   verbose        200 MiB to stdout, then a clean exit
-          #   verbose_stderr a short stdout line, then 200 MiB to stderr
-          #   verbose_hang   200 MiB to stdout, then a hang past the timeout
-          # All three write 200 MiB - three orders of magnitude past the ceiling
-          # the scenario configures - so the RSS ceiling asserted while they run
-          # is far below what buffering the output whole would cost.
-          $winVerbose = '"$chunk = [string]::new([char]120, 1048576); 1..200 | ForEach-Object { $chunk }"'
-          $winVerboseStderr = '"Write-Output keep-stdout; $chunk = [string]::new([char]101, 1048576); 1..200 | ForEach-Object { [Console]::Error.Write($chunk) }"'
-          $winVerboseHang = '"$chunk = [string]::new([char]120, 1048576); 1..200 | ForEach-Object { $chunk }; Start-Sleep -Seconds 60"'
-
-          $unixVerbose = '"yes x | head -c 209715200"'
-          $unixVerboseStderr = '"echo keep-stdout; yes e | head -c 209715200 >&2"'
-          $unixVerboseHang = '"yes x | head -c 209715200; sleep 60"'
-
-          # Windows-only descendant-tree kill scenario (sc-108853). Spawns a
-          # detached child via Start-Process tagged with a distinctive, unlikely
-          # to collide sleep duration (91743s) used purely as a process-list
-          # marker, then hangs the parent itself well past the configured
-          # command timeout. Single quotes (doubled to escape them inside this
-          # single-quoted literal) stand in for the nested double quotes
-          # Start-Process's -ArgumentList would otherwise need, keeping the
-          # payload double-quote- and backslash-free like the verbose scripts
-          # above.
-          $winChildProcessHang = '"Start-Process -FilePath powershell -ArgumentList ''-NoProfile'',''-Command'',''Start-Sleep -Seconds 91743'' -WindowStyle Hidden; Start-Sleep -Seconds 30"'
 
           $entries = @(
             [ordered]@{
@@ -186,15 +132,6 @@ jobs:
               config_dir = '/etc/rewst_remote_agent'
               log_file = "/etc/rewst_remote_agent/$orgId/rewst_agent.log"
               service = "rewst_remote_agent_$orgId"
-              success_commands = '"echo \"hello world\""'
-              success_output = 'hello world'
-              failure_commands = '"exit 1"'
-              timeout_commands = '"sleep 30"'
-              sweep_commands = '"sleep 180"'
-              verbose_commands = $unixVerbose
-              verbose_stderr_commands = $unixVerboseStderr
-              verbose_hang_commands = $unixVerboseHang
-              success_patterns = "Command completed`nSending postback`nPostback sent"
               # Moved under the data directory (sc-108848); deterministic and
               # fixed, unlike the old $TMPDIR-based path, so it can be a
               # static matrix value rather than resolved from the log.
@@ -216,16 +153,6 @@ jobs:
               config_dir = 'C:\ProgramData\RewstRemoteAgent'
               log_file = "C:\ProgramData\RewstRemoteAgent\$orgId\rewst_agent.log"
               service = "RewstRemoteAgent_$orgId"
-              success_commands = $winSuccess
-              success_output = 'hello world'
-              failure_commands = $winFailure
-              timeout_commands = '"Start-Sleep -Seconds 30"'
-              sweep_commands = '"Start-Sleep -Seconds 180"'
-              verbose_commands = $winVerbose
-              verbose_stderr_commands = $winVerboseStderr
-              verbose_hang_commands = $winVerboseHang
-              child_process_hang_commands = $winChildProcessHang
-              success_patterns = "Command completed`nSending postback`nPostback already sent"
               # Deliberately NOT moved (sc-108848): some customers whitelist
               # this exact path in their endpoint security software so the
               # agent's dynamically-written scripts are not flagged/blocked.
@@ -247,15 +174,6 @@ jobs:
               config_dir = '/Library/Application Support/rewst_remote_agent'
               log_file = "/Library/Application Support/rewst_remote_agent/$orgId/rewst_agent.log"
               service = "io.rewst.remote_agent_$orgId"
-              success_commands = '"echo \"hello world\""'
-              success_output = 'hello world'
-              failure_commands = '"exit 1"'
-              timeout_commands = '"sleep 30"'
-              sweep_commands = '"sleep 180"'
-              verbose_commands = $unixVerbose
-              verbose_stderr_commands = $unixVerboseStderr
-              verbose_hang_commands = $unixVerboseHang
-              success_patterns = "Command completed`nSending postback`nPostback sent"
               # Moved under the data directory (sc-108848); deterministic and
               # fixed, unlike the old $TMPDIR-based path, so it can be a
               # static matrix value rather than resolved from the log.
@@ -335,15 +253,14 @@ jobs:
         with:
           trigger_url: ${{ vars.IT_SEND_COMMAND_TRIGGER_URL }}
           device_id: ${{ steps.setup.outputs.device_id }}
-          commands: ${{ matrix.success_commands }}
-          expected_output: ${{ matrix.success_output }}
+          scenario: success
 
       - name: Check logs for successful command
         timeout-minutes: 5
         uses: ./.github/actions/assert-log-contains
         with:
           log_file: ${{ matrix.log_file }}
-          patterns: ${{ matrix.success_patterns }}
+          scenario: success
 
       # ---- Scripts directory permissions (sc-108848) ----
       # The scripts directory is created on demand the first time a command
@@ -367,7 +284,7 @@ jobs:
         with:
           trigger_url: ${{ vars.IT_SEND_COMMAND_TRIGGER_URL }}
           device_id: ${{ steps.setup.outputs.device_id }}
-          commands: ${{ matrix.failure_commands }}
+          scenario: failure
 
       - name: Check logs for error handling
         timeout-minutes: 5
@@ -389,8 +306,7 @@ jobs:
         with:
           trigger_url: ${{ vars.IT_SEND_COMMAND_TRIGGER_URL }}
           device_id: ${{ steps.setup.outputs.device_id }}
-          commands: ${{ matrix.success_commands }}
-          expected_output: ${{ matrix.success_output }}
+          scenario: success
 
       - name: Check logs for debug level
         timeout-minutes: 5
@@ -450,8 +366,7 @@ jobs:
         with:
           trigger_url: ${{ vars.IT_SEND_COMMAND_TRIGGER_URL }}
           device_id: ${{ steps.setup.outputs.device_id }}
-          commands: ${{ matrix.success_commands }}
-          expected_output: ${{ matrix.success_output }}
+          scenario: success
 
       - name: Check syslog for command completed
         timeout-minutes: 5
@@ -619,15 +534,14 @@ jobs:
         with:
           trigger_url: ${{ vars.IT_SEND_COMMAND_TRIGGER_URL }}
           device_id: ${{ steps.setup.outputs.device_id }}
-          commands: ${{ matrix.success_commands }}
-          expected_output: ${{ matrix.success_output }}
+          scenario: success
 
       - name: Check logs for command completion after auto-update
         timeout-minutes: 5
         uses: ./.github/actions/assert-log-contains
         with:
           log_file: ${{ matrix.log_file }}
-          patterns: ${{ matrix.success_patterns }}
+          scenario: success
 
       # ---- Digest-verification auto-update rejection scenarios (sc-112402) ----
       # Download now verifies a downloaded installer against the SHA-256 digest
@@ -947,8 +861,7 @@ jobs:
         with:
           trigger_url: ${{ vars.IT_SEND_COMMAND_TRIGGER_URL }}
           device_id: ${{ steps.setup.outputs.device_id }}
-          commands: ${{ matrix.success_commands }}
-          expected_output: ${{ matrix.success_output }}
+          scenario: success
 
       - name: Assert command executed exactly once after reconnect
         timeout-minutes: 6
@@ -1035,8 +948,7 @@ jobs:
         with:
           trigger_url: ${{ vars.IT_SEND_COMMAND_TRIGGER_URL }}
           device_id: ${{ steps.setup.outputs.device_id }}
-          commands: ${{ matrix.success_commands }}
-          expected_output: ${{ matrix.success_output }}
+          scenario: success
 
       - name: Assert command delivery continues after SAS renewal
         timeout-minutes: 6
@@ -1102,15 +1014,14 @@ jobs:
         with:
           trigger_url: ${{ vars.IT_SEND_COMMAND_TRIGGER_URL }}
           device_id: ${{ steps.setup.outputs.device_id }}
-          commands: ${{ matrix.success_commands }}
-          expected_output: ${{ matrix.success_output }}
+          scenario: success
 
       - name: Check logs for successful command
         timeout-minutes: 5
         uses: ./.github/actions/assert-log-contains
         with:
           log_file: ${{ matrix.log_file }}
-          patterns: ${{ matrix.success_patterns }}
+          scenario: success
 
       # ---- Withheld-SUBACK scenario (sc-106107) ----
       # The reconnection scenario above severs the connection, which keepalive
@@ -1416,7 +1327,7 @@ jobs:
         with:
           trigger_url: ${{ vars.IT_SEND_COMMAND_TRIGGER_URL }}
           device_id: ${{ steps.setup.outputs.device_id }}
-          commands: ${{ matrix.timeout_commands }}
+          scenario: timeout
 
       - name: Assert hanging command was killed by the default timeout
         timeout-minutes: 6
@@ -1433,8 +1344,7 @@ jobs:
         with:
           trigger_url: ${{ vars.IT_SEND_COMMAND_TRIGGER_URL }}
           device_id: ${{ steps.setup.outputs.device_id }}
-          commands: ${{ matrix.success_commands }}
-          expected_output: ${{ matrix.success_output }}
+          scenario: success
 
       - name: Assert worker pool recovered after default timeout
         timeout-minutes: 6
@@ -1483,7 +1393,7 @@ jobs:
         with:
           trigger_url: ${{ vars.IT_SEND_COMMAND_TRIGGER_URL }}
           device_id: ${{ steps.setup.outputs.device_id }}
-          commands: ${{ matrix.timeout_commands }}
+          scenario: timeout
 
       - name: Assert hanging command was killed by the timeout
         timeout-minutes: 6
@@ -1500,8 +1410,7 @@ jobs:
         with:
           trigger_url: ${{ vars.IT_SEND_COMMAND_TRIGGER_URL }}
           device_id: ${{ steps.setup.outputs.device_id }}
-          commands: ${{ matrix.success_commands }}
-          expected_output: ${{ matrix.success_output }}
+          scenario: success
 
       - name: Assert worker pool recovered after timeout
         timeout-minutes: 6
@@ -1567,15 +1476,14 @@ jobs:
         with:
           trigger_url: ${{ vars.IT_SEND_COMMAND_TRIGGER_URL }}
           device_id: ${{ steps.setup.outputs.device_id }}
-          commands: ${{ matrix.success_commands }}
-          expected_output: ${{ matrix.success_output }}
+          scenario: success
 
       - name: Check logs for successful command
         timeout-minutes: 5
         uses: ./.github/actions/assert-log-contains
         with:
           log_file: ${{ matrix.log_file }}
-          patterns: ${{ matrix.success_patterns }}
+          scenario: success
 
       # ---- Bounded command output scenario (sc-106105) ----
       # A command's stdout and stderr used to be buffered whole in memory, so the
@@ -1687,7 +1595,7 @@ jobs:
         with:
           trigger_url: ${{ vars.IT_SEND_COMMAND_TRIGGER_URL }}
           device_id: ${{ steps.setup.outputs.device_id }}
-          commands: ${{ matrix.verbose_commands }}
+          scenario: verbose
 
       - name: Assert the stdout flood was bounded
         timeout-minutes: 5
@@ -1737,8 +1645,7 @@ jobs:
         with:
           trigger_url: ${{ vars.IT_SEND_COMMAND_TRIGGER_URL }}
           device_id: ${{ steps.setup.outputs.device_id }}
-          commands: ${{ matrix.success_commands }}
-          expected_output: ${{ matrix.success_output }}
+          scenario: success
 
       - name: Assert output below the ceiling is untouched and the worker recovered
         timeout-minutes: 6
@@ -1765,7 +1672,7 @@ jobs:
         with:
           trigger_url: ${{ vars.IT_SEND_COMMAND_TRIGGER_URL }}
           device_id: ${{ steps.setup.outputs.device_id }}
-          commands: ${{ matrix.verbose_stderr_commands }}
+          scenario: verbose_stderr
 
       - name: Assert stderr is bounded independently of stdout
         timeout-minutes: 5
@@ -1847,15 +1754,14 @@ jobs:
         with:
           trigger_url: ${{ vars.IT_SEND_COMMAND_TRIGGER_URL }}
           device_id: ${{ steps.setup.outputs.device_id }}
-          commands: ${{ matrix.success_commands }}
-          expected_output: ${{ matrix.success_output }}
+          scenario: success
 
       - name: Check logs for successful command
         timeout-minutes: 5
         uses: ./.github/actions/assert-log-contains
         with:
           log_file: ${{ matrix.log_file }}
-          patterns: ${{ matrix.success_patterns }}
+          scenario: success
 
       # ---- Bounded command output scenario (sc-106105) ----
       # A command's stdout and stderr used to be buffered whole in memory, so the
@@ -1932,7 +1838,7 @@ jobs:
         with:
           trigger_url: ${{ vars.IT_SEND_COMMAND_TRIGGER_URL }}
           device_id: ${{ steps.setup.outputs.device_id }}
-          commands: ${{ matrix.verbose_hang_commands }}
+          scenario: verbose_hang
 
       - name: Assert the hanging command's output was still bounded
         timeout-minutes: 5
@@ -1970,8 +1876,7 @@ jobs:
         with:
           trigger_url: ${{ vars.IT_SEND_COMMAND_TRIGGER_URL }}
           device_id: ${{ steps.setup.outputs.device_id }}
-          commands: ${{ matrix.success_commands }}
-          expected_output: ${{ matrix.success_output }}
+          scenario: success
 
       - name: Assert the worker recovered after the verbose timeout
         timeout-minutes: 6
@@ -2088,7 +1993,7 @@ jobs:
         with:
           trigger_url: ${{ vars.IT_SEND_COMMAND_TRIGGER_URL }}
           device_id: ${{ steps.setup.outputs.device_id }}
-          commands: ${{ matrix.sweep_commands }}
+          scenario: sweep
           allow_engine_timeout: "true"
 
       - name: Capture the in-flight script file path
@@ -2099,7 +2004,7 @@ jobs:
         env:
           LOG_FILE: ${{ matrix.log_file }}
           BASELINE: ${{ steps.sweep_baseline.outputs.saved }}
-          COMMAND: ${{ matrix.sweep_commands }}
+          SCENARIO: sweep
 
       - name: Capture subscription count before the force-kill
         id: sweep_kill_sub_baseline
@@ -2497,15 +2402,14 @@ jobs:
         with:
           trigger_url: ${{ vars.IT_SEND_COMMAND_TRIGGER_URL }}
           device_id: ${{ steps.setup.outputs.device_id }}
-          commands: ${{ matrix.success_commands }}
-          expected_output: ${{ matrix.success_output }}
+          scenario: success
 
       - name: Check logs for successful command
         timeout-minutes: 5
         uses: ./.github/actions/assert-log-contains
         with:
           log_file: ${{ matrix.log_file }}
-          patterns: ${{ matrix.success_patterns }}
+          scenario: success
 
       # ---- Wedged Windows service stop scenario (sc-106108) ----
       # windowsService.Stop() polled the service state every 250ms in an
@@ -2536,8 +2440,7 @@ jobs:
         with:
           trigger_url: ${{ vars.IT_SEND_COMMAND_TRIGGER_URL }}
           device_id: ${{ steps.setup.outputs.device_id }}
-          commands: ${{ matrix.success_commands }}
-          expected_output: ${{ matrix.success_output }}
+          scenario: success
 
       - name: Check logs for command received
         timeout-minutes: 5
@@ -2604,8 +2507,13 @@ jobs:
         env:
           TRIGGER_URL: ${{ vars.IT_SEND_COMMAND_TRIGGER_URL }}
           DEVICE_ID: ${{ steps.setup.outputs.device_id }}
-          COMMANDS: ${{ matrix.child_process_hang_commands }}
+          SCENARIO: child_process_hang
+          E2E_CATALOG: ${{ github.workspace }}/.github/workflows/e2e-commands.json
         run: |
+          # The command comes from the catalog like every other send; this job
+          # is Windows-only, hence the windows family.
+          COMMANDS="$(jq -er --arg s "$SCENARIO" '.[$s].windows' "$E2E_CATALOG")" \
+            || { echo "::error::scenario $SCENARIO has no windows command in $E2E_CATALOG"; exit 1; }
           # This scenario cannot use the send-command action (it needs the call
           # backgrounded so it can inspect the child's live process state), but it
           # must not re-introduce the bug that action exists to fix: a discarded
@@ -2673,8 +2581,7 @@ jobs:
         with:
           trigger_url: ${{ vars.IT_SEND_COMMAND_TRIGGER_URL }}
           device_id: ${{ steps.setup.outputs.device_id }}
-          commands: ${{ matrix.success_commands }}
-          expected_output: ${{ matrix.success_output }}
+          scenario: success
 
       - name: Assert worker pool recovered after child-process scenario
         timeout-minutes: 6
@@ -3125,15 +3032,14 @@ jobs:
         with:
           trigger_url: ${{ steps.stub_broker.outputs.engine_url }}/webhooks/custom/trigger/hermetic/stub
           device_id: ${{ env.HERMETIC_DEVICE_ID }}
-          commands: ${{ matrix.success_commands }}
-          expected_output: ${{ matrix.success_output }}
+          scenario: success
 
       - name: Check logs for command completion and postback
         timeout-minutes: 5
         uses: ./.github/actions/assert-log-contains
         with:
           log_file: ${{ matrix.log_file }}
-          patterns: ${{ matrix.success_patterns }}
+          scenario: success
 
       - name: Send failing command through the stub engine
         timeout-minutes: 20
@@ -3141,7 +3047,7 @@ jobs:
         with:
           trigger_url: ${{ steps.stub_broker.outputs.engine_url }}/webhooks/custom/trigger/hermetic/stub
           device_id: ${{ env.HERMETIC_DEVICE_ID }}
-          commands: ${{ matrix.failure_commands }}
+          scenario: failure
 
       # ---- Kill with work queued, restart, every command reported exactly once ----
       # The sc-115628 QA step the live suite could never automate: its
@@ -3167,7 +3073,7 @@ jobs:
         env:
           ENGINE_URL: ${{ steps.stub_broker.outputs.engine_url }}
           DEVICE_ID: ${{ env.HERMETIC_DEVICE_ID }}
-          COMMANDS: ${{ matrix.timeout_commands }}
+          SCENARIO: timeout
           COUNT: "5"
         run: |
           & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/hermetic-enqueue-commands.ps1"
