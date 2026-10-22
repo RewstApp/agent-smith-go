@@ -333,8 +333,10 @@ func TestSeedJournal_WritesWhatTheAgentReads(t *testing.T) {
 	if err != nil || string(offset) != "25h" {
 		t.Errorf("clock offset override %q: %v", offset, err)
 	}
-	if code, _ := run(t, "hermetic-seed-journal.ps1",
-		"DATA_DIR="+data, "POST_ID=clock-2", "COMMANDS=echo ok", "RECEIVED_AGO_SECONDS=1", "CLOCK_OFFSET="); code != 0 {
+	code, _ = run(t, "hermetic-seed-journal.ps1",
+		"DATA_DIR="+data, "POST_ID=clock-2", "COMMANDS=echo ok",
+		"RECEIVED_AGO_SECONDS=1", "CLOCK_OFFSET=")
+	if code != 0 {
 		t.Fatal("re-seeding without an offset failed")
 	}
 	if _, err := os.Stat(filepath.Join(data, "clock_offset_override")); !os.IsNotExist(err) {
