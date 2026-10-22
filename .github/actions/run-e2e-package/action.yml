@@ -1,0 +1,80 @@
+name: Run the Go e2e scenarios
+description: >-
+  Compile the test/e2e package (`-tags e2e`) into a test binary and run it,
+  elevated, against the downloaded release and integration-test binaries
+  (sc-126321). The scenarios install the agent as a real service and talk only
+  to httptest stubs inside the test process, so the step needs no hub, no
+  engine and no network beyond GitHub. The binary is compiled as the runner
+  user and only the run is elevated: `sudo -E` on Linux and macOS (the E2E_*
+  variables must reach the test), directly on the already-elevated Windows
+  runner. On Windows the wedged-service fixture is prebuilt here so the test
+  does not need the Go toolchain at run time.
+
+inputs:
+  binary:
+    description: "File name (under ./dist) of the release binary"
+    required: true
+  it_binary:
+    description: "File name (under ./dist) of the integration-test binary"
+    required: true
+  org_id:
+    description: "Organization id the installation is made under"
+    required: true
+  run:
+    description: "-test.run expression selecting the scenarios"
+    required: false
+    default: "."
+  timeout:
+    description: "-test.timeout for the whole run"
+    required: false
+    default: "20m"
+  github_token:
+    description: "GitHub token passed to the agent for its update checks"
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Setup go
+      uses: actions/setup-go@v6
+      with:
+        go-version: "1.25.0"
+        cache: true
+
+    - name: Build and run the e2e test binary
+      shell: pwsh
+      env:
+        BINARY: ${{ inputs.binary }}
+        IT_BINARY: ${{ inputs.it_binary }}
+        ORG_ID: ${{ inputs.org_id }}
+        RUN: ${{ inputs.run }}
+        TEST_TIMEOUT: ${{ inputs.timeout }}
+        E2E_GITHUB_TOKEN: ${{ inputs.github_token }}
+        RUNNER_TEMP_DIR: ${{ runner.temp }}
+      run: |
+        $ErrorActionPreference = 'Stop'
+        $suffix = if ($IsWindows) { '.exe' } else { '' }
+        $testBin = Join-Path $env:RUNNER_TEMP_DIR "e2e.test$suffix"
+        go test -c -tags e2e -o $testBin ./test/e2e
+        if ($LASTEXITCODE -ne 0) { throw "failed to compile the e2e test binary" }
+
+        $env:E2E_BINARY = Join-Path $PWD "dist/$($env:BINARY)"
+        $env:E2E_IT_BINARY = Join-Path $PWD "dist/$($env:IT_BINARY)"
+        $env:E2E_ORG_ID = $env:ORG_ID
+        $env:E2E_REPO_ROOT = "$PWD"
+        if ($IsWindows) {
+          $fixture = Join-Path $env:RUNNER_TEMP_DIR 'wedgedservice.exe'
+          go build -tags integration -o $fixture ./test/wedgedservice
+          if ($LASTEXITCODE -ne 0) { throw "failed to build the wedged service fixture" }
+          $env:E2E_WEDGED_SERVICE_BINARY = $fixture
+        }
+
+        $testArgs = @('-test.v', '-test.run', $env:RUN, '-test.timeout', $env:TEST_TIMEOUT)
+        Write-Output "Running $testBin $($testArgs -join ' ')"
+        if ($IsWindows) {
+          & $testBin @testArgs
+        } else {
+          sudo -E $testBin @testArgs
+        }
+        exit $LASTEXITCODE
