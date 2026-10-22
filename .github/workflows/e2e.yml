@@ -977,6 +977,17 @@ jobs:
       #
       # Windows only: the Unix service implementations have no such polling loop.
 
+      # The success command above logs "Postback already sent" on Windows (the
+      # engine's trigger path has already fulfilled the result when the agent's
+      # own postback lands), so the disabled-postback check below must only
+      # fail when that line appears *again*.
+      - name: Baseline "Postback already sent" before disabling the agent postback
+        id: postback_baseline
+        uses: ./.github/actions/capture-log-count
+        with:
+          log_file: ${{ matrix.log_file }}
+          pattern: Postback already sent
+
       - name: Update agent with the agent postback disabled
         timeout-minutes: 10
         uses: ./.github/actions/run-agent
@@ -1005,6 +1016,7 @@ jobs:
         with:
           log_file: ${{ matrix.log_file }}
           pattern: Postback already sent
+          baseline_count: ${{ steps.postback_baseline.outputs.count }}
 
       - name: Dump agent log on failure
         if: failure()

@@ -3,7 +3,9 @@
 
 <#
 .SYNOPSIS
-Assert that a log file does NOT contain the supplied pattern.
+Assert that a log file does NOT contain the supplied pattern - or, with
+-BaselineCount, that it contains no more occurrences than it did before the
+step under test, so a line an earlier legitimate step produced is ignored.
 
 .DESCRIPTION
 Reading the agent's log file requires elevation now that its data directory
@@ -14,6 +16,7 @@ on Unix and natively on the already-elevated Windows runner (see action.yml).
 param(
     [Parameter(Mandatory)][string]$LogFile,
     [Parameter(Mandatory)][string]$Pattern,
+    [int]$BaselineCount = 0,
     [int]$WaitSeconds = 0,
     [int]$WaitForFileSeconds = 0
 )
@@ -37,8 +40,13 @@ if (-not (Test-Path $LogFile)) {
 $logContent = Get-Content $LogFile -Raw
 Write-Output $logContent
 
-if ($logContent -match [regex]::Escape($Pattern)) {
-    Write-Error "Unexpected log line found: $Pattern"
+$count = ([regex]::Matches($logContent, [regex]::Escape($Pattern))).Count
+if ($count -gt $BaselineCount) {
+    Write-Error "Unexpected log line found: $Pattern (count $count, baseline $BaselineCount)"
     exit 1
 }
-Write-Output "Confirmed: '$Pattern' not present in log"
+if ($BaselineCount -gt 0) {
+    Write-Output "Confirmed: '$Pattern' did not appear again (count $count, baseline $BaselineCount)"
+} else {
+    Write-Output "Confirmed: '$Pattern' not present in log"
+}
