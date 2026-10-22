@@ -5,8 +5,9 @@ description: >-
   environment the calling step sets and write step outputs through
   GITHUB_OUTPUT, so the caller is one platform-neutral step. The agent's log,
   config and scripts directories are root-owned on Linux and macOS, hence sudo
-  there; the environment is preserved whole (sudo -E, which the runner's
-  unrestricted sudoers permits) rather than through a per-step allow-list that
+  there; the environment is forwarded whole through Invoke-Elevated.ps1 (every
+  variable as a NAME=VALUE argument to env(1), since Ubuntu 26.04's sudo-rs
+  ignores -E, sc-129246) rather than through a per-step allow-list that
   drifted between twins (sc-126318). This action is the single place the
   workflow's helper steps branch on the platform.
 
@@ -74,14 +75,12 @@ runs:
     - name: Run helper (Unix, elevated)
       id: unix
       if: runner.os != 'Windows'
-      shell: bash
+      shell: pwsh
       env:
         IT_SCRIPT: ${{ inputs.script }}
       run: |
-        set -euo pipefail
-        # Resolve pwsh up front: sudo resets PATH via secure_path on some runners.
-        pwsh_path="$(command -v pwsh)"
-        sudo -E "$pwsh_path" -NoProfile -File "$GITHUB_WORKSPACE/.github/workflows/it-scripts/$IT_SCRIPT.ps1"
+        . "$env:GITHUB_WORKSPACE/.github/actions/_lib/Invoke-Elevated.ps1"
+        Invoke-Elevated -Script "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/$env:IT_SCRIPT.ps1"
 
     - name: Run helper (Windows)
       id: windows
