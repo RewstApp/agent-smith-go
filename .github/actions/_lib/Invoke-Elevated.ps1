@@ -5,8 +5,15 @@
 # Runs a PowerShell script as the privileged user on every platform: directly
 # on Windows (the runner is already an administrator), under sudo on Linux and
 # macOS (the agent's log, config and scripts directories are root-owned). The
-# environment is preserved whole (sudo -E; the runner's unrestricted sudoers
-# permits it) so GITHUB_OUTPUT and the step's variables reach the script.
+# environment is forwarded whole and explicitly - every variable of the calling
+# step as a NAME=VALUE argument to env(1) between sudo and pwsh - so
+# GITHUB_OUTPUT and the step's variables reach the script on every sudo. It
+# used to rely on `sudo -E`; on 2026-10-22 ubuntu-latest moved to Ubuntu 26.04,
+# whose sudo-rs answers `-E` with "preserving the entire environment is not
+# supported, '-E' is ignored" and resets the environment, so every helper on
+# ubuntu read its LOG_FILE as null and the gate went red for a reason that was
+# not the agent (sc-129246). env(1) applies the assignments itself, so nothing
+# here depends on which sudo the image ships or on its env_keep policy.
 # On Windows the hashtable is splatted so every entry binds by parameter
 # name (an array splat would pass "-Name" as a positional value); under sudo
 # the pairs go on the command line as "-Name value", and the called script
@@ -38,7 +45,19 @@ function Invoke-Elevated {
     & $Script @bound
   } else {
     $pwsh = (Get-Command pwsh).Source
-    sudo -E $pwsh -NoProfile -File $Script @argv
+    $environment = Get-ElevatedEnvironment
+    sudo env @environment $pwsh -NoProfile -File $Script @argv
   }
   if ($LASTEXITCODE) { exit $LASTEXITCODE }
+}
+
+# Get-ElevatedEnvironment returns the calling process's environment as
+# NAME=VALUE strings for env(1). Every variable is forwarded, as `sudo -E` did,
+# rather than a per-step allow-list that would drift between helpers.
+function Get-ElevatedEnvironment {
+  $pairs = @()
+  foreach ($entry in (Get-ChildItem env:)) {
+    $pairs += "$($entry.Name)=$($entry.Value)"
+  }
+  return $pairs
 }
