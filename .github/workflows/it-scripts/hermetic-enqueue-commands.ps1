@@ -18,8 +18,12 @@ try { $commands = $commands | ConvertFrom-Json -ErrorAction Stop } catch { }
 # the way the real engine does (UTF-16LE, then base64). A raw `payload` would
 # be delivered byte-for-byte and the agent would reject the plain text as
 # illegal base64 - posting back an error at once instead of running for 30s.
+# POST_ID_PREFIX names the post_ids ("<prefix>-<n>"); the kill-and-replay
+# scenario keeps the historical "hermetic", the sc-126322 scenarios use one
+# prefix per case so the engine-side assertions can tell them apart.
+$prefix = if ($env:POST_ID_PREFIX) { $env:POST_ID_PREFIX } else { 'hermetic' }
 for ($i = 1; $i -le $count; $i++) {
-  $body = @{ device_id = $env:DEVICE_ID; post_id = "hermetic-$i"; commands = $commands } | ConvertTo-Json -Compress
+  $body = @{ device_id = $env:DEVICE_ID; post_id = "$prefix-$i"; commands = $commands } | ConvertTo-Json -Compress
   $resp = Invoke-RestMethod -Method Post -Uri "$($env:ENGINE_URL)/_control/enqueue" -ContentType 'application/json' -Body $body -TimeoutSec 30
-  Write-Output "enqueued hermetic-$i as $($resp.id)"
+  Write-Output "enqueued $prefix-$i as $($resp.id)"
 }

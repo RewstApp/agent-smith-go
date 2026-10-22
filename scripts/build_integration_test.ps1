@@ -38,6 +38,15 @@
 #   seconds (host-info commands). Each symbol only exists in its own platform's
 #   build; -X against a missing symbol is ignored, so all three flags are
 #   harmless on the other two platforms.
+# - spoolAttemptIntervalOverrideStr overridden to 1s, so a postback result the
+#   stand-in engine keeps rejecting exhausts its attempt budget and is
+#   abandoned within a few connection cycles instead of (attempts-1) x 10
+#   minutes; journalMaxPendingOverrideStr overridden to 20, so the command
+#   journal fills with a couple of dozen queued commands rather than a
+#   thousand; clockOffsetOverrideFileStr overridden to clock_offset_override,
+#   so the hermetic suite can start the agent with the journal's clock stepped
+#   forward or backward by writing that file into the data directory
+#   (sc-126322). Released builds leave all three empty.
 
 $env:GOARCH = "amd64"
 
@@ -53,7 +62,10 @@ $defaultCommandTimeoutFlag = "-X github.com/RewstApp/agent-smith-go/internal/age
 $launchctlTimeoutFlag = "-X github.com/RewstApp/agent-smith-go/internal/service.launchctlTimeoutOverrideStr=5s"
 $systemctlTimeoutFlag = "-X github.com/RewstApp/agent-smith-go/internal/service.systemctlTimeoutOverrideStr=5s"
 $hostCommandTimeoutFlag = "-X github.com/RewstApp/agent-smith-go/internal/agent.hostCommandTimeoutOverrideStr=5s"
-$ldflags = "-w -s $versionFlag $intervalFlag $baseBackoffFlag $maxRetriesFlag $sasTokenLifetimeFlag $stopTimeoutFlag $exitTimeoutFlag $releaseUrlOverrideFlag $defaultCommandTimeoutFlag $launchctlTimeoutFlag $systemctlTimeoutFlag $hostCommandTimeoutFlag"
+$spoolAttemptIntervalFlag = "-X main.spoolAttemptIntervalOverrideStr=1s"
+$journalMaxPendingFlag = "-X main.journalMaxPendingOverrideStr=20"
+$clockOffsetOverrideFlag = "-X main.clockOffsetOverrideFileStr=clock_offset_override"
+$ldflags = "-w -s $versionFlag $intervalFlag $baseBackoffFlag $maxRetriesFlag $sasTokenLifetimeFlag $stopTimeoutFlag $exitTimeoutFlag $releaseUrlOverrideFlag $defaultCommandTimeoutFlag $launchctlTimeoutFlag $systemctlTimeoutFlag $hostCommandTimeoutFlag $spoolAttemptIntervalFlag $journalMaxPendingFlag $clockOffsetOverrideFlag"
 
 if ($IsWindows) {
     $buildOutput = "./dist/rewst_agent_config.win.it.exe"

@@ -23,13 +23,17 @@ import (
 type configEndpoint struct {
 	Secret   string
 	DeviceID string
-	srv      *httptest.Server
-	mu       sync.Mutex
-	requests int
+	// OmitDeviceID serves a 200 whose configuration has no device_id - what
+	// the Rewst config endpoint answers when its integration token has expired
+	// or the IoT Hub daily quota is exhausted (sc-126322).
+	OmitDeviceID bool
+	srv          *httptest.Server
+	mu           sync.Mutex
+	requests     int
 }
 
 type servedConfiguration struct {
-	DeviceID        string `json:"device_id"`
+	DeviceID        string `json:"device_id,omitempty"`
 	RewstOrgID      string `json:"rewst_org_id"`
 	RewstEngineHost string `json:"rewst_engine_host"`
 	SharedAccessKey string `json:"shared_access_key"`
@@ -47,13 +51,18 @@ func newConfigEndpoint(t *testing.T, orgID string) *configEndpoint {
 	mux.HandleFunc("/configure", func(w http.ResponseWriter, r *http.Request) {
 		c.mu.Lock()
 		c.requests++
+		omit := c.OmitDeviceID
 		c.mu.Unlock()
 		if r.Header.Get("x-rewst-secret") != c.Secret {
 			http.Error(w, "missing or wrong x-rewst-secret", http.StatusUnauthorized)
 			return
 		}
+		deviceID := c.DeviceID
+		if omit {
+			deviceID = ""
+		}
 		body := map[string]any{"configuration": servedConfiguration{
-			DeviceID:        c.DeviceID,
+			DeviceID:        deviceID,
 			RewstOrgID:      orgID,
 			RewstEngineHost: "engine.e2e.invalid",
 			SharedAccessKey: key,
@@ -168,4 +177,12 @@ func (s *releaseStub) Downloads() int {
 		}
 	}
 	return n
+}
+
+// SetOmitDeviceID switches the served configuration between complete and
+// lacking its device_id.
+func (c *configEndpoint) SetOmitDeviceID(omit bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.OmitDeviceID = omit
 }

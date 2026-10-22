@@ -34,6 +34,704 @@ jobs:
   # ---- Output bounds: stdout and stderr floods ----
   # ---- Output bound and command timeout composed ----
   # ---- Live smoke, Windows-only: postback disabled ----
+  # ---- Postback spool: spooled on 5xx then delivered, rejected entry passed over then abandoned ----
+  # The stand-in engine's answers to a post_id's postbacks are scripted through
+  # /_control/postback-responses (sc-126322). The integration build is installed
+  # with two in-line attempts a second apart, so a 5xx twice spools the result;
+  # its 90 s SAS lifetime makes a connection cycle - and so a spool flush - come
+  # every ~30 s, and its 1 s rejection spacing lets a consistently rejected
+  # entry burn its five-attempt budget in a few cycles instead of forty minutes.
+  hermetic-postback-spool:
+    permissions:
+      contents: read
+    needs: [build, build-integration-test, set-matrix]
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.set-matrix.outputs.matrix) }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Set up the hermetic scenario
+        timeout-minutes: 20
+        id: setup
+        uses: ./.github/actions/hermetic-setup
+        with:
+          os: ${{ matrix.os }}
+          binary: ${{ matrix.it_binary }}
+          org_id: ${{ vars.IT_ORG_ID }}
+          device_id: hermetic-${{ github.run_id }}-${{ matrix.os }}-postback-spool
+          service: ${{ matrix.service }}
+          log_file: ${{ matrix.log_file }}
+          extra_args: --postback-max-attempts 2 --postback-base-retry-backoff-seconds 1
+      - name: Script the engine to answer spool-1 with three 5xx before accepting it
+        uses: ./.github/actions/it-script
+        with:
+          script: hermetic-script-postback-responses
+        env:
+          ENGINE_URL: ${{ steps.setup.outputs.engine_url }}
+          POST_ID: spool-1
+          STATUSES: "503,503,503"
+
+      - name: Baseline "spooled for later delivery" before spool-1
+        id: bl_spooled_1
+        uses: ./.github/actions/capture-log-count
+        with:
+          log_file: ${{ matrix.log_file }}
+          pattern: Postback result spooled for later delivery
+
+      - name: Enqueue spool-1
+        timeout-minutes: 5
+        uses: ./.github/actions/it-script
+        with:
+          script: hermetic-enqueue-commands
+        env:
+          ENGINE_URL: ${{ steps.setup.outputs.engine_url }}
+          DEVICE_ID: ${{ steps.setup.outputs.device_id }}
+          SCENARIO: quick
+          COUNT: 1
+          POST_ID_PREFIX: spool
+
+      - name: Wait for spool-1 to exhaust its in-line attempts and be spooled
+        timeout-minutes: 5
+        uses: ./.github/actions/wait-for-log-line
+        with:
+          log_file: ${{ matrix.log_file }}
+          pattern: Postback result spooled for later delivery
+          baseline_count: ${{ steps.bl_spooled_1.outputs.count }}
+          max_attempts: 60
+          interval_seconds: 2
+
+      - name: Assert the in-line budget was exhausted before spooling
+        timeout-minutes: 5
+        uses: ./.github/actions/assert-log-contains
+        with:
+          log_file: ${{ matrix.log_file }}
+          patterns: |
+            Postback failed: all in-line retries exhausted
+
+      - name: Assert spool-1 is delivered from the spool once the engine accepts it
+        timeout-minutes: 6
+        uses: ./.github/actions/it-script
+        with:
+          script: hermetic-assert-postback-responses
+        env:
+          ENGINE_URL: ${{ steps.setup.outputs.engine_url }}
+          POST_ID: spool-1
+          RECORDED: "true"
+          MIN_ATTEMPTS: "4"
+          TIMEOUT_SECONDS: "240"
+
+      - name: Assert the flush reported the delivery
+        timeout-minutes: 5
+        uses: ./.github/actions/assert-log-contains
+        with:
+          log_file: ${{ matrix.log_file }}
+          patterns: |
+            Postback spool flushed
+
+      - name: Script the engine to reject reject-1 for good
+        uses: ./.github/actions/it-script
+        with:
+          script: hermetic-script-postback-responses
+        env:
+          ENGINE_URL: ${{ steps.setup.outputs.engine_url }}
+          POST_ID: reject-1
+          STATUSES: "503,503,503,503,503,503,503,503,503,503,503,503,503,503,503,503,503,503,503,503"
+
+      - name: Script the engine to reject pass-1 only in-line, so it lands in the spool behind reject-1
+        uses: ./.github/actions/it-script
+        with:
+          script: hermetic-script-postback-responses
+        env:
+          ENGINE_URL: ${{ steps.setup.outputs.engine_url }}
+          POST_ID: pass-1
+          STATUSES: "503,503"
+
+      - name: Baseline "spooled for later delivery" before reject-1 and pass-1
+        id: bl_spooled_2
+        uses: ./.github/actions/capture-log-count
+        with:
+          log_file: ${{ matrix.log_file }}
+          pattern: Postback result spooled for later delivery
+
+      - name: Enqueue reject-1
+        timeout-minutes: 5
+        uses: ./.github/actions/it-script
+        with:
+          script: hermetic-enqueue-commands
+        env:
+          ENGINE_URL: ${{ steps.setup.outputs.engine_url }}
+          DEVICE_ID: ${{ steps.setup.outputs.device_id }}
+          SCENARIO: quick
+          COUNT: 1
+          POST_ID_PREFIX: reject
+
+      - name: Wait for reject-1 to be spooled
+        timeout-minutes: 5
+        uses: ./.github/actions/wait-for-log-line
+        with:
+          log_file: ${{ matrix.log_file }}
+          pattern: Postback result spooled for later delivery
+          baseline_count: ${{ steps.bl_spooled_2.outputs.count }}
+          max_attempts: 60
+          interval_seconds: 2
+
+      - name: Baseline "spooled for later delivery" before pass-1
+        id: bl_spooled_3
+        uses: ./.github/actions/capture-log-count
+        with:
+          log_file: ${{ matrix.log_file }}
+          pattern: Postback result spooled for later delivery
+
+      - name: Enqueue pass-1
+        timeout-minutes: 5
+        uses: ./.github/actions/it-script
+        with:
+          script: hermetic-enqueue-commands
+        env:
+          ENGINE_URL: ${{ steps.setup.outputs.engine_url }}
+          DEVICE_ID: ${{ steps.setup.outputs.device_id }}
+          SCENARIO: quick
+          COUNT: 1
+          POST_ID_PREFIX: pass
+
+      - name: Wait for pass-1 to be spooled behind reject-1
+        timeout-minutes: 5
+        uses: ./.github/actions/wait-for-log-line
+        with:
+          log_file: ${{ matrix.log_file }}
+          pattern: Postback result spooled for later delivery
+          baseline_count: ${{ steps.bl_spooled_3.outputs.count }}
+          max_attempts: 60
+          interval_seconds: 2
+
+      - name: Assert pass-1 is delivered although reject-1 sits ahead of it in the spool
+        timeout-minutes: 6
+        uses: ./.github/actions/it-script
+        with:
+          script: hermetic-assert-postback-responses
+        env:
+          ENGINE_URL: ${{ steps.setup.outputs.engine_url }}
+          POST_ID: pass-1
+          RECORDED: "true"
+          MIN_ATTEMPTS: "3"
+          TIMEOUT_SECONDS: "240"
+
+      - name: Assert reject-1 is abandoned after its bounded attempts with its own drop reason
+        timeout-minutes: 8
+        uses: ./.github/actions/it-script
+        with:
+          script: hermetic-assert-log-count-exactly
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+          PATTERN: 'Postback result abandoned: engine kept rejecting it'
+          EXPECTED: "1"
+          BASELINE: "0"
+          TIMEOUT_SECONDS: "420"
+
+      - name: Assert the abandonment named its reason
+        timeout-minutes: 5
+        uses: ./.github/actions/assert-log-contains
+        with:
+          log_file: ${{ matrix.log_file }}
+          patterns: |
+            Postback spool entry dropped
+            reason=attempts_exhausted
+
+      - name: Assert the engine never recorded reject-1 and saw every attempt
+        timeout-minutes: 5
+        uses: ./.github/actions/it-script
+        with:
+          script: hermetic-assert-postback-responses
+        env:
+          ENGINE_URL: ${{ steps.setup.outputs.engine_url }}
+          POST_ID: reject-1
+          RECORDED: "false"
+          MIN_ATTEMPTS: "7"
+          TIMEOUT_SECONDS: "30"
+
+
+      - name: Dump agent log on failure
+        if: failure()
+        uses: ./.github/actions/dump-agent-log
+        with:
+          log_file: ${{ matrix.log_file }}
+
+      - name: Stop stub config endpoint
+        timeout-minutes: 15
+        if: always()
+        uses: ./.github/actions/stub-config
+        with:
+          mode: stop
+
+      - name: Stop stub broker and engine
+        timeout-minutes: 15
+        if: always()
+        uses: ./.github/actions/stub-broker
+        with:
+          mode: stop
+
+  # ---- Command journal: redelivery after a lost PUBACK, journal full ----
+  # The broker is told to lose the device's next PUBACK (/_control/devices/{id}/
+  # lose-next-puback): the message stays in flight and comes back with DUP on
+  # the next subscribe, which the journal's completion tombstone acknowledges
+  # without a second execution. Then one slow command holds the single worker
+  # while more commands are queued than the integration build's 20-entry
+  # journal holds, so the once-per-transition degradation and recovery lines
+  # are observed with every command still executing (sc-126322).
+  hermetic-journal:
+    permissions:
+      contents: read
+    needs: [build, build-integration-test, set-matrix]
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.set-matrix.outputs.matrix) }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Set up the hermetic scenario
+        timeout-minutes: 20
+        id: setup
+        uses: ./.github/actions/hermetic-setup
+        with:
+          os: ${{ matrix.os }}
+          binary: ${{ matrix.it_binary }}
+          org_id: ${{ vars.IT_ORG_ID }}
+          device_id: hermetic-${{ github.run_id }}-${{ matrix.os }}-journal
+          service: ${{ matrix.service }}
+          log_file: ${{ matrix.log_file }}
+          extra_args: --command-timeout-seconds 120
+      - name: Baseline "Duplicate delivery acknowledged" before the lost PUBACK
+        id: bl_dup
+        uses: ./.github/actions/capture-log-count
+        with:
+          log_file: ${{ matrix.log_file }}
+          pattern: Duplicate delivery acknowledged without execution
+
+      - name: Arm the broker to lose the next PUBACK
+        uses: ./.github/actions/it-script
+        with:
+          script: hermetic-lose-next-puback
+        env:
+          ENGINE_URL: ${{ steps.setup.outputs.engine_url }}
+          DEVICE_ID: ${{ steps.setup.outputs.device_id }}
+
+      - name: Enqueue dup-1
+        timeout-minutes: 5
+        uses: ./.github/actions/it-script
+        with:
+          script: hermetic-enqueue-commands
+        env:
+          ENGINE_URL: ${{ steps.setup.outputs.engine_url }}
+          DEVICE_ID: ${{ steps.setup.outputs.device_id }}
+          SCENARIO: quick
+          COUNT: 1
+          POST_ID_PREFIX: dup
+
+      - name: Assert dup-1 executed and was reported once
+        timeout-minutes: 5
+        uses: ./.github/actions/it-script
+        with:
+          script: hermetic-assert-postback-responses
+        env:
+          ENGINE_URL: ${{ steps.setup.outputs.engine_url }}
+          POST_ID: dup-1
+          RECORDED: "true"
+          MIN_ATTEMPTS: "1"
+          TIMEOUT_SECONDS: "120"
+
+      - name: Assert the broker still holds dup-1 in flight after the lost PUBACK
+        timeout-minutes: 5
+        uses: ./.github/actions/it-script
+        with:
+          script: hermetic-assert-device-snapshot
+        env:
+          ENGINE_URL: ${{ steps.setup.outputs.engine_url }}
+          DEVICE_ID: ${{ steps.setup.outputs.device_id }}
+          INFLIGHT: "1"
+          DELIVERED: "0"
+          MIN_PUBACKS: "1"
+          TIMEOUT_SECONDS: "30"
+
+      - name: Wait for the redelivery to be acknowledged without execution on the next cycle
+        timeout-minutes: 5
+        uses: ./.github/actions/wait-for-log-line
+        with:
+          log_file: ${{ matrix.log_file }}
+          pattern: Duplicate delivery acknowledged without execution
+          baseline_count: ${{ steps.bl_dup.outputs.count }}
+          max_attempts: 90
+          interval_seconds: 2
+
+      - name: Assert dup-1 was not executed a second time
+        timeout-minutes: 5
+        uses: ./.github/actions/it-script
+        with:
+          script: hermetic-assert-postback-responses
+        env:
+          ENGINE_URL: ${{ steps.setup.outputs.engine_url }}
+          POST_ID: dup-1
+          RECORDED: "true"
+          MAX_ATTEMPTS: "1"
+          TIMEOUT_SECONDS: "10"
+
+      - name: Assert the broker saw the second PUBACK and retired the message
+        timeout-minutes: 5
+        uses: ./.github/actions/it-script
+        with:
+          script: hermetic-assert-device-snapshot
+        env:
+          ENGINE_URL: ${{ steps.setup.outputs.engine_url }}
+          DEVICE_ID: ${{ steps.setup.outputs.device_id }}
+          INFLIGHT: "0"
+          DELIVERED: "1"
+          MIN_PUBACKS: "2"
+          TIMEOUT_SECONDS: "60"
+
+      - name: Baseline "Executing commands" before the hold
+        id: bl_exec
+        uses: ./.github/actions/capture-log-count
+        with:
+          log_file: ${{ matrix.log_file }}
+          pattern: Executing commands
+
+      - name: Enqueue the command that holds the single worker
+        timeout-minutes: 5
+        uses: ./.github/actions/it-script
+        with:
+          script: hermetic-enqueue-commands
+        env:
+          ENGINE_URL: ${{ steps.setup.outputs.engine_url }}
+          DEVICE_ID: ${{ steps.setup.outputs.device_id }}
+          SCENARIO: hold
+          COUNT: 1
+          POST_ID_PREFIX: hold
+
+      - name: Wait for the hold to start executing
+        timeout-minutes: 5
+        uses: ./.github/actions/wait-for-log-line
+        with:
+          log_file: ${{ matrix.log_file }}
+          pattern: Executing commands
+          baseline_count: ${{ steps.bl_exec.outputs.count }}
+          max_attempts: 60
+          interval_seconds: 2
+
+      - name: Queue one more command than the journal holds
+        timeout-minutes: 5
+        uses: ./.github/actions/it-script
+        with:
+          script: hermetic-enqueue-commands
+        env:
+          ENGINE_URL: ${{ steps.setup.outputs.engine_url }}
+          DEVICE_ID: ${{ steps.setup.outputs.device_id }}
+          SCENARIO: quick
+          COUNT: 20
+          POST_ID_PREFIX: fill
+
+      - name: Assert the journal reported itself full exactly once
+        timeout-minutes: 5
+        uses: ./.github/actions/it-script
+        with:
+          script: hermetic-assert-log-count-exactly
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+          PATTERN: Command journal unavailable; inbound commands are accepted in memory only
+          EXPECTED: "1"
+          BASELINE: "0"
+          TIMEOUT_SECONDS: "120"
+
+      - name: Assert every queued command still executed and was reported, the in-memory one included
+        timeout-minutes: 6
+        uses: ./.github/actions/it-script
+        with:
+          script: hermetic-assert-postback-responses
+        env:
+          ENGINE_URL: ${{ steps.setup.outputs.engine_url }}
+          POST_ID: fill-20
+          RECORDED: "true"
+          MIN_ATTEMPTS: "1"
+          TIMEOUT_SECONDS: "240"
+
+      - name: Enqueue one command after the backlog drained
+        timeout-minutes: 5
+        uses: ./.github/actions/it-script
+        with:
+          script: hermetic-enqueue-commands
+        env:
+          ENGINE_URL: ${{ steps.setup.outputs.engine_url }}
+          DEVICE_ID: ${{ steps.setup.outputs.device_id }}
+          SCENARIO: quick
+          COUNT: 1
+          POST_ID_PREFIX: after
+
+      - name: Assert the journal reported its recovery exactly once
+        timeout-minutes: 5
+        uses: ./.github/actions/it-script
+        with:
+          script: hermetic-assert-log-count-exactly
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+          PATTERN: Command journal recovered; inbound commands are durable again
+          EXPECTED: "1"
+          BASELINE: "0"
+          TIMEOUT_SECONDS: "120"
+
+      - name: Assert the command after recovery executed
+        timeout-minutes: 5
+        uses: ./.github/actions/it-script
+        with:
+          script: hermetic-assert-postback-responses
+        env:
+          ENGINE_URL: ${{ steps.setup.outputs.engine_url }}
+          POST_ID: after-1
+          RECORDED: "true"
+          MIN_ATTEMPTS: "1"
+          TIMEOUT_SECONDS: "120"
+
+
+      - name: Dump agent log on failure
+        if: failure()
+        uses: ./.github/actions/dump-agent-log
+        with:
+          log_file: ${{ matrix.log_file }}
+
+      - name: Stop stub config endpoint
+        timeout-minutes: 15
+        if: always()
+        uses: ./.github/actions/stub-config
+        with:
+          mode: stop
+
+      - name: Stop stub broker and engine
+        timeout-minutes: 15
+        if: always()
+        uses: ./.github/actions/stub-broker
+        with:
+          mode: stop
+
+  # ---- Clock step at boot: forward replays the queued command, backward is reported once ----
+  # With the service stopped, a never-started entry and a current heartbeat are
+  # seeded into the command journal and the integration build's clock offset
+  # override is written (sc-119838, sc-126322). Started 25 h ahead, the agent
+  # measures the entry's age on the heartbeat evidence - unobserved downtime
+  # does not count - so it replays the command rather than expiring it; started
+  # 25 h behind, it reports the backward step exactly once, suspends expiry for
+  # that cycle, and still replays.
+  hermetic-clock-step:
+    permissions:
+      contents: read
+    needs: [build, build-integration-test, set-matrix]
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.set-matrix.outputs.matrix) }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Set up the hermetic scenario
+        timeout-minutes: 20
+        id: setup
+        uses: ./.github/actions/hermetic-setup
+        with:
+          os: ${{ matrix.os }}
+          binary: ${{ matrix.it_binary }}
+          org_id: ${{ vars.IT_ORG_ID }}
+          device_id: hermetic-${{ github.run_id }}-${{ matrix.os }}-clock-step
+          service: ${{ matrix.service }}
+          log_file: ${{ matrix.log_file }}
+          extra_args: ""
+      - name: Baseline "Replaying command" before the forward step
+        id: bl_replay_fwd
+        uses: ./.github/actions/capture-log-count
+        with:
+          log_file: ${{ matrix.log_file }}
+          pattern: Replaying command a previous run accepted but never executed
+
+      - name: Baseline "expired before it could run" before the forward step
+        id: bl_expired
+        uses: ./.github/actions/capture-log-count
+        with:
+          log_file: ${{ matrix.log_file }}
+          pattern: Journaled command expired before it could run
+
+      - name: Baseline "clock stepped backwards" before the forward step
+        id: bl_stepback
+        uses: ./.github/actions/capture-log-count
+        with:
+          log_file: ${{ matrix.log_file }}
+          pattern: System clock stepped backwards; command journal expiry and pruning are suspended
+
+      - name: Stop the agent
+        timeout-minutes: 5
+        uses: ./.github/actions/stop-service
+        with:
+          service: ${{ matrix.service }}
+          unload: "true"
+
+      - name: Seed a queued command and a fresh heartbeat, with the clock 25 h ahead
+        uses: ./.github/actions/it-script
+        with:
+          script: hermetic-seed-journal
+        env:
+          DATA_DIR: ${{ matrix.config_dir }}/${{ vars.IT_ORG_ID }}
+          POST_ID: clock-1
+          COMMANDS: echo ok
+          RECEIVED_AGO_SECONDS: "120"
+          CLOCK_OFFSET: 25h
+
+      - name: Start the agent
+        timeout-minutes: 5
+        uses: ./.github/actions/start-service
+        with:
+          service: ${{ matrix.service }}
+
+      - name: Wait for the queued command to be replayed under the forward step
+        timeout-minutes: 5
+        uses: ./.github/actions/wait-for-log-line
+        with:
+          log_file: ${{ matrix.log_file }}
+          pattern: Replaying command a previous run accepted but never executed
+          baseline_count: ${{ steps.bl_replay_fwd.outputs.count }}
+          max_attempts: 60
+          interval_seconds: 2
+
+      - name: Assert clock-1 ran and was reported
+        timeout-minutes: 5
+        uses: ./.github/actions/it-script
+        with:
+          script: hermetic-assert-postback-responses
+        env:
+          ENGINE_URL: ${{ steps.setup.outputs.engine_url }}
+          POST_ID: clock-1
+          RECORDED: "true"
+          MIN_ATTEMPTS: "1"
+          TIMEOUT_SECONDS: "120"
+
+      - name: Assert nothing expired and no backward step was reported under the forward step
+        uses: ./.github/actions/it-script
+        with:
+          script: hermetic-assert-log-count-exactly
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+          PATTERN: Journaled command expired before it could run
+          EXPECTED: "0"
+          BASELINE: ${{ steps.bl_expired.outputs.count }}
+          TIMEOUT_SECONDS: "5"
+
+      - name: Assert the offset was in effect
+        timeout-minutes: 5
+        uses: ./.github/actions/assert-log-contains
+        with:
+          log_file: ${{ matrix.log_file }}
+          patterns: |
+            Clock offset override in effect
+
+      - name: Baseline "Replaying command" before the backward step
+        id: bl_replay_back
+        uses: ./.github/actions/capture-log-count
+        with:
+          log_file: ${{ matrix.log_file }}
+          pattern: Replaying command a previous run accepted but never executed
+
+      - name: Stop the agent
+        timeout-minutes: 5
+        uses: ./.github/actions/stop-service
+        with:
+          service: ${{ matrix.service }}
+          unload: "true"
+
+      - name: Seed a queued command with the clock 25 h behind the heartbeat
+        uses: ./.github/actions/it-script
+        with:
+          script: hermetic-seed-journal
+        env:
+          DATA_DIR: ${{ matrix.config_dir }}/${{ vars.IT_ORG_ID }}
+          POST_ID: clock-2
+          COMMANDS: echo ok
+          RECEIVED_AGO_SECONDS: "120"
+          CLOCK_OFFSET: -25h
+
+      - name: Start the agent
+        timeout-minutes: 5
+        uses: ./.github/actions/start-service
+        with:
+          service: ${{ matrix.service }}
+
+      - name: Assert the backward step was reported exactly once
+        timeout-minutes: 5
+        uses: ./.github/actions/it-script
+        with:
+          script: hermetic-assert-log-count-exactly
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+          PATTERN: System clock stepped backwards; command journal expiry and pruning are suspended
+          EXPECTED: "1"
+          BASELINE: ${{ steps.bl_stepback.outputs.count }}
+          TIMEOUT_SECONDS: "120"
+
+      - name: Wait for the queued command to be replayed under the backward step
+        timeout-minutes: 5
+        uses: ./.github/actions/wait-for-log-line
+        with:
+          log_file: ${{ matrix.log_file }}
+          pattern: Replaying command a previous run accepted but never executed
+          baseline_count: ${{ steps.bl_replay_back.outputs.count }}
+          max_attempts: 60
+          interval_seconds: 2
+
+      - name: Assert clock-2 ran and was reported
+        timeout-minutes: 5
+        uses: ./.github/actions/it-script
+        with:
+          script: hermetic-assert-postback-responses
+        env:
+          ENGINE_URL: ${{ steps.setup.outputs.engine_url }}
+          POST_ID: clock-2
+          RECORDED: "true"
+          MIN_ATTEMPTS: "1"
+          TIMEOUT_SECONDS: "120"
+
+      - name: Assert nothing expired under the backward step either
+        uses: ./.github/actions/it-script
+        with:
+          script: hermetic-assert-log-count-exactly
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+          PATTERN: Journaled command expired before it could run
+          EXPECTED: "0"
+          BASELINE: ${{ steps.bl_expired.outputs.count }}
+          TIMEOUT_SECONDS: "5"
+
+
+      - name: Dump agent log on failure
+        if: failure()
+        uses: ./.github/actions/dump-agent-log
+        with:
+          log_file: ${{ matrix.log_file }}
+
+      - name: Stop stub config endpoint
+        timeout-minutes: 15
+        if: always()
+        uses: ./.github/actions/stub-config
+        with:
+          mode: stop
+
+      - name: Stop stub broker and engine
+        timeout-minutes: 15
+        if: always()
+        uses: ./.github/actions/stub-broker
+        with:
+          mode: stop
+
   # ---- Go e2e scenarios: auto-update retries and digests, startup sweeps, wedged stop, locked directory ----
   # The scenarios that need nothing but stubs the repository owns run as a Go
   # test package against the real binary (test/e2e, sc-126321): the config
@@ -73,7 +771,7 @@ jobs:
           binary: ${{ matrix.binary }}
           it_binary: ${{ matrix.it_binary }}
           org_id: ${{ vars.IT_ORG_ID }}
-          run: 'TestAutoUpdate|TestSweeps|TestWedgedService|TestUninstall'
+          run: 'TestAutoUpdate|TestSweeps|TestWedgedService|TestUninstall|TestInstall'
           timeout: 22m
           github_token: ${{ secrets.GITHUB_TOKEN }}
 

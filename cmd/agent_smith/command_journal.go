@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -46,6 +47,26 @@ const (
 	journalPendingSuffix = ".json"
 	journalDoneSuffix    = ".done"
 )
+
+// journalMaxPendingOverrideStr is overridable via -ldflags for integration
+// testing. When set to a positive integer it replaces defaultJournalMaxPending,
+// so the hermetic suite can fill the journal with a couple of dozen queued
+// commands and observe the once-per-transition degradation and recovery lines
+// instead of needing a thousand (sc-126322). It is empty in production builds.
+// Example: -ldflags "-X main.journalMaxPendingOverrideStr=20"
+var journalMaxPendingOverrideStr = ""
+
+// resolveJournalMaxPending returns the pending-entry bound: the
+// ldflags-injected override when a build sets a valid one, otherwise the
+// documented defaultJournalMaxPending.
+func resolveJournalMaxPending() int {
+	if journalMaxPendingOverrideStr != "" {
+		if n, err := strconv.Atoi(journalMaxPendingOverrideStr); err == nil && n > 0 {
+			return n
+		}
+	}
+	return defaultJournalMaxPending
+}
 
 // errJournalFull is returned by put when the pending count has reached the
 // bound. The caller degrades to in-memory delivery; it does not refuse the

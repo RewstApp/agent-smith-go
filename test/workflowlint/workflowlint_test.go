@@ -378,6 +378,7 @@ func TestScenarioJobsArePresentAndSmall(t *testing.T) {
 		"live-service-user",
 		"hermetic-command-timeouts", "hermetic-output-bounds", "hermetic-timeout-composition",
 		"hermetic-connection", "hermetic-child-process",
+		"hermetic-postback-spool", "hermetic-journal", "hermetic-clock-step",
 		"test-hermetic", "test-config-response-cap", "e2e-go",
 	}
 	all := jobs(workflow(t))

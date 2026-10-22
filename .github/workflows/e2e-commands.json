@@ -41,5 +41,15 @@
   "child_process_hang": {
     "windows": "\"Start-Process -FilePath powershell -ArgumentList '-NoProfile','-Command','Start-Sleep -Seconds 91743' -WindowStyle Hidden; Start-Sleep -Seconds 30\"",
     "_note": "Windows-only descendant-tree kill scenario (sc-108853): spawns a detached child via Start-Process tagged with a distinctive sleep duration (91743 s) used purely as a process-list marker, then hangs the parent past the configured command timeout. Single quotes stand in for the nested double quotes Start-Process's -ArgumentList would otherwise need, keeping the payload double-quote- and backslash-free like the verbose scripts."
+  },
+  "quick": {
+    "unix": "\"echo ok\"",
+    "windows": "\"Write-Output ok\"",
+    "_note": "A command that finishes at once and does not post its own result (unlike the Windows `success` form), so the engine sees exactly the agent's postback - the sc-126322 spool, lost-PUBACK and journal-full scenarios count those."
+  },
+  "hold": {
+    "unix": "\"sleep 45\"",
+    "windows": "\"Start-Sleep -Seconds 45\"",
+    "_note": "Occupies the single worker long enough for the journal-full scenario (sc-126322) to queue more commands than the integration build's 20-entry journal holds; the scenario installs with --command-timeout-seconds 120 so the integration build's 5 s default timeout does not cut it short."
   }
 }

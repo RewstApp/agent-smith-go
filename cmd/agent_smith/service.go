@@ -198,7 +198,7 @@ func (svc *serviceContext) Execute(
 	// execution finishes.
 	svc.journal = newCommandJournal(
 		filepath.Join(agent.GetDataDirectory(svc.OrgId), "command_journal"),
-		defaultJournalMaxPending,
+		resolveJournalMaxPending(),
 		defaultJournalMaxAge,
 	)
 
@@ -231,6 +231,17 @@ func (svc *serviceContext) Execute(
 	}
 	svc.journal.onClockStepBack = clockStepBack("command journal")
 	svc.spool.onClockStepBack = clockStepBack("postback spool")
+	// An integration build may shift the clock these two read (see
+	// clockOffsetOverrideFileStr); a released build never does.
+	if offset := resolveClockOffset(agent.GetDataDirectory(svc.OrgId)); offset != 0 {
+		logger.Warn(
+			"Clock offset override in effect for the command journal and postback spool",
+			"offset", offset,
+		)
+		shifted := func() time.Time { return time.Now().Add(offset) }
+		svc.journal.now = shifted
+		svc.spool.now = shifted
+	}
 	utils.SafeGo(logger, func() {
 		ticker := time.NewTicker(clockHeartbeatInterval)
 		defer ticker.Stop()
