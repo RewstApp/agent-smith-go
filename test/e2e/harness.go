@@ -37,6 +37,7 @@ package e2e
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -71,6 +72,16 @@ const (
 	commandTimeout = 5 * time.Minute
 )
 
+// required makes a missing E2E_BINARY or E2E_IT_BINARY a failure rather than a
+// skip. CI passes it (the flag survives sudo where the environment might not,
+// see sc-129246) so a forwarding regression cannot report a green job that ran
+// nothing; a developer's `go test -tags e2e` without the variables still skips.
+var required = flag.Bool(
+	"e2e.required",
+	false,
+	"fail instead of skipping when E2E_BINARY or E2E_IT_BINARY is unset",
+)
+
 // serviceController is the harness's view of the platform service manager.
 // Status reports one of "running", "stopped", "start-pending", "stop-pending"
 // or "absent"; BinaryPath and SetBinaryPath exist for the Windows wedged-service
@@ -103,16 +114,21 @@ type Harness struct {
 // New reads the environment, checks the process is elevated, starts the
 // in-process config endpoint and registers the uninstall cleanup. It skips (not
 // fails) when E2E_BINARY or E2E_IT_BINARY is unset so `go vet -tags e2e` and a
-// casual `go test -tags e2e ./test/e2e` on a developer machine stay green.
+// casual `go test -tags e2e ./test/e2e` on a developer machine stay green,
+// unless -e2e.required is passed.
 func New(t *testing.T) *Harness {
 	t.Helper()
 	binary := os.Getenv("E2E_BINARY")
-	if binary == "" {
-		t.Skip("E2E_BINARY is not set; see the README's \"Go e2e scenarios\" section")
-	}
 	itBinary := os.Getenv("E2E_IT_BINARY")
-	if itBinary == "" {
-		t.Skip("E2E_IT_BINARY is not set; see the README's \"Go e2e scenarios\" section")
+	for name, value := range map[string]string{"E2E_BINARY": binary, "E2E_IT_BINARY": itBinary} {
+		if value != "" {
+			continue
+		}
+		msg := name + " is not set; see the README's \"Go e2e scenarios\" section"
+		if *required {
+			t.Fatal(msg + " (-e2e.required: the environment did not reach the test binary)")
+		}
+		t.Skip(msg)
 	}
 	orgID := os.Getenv("E2E_ORG_ID")
 	if orgID == "" {

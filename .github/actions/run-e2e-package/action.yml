@@ -5,10 +5,14 @@ description: >-
   (sc-126321). The scenarios install the agent as a real service and talk only
   to httptest stubs inside the test process, so the step needs no hub, no
   engine and no network beyond GitHub. The binary is compiled as the runner
-  user and only the run is elevated: `sudo -E` on Linux and macOS (the E2E_*
-  variables must reach the test), directly on the already-elevated Windows
-  runner. On Windows the wedged-service fixture is prebuilt here so the test
-  does not need the Go toolchain at run time.
+  user and only the run is elevated: on Linux and macOS through `sudo env`
+  with the E2E_* variables passed as NAME=VALUE arguments (Ubuntu 26.04's
+  sudo-rs ignores -E and resets the environment, sc-129246), directly on the
+  already-elevated Windows runner. The run passes -e2e.required, so if the
+  variables ever fail to reach the test binary the job fails instead of
+  skipping every scenario and reporting green. On Windows the wedged-service
+  fixture is prebuilt here so the test does not need the Go toolchain at run
+  time.
 
 inputs:
   binary:
@@ -59,22 +63,27 @@ runs:
         go test -c -tags e2e -o $testBin ./test/e2e
         if ($LASTEXITCODE -ne 0) { throw "failed to compile the e2e test binary" }
 
-        $env:E2E_BINARY = Join-Path $PWD "dist/$($env:BINARY)"
-        $env:E2E_IT_BINARY = Join-Path $PWD "dist/$($env:IT_BINARY)"
-        $env:E2E_ORG_ID = $env:ORG_ID
-        $env:E2E_REPO_ROOT = "$PWD"
+        $e2eEnv = @{
+          E2E_BINARY       = Join-Path $PWD "dist/$($env:BINARY)"
+          E2E_IT_BINARY    = Join-Path $PWD "dist/$($env:IT_BINARY)"
+          E2E_ORG_ID       = $env:ORG_ID
+          E2E_REPO_ROOT    = "$PWD"
+          E2E_GITHUB_TOKEN = $env:E2E_GITHUB_TOKEN
+        }
         if ($IsWindows) {
           $fixture = Join-Path $env:RUNNER_TEMP_DIR 'wedgedservice.exe'
           go build -tags integration -o $fixture ./test/wedgedservice
           if ($LASTEXITCODE -ne 0) { throw "failed to build the wedged service fixture" }
-          $env:E2E_WEDGED_SERVICE_BINARY = $fixture
+          $e2eEnv.E2E_WEDGED_SERVICE_BINARY = $fixture
         }
 
-        $testArgs = @('-test.v', '-test.run', $env:RUN, '-test.timeout', $env:TEST_TIMEOUT)
+        $testArgs = @('-test.v', '-test.run', $env:RUN, '-test.timeout', $env:TEST_TIMEOUT, '-e2e.required')
         Write-Output "Running $testBin $($testArgs -join ' ')"
         if ($IsWindows) {
+          foreach ($name in $e2eEnv.Keys) { Set-Item -Path "env:$name" -Value $e2eEnv[$name] }
           & $testBin @testArgs
         } else {
-          sudo -E $testBin @testArgs
+          $pairs = @($e2eEnv.Keys | ForEach-Object { "$_=$($e2eEnv[$_])" })
+          sudo env @pairs $testBin @testArgs
         }
         exit $LASTEXITCODE
