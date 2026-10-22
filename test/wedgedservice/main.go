@@ -18,7 +18,7 @@
 // and not how the agent got stuck.
 //
 // The harness registers it under the agent's own service name by rewriting that
-// service's binPath (see .github/actions/wedged-service), so the agent binary
+// service's binPath (see test/e2e's wedgeService), so the agent binary
 // and config file on disk are untouched and can be hashed before and after the
 // aborted update.
 //

@@ -204,7 +204,7 @@ func jobs(lines []string) map[string][]string {
 		if !inJobs {
 			continue
 		}
-		if m := regexp.MustCompile(`^  ([a-z-]+):$`).FindStringSubmatch(ln); m != nil {
+		if m := regexp.MustCompile(`^  ([a-z][a-z0-9-]*):$`).FindStringSubmatch(ln); m != nil {
 			cur = m[1]
 			continue
 		}
@@ -245,7 +245,7 @@ func TestEveryIntegrationJobIsBounded(t *testing.T) {
 // "exceeded the maximum execution time" on the job.
 func TestEveryWaitingStepIsBounded(t *testing.T) {
 	waiting := regexp.MustCompile(
-		`(?m)^\s+uses: \./\.github/actions/(e2e-setup|hermetic-setup|install-agent|run-agent|send-command|wait-for-log-line|await-service-respawn|stub-[a-z]+|wedged-service|assert-log-[a-z]+)$|it-scripts/(wait-for|assert)|^\s+script: (wait-for|assert)`,
+		`(?m)^\s+uses: \./\.github/actions/(e2e-setup|hermetic-setup|install-agent|run-agent|send-command|wait-for-log-line|run-e2e-package|stub-[a-z]+|assert-log-[a-z]+)$|it-scripts/(wait-for|assert)|^\s+script: (wait-for|assert)`,
 	)
 	lines := workflow(t)
 	starts := []int{}
@@ -374,11 +374,11 @@ func TestInlineSleepsAreInsidePollLoops(t *testing.T) {
 func TestScenarioJobsArePresentAndSmall(t *testing.T) {
 	const maxSteps = 40
 	want := []string{
-		"live-lifecycle", "live-auto-update", "live-wedged-broker", "live-sweeps",
-		"live-update-retry", "live-windows-only", "live-service-user",
+		"live-lifecycle", "live-auto-update", "live-wedged-broker", "live-windows-only",
+		"live-service-user",
 		"hermetic-command-timeouts", "hermetic-output-bounds", "hermetic-timeout-composition",
 		"hermetic-connection", "hermetic-child-process",
-		"test-hermetic", "test-config-response-cap",
+		"test-hermetic", "test-config-response-cap", "e2e-go",
 	}
 	all := jobs(workflow(t))
 	for _, name := range want {
@@ -439,7 +439,7 @@ func TestWorkflowHasNoPlatformBranches(t *testing.T) {
 func TestMatrixCarriesOnlyInstallFacts(t *testing.T) {
 	allowed := map[string]bool{
 		"os": true, "binary": true, "it_binary": true, "config_dir": true, "log_file": true,
-		"service": true, "scripts_dir": true, "scripts_dir_owner": true, "program_dir": true,
+		"service": true, "scripts_dir": true, "scripts_dir_owner": true,
 		"uninstall_paths": true, "service_user": true, "service_username_arg": true,
 		"service_identity": true,
 	}

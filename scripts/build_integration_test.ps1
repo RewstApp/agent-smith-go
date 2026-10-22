@@ -8,7 +8,7 @@
 #   fires ~30s in - lifetime minus the ~60s renew margin - so the renewal path
 #   can be exercised in seconds not hours)
 # - stopTimeoutOverrideStr overridden to 25s (the bounded wait for a Windows
-#   service to reach Stopped, so the wedged-service scenario observes the update
+#   service to reach Stopped, so the wedged-service scenario (test/e2e) observes the update
 #   abort in seconds instead of the production five minutes). The symbol only
 #   exists in the Windows build; -X against a missing symbol is ignored, so the
 #   same flag is harmless on Linux and macOS.
@@ -23,7 +23,7 @@
 #   sequence
 # - releaseUrlOverrideFileStr overridden to release_url_override, which lets the
 #   integration harness point the auto-updater at a local stub release endpoint
-#   (see .github/actions/set-release-url) so the retry schedule can be driven by
+#   (see test/e2e's SetReleaseURL) so the retry schedule can be driven by
 #   an endpoint that fails on demand. Released builds leave this empty and never
 #   look for the file, so their update source stays fixed at build time
 # - defaultCommandTimeoutOverrideStr overridden to 5s, so the "hung command

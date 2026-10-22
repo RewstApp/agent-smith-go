@@ -17,6 +17,16 @@ inputs:
     description: "Seconds to sleep before reading the log"
     required: false
     default: "0"
+  baseline_count:
+    description: >-
+      Occurrences of the pattern that were already in the log before the step
+      under test (from capture-log-count). The assertion fails only when the
+      count has grown, so a line an earlier, legitimate step produced does not
+      fail a later "must not appear" check (sc-126321: the Windows success
+      command logs "Postback already sent", which the disabled-postback check
+      then has to ignore). 0 keeps the whole-file assertion.
+    required: false
+    default: "0"
   wait_for_file_seconds:
     description: "Maximum seconds to wait for the log file to exist before reading (polls every second)"
     required: false
@@ -30,8 +40,9 @@ runs:
       env:
         LOG_FILE: ${{ inputs.log_file }}
         PATTERN: ${{ inputs.pattern }}
+        BASELINE_COUNT: ${{ inputs.baseline_count }}
         WAIT_SECONDS: ${{ inputs.wait_seconds }}
         WAIT_FOR_FILE_SECONDS: ${{ inputs.wait_for_file_seconds }}
       run: |
         . "$env:GITHUB_WORKSPACE/.github/actions/_lib/Invoke-Elevated.ps1"
-        Invoke-Elevated -Script "$env:GITHUB_ACTION_PATH/assert.ps1" -Arguments @{ LogFile = $env:LOG_FILE; Pattern = $env:PATTERN; WaitSeconds = ([int]$env:WAIT_SECONDS); WaitForFileSeconds = ([int]$env:WAIT_FOR_FILE_SECONDS) }
+        Invoke-Elevated -Script "$env:GITHUB_ACTION_PATH/assert.ps1" -Arguments @{ LogFile = $env:LOG_FILE; Pattern = $env:PATTERN; BaselineCount = ([int]$env:BASELINE_COUNT); WaitSeconds = ([int]$env:WAIT_SECONDS); WaitForFileSeconds = ([int]$env:WAIT_FOR_FILE_SECONDS) }

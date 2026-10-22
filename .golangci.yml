@@ -1,11 +1,13 @@
 version: "2"
 run:
-  # The integration-test fixtures (test/stubbroker, test/stubrelease,
-  # test/stubconfig, test/wedgedservice) are excluded from
-  # `go test ./...` by this tag so they cannot count uncovered statements
-  # against the coverage threshold; listing it here keeps them linted.
+  # The integration-test fixtures (test/stubbroker, test/stubconfig,
+  # test/wedgedservice) are excluded from `go test ./...` by the integration
+  # tag, and the Go e2e scenarios (test/e2e, which install a real service) by
+  # the e2e tag, so neither can count uncovered statements against the coverage
+  # threshold; listing the tags here keeps them linted.
   build-tags:
     - integration
+    - e2e
 linters:
   enable:
     - errcheck

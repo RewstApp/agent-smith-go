@@ -27,15 +27,62 @@ on:
 
 jobs:
   # ---- Live smoke - Lifecycle: install, commands, logging, syslog, uninstall ----
-  # ---- Live smoke - Auto-update: happy path, tampered and missing digests ----
+  # ---- Live smoke - Auto-update: happy path against the real release endpoint ----
   # ---- Connection: reconnect after disruption, SAS renewal ----
   # ---- Live smoke - Broker withholding SUBACK: bounded subscribe, prompt stop, recovery ----
   # ---- Command timeouts: default and configured ----
   # ---- Output bounds: stdout and stderr floods ----
   # ---- Output bound and command timeout composed ----
-  # ---- Live smoke - Startup sweeps: stranded scripts and installers ----
-  # ---- Live smoke - Auto-update retry schedule and stop during backoff ----
-  # ---- Live smoke, Windows-only: postback disabled, child-process kill, wedged stop aborts update/uninstall, locked directory uninstall ----
+  # ---- Live smoke, Windows-only: postback disabled ----
+  # ---- Go e2e scenarios: auto-update retries and digests, startup sweeps, wedged stop, locked directory ----
+  # The scenarios that need nothing but stubs the repository owns run as a Go
+  # test package against the real binary (test/e2e, sc-126321): the config
+  # endpoint and the release endpoint are httptest servers inside the test
+  # process, the binary is installed as a real service, and every wait is a
+  # bounded poll. They used to be about ninety workflow steps across the
+  # live-sweeps, live-update-retry, live-auto-update and live-windows-only
+  # jobs. Nothing here reaches the hub or the engine, so the job gates the
+  # merge with the hermetic jobs.
+  e2e-go:
+    permissions:
+      contents: read
+    needs: [build, build-integration-test, set-matrix]
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.set-matrix.outputs.matrix) }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Download compiled binary
+        uses: ./.github/actions/download-binary
+        with:
+          name: ${{ matrix.os }}
+
+      - name: Download integration test binary
+        uses: ./.github/actions/download-binary
+        with:
+          name: it-${{ matrix.os }}
+
+      - name: Run the Go e2e scenarios
+        timeout-minutes: 25
+        uses: ./.github/actions/run-e2e-package
+        with:
+          binary: ${{ matrix.binary }}
+          it_binary: ${{ matrix.it_binary }}
+          org_id: ${{ vars.IT_ORG_ID }}
+          run: 'TestAutoUpdate|TestSweeps|TestWedgedService|TestUninstall'
+          timeout: 22m
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Dump agent log on failure
+        if: failure()
+        uses: ./.github/actions/dump-agent-log
+        with:
+          log_file: ${{ matrix.log_file }}
+
   # ---- Config-fetch response size ceiling (sc-112405) ----
   # Config mode read the config endpoint's POST response with a bare
   # io.ReadAll. configHTTPTimeout (5 minutes) bounded the request in time but
@@ -158,10 +205,6 @@ jobs:
               # agent's dynamically-written scripts are not flagged/blocked.
               scripts_dir = "C:\RewstRemoteAgent\scripts\$orgId"
               scripts_dir_owner = ''
-              # Windows-only: the only field consumed by the locked-directory
-              # uninstall scenario (sc-108857), which has no equivalent on the
-              # other platforms - see the locked-file action.
-              program_dir = "C:\Program Files\RewstRemoteAgent\$orgId"
               uninstall_paths = "C:\ProgramData\RewstRemoteAgent\$orgId`nC:\Program Files\RewstRemoteAgent\$orgId`nC:\RewstRemoteAgent\scripts\$orgId"
               service_user = 'rewst-it-svc'
               service_username_arg = '.\rewst-it-svc'
@@ -563,201 +606,6 @@ jobs:
           log_file: ${{ matrix.log_file }}
           scenario: success
 
-      # ---- Digest-verification auto-update rejection scenarios (sc-112402) ----
-      # Download now verifies a downloaded installer against the SHA-256 digest
-      # GitHub's Releases API reports for the asset (Asset.Digest) rather than a
-      # hand-published .sha256 sidecar file. The happy path is already exercised
-      # for free by the "Wait for auto updater to trigger and update" scenario
-      # near the top of this job, which checks the real releases API and so gets
-      # a real GitHub-computed digest; a real release cannot be made to serve a
-      # tampered or missing one on demand, so these two scenarios instead point
-      # the agent at test/stubrelease - extended (sc-112402) to optionally serve
-      # one downloadable asset with a controllable digest - and confirm Download
-      # rejects it before anything is handed to Update(). The asset's bytes are
-      # never executed even on a bug in this rejection: they are arbitrary fixed
-      # content, not a real installer.
-
-      - name: Start stub release endpoint (tampered digest)
-        timeout-minutes: 15
-        id: stub_release_tampered_digest
-        uses: ./.github/actions/stub-release
-        with:
-          mode: start
-          # Must be newer than the IT binary's own v0.0.0-it (the fixture's
-          # own default tag, chosen so the retry-backoff scenario above does
-          # NOT trigger a download) - otherwise isNewerVersion sees no update
-          # and Download, the code under test here, is never reached.
-          tag: "v99.0.0"
-          asset_name: ${{ matrix.binary }}
-          # Well-formed (64 hex chars) but not the digest of anything this
-          # fixture serves - simulates a corrupted-but-200-OK download or a
-          # tampered release asset, as distinct from the missing-digest
-          # scenario below.
-          asset_digest: "sha256:0000000000000000000000000000000000000000000000000000000000000000"
-
-      - name: Point the agent at the stub release endpoint (tampered digest)
-        timeout-minutes: 5
-        uses: ./.github/actions/set-release-url
-        with:
-          mode: set
-          config_dir: ${{ matrix.config_dir }}
-          org_id: ${{ vars.IT_ORG_ID }}
-          url: ${{ steps.stub_release_tampered_digest.outputs.url }}
-
-      - name: Serve the tampered-digest release payload
-        timeout-minutes: 15
-        uses: ./.github/actions/stub-release
-        with:
-          mode: ok
-
-      # Baseline before the event so the wait below needs a *new* line (sc-117884).
-
-      - name: Baseline "checksum mismatch for" before the tampered-digest install
-        id: bl_tampered_reject
-        uses: ./.github/actions/capture-log-count
-        with:
-          log_file: ${{ matrix.log_file }}
-          pattern: "checksum mismatch for"
-
-      - name: Install integration test binary with auto-updates on (tampered digest)
-        timeout-minutes: 10
-        uses: ./.github/actions/run-agent
-        with:
-          binary: ${{ matrix.it_binary }}
-          args: --update --org-id ${{ vars.IT_ORG_ID }} --github-token ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Wait for the tampered installer to be rejected
-        timeout-minutes: 6
-        uses: ./.github/actions/wait-for-log-line
-        with:
-          log_file: ${{ matrix.log_file }}
-          pattern: "checksum mismatch for"
-          baseline_count: ${{ steps.bl_tampered_reject.outputs.count }}
-
-      - name: Assert the tampered installer was rejected rather than installed
-        timeout-minutes: 5
-        uses: ./.github/actions/assert-log-contains
-        with:
-          log_file: ${{ matrix.log_file }}
-          patterns: |
-            checksum mismatch for
-            Update failed, starting retry backoff
-
-      - name: Clear the release url override (tampered digest)
-        timeout-minutes: 5
-        if: always()
-        uses: ./.github/actions/set-release-url
-        with:
-          mode: clear
-          config_dir: ${{ matrix.config_dir }}
-          org_id: ${{ vars.IT_ORG_ID }}
-
-      - name: Stop stub release endpoint (tampered digest)
-        timeout-minutes: 15
-        if: always()
-        uses: ./.github/actions/stub-release
-        with:
-          mode: stop
-
-      - name: Reinstall the release binary after the tampered-digest scenario
-        timeout-minutes: 10
-        if: always()
-        uses: ./.github/actions/run-agent
-        with:
-          binary: ${{ matrix.binary }}
-          args: --update --org-id ${{ vars.IT_ORG_ID }} --no-auto-updates --github-token ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Start stub release endpoint (missing digest)
-        timeout-minutes: 15
-        id: stub_release_missing_digest
-        uses: ./.github/actions/stub-release
-        with:
-          mode: start
-          # See the tampered-digest scenario above for why this must be newer
-          # than the IT binary's own v0.0.0-it.
-          tag: "v99.0.0"
-          asset_name: ${{ matrix.binary }}
-
-          # asset_digest deliberately omitted (default ""): the payload's asset
-          # carries no "digest" field at all, simulating a release GitHub never
-          # computed one for.
-
-      - name: Point the agent at the stub release endpoint (missing digest)
-        timeout-minutes: 5
-        uses: ./.github/actions/set-release-url
-        with:
-          mode: set
-          config_dir: ${{ matrix.config_dir }}
-          org_id: ${{ vars.IT_ORG_ID }}
-          url: ${{ steps.stub_release_missing_digest.outputs.url }}
-
-      - name: Serve the missing-digest release payload
-        timeout-minutes: 15
-        uses: ./.github/actions/stub-release
-        with:
-          mode: ok
-
-      # Baseline before the event so the wait below needs a *new* line (sc-117884).
-
-      - name: Baseline "failed to verify installer for" before the missing-digest install
-        id: bl_missing_digest_reject
-        uses: ./.github/actions/capture-log-count
-        with:
-          log_file: ${{ matrix.log_file }}
-          pattern: "failed to verify installer for"
-
-      - name: Install integration test binary with auto-updates on (missing digest)
-        timeout-minutes: 10
-        uses: ./.github/actions/run-agent
-        with:
-          binary: ${{ matrix.it_binary }}
-          args: --update --org-id ${{ vars.IT_ORG_ID }} --github-token ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Wait for the missing-digest installer to be rejected
-        timeout-minutes: 6
-        uses: ./.github/actions/wait-for-log-line
-        with:
-          log_file: ${{ matrix.log_file }}
-          pattern: "failed to verify installer for"
-          baseline_count: ${{ steps.bl_missing_digest_reject.outputs.count }}
-
-      - name: Assert the missing-digest installer was rejected rather than installed
-        timeout-minutes: 5
-        uses: ./.github/actions/assert-log-contains
-        with:
-          log_file: ${{ matrix.log_file }}
-          patterns: |
-            failed to verify installer for
-            no usable sha256 digest
-            Update failed, starting retry backoff
-
-      - name: Clear the release url override (missing digest)
-        timeout-minutes: 5
-        if: always()
-        uses: ./.github/actions/set-release-url
-        with:
-          mode: clear
-          config_dir: ${{ matrix.config_dir }}
-          org_id: ${{ vars.IT_ORG_ID }}
-
-      - name: Stop stub release endpoint (missing digest)
-        timeout-minutes: 15
-        if: always()
-        uses: ./.github/actions/stub-release
-        with:
-          mode: stop
-
-      - name: Reinstall the release binary after the missing-digest scenario
-        timeout-minutes: 10
-        if: always()
-        uses: ./.github/actions/run-agent
-        with:
-          binary: ${{ matrix.binary }}
-          args: --update --org-id ${{ vars.IT_ORG_ID }} --no-auto-updates --github-token ${{ secrets.GITHUB_TOKEN }}
-
-      # Every scenario above asserts on the agent log; when one fails, the log is
-      # the evidence. Dump its tail so triage does not need a re-run with extra
-      # steps (three runs on 2026-09-22 were diagnosed from postback bodies alone).
 
       - name: Dump agent log on failure
         if: failure()
@@ -1045,479 +893,6 @@ jobs:
           outcome: ${{ job.status }}
 
 
-  live-sweeps:
-    permissions:
-      contents: read
-    # Live smoke (sc-126320): installs from the Rewst config endpoint and talks
-    # to the real hub and engine, so it can go red for reasons that are not
-    # the agent (the hub's daily quota, an expired integration token, the
-    # engine's ceiling). It no longer gates the merge - the hermetic jobs do -
-    # and reports its outcome in the job summary instead.
-    continue-on-error: true
-    env:
-      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-    needs: [build, build-integration-test, set-matrix, live-wedged-broker]
-    # Chained behind the previous scenario job, not parallel to it: the live
-    # config endpoint gives every install on a platform the same device id, so
-    # two scenario agents at once kick each other off IoT Hub and commands land
-    # on whichever holds the connection. Parallelism returns with the hermetic
-    # migration (sc-126319), where each job has its own device identity. The
-    # chain never skips a scenario because an earlier one failed: each starts
-    # from a fresh install and reports on its own.
-    if: ${{ !cancelled() }}
-    strategy:
-      fail-fast: false
-      matrix: ${{ fromJson(needs.set-matrix.outputs.matrix) }}
-    runs-on: ${{ matrix.os }}
-    # Provisional bound; re-measured from the first chained runs (README
-    # "Bounding the e2e jobs").
-    timeout-minutes: 30
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v5
-
-      # Fresh install from the live config endpoint; every scenario job starts here.
-      # Bounded below the job so a hung install is attributed to this step.
-
-      - name: Set up the scenario
-        timeout-minutes: 20
-        id: setup
-        uses: ./.github/actions/e2e-setup
-        with:
-          os: ${{ matrix.os }}
-          binary: ${{ matrix.binary }}
-          it_binary: ${{ matrix.it_binary }}
-          config_url: ${{ vars.IT_CONFIG_URL }}
-          config_secret: ${{ secrets.IT_CONFIG_SECRET }}
-          org_id: ${{ vars.IT_ORG_ID }}
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          service: ${{ matrix.service }}
-          config_dir: ${{ matrix.config_dir }}
-
-      # ---- Stale script file sweep scenario (sc-103967) ----
-      # A command interrupted by an abrupt kill (force-stop, OOM kill, power
-      # loss) never runs its deferred temp-file cleanup, so its script file is
-      # stranded in the scripts directory and nothing used to reclaim it. Verify
-      # the startup sweep now does: force-kill the service mid-command to strand
-      # a real script file, age it (plus a control set) into the months-old
-      # debris a long-lived install accumulates, restart, and confirm only the
-      # agent's own stale files are removed.
-      #
-      # The release binary is reinstalled first, with auto-updates off and the
-      # per-command timeout raised well past the command's runtime, so nothing
-      # ends the command before the kill lands - not the 5s timeout from the
-      # earlier scenario, the 30s auto-updater, or the IT binary's 90s SAS
-      # lifetime. Each of those tears the command down gracefully, and graceful
-      # teardown DOES run the cleanup, leaving no stranded file to sweep.
-
-      - name: Capture sweep scenario baseline counts
-        id: sweep_baseline
-        uses: ./.github/actions/it-script
-        with:
-          script: capture-sweep-scenario-baseline-counts
-        env:
-          LOG_FILE: ${{ matrix.log_file }}
-
-      - name: Install release binary for the sweep scenario
-        timeout-minutes: 10
-        uses: ./.github/actions/run-agent
-        with:
-          binary: ${{ matrix.binary }}
-          args: --update --org-id ${{ vars.IT_ORG_ID }} --no-auto-updates --command-timeout-seconds 600 --github-token ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Wait for fresh subscription before the sweep scenario
-        timeout-minutes: 6
-        uses: ./.github/actions/it-script
-        with:
-          script: wait-for-fresh-subscription-before-the-sweep-scenario
-        env:
-          LOG_FILE: ${{ matrix.log_file }}
-          BASELINE: ${{ steps.sweep_baseline.outputs.subscribed }}
-
-      - name: Send long-running command
-        timeout-minutes: 20
-        uses: ./.github/actions/send-command
-        with:
-          trigger_url: ${{ vars.IT_SEND_COMMAND_TRIGGER_URL }}
-          device_id: ${{ steps.setup.outputs.device_id }}
-          scenario: sweep
-          allow_engine_timeout: "true"
-
-      - name: Capture the in-flight script file path
-        id: inflight_script
-        uses: ./.github/actions/it-script
-        with:
-          script: capture-the-in-flight-script-file-path
-        env:
-          LOG_FILE: ${{ matrix.log_file }}
-          BASELINE: ${{ steps.sweep_baseline.outputs.saved }}
-          SCENARIO: sweep
-
-      - name: Capture subscription count before the force-kill
-        id: sweep_kill_sub_baseline
-        uses: ./.github/actions/it-script
-        with:
-          script: capture-restore-baseline-counts
-        env:
-          LOG_FILE: ${{ matrix.log_file }}
-
-      - name: Force-kill the agent mid-command
-        timeout-minutes: 5
-        uses: ./.github/actions/kill-service
-        with:
-          service: ${{ matrix.service }}
-
-      - name: Wait for the service manager to respawn the agent before ageing
-        timeout-minutes: 6
-        uses: ./.github/actions/await-service-respawn
-        with:
-          log_file: ${{ matrix.log_file }}
-          baseline_count: ${{ steps.sweep_kill_sub_baseline.outputs.subscribed }}
-
-      - name: Age the stranded script file and seed sweep control files
-        timeout-minutes: 5
-        uses: ./.github/actions/script-sweep-fixture
-        with:
-          mode: seed
-          scripts_dir: ${{ steps.inflight_script.outputs.scripts_dir }}
-          orphan_path: ${{ steps.inflight_script.outputs.path }}
-
-      - name: Capture sweep log baseline count
-        id: sweep_log_baseline
-        uses: ./.github/actions/it-script
-        with:
-          script: capture-sweep-log-baseline-count
-        env:
-          LOG_FILE: ${{ matrix.log_file }}
-
-      - name: Restart agent to trigger the startup sweep
-        timeout-minutes: 10
-        uses: ./.github/actions/run-agent
-        with:
-          binary: ${{ matrix.binary }}
-          args: --update --org-id ${{ vars.IT_ORG_ID }} --no-auto-updates --github-token ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Wait for and assert the startup sweep was logged
-        timeout-minutes: 6
-        uses: ./.github/actions/it-script
-        with:
-          script: wait-for-and-assert-the-startup-sweep-was-logged
-        env:
-          LOG_FILE: ${{ matrix.log_file }}
-          BASELINE: ${{ steps.sweep_log_baseline.outputs.swept }}
-
-      - name: Assert stale script files swept and live files untouched
-        timeout-minutes: 5
-        uses: ./.github/actions/script-sweep-fixture
-        with:
-          mode: assert
-          scripts_dir: ${{ steps.inflight_script.outputs.scripts_dir }}
-          orphan_path: ${{ steps.inflight_script.outputs.path }}
-
-      # ---- Downloaded installer sweep scenario (sc-106111) ----
-      # Every auto-update downloads a full agent binary and executes it as the
-      # installer. The installer is spawned detached and the process that could
-      # delete it afterwards is the one the installer replaces, so the download
-      # path cannot clean up after itself and nothing else used to - one
-      # orphaned binary accumulated per update for the lifetime of the install,
-      # until the volume filled and took future updates and command execution
-      # with it. Verify the startup sweep now reclaims them.
-      #
-      # The fixture is planted rather than produced by a real update cycle: the
-      # sweep is what this ticket changed, and the download side (where the file
-      # lands, under what name) is covered by unit tests that assert the two
-      # halves share one pattern constant. Ageing is the only simulated part, so
-      # the production 24h threshold stays in play with no test-only override.
-      #
-      # Only the org's own updates directory is asserted here. The sweep also
-      # covers the legacy shared temp directory that older agents downloaded
-      # into, but that is the *service account's* temp directory - notably root's
-      # private TMPDIR on macOS, not the runner's - so a fixture planted from
-      # the runner would land somewhere the service never reads. That half is
-      # covered by TestExecute_SweepsStaleInstallerFilesOnStartup, which runs
-      # Execute in-process and can see its own temp directory.
-
-      - name: Seed the installer sweep fixture
-        timeout-minutes: 5
-        uses: ./.github/actions/installer-sweep-fixture
-        with:
-          mode: seed
-          updates_dir: ${{ matrix.config_dir }}/${{ vars.IT_ORG_ID }}/updates
-
-      - name: Capture installer sweep log baseline count
-        id: installer_sweep_baseline
-        uses: ./.github/actions/it-script
-        with:
-          script: capture-installer-sweep-log-baseline-count
-        env:
-          LOG_FILE: ${{ matrix.log_file }}
-
-      - name: Restart agent to trigger the installer sweep
-        timeout-minutes: 10
-        uses: ./.github/actions/run-agent
-        with:
-          binary: ${{ matrix.binary }}
-          args: --update --org-id ${{ vars.IT_ORG_ID }} --no-auto-updates --github-token ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Wait for and assert the installer sweep was logged
-        timeout-minutes: 6
-        uses: ./.github/actions/it-script
-        with:
-          script: wait-for-and-assert-the-installer-sweep-was-logged
-        env:
-          LOG_FILE: ${{ matrix.log_file }}
-          BASELINE: ${{ steps.installer_sweep_baseline.outputs.swept }}
-
-      - name: Assert stale installers swept and live files untouched
-        timeout-minutes: 5
-        uses: ./.github/actions/installer-sweep-fixture
-        with:
-          mode: assert
-          updates_dir: ${{ matrix.config_dir }}/${{ vars.IT_ORG_ID }}/updates
-
-      # Every scenario above asserts on the agent log; when one fails, the log is
-      # the evidence. Dump its tail so triage does not need a re-run with extra
-      # steps (three runs on 2026-09-22 were diagnosed from postback bodies alone).
-
-      - name: Dump agent log on failure
-        if: failure()
-        uses: ./.github/actions/dump-agent-log
-        with:
-          log_file: ${{ matrix.log_file }}
-
-      - name: Record the live smoke outcome
-        if: always()
-        uses: ./.github/actions/smoke-summary
-        with:
-          job: live-sweeps
-          outcome: ${{ job.status }}
-
-
-  live-update-retry:
-    permissions:
-      contents: read
-    # Live smoke (sc-126320): installs from the Rewst config endpoint and talks
-    # to the real hub and engine, so it can go red for reasons that are not
-    # the agent (the hub's daily quota, an expired integration token, the
-    # engine's ceiling). It no longer gates the merge - the hermetic jobs do -
-    # and reports its outcome in the job summary instead.
-    continue-on-error: true
-    env:
-      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-    needs: [build, build-integration-test, set-matrix, live-sweeps]
-    # Chained behind the previous scenario job, not parallel to it: the live
-    # config endpoint gives every install on a platform the same device id, so
-    # two scenario agents at once kick each other off IoT Hub and commands land
-    # on whichever holds the connection. Parallelism returns with the hermetic
-    # migration (sc-126319), where each job has its own device identity. The
-    # chain never skips a scenario because an earlier one failed: each starts
-    # from a fresh install and reports on its own.
-    if: ${{ !cancelled() }}
-    strategy:
-      fail-fast: false
-      matrix: ${{ fromJson(needs.set-matrix.outputs.matrix) }}
-    runs-on: ${{ matrix.os }}
-    # Provisional bound; re-measured from the first chained runs (README
-    # "Bounding the e2e jobs").
-    timeout-minutes: 30
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v5
-
-      # Fresh install from the live config endpoint; every scenario job starts here.
-      # Bounded below the job so a hung install is attributed to this step.
-
-      - name: Set up the scenario
-        timeout-minutes: 20
-        id: setup
-        uses: ./.github/actions/e2e-setup
-        with:
-          os: ${{ matrix.os }}
-          binary: ${{ matrix.binary }}
-          it_binary: ${{ matrix.it_binary }}
-          config_url: ${{ vars.IT_CONFIG_URL }}
-          config_secret: ${{ secrets.IT_CONFIG_SECRET }}
-          org_id: ${{ vars.IT_ORG_ID }}
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          service: ${{ matrix.service }}
-          config_dir: ${{ matrix.config_dir }}
-
-      # ---- Capped and jittered auto-update retry scenario (sc-106110) ----
-      # The auto-update retry delay was base * (1 << attempt) with no ceiling and
-      # no jitter. Unjittered, every agent that failed against the release
-      # endpoint at the same moment retried at the same instants, so an outage or
-      # rate limit was sustained by the fleet trying to recover from it; uncapped,
-      # a large retry count overflowed the shift into a negative duration, which
-      # made the wait return immediately and spun the loop against the endpoint.
-      #
-      # A GitHub outage is not something CI can arrange and an unroutable address
-      # produces connection errors rather than the HTTP failure the ticket
-      # describes, so the agent is pointed at the test/stubrelease fixture through
-      # the override file the integration build honors. The fixture fails every
-      # request until it is flipped, which puts the agent into retryWithBackoff
-      # with the shortened build knobs - base 2s, 6 retries, 30s check interval,
-      # so the cap is a quarter of that interval (7.5s) - and makes a full
-      # schedule observable in under a minute.
-      #
-      # Fleet-wide de-synchronization needs many agents and is covered by unit
-      # tests over the schedule itself. What one endpoint can show, and what these
-      # steps assert, is that every slot is strictly positive, bounded by the cap,
-      # varies rather than repeating, and is never served back to back.
-
-      - name: Start stub release endpoint (failing)
-        timeout-minutes: 15
-        id: stub_release
-        uses: ./.github/actions/stub-release
-        with:
-          mode: start
-
-      - name: Capture auto-update retry baseline counts
-        id: retry_baseline
-        uses: ./.github/actions/it-script
-        with:
-          script: capture-auto-update-retry-baseline-counts
-        env:
-          LOG_FILE: ${{ matrix.log_file }}
-
-      - name: Point the agent at the stub release endpoint
-        timeout-minutes: 5
-        uses: ./.github/actions/set-release-url
-        with:
-          mode: set
-          config_dir: ${{ matrix.config_dir }}
-          org_id: ${{ vars.IT_ORG_ID }}
-          url: ${{ steps.stub_release.outputs.url }}
-
-      - name: Install integration test binary with auto-updates on
-        timeout-minutes: 10
-        uses: ./.github/actions/run-agent
-        with:
-          binary: ${{ matrix.it_binary }}
-          args: --update --org-id ${{ vars.IT_ORG_ID }} --github-token ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Wait for the update retry schedule to run
-        timeout-minutes: 6
-        uses: ./.github/actions/it-script
-        with:
-          script: wait-for-the-update-retry-schedule-to-run
-        env:
-          LOG_FILE: ${{ matrix.log_file }}
-          BASELINE: ${{ steps.retry_baseline.outputs.retrying }}
-
-      - name: Serve a valid release payload mid-sequence
-        timeout-minutes: 15
-        uses: ./.github/actions/stub-release
-        with:
-          mode: ok
-
-      - name: Assert the update succeeds on a retry
-        timeout-minutes: 6
-        uses: ./.github/actions/it-script
-        with:
-          script: assert-the-update-succeeds-on-a-retry
-        env:
-          LOG_FILE: ${{ matrix.log_file }}
-          BASELINE: ${{ steps.retry_baseline.outputs.succeeded }}
-
-      - name: Assert the retry schedule is capped, jittered and never immediate
-        timeout-minutes: 6
-        uses: ./.github/actions/it-script
-        with:
-          script: assert-the-retry-schedule-is-capped-jittered-and-never-immediate
-        env:
-          LOG_FILE: ${{ matrix.log_file }}
-          BASELINE: ${{ steps.retry_baseline.outputs.retrying }}
-
-      - name: Fail the release endpoint again for the stop check
-        timeout-minutes: 15
-        uses: ./.github/actions/stub-release
-        with:
-          mode: fail
-
-      - name: Capture stop-during-backoff baseline counts
-        id: retry_stop_baseline
-        uses: ./.github/actions/it-script
-        with:
-          script: capture-stop-during-backoff-baseline-counts
-        env:
-          LOG_FILE: ${{ matrix.log_file }}
-
-      - name: Wait for a fresh backoff to be entered
-        timeout-minutes: 6
-        uses: ./.github/actions/it-script
-        with:
-          script: wait-for-a-fresh-backoff-to-be-entered
-        env:
-          LOG_FILE: ${{ matrix.log_file }}
-          BASELINE: ${{ steps.retry_stop_baseline.outputs.retrying }}
-
-      - name: Assert a service stop during a backoff is prompt
-        timeout-minutes: 6
-        uses: ./.github/actions/it-script
-        with:
-          script: assert-a-service-stop-during-a-backoff-is-prompt
-        env:
-          LOG_FILE: ${{ matrix.log_file }}
-          SERVICE: ${{ matrix.service }}
-          BASELINE: ${{ steps.retry_stop_baseline.outputs.stopped }}
-
-      - name: Capture restore baseline counts
-        if: always()
-        id: retry_restore_baseline
-        uses: ./.github/actions/it-script
-        with:
-          script: capture-restore-baseline-counts
-        env:
-          LOG_FILE: ${{ matrix.log_file }}
-
-      - name: Clear the release url override
-        timeout-minutes: 5
-        if: always()
-        uses: ./.github/actions/set-release-url
-        with:
-          mode: clear
-          config_dir: ${{ matrix.config_dir }}
-          org_id: ${{ vars.IT_ORG_ID }}
-
-      - name: Stop stub release endpoint
-        timeout-minutes: 15
-        if: always()
-        uses: ./.github/actions/stub-release
-        with:
-          mode: stop
-
-      - name: Reinstall the release binary after the retry scenario
-        timeout-minutes: 10
-        if: always()
-        uses: ./.github/actions/run-agent
-        with:
-          binary: ${{ matrix.binary }}
-          args: --update --org-id ${{ vars.IT_ORG_ID }} --no-auto-updates --github-token ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Wait for resubscription after the retry scenario
-        timeout-minutes: 6
-        if: always()
-        uses: ./.github/actions/it-script
-        with:
-          script: wait-for-resubscription-after-the-retry-scenario
-        env:
-          LOG_FILE: ${{ matrix.log_file }}
-          BASELINE: ${{ steps.retry_restore_baseline.outputs.subscribed }}
-
-      - name: Dump agent log on failure
-        if: failure()
-        uses: ./.github/actions/dump-agent-log
-        with:
-          log_file: ${{ matrix.log_file }}
-
-      - name: Record the live smoke outcome
-        if: always()
-        uses: ./.github/actions/smoke-summary
-        with:
-          job: live-update-retry
-          outcome: ${{ job.status }}
-
-
   live-windows-only:
     permissions:
       contents: read
@@ -1529,7 +904,7 @@ jobs:
     continue-on-error: true
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-    needs: [build, build-integration-test, set-matrix, live-update-retry]
+    needs: [build, build-integration-test, set-matrix, live-wedged-broker]
     # Chained behind the previous scenario job, not parallel to it: the live
     # config endpoint gives every install on a platform the same device id, so
     # two scenario agents at once kick each other off IoT Hub and commands land
@@ -1602,6 +977,17 @@ jobs:
       #
       # Windows only: the Unix service implementations have no such polling loop.
 
+      # The success command above logs "Postback already sent" on Windows (the
+      # engine's trigger path has already fulfilled the result when the agent's
+      # own postback lands), so the disabled-postback check below must only
+      # fail when that line appears *again*.
+      - name: Baseline "Postback already sent" before disabling the agent postback
+        id: postback_baseline
+        uses: ./.github/actions/capture-log-count
+        with:
+          log_file: ${{ matrix.log_file }}
+          pattern: Postback already sent
+
       - name: Update agent with the agent postback disabled
         timeout-minutes: 10
         uses: ./.github/actions/run-agent
@@ -1630,343 +1016,7 @@ jobs:
         with:
           log_file: ${{ matrix.log_file }}
           pattern: Postback already sent
-
-      - name: Capture installed file hashes before the wedge
-        id: wedge_hashes
-        shell: pwsh
-        env:
-          ORG_ID: ${{ vars.IT_ORG_ID }}
-          CONFIG_DIR: ${{ matrix.config_dir }}
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $exe = Join-Path $env:PROGRAMFILES "RewstRemoteAgent\$($env:ORG_ID)\agent_smith.win.exe"
-          $config = Join-Path $env:CONFIG_DIR "$($env:ORG_ID)\config.json"
-          foreach ($path in @($exe, $config)) {
-            if (-not (Test-Path $path)) { throw "expected installed file is missing: $path" }
-          }
-          $exeHash = (Get-FileHash -Path $exe -Algorithm SHA256).Hash
-          $configHash = (Get-FileHash -Path $config -Algorithm SHA256).Hash
-          "exe_path=$exe"         >> $env:GITHUB_OUTPUT
-          "config_path=$config"   >> $env:GITHUB_OUTPUT
-          "exe_hash=$exeHash"     >> $env:GITHUB_OUTPUT
-          "config_hash=$configHash" >> $env:GITHUB_OUTPUT
-          Write-Output "agent executable $exe sha256=$exeHash"
-          Write-Output "config file $config sha256=$configHash"
-
-      - name: Wedge the agent service in StopPending
-        timeout-minutes: 15
-        uses: ./.github/actions/wedged-service
-        with:
-          mode: wedge
-          service: ${{ matrix.service }}
-
-      - name: Assert the update aborts on a wedged stop
-        shell: pwsh
-        env:
-          IT_BINARY: ${{ matrix.it_binary }}
-          ORG_ID: ${{ vars.IT_ORG_ID }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          # The integration binary is the invoker because its stop deadline is
-          # overridden to 25s (see scripts/build_integration_test.ps1). The
-          # released default is five minutes; that the constant is what governs a
-          # production build is covered by unit tests rather than by keeping a
-          # runner idle for five minutes here.
-          $sw = [System.Diagnostics.Stopwatch]::StartNew()
-          $out = & "./dist/$($env:IT_BINARY)" --update --org-id $env:ORG_ID `
-            --github-token $env:GH_TOKEN 2>&1 | Out-String
-          $sw.Stop()
-          # The updater reports an aborted update through its log, not its exit
-          # status, and this step's verdict comes from the log below.
-          $global:LASTEXITCODE = 0
-          $elapsed = [math]::Round($sw.Elapsed.TotalSeconds, 1)
-          Write-Output "---- updater output after ${elapsed}s ----"
-          Write-Output $out
-
-          $failures = @()
-          # Returning at all is the headline: before the fix this call never came
-          # back. The floor proves it waited out its deadline rather than failing
-          # fast for an unrelated reason; the ceiling is far above the 25s
-          # deadline yet far below an unbounded hang.
-          if ($sw.Elapsed.TotalSeconds -lt 20) {
-            $failures += "update returned after ${elapsed}s, before its 25s stop deadline could elapse"
-          }
-          if ($sw.Elapsed.TotalSeconds -gt 180) {
-            $failures += "update took ${elapsed}s, far past its 25s stop deadline"
-          }
-          # The log has to name the service, the deadline and the last observed
-          # state, since that is the only account of why an unattended update
-          # aborted.
-          foreach ($needle in @(
-            'Failed to stop service',
-            'did not stop within',
-            'last observed state StopPending',
-            'Update aborted; existing installation left untouched'
-          )) {
-            if (-not $out.Contains($needle)) { $failures += "missing from the log: '$needle'" }
-          }
-          # And it must not have carried on as if the stop had succeeded.
-          foreach ($absent in @(
-            'Configuration successfully updated',
-            'Agent installed to',
-            'Service started'
-          )) {
-            if ($out.Contains($absent)) { $failures += "update proceeded past the failed stop: '$absent'" }
-          }
-
-          if ($failures.Count -gt 0) {
-            $failures | ForEach-Object { Write-Output "FAIL: $_" }
-            Write-Error "the update did not abort cleanly on a wedged stop"
-            exit 1
-          }
-          Write-Output "Update aborted on the wedged stop after ${elapsed}s, as expected"
-          exit 0
-
-      - name: Assert the aborted update left the installation untouched
-        shell: pwsh
-        env:
-          EXE_PATH: ${{ steps.wedge_hashes.outputs.exe_path }}
-          CONFIG_PATH: ${{ steps.wedge_hashes.outputs.config_path }}
-          EXE_HASH: ${{ steps.wedge_hashes.outputs.exe_hash }}
-          CONFIG_HASH: ${{ steps.wedge_hashes.outputs.config_hash }}
-        run: |
-          # The whole point of aborting: the wedged process may still hold the
-          # executable open, so a half-written binary or a rewritten config would
-          # leave the endpoint unrecoverable without hands on it.
-          $ErrorActionPreference = 'Stop'
-          $failures = @()
-          foreach ($pair in @(
-            @{ Path = $env:EXE_PATH;    Expected = $env:EXE_HASH;    Label = 'agent executable' },
-            @{ Path = $env:CONFIG_PATH; Expected = $env:CONFIG_HASH; Label = 'config file' }
-          )) {
-            if (-not (Test-Path $pair.Path)) {
-              $failures += "$($pair.Label) was removed: $($pair.Path)"
-              continue
-            }
-            $actual = (Get-FileHash -Path $pair.Path -Algorithm SHA256).Hash
-            if ($actual -ne $pair.Expected) {
-              $failures += "$($pair.Label) changed: $($pair.Expected) -> $actual"
-            } else {
-              Write-Output "$($pair.Label) unchanged (sha256=$actual)"
-            }
-          }
-          if ($failures.Count -gt 0) {
-            $failures | ForEach-Object { Write-Output "FAIL: $_" }
-            Write-Error "the aborted update modified the installation"
-            exit 1
-          }
-          exit 0
-
-      # The failed stop above left the service in StopPending, and the agent
-      # treats only Running as active - so an uninstall issued now would skip the
-      # stop entirely instead of exercising it. Start a fresh wedged run so the
-      # uninstall meets a Running service, as an operator would.
-
-      - name: Re-wedge the service for the uninstall check
-        timeout-minutes: 15
-        uses: ./.github/actions/wedged-service
-        with:
-          mode: rewedge
-          service: ${{ matrix.service }}
-
-      - name: Assert the uninstall aborts on a wedged stop
-        shell: pwsh
-        env:
-          IT_BINARY: ${{ matrix.it_binary }}
-          ORG_ID: ${{ vars.IT_ORG_ID }}
-          SERVICE: ${{ matrix.service }}
-          EXE_PATH: ${{ steps.wedge_hashes.outputs.exe_path }}
-          CONFIG_PATH: ${{ steps.wedge_hashes.outputs.config_path }}
-          EXE_HASH: ${{ steps.wedge_hashes.outputs.exe_hash }}
-          CONFIG_HASH: ${{ steps.wedge_hashes.outputs.config_hash }}
-          UNINSTALL_PATHS: ${{ matrix.uninstall_paths }}
-        run: |
-          $sw = [System.Diagnostics.Stopwatch]::StartNew()
-          $out = & "./dist/$($env:IT_BINARY)" --uninstall --org-id $env:ORG_ID 2>&1 | Out-String
-          $sw.Stop()
-          $global:LASTEXITCODE = 0
-          $elapsed = [math]::Round($sw.Elapsed.TotalSeconds, 1)
-          Write-Output "---- uninstaller output after ${elapsed}s ----"
-          Write-Output $out
-
-          $failures = @()
-          if ($sw.Elapsed.TotalSeconds -lt 20) {
-            $failures += "uninstall returned after ${elapsed}s, before its 25s stop deadline could elapse"
-          }
-          if ($sw.Elapsed.TotalSeconds -gt 180) {
-            $failures += "uninstall took ${elapsed}s, far past its 25s stop deadline"
-          }
-          foreach ($needle in @(
-            'Failed to stop service',
-            'did not stop within',
-            'Uninstall aborted; nothing was removed'
-          )) {
-            if (-not $out.Contains($needle)) { $failures += "missing from the log: '$needle'" }
-          }
-          foreach ($absent in @('Service deleted', 'Directory deleted')) {
-            if ($out.Contains($absent)) { $failures += "uninstall proceeded past the failed stop: '$absent'" }
-          }
-
-          # Fully intact or fully removed, never mixed: the registration, the
-          # installed directories, and both hashed files must all still be there.
-          if (-not (Get-Service -Name $env:SERVICE -ErrorAction SilentlyContinue)) {
-            $failures += "service registration $($env:SERVICE) was deleted"
-          }
-          foreach ($path in ($env:UNINSTALL_PATHS -split "`n" | ForEach-Object { $_.Trim() } |
-              Where-Object { $_ })) {
-            if (-not (Test-Path $path)) { $failures += "installed directory was removed: $path" }
-          }
-          foreach ($pair in @(
-            @{ Path = $env:EXE_PATH;    Expected = $env:EXE_HASH;    Label = 'agent executable' },
-            @{ Path = $env:CONFIG_PATH; Expected = $env:CONFIG_HASH; Label = 'config file' }
-          )) {
-            if (-not (Test-Path $pair.Path)) {
-              $failures += "$($pair.Label) was removed: $($pair.Path)"
-            } elseif ((Get-FileHash -Path $pair.Path -Algorithm SHA256).Hash -ne $pair.Expected) {
-              $failures += "$($pair.Label) changed during the aborted uninstall"
-            }
-          }
-
-          if ($failures.Count -gt 0) {
-            $failures | ForEach-Object { Write-Output "FAIL: $_" }
-            Write-Error "the uninstall did not abort cleanly on a wedged stop"
-            exit 1
-          }
-          Write-Output "Uninstall aborted on the wedged stop after ${elapsed}s with nothing removed"
-          exit 0
-
-      # Captured before the restore restarts the real agent, so the delta below
-      # can only come from the recovered service.
-
-      - name: Capture recovery baseline counts
-        id: wedge_recovery_baseline
-        shell: pwsh
-        env:
-          LOG_FILE: ${{ matrix.log_file }}
-        run: |
-          $content = Get-Content $env:LOG_FILE -Raw -ErrorAction SilentlyContinue
-          $subscribed = if ($content) { ([regex]::Matches($content, [regex]::Escape("Subscribed to messages"))).Count } else { 0 }
-          "subscribed=$subscribed" >> $env:GITHUB_OUTPUT
-          Write-Output "Baseline counts -> subscribed=$subscribed"
-
-      # always(): a failed assertion above must not leave the runner's service
-      # registration pointing at the fixture, or the rest of the job (and the
-      # final uninstall) would be testing the fixture instead of the agent.
-
-      - name: Restore the agent service after the wedge
-        timeout-minutes: 15
-        if: always()
-        uses: ./.github/actions/wedged-service
-        with:
-          mode: restore
-          service: ${{ matrix.service }}
-
-      - name: Assert the recovered endpoint comes back online
-        shell: pwsh
-        env:
-          LOG_FILE: ${{ matrix.log_file }}
-          BASELINE: ${{ steps.wedge_recovery_baseline.outputs.subscribed }}
-        run: |
-          $baseline = [int]$env:BASELINE
-          for ($i = 1; $i -le 60; $i++) {
-            $content = Get-Content $env:LOG_FILE -Raw -ErrorAction SilentlyContinue
-            $count = if ($content) { ([regex]::Matches($content, [regex]::Escape("Subscribed to messages"))).Count } else { 0 }
-            if ($count -gt $baseline) {
-              Write-Output "Recovered agent subscribed again (count $count > baseline $baseline) after ~$($i * 2)s"
-              exit 0
-            }
-            Start-Sleep -Seconds 2
-          }
-          Write-Error "Recovered agent never resubscribed (count stayed at $baseline)"
-          exit 1
-
-      - name: Assert a subsequent update succeeds after recovery
-        shell: pwsh
-        env:
-          BINARY: ${{ matrix.binary }}
-          ORG_ID: ${{ vars.IT_ORG_ID }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          # The bound must only catch a wedge: once the endpoint is recovered, an
-          # ordinary update stops the service, replaces the binary and starts it
-          # again with no behavioral change.
-          $out = & "./dist/$($env:BINARY)" --update --org-id $env:ORG_ID --no-auto-updates `
-            --github-token $env:GH_TOKEN 2>&1 | Out-String
-          $global:LASTEXITCODE = 0
-          Write-Output $out
-
-          $failures = @()
-          foreach ($needle in @('Agent installed to', 'Service started')) {
-            if (-not $out.Contains($needle)) { $failures += "missing from the log: '$needle'" }
-          }
-          if ($out.Contains('Failed to stop service')) {
-            $failures += "a healthy stop was reported as a failure"
-          }
-          if ($failures.Count -gt 0) {
-            $failures | ForEach-Object { Write-Output "FAIL: $_" }
-            Write-Error "the post-recovery update did not complete normally"
-            exit 1
-          }
-          Write-Output "Post-recovery update completed normally"
-          exit 0
-
-      # sc-108857: a file locked inside one installed directory must not stop the
-      # others from being removed. This is the terminal uninstall on Windows -
-      # it deletes the service registration and the data and scripts
-      # directories - so the clean uninstall below runs on the other platforms,
-      # and Windows keeps its clean-path coverage in the test-service-user job.
-      # Windows-only because an open handle only blocks unlink there; see the
-      # locked-file action.
-
-      - name: Lock a file in the program directory
-        timeout-minutes: 5
-        uses: ./.github/actions/locked-file
-        with:
-          mode: lock
-          path: ${{ matrix.program_dir }}
-
-      - name: Assert the uninstall continues past the locked directory
-        timeout-minutes: 6
-        shell: pwsh
-        env:
-          # The production binary, not the integration build: this scenario
-          # needs no shortened deadlines, and a healthy stop and process exit
-          # should be given the real ones rather than a tighter bound that could
-          # abort the uninstall on a slow runner.
-          BINARY: ${{ matrix.binary }}
-          ORG_ID: ${{ vars.IT_ORG_ID }}
-          SERVICE: ${{ matrix.service }}
-          LOCKED_DIR: ${{ matrix.program_dir }}
-          # The two directories that must still be removed, spelled with the
-          # separator the agent logs them with so the log assertions match.
-          REMOVED_DIRS: |
-            ${{ matrix.config_dir }}\${{ vars.IT_ORG_ID }}
-            ${{ matrix.scripts_dir }}
-        run: |
-          & "$env:GITHUB_WORKSPACE/.github/workflows/it-scripts/assert-uninstall-continues-past-a-locked-directory.ps1"
-
-      # always(), because a handle left open would make the directory
-      # unremovable for the rest of the job - including the assertion below.
-
-      - name: Release the locked file
-        timeout-minutes: 5
-        if: always()
-        uses: ./.github/actions/locked-file
-        with:
-          mode: release
-
-      # Runs on every platform: on Windows this is the state left by the locked
-      # scenario plus the by-hand removal of the one directory it named, which
-      # is the operator's path back to a clean endpoint.
-
-      - name: Check deleted directories
-        uses: ./.github/actions/assert-uninstalled
-        with:
-          paths: ${{ matrix.uninstall_paths }}
-
-      # Every scenario above asserts on the agent log; when one fails, the log is
-      # the evidence. Dump its tail so triage does not need a re-run with extra
-      # steps (three runs on 2026-09-22 were diagnosed from postback bodies alone).
+          baseline_count: ${{ steps.postback_baseline.outputs.count }}
 
       - name: Dump agent log on failure
         if: failure()
