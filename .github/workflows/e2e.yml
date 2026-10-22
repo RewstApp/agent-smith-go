@@ -575,6 +575,7 @@ jobs:
         uses: ./.github/actions/stop-service
         with:
           service: ${{ matrix.service }}
+          unload: "true"
 
       - name: Seed a queued command and a fresh heartbeat, with the clock 25 h ahead
         uses: ./.github/actions/it-script
@@ -646,6 +647,7 @@ jobs:
         uses: ./.github/actions/stop-service
         with:
           service: ${{ matrix.service }}
+          unload: "true"
 
       - name: Seed a queued command with the clock 25 h behind the heartbeat
         uses: ./.github/actions/it-script

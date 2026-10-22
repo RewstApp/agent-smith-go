@@ -70,6 +70,20 @@ func newEdgeStub(t *testing.T) *edgeStub {
 	return s
 }
 
+// serve publishes what the GET handlers answer; the handlers run on the
+// server's goroutines, so the hand-off goes through the mutex (the test
+// workflow runs this package under -race).
+func (s *edgeStub) serve(responses, snapshot map[string]any) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if responses != nil {
+		s.responses = responses
+	}
+	if snapshot != nil {
+		s.snapshot = snapshot
+	}
+}
+
 func TestScriptPostbackResponses_PostsTheStatusesInOrder(t *testing.T) {
 	s := newEdgeStub(t)
 	code, out := run(t, "hermetic-script-postback-responses.ps1",
@@ -77,14 +91,17 @@ func TestScriptPostbackResponses_PostsTheStatusesInOrder(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit %d\n%s", code, out)
 	}
-	if len(s.scripts) != 1 {
-		t.Fatalf("scripts posted: %d", len(s.scripts))
+	s.mu.Lock()
+	scripts := append([]map[string]any(nil), s.scripts...)
+	s.mu.Unlock()
+	if len(scripts) != 1 {
+		t.Fatalf("scripts posted: %d", len(scripts))
 	}
-	if got := fmt.Sprint(s.scripts[0]["statuses"]); got != "[503 503 200]" {
+	if got := fmt.Sprint(scripts[0]["statuses"]); got != "[503 503 200]" {
 		t.Errorf("statuses %s", got)
 	}
-	if s.scripts[0]["post_id"] != "spool-1" {
-		t.Errorf("post_id %v", s.scripts[0]["post_id"])
+	if scripts[0]["post_id"] != "spool-1" {
+		t.Errorf("post_id %v", scripts[0]["post_id"])
 	}
 }
 
@@ -99,12 +116,12 @@ func TestScriptPostbackResponses_RequiresAPostIDAndStatuses(t *testing.T) {
 
 func TestAssertPostbackResponses_PassesWhenRecordedAndAttemptsMatch(t *testing.T) {
 	s := newEdgeStub(t)
-	s.responses = map[string]any{
+	s.serve(map[string]any{
 		"post_id":   "spool-1",
 		"attempts":  4,
 		"recorded":  true,
 		"remaining": []int{},
-	}
+	}, nil)
 	code, out := run(
 		t,
 		"hermetic-assert-postback-responses.ps1",
@@ -122,7 +139,7 @@ func TestAssertPostbackResponses_PassesWhenRecordedAndAttemptsMatch(t *testing.T
 
 func TestAssertPostbackResponses_FailsOnAnUnexpectedRecord(t *testing.T) {
 	s := newEdgeStub(t)
-	s.responses = map[string]any{"post_id": "reject-1", "attempts": 7, "recorded": true}
+	s.serve(map[string]any{"post_id": "reject-1", "attempts": 7, "recorded": true}, nil)
 	code, out := run(
 		t,
 		"hermetic-assert-postback-responses.ps1",
@@ -138,7 +155,7 @@ func TestAssertPostbackResponses_FailsOnAnUnexpectedRecord(t *testing.T) {
 	if !strings.Contains(out, "recorded is True, expected False") {
 		t.Errorf("output does not name the mismatch:\n%s", out)
 	}
-	s.responses = map[string]any{"post_id": "dup-1", "attempts": 2, "recorded": true}
+	s.serve(map[string]any{"post_id": "dup-1", "attempts": 2, "recorded": true}, nil)
 	code, out = run(
 		t,
 		"hermetic-assert-postback-responses.ps1",
@@ -159,20 +176,23 @@ func TestLoseNextPuback_PostsTheDeviceControl(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit %d\n%s", code, out)
 	}
-	if len(s.loseCalls) != 1 || s.loseCalls[0] != "/_control/devices/dev-9/lose-next-puback" {
-		t.Errorf("control calls %v", s.loseCalls)
+	s.mu.Lock()
+	calls := append([]string(nil), s.loseCalls...)
+	s.mu.Unlock()
+	if len(calls) != 1 || calls[0] != "/_control/devices/dev-9/lose-next-puback" {
+		t.Errorf("control calls %v", calls)
 	}
 }
 
 func TestAssertDeviceSnapshot_ChecksEveryGivenField(t *testing.T) {
 	s := newEdgeStub(t)
-	s.snapshot = map[string]any{
+	s.serve(nil, map[string]any{
 		"queued":    0,
 		"inflight":  1,
 		"delivered": 0,
 		"pubacks":   1,
 		"connects":  1,
-	}
+	})
 	code, out := run(
 		t,
 		"hermetic-assert-device-snapshot.ps1",
@@ -232,8 +252,10 @@ func TestAssertLogCountExactly_FailsOnMoreAsWellAsFewer(t *testing.T) {
 		t.Errorf("two past the baseline passed EXPECTED=1 (exit %d):\n%s", code, out)
 	}
 	write("nothing here")
-	if code, _ := run(t, "hermetic-assert-log-count-exactly.ps1",
-		"LOG_FILE="+log, "PATTERN=Command journal unavailable", "EXPECTED=1", "BASELINE=0", "TIMEOUT_SECONDS=2"); code == 0 {
+	code, _ = run(t, "hermetic-assert-log-count-exactly.ps1",
+		"LOG_FILE="+log, "PATTERN=Command journal unavailable",
+		"EXPECTED=1", "BASELINE=0", "TIMEOUT_SECONDS=2")
+	if code == 0 {
 		t.Error("a missing line passed EXPECTED=1")
 	}
 }
@@ -334,8 +356,11 @@ func TestEnqueue_HonoursThePostIDPrefix(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit %d\n%s", code, out)
 	}
-	if len(s.enqueued) != 2 || s.enqueued[0]["post_id"] != "spool-1" ||
-		s.enqueued[1]["post_id"] != "spool-2" {
-		t.Errorf("enqueued %v", s.enqueued)
+	s.mu.Lock()
+	enqueued := append([]map[string]any(nil), s.enqueued...)
+	s.mu.Unlock()
+	if len(enqueued) != 2 || enqueued[0]["post_id"] != "spool-1" ||
+		enqueued[1]["post_id"] != "spool-2" {
+		t.Errorf("enqueued %v", enqueued)
 	}
 }

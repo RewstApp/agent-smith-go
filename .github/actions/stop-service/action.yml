@@ -5,6 +5,13 @@ inputs:
   service:
     description: "Service name"
     required: true
+  unload:
+    description: >-
+      macOS only: "true" boots the launchd daemon out (stop and unload) so a
+      KeepAlive agent stays stopped until start-service loads it again; the
+      default leaves it loaded and launchd respawns it. Ignored elsewhere.
+    required: false
+    default: "false"
 
 runs:
   using: composite
@@ -24,13 +31,20 @@ runs:
     - name: Stop service (macOS)
       if: runner.os == 'macOS'
       shell: bash
+      env:
+        UNLOAD: ${{ inputs.unload }}
       run: |
-        # bootout, not `launchctl stop`: the agent's daemon is KeepAlive
-        # (SuccessfulExit=false), so a bare stop is answered by launchd
-        # respawning it within seconds, and a scenario that stops the agent
-        # to change what it reads at startup (sc-126322's clock step seeds
-        # the journal and the clock offset between stop and start) raced
-        # the respawn and lost on macOS alone. bootout unloads the daemon,
-        # which stops it and keeps it stopped until start-service loads it
-        # again - the same stop+unload the agent's own Stop() performs.
-        sudo launchctl bootout "system/${{ inputs.service }}" || true
+        # The agent's daemon is KeepAlive (SuccessfulExit=false), so a bare
+        # `launchctl stop` is answered by launchd respawning it within
+        # seconds. That is what most scenarios want: the agent's own update
+        # and uninstall paths open the loaded service (stop-service then
+        # run-agent --update is the lifecycle job's sequence). A scenario that
+        # must change what the agent reads at startup between stop and start
+        # (sc-126322's clock step seeds the journal and the clock offset) asks
+        # for unload=true, which boots the daemon out so it stays stopped until
+        # start-service bootstraps it again.
+        if [ "$UNLOAD" = "true" ]; then
+          sudo launchctl bootout "system/${{ inputs.service }}" || true
+        else
+          sudo launchctl stop "system/${{ inputs.service }}" || true
+        fi
