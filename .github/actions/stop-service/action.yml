@@ -25,4 +25,12 @@ runs:
       if: runner.os == 'macOS'
       shell: bash
       run: |
-        sudo launchctl stop "system/${{ inputs.service }}" || true
+        # bootout, not `launchctl stop`: the agent's daemon is KeepAlive
+        # (SuccessfulExit=false), so a bare stop is answered by launchd
+        # respawning it within seconds, and a scenario that stops the agent
+        # to change what it reads at startup (sc-126322's clock step seeds
+        # the journal and the clock offset between stop and start) raced
+        # the respawn and lost on macOS alone. bootout unloads the daemon,
+        # which stops it and keeps it stopped until start-service loads it
+        # again - the same stop+unload the agent's own Stop() performs.
+        sudo launchctl bootout "system/${{ inputs.service }}" || true
