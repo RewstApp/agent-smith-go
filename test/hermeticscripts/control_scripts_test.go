@@ -90,7 +90,9 @@ func TestScriptPostbackResponses_PostsTheStatusesInOrder(t *testing.T) {
 
 func TestScriptPostbackResponses_RequiresAPostIDAndStatuses(t *testing.T) {
 	s := newEdgeStub(t)
-	if code, _ := run(t, "hermetic-script-postback-responses.ps1", "ENGINE_URL="+s.srv.URL, "POST_ID=x", "STATUSES="); code == 0 {
+	code, _ := run(t, "hermetic-script-postback-responses.ps1",
+		"ENGINE_URL="+s.srv.URL, "POST_ID=x", "STATUSES=")
+	if code == 0 {
 		t.Error("an empty STATUSES passed")
 	}
 }
