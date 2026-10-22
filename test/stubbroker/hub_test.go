@@ -392,3 +392,133 @@ func TestFixture_OfflineDropsRefusesThenReadmits(t *testing.T) {
 		t.Fatalf("snapshot after online = %+v", snap)
 	}
 }
+
+// A PUBACK the broker is told to lose leaves the message in flight, so the
+// disconnect requeues it and the next subscriber receives it again with DUP -
+// the lost-acknowledgement redelivery the command journal de-duplicates by
+// tombstone (sc-126322). The snapshot counts both PUBACKs.
+func TestFixture_LostPubackRedeliversWithDup(t *testing.T) {
+	brokerAddr, engineURL, _, clientTLS, h := startFixture(t)
+	hc := &http.Client{Timeout: 5 * time.Second}
+	resp, err := hc.Post(
+		engineURL+"/_control/devices/dev-5/lose-next-puback",
+		"application/json",
+		nil,
+	)
+	if err != nil || resp.StatusCode != 200 {
+		t.Fatalf("lose-next-puback: %v %v", err, resp)
+	}
+	if s := h.snapshot("dev-5"); !s.LoseNextPuback {
+		t.Fatalf("snapshot does not show the armed loss: %+v", s)
+	}
+
+	first := make(chan mqtt.Message, 1)
+	c1 := connectDevice(
+		t,
+		brokerAddr,
+		"dev-5",
+		clientTLS,
+		func(_ mqtt.Client, m mqtt.Message) { first <- m },
+	)
+	resp, err = hc.Post(
+		engineURL+"/_control/enqueue",
+		"application/json",
+		bytes.NewBufferString(`{"device_id":"dev-5","post_id":"p5","commands":"echo hi"}`),
+	)
+	if err != nil || resp.StatusCode != 200 {
+		t.Fatalf("enqueue: %v %v", err, resp)
+	}
+	select {
+	case m := <-first:
+		m.Ack() // the PUBACK the broker loses
+	case <-time.After(5 * time.Second):
+		t.Fatal("first delivery never arrived")
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for h.snapshot("dev-5").Pubacks < 1 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond) // sleep-ok: poll interval
+	}
+	if s := h.snapshot("dev-5"); s.Pubacks != 1 || s.Inflight != 1 || s.Delivered != 0 ||
+		s.LoseNextPuback {
+		t.Fatalf(
+			"after the lost PUBACK: %+v, want it counted, the message still in flight, the arm cleared",
+			s,
+		)
+	}
+	c1.Disconnect(0)
+
+	second := make(chan mqtt.Message, 1)
+	c2 := connectDevice(
+		t,
+		brokerAddr,
+		"dev-5",
+		clientTLS,
+		func(_ mqtt.Client, m mqtt.Message) { second <- m },
+	)
+	defer c2.Disconnect(100)
+	select {
+	case m := <-second:
+		if !m.Duplicate() {
+			t.Error("redelivery after the lost PUBACK not flagged DUP")
+		}
+		m.Ack()
+	case <-time.After(5 * time.Second):
+		t.Fatal("message was not redelivered after the lost PUBACK")
+	}
+	deadline = time.Now().Add(5 * time.Second)
+	for h.snapshot("dev-5").Delivered != 1 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond) // sleep-ok: poll interval
+	}
+	if s := h.snapshot("dev-5"); s.Delivered != 1 || s.Pubacks != 2 || s.Inflight != 0 ||
+		s.Queued != 0 {
+		t.Errorf(
+			"after the honoured PUBACK: %+v, want delivered=1 pubacks=2 and nothing pending",
+			s,
+		)
+	}
+}
+
+// Scripted postback responses: the engine answers the scripted statuses in
+// order without recording, then records the first accepted result and refuses
+// the duplicate; every attempt is counted (sc-126322).
+func TestFixture_ScriptedPostbackResponses(t *testing.T) {
+	_, engineURL, postbackBase, clientTLS, h := startFixture(t)
+	hc := &http.Client{Timeout: 5 * time.Second}
+	resp, err := hc.Post(
+		engineURL+"/_control/postback-responses",
+		"application/json",
+		bytes.NewBufferString(`{"post_id":"p6","statuses":[503,500,200]}`),
+	)
+	if err != nil || resp.StatusCode != 200 {
+		t.Fatalf("script: %v %v", err, resp)
+	}
+	want := []int{503, 500, 200, 400}
+	for i, status := range want {
+		if got := postResult(t, clientTLS, postbackBase, "p6", `{"output":"x"}`); got != status {
+			t.Errorf("postback %d: status %d, want %d", i+1, got, status)
+		}
+	}
+	snap := h.postbackResponses("p6")
+	if snap.Attempts != 4 || len(snap.Remaining) != 0 || !snap.Recorded {
+		t.Errorf("snapshot %+v, want attempts=4, nothing remaining, recorded", snap)
+	}
+	if n := len(h.allPostbacks()); n != 1 {
+		t.Errorf("engine holds %d postbacks, want exactly the one accepted result", n)
+	}
+	// The GET form answers the same snapshot over HTTP, including for a post_id
+	// that was never scripted.
+	r, err := hc.Get(engineURL + "/_control/postback-responses?post_id=p6")
+	if err != nil || r.StatusCode != 200 {
+		t.Fatalf("GET: %v %v", err, r)
+	}
+	var got postbackResponsesSnapshot
+	if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Attempts != 4 || !got.Recorded {
+		t.Errorf("GET snapshot %+v", got)
+	}
+	if u := h.postbackResponses("never"); u.Attempts != 0 || u.Recorded {
+		t.Errorf("unscripted post_id snapshot %+v", u)
+	}
+}

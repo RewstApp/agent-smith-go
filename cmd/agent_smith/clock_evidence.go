@@ -2,6 +2,8 @@ package main
 
 import (
 	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -13,6 +15,37 @@ import (
 // death is time the next process cannot see; it is at most this long, and it
 // only ever makes the next process more conservative.
 const clockHeartbeatInterval = time.Minute
+
+// clockOffsetOverrideFileStr is overridable via -ldflags for integration
+// testing. When set, the service reads the named file from the org's data
+// directory at startup and, if it holds a valid Go duration, shifts the clock
+// the command journal and the postback spool read by that amount - the way a
+// reboot that lands on a stepped system clock would (sc-119838). The hermetic
+// suite uses it to prove a queued command survives a 25 h forward step and that
+// a backward step is reported exactly once (sc-126322). Released builds leave
+// it empty and never look for the file, so a shipped agent's clock cannot be
+// redirected by dropping a file on an endpoint.
+// Example: -ldflags "-X main.clockOffsetOverrideFileStr=clock_offset_override"
+var clockOffsetOverrideFileStr = ""
+
+// resolveClockOffset returns the offset the override file in dataDir asks for,
+// or zero when the build has no override, the file is missing, or its content
+// is not a duration. A missing or malformed file never fails the agent: the
+// clock simply runs unshifted.
+func resolveClockOffset(dataDir string) time.Duration {
+	if clockOffsetOverrideFileStr == "" {
+		return 0
+	}
+	data, err := os.ReadFile(filepath.Join(dataDir, clockOffsetOverrideFileStr))
+	if err != nil {
+		return 0
+	}
+	d, err := time.ParseDuration(strings.TrimSpace(string(data)))
+	if err != nil {
+		return 0
+	}
+	return d
+}
 
 // clockEvidence bounds every age-based decision in the journal and the spool
 // by time the agent has actually observed, rather than by whatever the wall

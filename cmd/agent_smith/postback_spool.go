@@ -57,6 +57,27 @@ const (
 	spoolFileSuffix = ".json"
 )
 
+// spoolAttemptIntervalOverrideStr is overridable via -ldflags for integration
+// testing. When set to a valid, positive Go duration it replaces
+// minAttemptInterval, so the hermetic suite can watch a consistently rejected
+// result exhaust its attempt budget and be abandoned in a few connection
+// cycles rather than in (maxAttempts-1) x 10 minutes (sc-126322). It is empty
+// in production builds.
+// Example: -ldflags "-X main.spoolAttemptIntervalOverrideStr=1s"
+var spoolAttemptIntervalOverrideStr = ""
+
+// resolveSpoolAttemptInterval returns the spacing between two counted
+// rejections: the ldflags-injected override when a build sets a valid one,
+// otherwise the documented minAttemptInterval.
+func resolveSpoolAttemptInterval() time.Duration {
+	if spoolAttemptIntervalOverrideStr != "" {
+		if d, err := time.ParseDuration(spoolAttemptIntervalOverrideStr); err == nil && d > 0 {
+			return d
+		}
+	}
+	return minAttemptInterval
+}
+
 // Reasons an entry leaves the spool without being delivered. They are distinct
 // strings because they describe very different failures and are counted
 // separately: expired and capacity are pressure on a spool that is doing its
@@ -181,7 +202,7 @@ func newPostbackSpool(
 		maxEntries:      maxEntries,
 		maxAge:          maxAge,
 		maxAttempts:     maxAttempts,
-		attemptInterval: minAttemptInterval,
+		attemptInterval: resolveSpoolAttemptInterval(),
 		logger:          logger,
 		fs:              utils.NewFileSystem(),
 	}

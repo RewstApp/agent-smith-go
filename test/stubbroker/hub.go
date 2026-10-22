@@ -61,6 +61,13 @@ type deviceState struct {
 	// device's network path to the hub (sc-126319).
 	offlineUntil time.Time
 	connects     int
+	// pubacks counts every PUBACK the device sent, honoured or not.
+	pubacks int
+	// loseNextPuback makes the broker ignore the device's next PUBACK: the
+	// message stays in flight, is requeued when the connection drops, and is
+	// redelivered with DUP on the next subscribe - the lost-acknowledgement
+	// case the command journal's tombstones exist for (sc-126322).
+	loseNextPuback bool
 }
 
 // clientConn is one accepted MQTT connection.
@@ -93,15 +100,22 @@ type hub struct {
 	// commands, e.g. https://127.0.0.1:8443.
 	postbackBase  string
 	engineTimeout time.Duration
+	// responseScripts holds, per post_id, the HTTP statuses the engine answers
+	// the next postbacks with before behaving normally; attempts counts every
+	// postback the engine saw for a post_id, accepted or not (sc-126322).
+	responseScripts map[string][]int
+	attempts        map[string]int
 }
 
 func newHub(postbackBase string, engineTimeout time.Duration) *hub {
 	return &hub{
-		devices:       map[string]*deviceState{},
-		postbacks:     map[string]*postback{},
-		waiters:       map[string]chan *postback{},
-		postbackBase:  postbackBase,
-		engineTimeout: engineTimeout,
+		devices:         map[string]*deviceState{},
+		postbacks:       map[string]*postback{},
+		waiters:         map[string]chan *postback{},
+		postbackBase:    postbackBase,
+		engineTimeout:   engineTimeout,
+		responseScripts: map[string][]int{},
+		attempts:        map[string]int{},
 	}
 }
 
@@ -226,11 +240,30 @@ func (h *hub) puback(deviceID string, pid uint16) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	d := h.device(deviceID)
-	if m, ok := d.inflight[pid]; ok {
-		delete(d.inflight, pid)
-		d.delivered++
-		log.Printf("PUBACK pid=%d from %s (%s) -> delivered", pid, deviceID, m.ID)
+	d.pubacks++
+	m, ok := d.inflight[pid]
+	if !ok {
+		return
 	}
+	if d.loseNextPuback {
+		d.loseNextPuback = false
+		log.Printf(
+			"PUBACK pid=%d from %s (%s) -> lost on purpose; message stays in flight",
+			pid, deviceID, m.ID,
+		)
+		return
+	}
+	delete(d.inflight, pid)
+	d.delivered++
+	log.Printf("PUBACK pid=%d from %s (%s) -> delivered", pid, deviceID, m.ID)
+}
+
+// loseNextPuback arms the device's next PUBACK to be ignored.
+func (h *hub) loseNextPuback(deviceID string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.device(deviceID).loseNextPuback = true
+	log.Printf("%s: the next PUBACK will be lost", deviceID)
 }
 
 // disconnected forgets c as a subscriber and returns its in-flight messages to
@@ -265,6 +298,9 @@ type deviceSnapshot struct {
 	Connects  int  `json:"connects"`
 	Connected int  `json:"connected"`
 	Offline   bool `json:"offline"`
+	Pubacks   int  `json:"pubacks"`
+	// LoseNextPuback reports whether the next PUBACK is still armed to be lost.
+	LoseNextPuback bool `json:"lose_next_puback"`
 }
 
 func (h *hub) snapshot(deviceID string) deviceSnapshot {
@@ -272,12 +308,14 @@ func (h *hub) snapshot(deviceID string) deviceSnapshot {
 	defer h.mu.Unlock()
 	d := h.device(deviceID)
 	return deviceSnapshot{
-		Queued:    len(d.queue),
-		Inflight:  len(d.inflight),
-		Delivered: d.delivered,
-		Connects:  d.connects,
-		Connected: len(d.conns),
-		Offline:   time.Now().Before(d.offlineUntil),
+		Queued:         len(d.queue),
+		Inflight:       len(d.inflight),
+		Delivered:      d.delivered,
+		Connects:       d.connects,
+		Connected:      len(d.conns),
+		Offline:        time.Now().Before(d.offlineUntil),
+		Pubacks:        d.pubacks,
+		LoseNextPuback: d.loseNextPuback,
 	}
 }
 
@@ -320,6 +358,53 @@ func (h *hub) allPostbacks() []*postback {
 	return out
 }
 
+// scriptResponses replaces the statuses the engine answers postID's next
+// postbacks with. A 200 in the list, or running out of list, means the normal
+// path (record once, 400 "fulfilled" for a duplicate).
+func (h *hub) scriptResponses(postID string, statuses []int) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.responseScripts[postID] = append([]int(nil), statuses...)
+	log.Printf("engine: postbacks for %s scripted as %v", postID, statuses)
+}
+
+// nextScriptedStatus counts a postback attempt for postID and pops the next
+// scripted status, or 0 when the normal path applies.
+func (h *hub) nextScriptedStatus(postID string) int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.attempts[postID]++
+	script := h.responseScripts[postID]
+	if len(script) == 0 {
+		return 0
+	}
+	status := script[0]
+	h.responseScripts[postID] = script[1:]
+	if status == http.StatusOK {
+		return 0
+	}
+	return status
+}
+
+type postbackResponsesSnapshot struct {
+	PostID    string `json:"post_id"`
+	Attempts  int    `json:"attempts"`
+	Remaining []int  `json:"remaining"`
+	Recorded  bool   `json:"recorded"`
+}
+
+func (h *hub) postbackResponses(postID string) postbackResponsesSnapshot {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	_, recorded := h.postbacks[postID]
+	return postbackResponsesSnapshot{
+		PostID:    postID,
+		Attempts:  h.attempts[postID],
+		Remaining: append([]int{}, h.responseScripts[postID]...),
+		Recorded:  recorded,
+	}
+}
+
 // ── engine ───────────────────────────────────────────────────────────────────
 
 // engineMux serves the trigger, the control surface and (read-only) postbacks
@@ -330,6 +415,7 @@ func (h *hub) engineMux() http.Handler {
 	mux.HandleFunc("/_control/enqueue", h.handleEnqueue)
 	mux.HandleFunc("/_control/devices/", h.handleDevice)
 	mux.HandleFunc("/_control/postbacks", h.handlePostbacks)
+	mux.HandleFunc("/_control/postback-responses", h.handlePostbackResponses)
 	return mux
 }
 
@@ -405,6 +491,13 @@ func (h *hub) handleTrigger(w http.ResponseWriter, r *http.Request) {
 func (h *hub) handlePostback(w http.ResponseWriter, r *http.Request) {
 	postID := strings.TrimPrefix(r.URL.Path, "/webhooks/custom/action/")
 	body, _ := io.ReadAll(io.LimitReader(r.Body, 32<<20))
+	if status := h.nextScriptedStatus(postID); status != 0 {
+		log.Printf("engine: postback for %s -> %d (scripted)", postID, status)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		_, _ = fmt.Fprintf(w, `{"error":"scripted %d"}`, status)
+		return
+	}
 	if !h.recordPostback(postID, body) {
 		log.Printf("engine: duplicate postback for %s -> 400 fulfilled", postID)
 		w.Header().Set("Content-Type", "application/json")
@@ -492,8 +585,39 @@ func (h *hub) handleDevice(w http.ResponseWriter, r *http.Request) {
 	case "online":
 		h.setOnline(id)
 		_ = json.NewEncoder(w).Encode(map[string]any{"device_id": id, "online": true})
+	case "lose-next-puback":
+		h.loseNextPuback(id)
+		_ = json.NewEncoder(w).Encode(map[string]any{"device_id": id, "lose_next_puback": true})
 	default:
 		_ = json.NewEncoder(w).Encode(h.snapshot(id))
+	}
+}
+
+// handlePostbackResponses scripts the engine's answers to a post_id's
+// postbacks (POST {post_id, statuses:[503,503,200]}) and reports what the
+// engine has seen for one (GET ?post_id=...): attempts, the statuses still
+// scripted, and whether a result was recorded.
+func (h *hub) handlePostbackResponses(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	switch r.Method {
+	case http.MethodPost:
+		var req struct {
+			PostID   string `json:"post_id"`
+			Statuses []int  `json:"statuses"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.PostID == "" {
+			http.Error(w, `{"error":"post_id and statuses are required"}`, http.StatusBadRequest)
+			return
+		}
+		h.scriptResponses(req.PostID, req.Statuses)
+		_ = json.NewEncoder(w).Encode(h.postbackResponses(req.PostID))
+	default:
+		postID := r.URL.Query().Get("post_id")
+		if postID == "" {
+			http.Error(w, `{"error":"post_id is required"}`, http.StatusBadRequest)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(h.postbackResponses(postID))
 	}
 }
 
