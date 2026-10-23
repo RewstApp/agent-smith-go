@@ -32,12 +32,14 @@
 #   the fallback used when command_timeout_seconds is left unconfigured; it
 #   never applies once a device explicitly configures the field.
 # - launchctlTimeoutOverrideStr (macOS) and systemctlTimeoutOverrideStr (Linux)
-#   overridden to 5s, and hostCommandTimeoutOverrideStr (Windows) overridden to
-#   5s, so a wedged launchctl/systemctl/sc/dsregcmd/WMI call (sc-108855) aborts
-#   in seconds instead of the production 5 minutes (service commands) or 30
-#   seconds (host-info commands). Each symbol only exists in its own platform's
-#   build; -X against a missing symbol is ignored, so all three flags are
-#   harmless on the other two platforms.
+#   overridden to 5s, and hostCommandTimeoutOverrideStr overridden to 5s, so a
+#   wedged launchctl/systemctl/sc/dsregcmd/WMI call (sc-108855) or system-info
+#   query (sc-129668) aborts in seconds instead of the production 5 minutes
+#   (service commands) or 30 seconds (host-info commands and queries). The
+#   launchctl and systemctl symbols only exist in their own platform's build;
+#   -X against a missing symbol is ignored, so the flags are harmless on the
+#   other platforms. hostCommandTimeoutOverrideStr exists on all three since
+#   sc-129668 moved the bound to the shared system-info queries.
 # - spoolAttemptIntervalOverrideStr overridden to 1s, so a postback result the
 #   stand-in engine keeps rejecting exhausts its attempt budget and is
 #   abandoned within a few connection cycles instead of (attempts-1) x 10

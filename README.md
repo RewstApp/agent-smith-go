@@ -822,6 +822,22 @@ bounded, documented timeout:
   complete in well under a second, and the caller-supplied context passed in
   from `config.go`/`update.go` carries no deadline of its own, so the bound has
   to be enforced internally rather than relied on from the caller.
+- **Every platform** (`internal/agent/sysinfo_bound.go`, sc-129668): the
+  system-info queries behind the `SystemInfoProvider` — host platform, CPU
+  model and total memory, which gopsutil answers through WMI on Windows and
+  sysctl / procfs elsewhere — run under the caller's context additionally
+  bounded by the same `hostCommandTimeout`, passed to gopsutil's
+  `*WithContext` variants. They used to be called with no context at all, and
+  on Windows gopsutil then applied its own **3-second** WMI timeout: a cold
+  runner or a domain controller with a slow WMI repository missed that window
+  and the whole install aborted with a bare `failed to read paths: context
+  deadline exceeded`, unretried (e2e run 39675626921, 2026-10-21), while the
+  agent's own policy for the adjacent shell-outs was to wait 30 seconds. The
+  deadline on the context is what disables gopsutil's default, so a query
+  that outlives the bound now fails with an error naming the query and the
+  bound (`host platform query timed out after 30s`), and the bound and its
+  `-ldflags` override (`hostCommandTimeoutOverrideStr`) now exist on all
+  three platforms rather than in the Windows build alone.
 
 A command that exceeds its bound is killed and returns an error naming the
 command and its arguments (for example `systemctl stop rewst_agent_smith_<org>

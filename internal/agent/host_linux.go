@@ -7,45 +7,29 @@ import (
 	"net"
 	"os"
 	"strings"
-
-	"github.com/shirou/gopsutil/v4/cpu"
-	"github.com/shirou/gopsutil/v4/host"
-	"github.com/shirou/gopsutil/v4/mem"
 )
 
 var netInterfaces = net.Interfaces
 
-type linuxDefaultSystemInfoProvider struct{}
+type linuxDefaultSystemInfoProvider struct {
+	// queries holds the gopsutil calls; the zero value selects gopsutil.
+	queries systemQueries
+}
 
 func (*linuxDefaultSystemInfoProvider) Hostname() (string, error) {
 	return os.Hostname()
 }
 
-func (*linuxDefaultSystemInfoProvider) HostPlatform() (string, error) {
-	hostStat, err := host.Info()
-	if err != nil {
-		return "", err
-	}
-
-	return hostStat.Platform, nil
+func (p *linuxDefaultSystemInfoProvider) HostPlatform(ctx context.Context) (string, error) {
+	return hostPlatform(ctx, p.queries)
 }
 
-func (*linuxDefaultSystemInfoProvider) CPUModelName() (string, error) {
-	cpuStat, err := cpu.Info()
-	if err != nil {
-		return "", err
-	}
-
-	return strings.TrimSpace(cpuStat[0].ModelName), nil
+func (p *linuxDefaultSystemInfoProvider) CPUModelName(ctx context.Context) (string, error) {
+	return cpuModelName(ctx, p.queries)
 }
 
-func (*linuxDefaultSystemInfoProvider) TotalMemoryBytes() (uint64, error) {
-	vmStat, err := mem.VirtualMemory()
-	if err != nil {
-		return 0, nil
-	}
-
-	return vmStat.Total, nil
+func (p *linuxDefaultSystemInfoProvider) TotalMemoryBytes(ctx context.Context) (uint64, error) {
+	return totalMemoryBytes(ctx, p.queries)
 }
 
 func (*linuxDefaultSystemInfoProvider) MACAddress() (*string, error) {

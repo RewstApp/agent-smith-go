@@ -55,7 +55,7 @@ func TestLinuxDefaultSystemInfoProvider_Hostname(t *testing.T) {
 func TestLinuxDefaultSystemInfoProvider_HostPlatform(t *testing.T) {
 	sys := &linuxDefaultSystemInfoProvider{}
 
-	_, err := sys.HostPlatform()
+	_, err := sys.HostPlatform(context.Background())
 	if err != nil {
 		t.Errorf("expected no error, got %v", err)
 	}
@@ -63,7 +63,7 @@ func TestLinuxDefaultSystemInfoProvider_HostPlatform(t *testing.T) {
 
 func TestLinuxDefaultSystemInfoProvider_CPUModelName(t *testing.T) {
 	sys := &linuxDefaultSystemInfoProvider{}
-	_, err := sys.CPUModelName()
+	_, err := sys.CPUModelName(context.Background())
 	if err != nil {
 		t.Errorf("expected no error, got %v", err)
 	}
@@ -71,7 +71,7 @@ func TestLinuxDefaultSystemInfoProvider_CPUModelName(t *testing.T) {
 
 func TestLinuxDefaultSystemInfoProvider_TotalMemoryBytes(t *testing.T) {
 	sys := &linuxDefaultSystemInfoProvider{}
-	result, err := sys.TotalMemoryBytes()
+	result, err := sys.TotalMemoryBytes(context.Background())
 	if err != nil {
 		t.Errorf("expected no error, got %v", err)
 	}
