@@ -177,12 +177,22 @@ func TestMessage_Execute_InvalidBase64(t *testing.T) {
 
 type mockSystemInfoProvider struct{}
 
-func (m *mockSystemInfoProvider) Hostname() (string, error)     { return "test-host", nil }
-func (m *mockSystemInfoProvider) HostPlatform() (string, error) { return "test-os", nil }
-func (m *mockSystemInfoProvider) CPUModelName() (string, error) { return "test-cpu", nil }
+func (m *mockSystemInfoProvider) Hostname() (string, error) { return "test-host", nil }
 
-func (m *mockSystemInfoProvider) TotalMemoryBytes() (uint64, error) { return 1024 * 1024 * 1024, nil }
-func (m *mockSystemInfoProvider) MACAddress() (*string, error)      { return nil, nil }
+func (m *mockSystemInfoProvider) HostPlatform(
+	context.Context,
+) (string, error) {
+	return "test-os", nil
+}
+
+func (m *mockSystemInfoProvider) CPUModelName(context.Context) (string, error) {
+	return "test-cpu", nil
+}
+
+func (m *mockSystemInfoProvider) TotalMemoryBytes(context.Context) (uint64, error) {
+	return 1024 * 1024 * 1024, nil
+}
+func (m *mockSystemInfoProvider) MACAddress() (*string, error) { return nil, nil }
 
 type mockDomainInfoProvider struct{}
 

@@ -32,9 +32,12 @@ type HostInfo struct {
 
 type SystemInfoProvider interface {
 	Hostname() (string, error)
-	HostPlatform() (string, error)
-	CPUModelName() (string, error)
-	TotalMemoryBytes() (uint64, error)
+	// HostPlatform, CPUModelName and TotalMemoryBytes ask the OS through
+	// gopsutil; they take the caller's context and are additionally bounded by
+	// hostCommandTimeout (sc-129668). Hostname and MACAddress are local calls.
+	HostPlatform(ctx context.Context) (string, error)
+	CPUModelName(ctx context.Context) (string, error)
+	TotalMemoryBytes(ctx context.Context) (uint64, error)
 	MACAddress() (*string, error)
 }
 
@@ -52,12 +55,12 @@ func NewHostInfo(
 	sys SystemInfoProvider,
 	domain DomainInfoProvider,
 ) (*HostInfo, error) {
-	hostPlatform, err := sys.HostPlatform()
+	hostPlatform, err := sys.HostPlatform(ctx)
 	if err != nil {
 		return nil, err
 	}
 
-	cpuModelName, err := sys.CPUModelName()
+	cpuModelName, err := sys.CPUModelName(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -73,7 +76,7 @@ func NewHostInfo(
 		return nil, err
 	}
 
-	memoryBytes, err := sys.TotalMemoryBytes()
+	memoryBytes, err := sys.TotalMemoryBytes(ctx)
 	if err != nil {
 		return nil, err
 	}

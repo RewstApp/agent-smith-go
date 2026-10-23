@@ -11,75 +11,33 @@ import (
 	"os"
 	"os/exec"
 	"strings"
-	"time"
-
-	"github.com/shirou/gopsutil/v4/cpu"
-	"github.com/shirou/gopsutil/v4/host"
-	"github.com/shirou/gopsutil/v4/mem"
 )
 
 var netInterfaces = net.Interfaces
 
-// hostCommandTimeout bounds every OS-level command the domain info provider
-// shells out to: the WMI queries the PowerShell runner issues (ADDomain,
-// IsADDomainController), sc query (IsEntraConnectServer), and dsregcmd
-// (EntraDomain). These run during config, install, update and diagnostic
-// flows with a caller-supplied context that carries no deadline of its own
-// (typically context.Background()), so without an internally enforced bound a
-// wedged WMI repository, a stuck SCM, or a hung dsregcmd - all observed
-// real-world failure modes, especially on domain controllers - would hang
-// those flows indefinitely, the same failure class already fixed for the
-// Windows service Stop() wait. Thirty seconds is generous for a command that
-// normally completes in well under a second, while still failing fast enough
-// that gathering host info for one field never meaningfully delays the
-// caller.
-const hostCommandTimeout = 30 * time.Second
+// hostCommandTimeout, its ldflags override and resolveHostCommandTimeout live
+// in sysinfo_bound.go since sc-129668: the bound now covers the system-info
+// queries on every platform as well as the Windows-only shell-outs below.
 
-// hostCommandTimeoutOverrideStr is overridable via -ldflags for integration
-// testing, the same mechanism stopTimeoutOverrideStr uses for the Windows
-// service stop wait. Empty in production builds.
-var hostCommandTimeoutOverrideStr = ""
-
-func resolveHostCommandTimeout() time.Duration {
-	if hostCommandTimeoutOverrideStr != "" {
-		if d, err := time.ParseDuration(hostCommandTimeoutOverrideStr); err == nil && d > 0 {
-			return d
-		}
-	}
-	return hostCommandTimeout
+type windowsDefaultSystemInfoProvider struct {
+	// queries holds the gopsutil calls; the zero value selects gopsutil.
+	queries systemQueries
 }
-
-type windowsDefaultSystemInfoProvider struct{}
 
 func (*windowsDefaultSystemInfoProvider) Hostname() (string, error) {
 	return os.Hostname()
 }
 
-func (*windowsDefaultSystemInfoProvider) HostPlatform() (string, error) {
-	hostStat, err := host.Info()
-	if err != nil {
-		return "", err
-	}
-
-	return hostStat.Platform, nil
+func (p *windowsDefaultSystemInfoProvider) HostPlatform(ctx context.Context) (string, error) {
+	return hostPlatform(ctx, p.queries)
 }
 
-func (*windowsDefaultSystemInfoProvider) CPUModelName() (string, error) {
-	cpuStat, err := cpu.Info()
-	if err != nil {
-		return "", err
-	}
-
-	return strings.TrimSpace(cpuStat[0].ModelName), nil
+func (p *windowsDefaultSystemInfoProvider) CPUModelName(ctx context.Context) (string, error) {
+	return cpuModelName(ctx, p.queries)
 }
 
-func (*windowsDefaultSystemInfoProvider) TotalMemoryBytes() (uint64, error) {
-	vmStat, err := mem.VirtualMemory()
-	if err != nil {
-		return 0, err
-	}
-
-	return vmStat.Total, nil
+func (p *windowsDefaultSystemInfoProvider) TotalMemoryBytes(ctx context.Context) (uint64, error) {
+	return totalMemoryBytes(ctx, p.queries)
 }
 
 func (*windowsDefaultSystemInfoProvider) MACAddress() (*string, error) {

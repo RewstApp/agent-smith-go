@@ -60,7 +60,7 @@ func TestWindowsDefaultSystemInfoProvider_HostPlatform(t *testing.T) {
 	sys := &windowsDefaultSystemInfoProvider{}
 	expected := "windows"
 
-	result, err := sys.HostPlatform()
+	result, err := sys.HostPlatform(context.Background())
 	if err != nil {
 		t.Errorf("expected no error, got %v", err)
 	}
@@ -72,7 +72,7 @@ func TestWindowsDefaultSystemInfoProvider_HostPlatform(t *testing.T) {
 
 func TestWindowsDefaultSystemInfoProvider_CPUModelName(t *testing.T) {
 	sys := &windowsDefaultSystemInfoProvider{}
-	_, err := sys.CPUModelName()
+	_, err := sys.CPUModelName(context.Background())
 	if err != nil {
 		t.Errorf("expected no error, got %v", err)
 	}
@@ -80,7 +80,7 @@ func TestWindowsDefaultSystemInfoProvider_CPUModelName(t *testing.T) {
 
 func TestWindowsDefaultSystemInfoProvider_TotalMemoryBytes(t *testing.T) {
 	sys := &windowsDefaultSystemInfoProvider{}
-	result, err := sys.TotalMemoryBytes()
+	result, err := sys.TotalMemoryBytes(context.Background())
 	if err != nil {
 		t.Errorf("expected no error, got %v", err)
 	}

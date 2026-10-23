@@ -27,15 +27,15 @@ func (mock *mockSystemInfoProvider) Hostname() (string, error) {
 	return mock.hostname, mock.hostnameErr
 }
 
-func (mock *mockSystemInfoProvider) HostPlatform() (string, error) {
+func (mock *mockSystemInfoProvider) HostPlatform(context.Context) (string, error) {
 	return mock.hostPlatform, mock.hostPlatformErr
 }
 
-func (mock *mockSystemInfoProvider) CPUModelName() (string, error) {
+func (mock *mockSystemInfoProvider) CPUModelName(context.Context) (string, error) {
 	return mock.cpuModelName, mock.cpuModelNameErr
 }
 
-func (mock *mockSystemInfoProvider) TotalMemoryBytes() (uint64, error) {
+func (mock *mockSystemInfoProvider) TotalMemoryBytes(context.Context) (uint64, error) {
 	return mock.totalMemoryBytes, mock.totalMemoryBytesErr
 }
 
