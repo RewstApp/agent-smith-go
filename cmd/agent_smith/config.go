@@ -117,6 +117,9 @@ func runConfig(params *configContext) error {
 	response.Configuration.MaxOutputBytes = tuningPtr(params.Tuning.MaxOutputBytes)
 	response.Configuration.LogMaxBytes = tuningPtr(params.Tuning.LogMaxBytes)
 	response.Configuration.LogMaxFiles = tuningPtr(params.Tuning.LogMaxFiles)
+	response.Configuration.HealthReportIntervalSeconds = tuningPtr(
+		params.Tuning.HealthReportIntervalSeconds,
+	)
 
 	// Create the data directory. EnsureSecureDir (rather than a bare MkdirAll)
 	// is what locks it to 0700 on Linux/macOS on both a fresh install and a

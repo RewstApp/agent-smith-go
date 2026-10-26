@@ -78,6 +78,15 @@ type NotifierWrapper interface {
 	CheckHealth()
 	// Stats returns a snapshot of the cumulative plugin health counters.
 	Stats() NotifierStats
+	// PluginStats returns the same counters per plugin, by name, for the
+	// device twin's fleet-health object (sc-129687).
+	PluginStats() []PluginStats
+}
+
+// PluginStats is one plugin's supervision counters.
+type PluginStats struct {
+	Name string
+	NotifierStats
 }
 
 type optionalNotifierWrapper struct {
@@ -245,6 +254,15 @@ func (p *optionalNotifierWrapper) Stats() NotifierStats {
 		Restarts:        p.restarts.Load(),
 		RestartFailures: p.restartFailures.Load(),
 	}
+}
+
+// PluginStats implements NotifierWrapper; a wrapper not built from a config
+// entry has no plugin to report.
+func (p *optionalNotifierWrapper) PluginStats() []PluginStats {
+	if p.name == "" {
+		return nil
+	}
+	return []PluginStats{{Name: p.name, NotifierStats: p.Stats()}}
 }
 
 // restartable reports whether this wrapper knows how to launch a subprocess. It
@@ -425,6 +443,15 @@ func (s *notifierSetWrapper) CheckHealth() {
 	for _, notifier := range s.notifiers {
 		notifier.CheckHealth()
 	}
+}
+
+// PluginStats implements NotifierWrapper.
+func (s *notifierSetWrapper) PluginStats() []PluginStats {
+	out := make([]PluginStats, 0, len(s.notifiers))
+	for _, notifier := range s.notifiers {
+		out = append(out, notifier.PluginStats()...)
+	}
+	return out
 }
 
 func (s *notifierSetWrapper) Stats() NotifierStats {

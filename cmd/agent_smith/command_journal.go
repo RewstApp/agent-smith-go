@@ -308,6 +308,14 @@ func (j *commandJournal) pending() (fresh, expired []journalEntry, err error) {
 	return fresh, expired, nil
 }
 
+// pendingCount is the number of journaled commands that have not finished,
+// for the fleet-health report.
+func (j *commandJournal) pendingCount() int {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	return j.countPendingLocked()
+}
+
 func (j *commandJournal) countPendingLocked() int {
 	names, err := j.listLocked(journalPendingSuffix)
 	if err != nil {

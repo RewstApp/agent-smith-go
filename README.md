@@ -41,6 +41,7 @@ rewst_agent_config.win.exe --org-id YOUR_ORG_ID --config-url CONFIG_URL --config
 - `--disable-agent-postback`: Disable agent postback
 - `--no-auto-updates`: Disable auto updates
 - `--mqtt-qos`: MQTT subscription QoS level (`0` = at-most-once, `1` = at-least-once). Defaults to `1` when omitted. Azure IoT Hub does not support QoS 2.
+- `--health-report-interval-seconds`: how often a changed fleet-health object is re-published to the device twin (default `60`; see "Fleet Health in the Device Twin").
 
 Example with optional parameters:
 ```bash
@@ -1084,6 +1085,58 @@ same call that protects the helper on macOS does not protect it on Linux.
 ### Reporting the Agent Version
 
 `internal/version.Version` is the release tag stamped by the build script (`v1.5.7`), and its default is `v0.0.0` — the same shape — so a plain `go build` or `go test` binary differs from a release only in the number. The bare number that the `x-rewst-agent-smith-version` header and the `AGENT_SMITH_VERSION` variable in every command script have always carried comes from `version.Number()`, which strips a leading `v` only when one is present and returns `0.0.0` for an empty stamp instead of panicking. Before this, both call sites sliced `Version[1:]` against a bare `0.0.0` default, so every developer and CI build reported `.0.0`, an empty `-X` injection would have panicked on the first HTTP request (the config fetch during install), and the only test of the header derived its expectation from the same `Version[1:]` expression and therefore could not fail. The device twin's `agent_version`, the startup log line and `--diagnostic` intentionally keep the tag form; that difference is documented at each call site.
+
+### Fleet Health in the Device Twin
+
+The device twin's reported properties used to carry one field, `agent_version`,
+published once per connection cycle. Everything else the agent knew about its
+own condition stayed in the log file on the endpoint, so a device whose results
+were piling up in the postback spool, whose command journal had degraded to
+in-memory acceptance, or whose notification plugin was crash-looping was
+invisible from Rewst until a customer noticed. Since sc-129687 the agent also
+reports a `health` object, assembled from the counters it already keeps:
+
+```json
+"health": {
+  "reported_at": "2026-10-26T12:00:00Z",
+  "uptime_seconds": 86400,
+  "connected_at": "2026-10-26T11:59:58Z",
+  "last_connection_error": "",
+  "journal":  { "pending": 0, "degraded": false, "expired_total": 0, "interrupted_total": 0 },
+  "spool":    { "entries": 0, "dropped_expired": 0, "dropped_capacity": 0, "dropped_attempts": 0, "dropped_corrupt": 0 },
+  "plugins":  [ { "name": "teams", "restarts": 0, "notify_failures": 0, "notify_timeouts": 0 } ],
+  "commands": { "executing": 0, "completed_total": 12, "timed_out_total": 0 }
+}
+```
+
+Every counter is **since process start**; a restart resets them, which is
+stated here rather than papered over by persisting them. `journal.pending` is
+the number of accepted commands not yet finished, `journal.degraded` is true
+while the journal is failing writes (the once-per-transition Error in the log),
+`spool.entries` is the number of results waiting for the engine and the
+`dropped_*` counters are the spool's documented drop reasons, `plugins` mirrors
+the supervision counters per configured plugin, `commands.timed_out_total`
+counts commands killed at the per-command deadline, and
+`last_connection_error` is the reason the last connection was lost (empty when
+none since start).
+
+The object is published after every successful subscribe and then re-checked
+every `health_report_interval_seconds` (default 60; `--health-report-interval-seconds`
+at install or `--update`) for the life of the connection: it is re-published
+only when something other than the clock changed, so a burst of drops or
+plugin restarts becomes at most one twin update per interval, well inside IoT
+Hub's twin allowance. The publish runs off the connection path with the usual
+bounded wait, and a failure is a Warn: the twin is informational and can never
+affect command handling. The service also leaves the last object it published
+in `<data directory>/health.json`, which `--diagnostic` shows under "Fleet
+Health" so what the machine says can be compared with what Rewst sees.
+
+**Proven end to end by** the stub broker, which keeps every reported-properties
+PATCH per device and serves the merged result at
+`/_control/devices/{id}/twin`: `hermetic-journal` asserts `health.journal.degraded`
+is true while the journal is full and false again after it recovers, and
+`hermetic-postback-spool` asserts `health.spool.dropped_attempts` is 1 after
+the abandonment.
 
 ### Verified, Version-Gated Auto-Updates
 

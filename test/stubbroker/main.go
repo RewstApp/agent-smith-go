@@ -389,18 +389,33 @@ func serve(conn net.Conn, modeFile string) {
 			// needs no response. A QoS 1 publish is acknowledged so the fixture
 			// stays correct if that ever changes; its packet id follows the topic.
 			qos := (flags >> 1) & 0x03
-			if qos != 1 {
-				log.Printf("[%s] PUBLISH (qos %d) -> no response required", remote, qos)
-				break
-			}
 			if len(payload) < 2 {
 				log.Printf("[%s] malformed PUBLISH", remote)
 				return
 			}
 			topicLen := int(payload[0])<<8 | int(payload[1])
-			if len(payload) < 2+topicLen+2 {
+			if len(payload) < 2+topicLen {
 				log.Printf("[%s] malformed PUBLISH", remote)
 				return
+			}
+			topic := string(payload[2 : 2+topicLen])
+			body := payload[2+topicLen:]
+			if qos > 0 {
+				if len(body) < 2 {
+					log.Printf("[%s] malformed PUBLISH", remote)
+					return
+				}
+				body = body[2:]
+			}
+			// A reported-properties PATCH is kept per device so the harness can
+			// read what the agent reports about itself (sc-129687).
+			if strings.HasPrefix(topic, "$iothub/twin/PATCH/properties/reported/") &&
+				client.clientID != "" && broker != nil {
+				broker.recordTwin(client.clientID, body)
+			}
+			if qos != 1 {
+				log.Printf("[%s] PUBLISH (qos %d) -> no response required", remote, qos)
+				break
 			}
 			packetID := payload[2+topicLen : 2+topicLen+2]
 			log.Printf("[%s] PUBLISH (qos 1) -> PUBACK", remote)

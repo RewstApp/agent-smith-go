@@ -68,6 +68,10 @@ type deviceState struct {
 	// redelivered with DUP on the next subscribe - the lost-acknowledgement
 	// case the command journal's tombstones exist for (sc-126322).
 	loseNextPuback bool
+	// twin holds the device's reported properties as the last PATCH left them:
+	// a shallow merge of every reported-properties publish, the way IoT Hub's
+	// twin accumulates them (sc-129687).
+	twin map[string]json.RawMessage
 }
 
 // clientConn is one accepted MQTT connection.
@@ -256,6 +260,37 @@ func (h *hub) puback(deviceID string, pid uint16) {
 	delete(d.inflight, pid)
 	d.delivered++
 	log.Printf("PUBACK pid=%d from %s (%s) -> delivered", pid, deviceID, m.ID)
+}
+
+// recordTwin merges a reported-properties PATCH into the device's twin. A
+// payload that is not a JSON object is ignored, as IoT Hub would reject it.
+func (h *hub) recordTwin(deviceID string, payload []byte) {
+	var patch map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &patch); err != nil {
+		log.Printf("%s: twin PATCH is not a JSON object: %v", deviceID, err)
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	d := h.device(deviceID)
+	if d.twin == nil {
+		d.twin = map[string]json.RawMessage{}
+	}
+	for k, v := range patch {
+		d.twin[k] = v
+	}
+	log.Printf("%s: twin reported properties updated (%d key(s))", deviceID, len(patch))
+}
+
+// twin returns the device's reported properties as last merged.
+func (h *hub) twin(deviceID string) map[string]json.RawMessage {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	out := map[string]json.RawMessage{}
+	for k, v := range h.device(deviceID).twin {
+		out[k] = v
+	}
+	return out
 }
 
 // loseNextPuback arms the device's next PUBACK to be ignored.
@@ -564,9 +599,10 @@ func (h *hub) handleEnqueue(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]string{"id": m.ID})
 }
 
-// handleDevice serves /_control/devices/{id} (snapshot), and the offline and
+// handleDevice serves /_control/devices/{id} (snapshot), the offline and
 // online controls at /_control/devices/{id}/offline?seconds=N and
-// /_control/devices/{id}/online.
+// /_control/devices/{id}/online, the lose-next-puback arm, and
+// /_control/devices/{id}/twin (the reported properties as last merged).
 func (h *hub) handleDevice(w http.ResponseWriter, r *http.Request) {
 	rest := strings.TrimPrefix(r.URL.Path, "/_control/devices/")
 	id, action, _ := strings.Cut(rest, "/")
@@ -588,6 +624,8 @@ func (h *hub) handleDevice(w http.ResponseWriter, r *http.Request) {
 	case "lose-next-puback":
 		h.loseNextPuback(id)
 		_ = json.NewEncoder(w).Encode(map[string]any{"device_id": id, "lose_next_puback": true})
+	case "twin":
+		_ = json.NewEncoder(w).Encode(map[string]any{"device_id": id, "reported": h.twin(id)})
 	default:
 		_ = json.NewEncoder(w).Encode(h.snapshot(id))
 	}

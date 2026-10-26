@@ -366,3 +366,33 @@ func TestEnqueue_HonoursThePostIDPrefix(t *testing.T) {
 		t.Errorf("enqueued %v", enqueued)
 	}
 }
+
+func TestAssertTwin_ReadsADottedPathAndFailsOnAMismatch(t *testing.T) {
+	s := newEdgeStub(t)
+	s.srv.Config.Handler.(*http.ServeMux).HandleFunc(
+		"/_control/devices/dev-7/twin",
+		func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"device_id":"dev-7","reported":{"agent_version":"v1.6.1",` +
+				`"health":{"journal":{"pending":3,"degraded":true},"spool":{"dropped_attempts":1}}}}`))
+		},
+	)
+	code, out := run(t, "hermetic-assert-twin.ps1",
+		"ENGINE_URL="+s.srv.URL, "DEVICE_ID=dev-7", "PROPERTY=health.journal.degraded",
+		"EXPECTED=True", "TIMEOUT_SECONDS=5")
+	if code != 0 {
+		t.Fatalf("exit %d\n%s", code, out)
+	}
+	code, out = run(t, "hermetic-assert-twin.ps1",
+		"ENGINE_URL="+s.srv.URL, "DEVICE_ID=dev-7", "PROPERTY=health.spool.dropped_attempts",
+		"EXPECTED=1", "TIMEOUT_SECONDS=5")
+	if code != 0 {
+		t.Fatalf("numeric: exit %d\n%s", code, out)
+	}
+	code, out = run(t, "hermetic-assert-twin.ps1",
+		"ENGINE_URL="+s.srv.URL, "DEVICE_ID=dev-7", "PROPERTY=health.journal.pending",
+		"EXPECTED=0", "TIMEOUT_SECONDS=3")
+	if code == 0 || !strings.Contains(out, "is '3', expected '0'") {
+		t.Errorf("a mismatch passed (exit %d):\n%s", code, out)
+	}
+}

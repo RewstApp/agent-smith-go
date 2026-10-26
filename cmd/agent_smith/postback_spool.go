@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/RewstApp/agent-smith-go/internal/mqtt"
 	"github.com/RewstApp/agent-smith-go/internal/utils"
 	"github.com/hashicorp/go-hclog"
 )
@@ -220,6 +221,21 @@ func newPostbackSpool(
 }
 
 // countDrop records a discarded entry against the total and its reason.
+// health reports the spool's size and drop counters for the fleet-health
+// object.
+func (s *postbackSpool) health() mqtt.SpoolHealth {
+	s.mu.Lock()
+	entries := len(s.listLocked())
+	s.mu.Unlock()
+	return mqtt.SpoolHealth{
+		Entries:         entries,
+		DroppedExpired:  s.droppedExpired.Load(),
+		DroppedCapacity: s.droppedCapacity.Load(),
+		DroppedAttempts: s.droppedAttempts.Load(),
+		DroppedCorrupt:  s.droppedCorrupt.Load(),
+	}
+}
+
 func (s *postbackSpool) countDrop(reason string) int64 {
 	switch reason {
 	case dropReasonExpired:

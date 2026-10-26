@@ -222,6 +222,9 @@ func runUpdate(params *updateContext) {
 	if params.Tuning.LogMaxFiles != tuningFlagUnset {
 		device.LogMaxFiles = tuningPtr(params.Tuning.LogMaxFiles)
 	}
+	if params.Tuning.HealthReportIntervalSeconds != tuningFlagUnset {
+		device.HealthReportIntervalSeconds = tuningPtr(params.Tuning.HealthReportIntervalSeconds)
+	}
 
 	// Save the updated configuration file
 	configBytes, err := json.MarshalIndent(device, "", "  ")
