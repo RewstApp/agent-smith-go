@@ -103,6 +103,14 @@ type serviceContext struct {
 	publishHealth       func(client mqtt.Client, props mqtt.ReportedProperties) error
 	// healthFileDir overrides where the health file is written; tests only.
 	healthFileDir string
+	// Progress heartbeats (sc-129689): healthKick wakes the twin reporter when
+	// a command finishes so its entry clears at once; lastInFlight records
+	// whether the last publish carried running commands, so one more publish
+	// clears them; lastPublishedAt spaces kicked publishes out.
+	healthKick      chan struct{}
+	healthInterval  time.Duration
+	lastInFlight    bool
+	lastPublishedAt time.Time
 }
 
 // newServiceFlagSet builds the flag set for service mode, binding flags to the

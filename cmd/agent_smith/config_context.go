@@ -51,6 +51,7 @@ type tuningFlags struct {
 	LogMaxBytes                     int
 	LogMaxFiles                     int
 	HealthReportIntervalSeconds     int
+	CommandHeartbeatSeconds         int
 	// provided records which tuning flag names the operator explicitly set. It is
 	// populated from flag.FlagSet.Visit after parsing so validation can flag an
 	// explicitly-provided non-positive value (e.g. --worker-count -1) even when it
@@ -73,6 +74,7 @@ var tuningFlagNames = []string{
 	"log-max-bytes",
 	"log-max-files",
 	"health-report-interval-seconds",
+	"command-heartbeat-seconds",
 }
 
 // captureProvided records which tuning flags were explicitly set on fs so that
@@ -166,6 +168,12 @@ func bindTuningFlags(fs *flag.FlagSet, t *tuningFlags) {
 		tuningFlagUnset,
 		"Seconds between device-twin fleet-health updates when the health changed; unset falls back to the default (60) (positive integer)",
 	)
+	fs.IntVar(
+		&t.CommandHeartbeatSeconds,
+		"command-heartbeat-seconds",
+		tuningFlagUnset,
+		"Seconds between device-twin progress heartbeats for a running command; unset falls back to the default (30) (positive integer)",
+	)
 }
 
 // validate rejects any tuning flag that was explicitly provided with a
@@ -188,6 +196,7 @@ func (t tuningFlags) validate() error {
 		{"log-max-bytes", t.LogMaxBytes},
 		{"log-max-files", t.LogMaxFiles},
 		{"health-report-interval-seconds", t.HealthReportIntervalSeconds},
+		{"command-heartbeat-seconds", t.CommandHeartbeatSeconds},
 	}
 	for _, c := range checks {
 		if t.provided[c.name] && c.value <= 0 {

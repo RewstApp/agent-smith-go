@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/RewstApp/agent-smith-go/internal/agent"
@@ -53,6 +54,11 @@ type baseExecutor struct {
 	BuildExecuteCommandArgs  BuildExecuteCommandArgsFunc
 	BuildExecuteFileArgs     BuildExecuteFileArgsFunc
 	FS                       utils.FileSystem
+	// completed and timedOut count outcomes for ExecutionStats (sc-129687);
+	// inFlight tracks the commands being run, for ProgressReporter (sc-129689).
+	completed atomic.Int64
+	timedOut  atomic.Int64
+	inFlight  inFlightSet
 
 	// Diagnostic values (shell version and the service account reported by
 	// whoami) are static for the lifetime of an agent process: the shell binary
@@ -242,6 +248,8 @@ func (e *baseExecutor) Execute(
 	cmd := exec.CommandContext(execCtx, e.Shell, e.BuildExecuteFileArgs(tempfile.Name())...)
 	cmd.Stdout = stdoutBuf
 	cmd.Stderr = stderrBuf
+	running := e.inFlight.add(message.PostId, stdoutBuf, stderrBuf)
+	defer e.inFlight.remove(running)
 	cmd.Env = os.Environ()
 	// Bare number, as customer scripts have always seen it; see version.Number.
 	cmd.Env = append(cmd.Env, fmt.Sprintf("AGENT_SMITH_VERSION=%s", version.Number()))
@@ -322,8 +330,10 @@ func (e *baseExecutor) Execute(
 			if stderrBuf.Len() > 0 {
 				errMsg = fmt.Sprintf("%s: %s", errMsg, stderrBuf.String())
 			}
+			e.timedOut.Add(1)
 			return timeoutResultBytes(logger, errMsg, stdoutBuf.String(), trunc)
 		}
+		e.completed.Add(1)
 
 		logger.Error("Command failed", "error", err)
 		logger.Debug(
@@ -336,6 +346,7 @@ func (e *baseExecutor) Execute(
 		return resultBytes(logger, stderrBuf.String(), stdoutBuf.String(), trunc)
 	}
 
+	e.completed.Add(1)
 	logger.Info(
 		"Command completed",
 		"message_id",
@@ -356,6 +367,16 @@ func (e *baseExecutor) Execute(
 
 func (e *baseExecutor) AlwaysPostback() bool {
 	return false
+}
+
+// ExecutionStats implements StatsReporter.
+func (e *baseExecutor) ExecutionStats() ExecutionStats {
+	return ExecutionStats{Completed: e.completed.Load(), TimedOut: e.timedOut.Load()}
+}
+
+// InFlight implements ProgressReporter.
+func (e *baseExecutor) InFlight() []Progress {
+	return e.inFlight.snapshot()
 }
 
 func NewBaseExecutor(

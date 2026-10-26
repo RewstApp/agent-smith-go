@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"path/filepath"
 	"time"
 
@@ -72,6 +73,47 @@ func (svc *serviceContext) healthSnapshot(notifier plugins.NotifierWrapper) *mqt
 
 // recordConnectionError keeps the most recent connection-lost reason for the
 // health object; an empty string clears it.
+// progressSnapshot gathers the running commands' heartbeats (sc-129689) from
+// the executor, when it reports them. nil when nothing is running.
+func (svc *serviceContext) progressSnapshot() *mqtt.CommandsProgress {
+	reporter, ok := svc.Executor.(interpreter.ProgressReporter)
+	if !ok {
+		return nil
+	}
+	running := reporter.InFlight()
+	if len(running) == 0 {
+		return nil
+	}
+	now := time.Now()
+	out := &mqtt.CommandsProgress{InFlight: make([]mqtt.CommandProgress, 0, len(running))}
+	for _, p := range running {
+		out.InFlight = append(out.InFlight, mqtt.CommandProgress{
+			PostID:         p.PostID,
+			StartedAt:      p.StartedAt.UTC().Format(time.RFC3339),
+			ElapsedSeconds: int64(now.Sub(p.StartedAt).Seconds()),
+			StdoutBytes:    p.StdoutBytes,
+			StderrBytes:    p.StderrBytes,
+			LastOutputLine: p.LastOutputLine,
+		})
+	}
+	return out
+}
+
+// kickHealth wakes the twin reporter without blocking, for a command that
+// just finished: its heartbeat entry should clear now, not at the next tick.
+func (svc *serviceContext) kickHealth() {
+	svc.healthMu.Lock()
+	kick := svc.healthKick
+	svc.healthMu.Unlock()
+	if kick == nil {
+		return
+	}
+	select {
+	case kick <- struct{}{}:
+	default:
+	}
+}
+
 func (svc *serviceContext) recordConnectionError(err error) {
 	svc.connErrMu.Lock()
 	defer svc.connErrMu.Unlock()
@@ -107,11 +149,21 @@ func (svc *serviceContext) reportHealth(
 		return false
 	}
 	health := svc.healthSnapshot(notifier)
+	progress := svc.progressSnapshot()
+	inFlight := progress != nil
 	svc.healthMu.Lock()
-	unchanged := !force && health.Same(svc.lastHealth)
+	// A running command is a change every time (its elapsed time moved); the
+	// publish after the last one ran clears the list; otherwise only a change
+	// in the health counters, no more often than the health interval, counts.
+	changed := force || inFlight || svc.lastInFlight ||
+		(!health.Same(svc.lastHealth) && time.Since(svc.lastPublishedAt) >= svc.healthInterval)
+	clearing := !inFlight && svc.lastInFlight
 	svc.healthMu.Unlock()
-	if unchanged {
+	if !changed {
 		return false
+	}
+	if clearing {
+		progress = &mqtt.CommandsProgress{InFlight: []mqtt.CommandProgress{}}
 	}
 	publish := svc.publishHealth
 	if publish == nil {
@@ -119,7 +171,11 @@ func (svc *serviceContext) reportHealth(
 			return mqtt.UpdateReportedProperties(client, props, utils.MqttPublishTimeout)
 		}
 	}
-	props := mqtt.ReportedProperties{AgentVersion: version.Version, Health: health}
+	props := mqtt.ReportedProperties{
+		AgentVersion: version.Version,
+		Health:       health,
+		Commands:     progress,
+	}
 	if err := publish(client, props); err != nil {
 		if ctx.Err() == nil {
 			logger.Warn("Failed to update device twin fleet health", "error", err)
@@ -131,16 +187,26 @@ func (svc *serviceContext) reportHealth(
 	}
 	svc.healthMu.Lock()
 	svc.lastHealth = health
+	svc.lastInFlight = inFlight
+	svc.lastPublishedAt = time.Now()
 	svc.healthMu.Unlock()
-	svc.writeHealthFile(health, logger)
+	svc.writeHealthFile(&props, logger)
 	logger.Debug(
 		"Device twin fleet health updated",
 		"journal_pending", health.Journal.Pending,
 		"journal_degraded", health.Journal.Degraded,
 		"spool_entries", health.Spool.Entries,
 		"executing", health.Commands.Executing,
+		"in_flight", len(inFlightOrNone(progress)),
 	)
 	return true
+}
+
+func inFlightOrNone(p *mqtt.CommandsProgress) []mqtt.CommandProgress {
+	if p == nil {
+		return nil
+	}
+	return p.InFlight
 }
 
 // healthLoop re-checks the health every interval for the life of the
@@ -153,8 +219,22 @@ func (svc *serviceContext) healthLoop(
 	notifier plugins.NotifierWrapper,
 	logger hclog.Logger,
 ) {
-	interval := device.ResolvedHealthReportInterval()
-	ticker := time.NewTicker(interval)
+	// The loop ticks at the heartbeat interval so a running command's elapsed
+	// time is republished on that cadence; the health counters still coalesce
+	// to their own, longer interval inside reportHealth. A kick from a command
+	// that just finished publishes at once, spaced by at least a second so a
+	// stream of short commands cannot flood the twin.
+	kick := make(chan struct{}, 1)
+	svc.healthMu.Lock()
+	svc.healthInterval = device.ResolvedHealthReportInterval()
+	svc.healthKick = kick
+	svc.healthMu.Unlock()
+	defer func() {
+		svc.healthMu.Lock()
+		svc.healthKick = nil
+		svc.healthMu.Unlock()
+	}()
+	ticker := time.NewTicker(device.ResolvedCommandHeartbeatInterval())
 	defer ticker.Stop()
 	for {
 		select {
@@ -162,9 +242,20 @@ func (svc *serviceContext) healthLoop(
 			return
 		case <-ticker.C:
 			svc.reportHealth(ctx, client, notifier, logger, false)
+		case <-kick:
+			svc.healthMu.Lock()
+			recent := time.Since(svc.lastPublishedAt) < kickMinSpacing
+			svc.healthMu.Unlock()
+			if !recent {
+				svc.reportHealth(ctx, client, notifier, logger, false)
+			}
 		}
 	}
 }
+
+// kickMinSpacing is the least time between two publishes triggered by
+// commands finishing; the next tick catches up on anything skipped.
+const kickMinSpacing = time.Second
 
 // healthDir is where the health file lives: the org's data directory, or the
 // directory a test injected.
@@ -177,8 +268,8 @@ func (svc *serviceContext) healthDir() string {
 
 // writeHealthFile leaves the health object in the data directory for
 // --diagnostic. Best effort: a failure is logged at Debug and never retried.
-func (svc *serviceContext) writeHealthFile(health *mqtt.Health, logger hclog.Logger) {
-	data, err := json.MarshalIndent(health, "", "  ")
+func (svc *serviceContext) writeHealthFile(props *mqtt.ReportedProperties, logger hclog.Logger) {
+	data, err := json.MarshalIndent(props, "", "  ")
 	if err != nil {
 		return
 	}
@@ -193,20 +284,23 @@ func (svc *serviceContext) writeHealthFile(health *mqtt.Health, logger hclog.Log
 	}
 }
 
-// readHealthFile loads the health object the service last published for the
-// org, for --diagnostic.
-func readHealthFile(orgId string) (*mqtt.Health, error) {
+// readHealthFile loads the reported properties the service last published for
+// the org (health and running commands), for --diagnostic.
+func readHealthFile(orgId string) (*mqtt.ReportedProperties, error) {
 	return readHealthFileFrom(agent.GetDataDirectory(orgId))
 }
 
-func readHealthFileFrom(dir string) (*mqtt.Health, error) {
+func readHealthFileFrom(dir string) (*mqtt.ReportedProperties, error) {
 	data, err := utils.NewFileSystem().ReadFile(filepath.Join(dir, healthFileName))
 	if err != nil {
 		return nil, err
 	}
-	var h mqtt.Health
-	if err := json.Unmarshal(data, &h); err != nil {
+	var props mqtt.ReportedProperties
+	if err := json.Unmarshal(data, &props); err != nil {
 		return nil, err
 	}
-	return &h, nil
+	if props.Health == nil {
+		return nil, errors.New("the fleet-health file carries no health object")
+	}
+	return &props, nil
 }

@@ -119,6 +119,25 @@ type ReportedProperties struct {
 	// outcomes and the connection. Every counter is since process start. nil
 	// omits the object, which is what the first publish of an older agent sent.
 	Health *Health `json:"health,omitempty"`
+	// Commands carries the running commands' progress heartbeats (sc-129689);
+	// nil omits the object, an empty InFlight clears a previous report.
+	Commands *CommandsProgress `json:"commands,omitempty"`
+}
+
+// CommandsProgress is the device twin's running-commands object.
+type CommandsProgress struct {
+	InFlight []CommandProgress `json:"in_flight"`
+}
+
+// CommandProgress is one running command's heartbeat: the output counts are
+// bytes produced, which keep growing past the output ceiling.
+type CommandProgress struct {
+	PostID         string `json:"post_id"`
+	StartedAt      string `json:"started_at"`
+	ElapsedSeconds int64  `json:"elapsed_seconds"`
+	StdoutBytes    int64  `json:"stdout_bytes"`
+	StderrBytes    int64  `json:"stderr_bytes"`
+	LastOutputLine string `json:"last_output_line"`
 }
 
 // Health is the device twin's fleet-health object. The JSON shape is a

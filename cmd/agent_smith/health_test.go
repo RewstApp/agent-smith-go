@@ -173,11 +173,12 @@ func TestReportHealth_PublishesOnChangeAndWritesTheFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("health file: %v", err)
 	}
-	var fromFile mqtt.Health
-	if err := json.Unmarshal(raw, &fromFile); err != nil || fromFile.Spool.DroppedExpired != 1 {
+	var fromFile mqtt.ReportedProperties
+	if err := json.Unmarshal(raw, &fromFile); err != nil || fromFile.Health == nil ||
+		fromFile.Health.Spool.DroppedExpired != 1 || fromFile.AgentVersion == "" {
 		t.Errorf("health file %s: %v", raw, err)
 	}
-	if got, err := readHealthFileFrom(dataDir); err != nil || !got.Same(&fromFile) {
+	if got, err := readHealthFileFrom(dataDir); err != nil || !got.Health.Same(fromFile.Health) {
 		t.Errorf("readHealthFileFrom: %+v %v", got, err)
 	}
 	if _, err := readHealthFileFrom(t.TempDir()); err == nil {
@@ -203,7 +204,10 @@ func TestReportHealth_PublishFailureIsNotFatalAndIsRetriedNextTime(t *testing.T)
 func TestHealthLoop_CoalescesToTheIntervalAndStopsWithTheCycle(t *testing.T) {
 	svc, pub := newHealthTestService(t)
 	interval := 1
-	device := agent.Device{HealthReportIntervalSeconds: &interval}
+	device := agent.Device{
+		HealthReportIntervalSeconds: &interval,
+		CommandHeartbeatSeconds:     &interval,
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
@@ -258,4 +262,151 @@ func TestReportHealth_DoesNothingOnceTheCycleEnded(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(svc.healthDir(), healthFileName)); !os.IsNotExist(err) {
 		t.Error("the health file was written after cancellation")
 	}
+}
+
+// Progress heartbeats (sc-129689): a running command is published every tick
+// with its elapsed time, the publish after it finishes clears the list, and a
+// finished command kicks the reporter instead of waiting for the tick.
+
+type progressExecutor struct {
+	funcExecutor
+	mu      sync.Mutex
+	running []interpreter.Progress
+}
+
+func (e *progressExecutor) InFlight() []interpreter.Progress {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return append([]interpreter.Progress(nil), e.running...)
+}
+
+func (e *progressExecutor) set(running ...interpreter.Progress) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.running = running
+}
+
+func TestProgressSnapshot_FormatsRunningCommands(t *testing.T) {
+	exec := &progressExecutor{}
+	svc := &serviceContext{OrgId: "p", Executor: exec}
+	if svc.progressSnapshot() != nil {
+		t.Fatal("nothing running reported a progress object")
+	}
+	started := time.Now().Add(-42 * time.Second)
+	exec.set(
+		interpreter.Progress{
+			PostID:         "hold-1",
+			StartedAt:      started,
+			StdoutBytes:    7,
+			StderrBytes:    1,
+			LastOutputLine: "tick",
+		},
+	)
+	got := svc.progressSnapshot()
+	if got == nil || len(got.InFlight) != 1 {
+		t.Fatalf("snapshot %+v", got)
+	}
+	c := got.InFlight[0]
+	if c.PostID != "hold-1" || c.ElapsedSeconds < 41 || c.ElapsedSeconds > 44 ||
+		c.StdoutBytes != 7 ||
+		c.StderrBytes != 1 ||
+		c.LastOutputLine != "tick" {
+		t.Errorf("entry %+v", c)
+	}
+	if _, err := time.Parse(time.RFC3339, c.StartedAt); err != nil {
+		t.Errorf("started_at %q: %v", c.StartedAt, err)
+	}
+	if (&serviceContext{Executor: &funcExecutor{}}).progressSnapshot() != nil {
+		t.Error("an executor without progress reported one")
+	}
+}
+
+func TestReportHealth_PublishesWhileRunningAndClearsAfter(t *testing.T) {
+	svc, pub := newHealthTestService(t)
+	exec := &progressExecutor{}
+	svc.Executor = exec
+	ctx := context.Background()
+	logger := hclog.NewNullLogger()
+	notifier := &mockNotifierWrapper{}
+	svc.reportHealth(ctx, nil, notifier, logger, true)
+
+	exec.set(interpreter.Progress{PostID: "hold-1", StartedAt: time.Now()})
+	if !svc.reportHealth(ctx, nil, notifier, logger, false) {
+		t.Fatal("a running command was not published")
+	}
+	if !svc.reportHealth(ctx, nil, notifier, logger, false) {
+		t.Fatal("a still-running command was not republished (its elapsed time moved)")
+	}
+	exec.set()
+	if !svc.reportHealth(ctx, nil, notifier, logger, false) {
+		t.Fatal("the publish that clears the list did not happen")
+	}
+	if svc.reportHealth(ctx, nil, notifier, logger, false) {
+		t.Error("an idle, unchanged state was published again")
+	}
+	published := pub.published
+	if n := len(published); n != 4 {
+		t.Fatalf("published %d times, want 4", n)
+	}
+	if published[0].Commands != nil {
+		t.Error("the idle first publish carried a commands object")
+	}
+	if published[1].Commands == nil || len(published[1].Commands.InFlight) != 1 ||
+		published[1].Commands.InFlight[0].PostID != "hold-1" {
+		t.Errorf("running publish %+v", published[1].Commands)
+	}
+	if published[3].Commands == nil || len(published[3].Commands.InFlight) != 0 {
+		t.Errorf("the clearing publish must carry an empty list, got %+v", published[3].Commands)
+	}
+	if got, err := readHealthFileFrom(svc.healthDir()); err != nil || got.Commands == nil ||
+		len(got.Commands.InFlight) != 0 {
+		t.Errorf("health file after clearing: %+v %v", got, err)
+	}
+}
+
+func TestHealthLoop_KickPublishesAtOnceAndIsSpaced(t *testing.T) {
+	svc, pub := newHealthTestService(t)
+	exec := &progressExecutor{}
+	svc.Executor = exec
+	heartbeat, health := 60, 60
+	device := agent.Device{
+		CommandHeartbeatSeconds:     &heartbeat,
+		HealthReportIntervalSeconds: &health,
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		svc.healthLoop(ctx, nil, device, &mockNotifierWrapper{}, hclog.NewNullLogger())
+		close(done)
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	kickInstalled := func() bool {
+		svc.healthMu.Lock()
+		defer svc.healthMu.Unlock()
+		return svc.healthKick != nil
+	}
+	for !kickInstalled() && time.Now().Before(deadline) {
+		// sleep-ok: poll until the loop has installed its kick channel
+		time.Sleep(10 * time.Millisecond)
+	}
+	// A command finishing kicks a publish well before the 60 s tick.
+	svc.spool.countDrop(dropReasonCorrupt)
+	svc.kickHealth()
+	for pub.count() == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond) // sleep-ok: poll interval inside a bounded wait
+	}
+	if pub.count() != 1 {
+		t.Fatalf("published %d times after a kick, want 1", pub.count())
+	}
+	// A second kick inside the spacing window is absorbed.
+	svc.spool.countDrop(dropReasonCorrupt)
+	svc.kickHealth()
+	// sleep-ok: gives an unwanted publish time to happen before asserting it did not
+	time.Sleep(200 * time.Millisecond)
+	if pub.count() != 1 {
+		t.Errorf("a kick within %s of the last publish published again", kickMinSpacing)
+	}
+	cancel()
+	<-done
 }

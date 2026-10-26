@@ -374,7 +374,8 @@ func TestAssertTwin_ReadsADottedPathAndFailsOnAMismatch(t *testing.T) {
 		func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"device_id":"dev-7","reported":{"agent_version":"v1.6.1",` +
-				`"health":{"journal":{"pending":3,"degraded":true},"spool":{"dropped_attempts":1}}}}`))
+				`"health":{"journal":{"pending":3,"degraded":true},"spool":{"dropped_attempts":1}},` +
+				`"commands":{"in_flight":[{"post_id":"hold-1","elapsed_seconds":12}]}}}`))
 		},
 	)
 	code, out := run(t, "hermetic-assert-twin.ps1",
@@ -394,5 +395,38 @@ func TestAssertTwin_ReadsADottedPathAndFailsOnAMismatch(t *testing.T) {
 		"EXPECTED=0", "TIMEOUT_SECONDS=3")
 	if code == 0 || !strings.Contains(out, "is '3', expected '0'") {
 		t.Errorf("a mismatch passed (exit %d):\n%s", code, out)
+	}
+	// Array index, Count and a numeric floor (sc-129689).
+	for _, tc := range []struct{ prop, expected, min string }{
+		{"commands.in_flight[0].post_id", "hold-1", ""},
+		{"commands.in_flight.Count", "1", ""},
+		{"commands.in_flight[0].elapsed_seconds", "", "10"},
+	} {
+		env := []string{
+			"ENGINE_URL=" + s.srv.URL,
+			"DEVICE_ID=dev-7",
+			"PROPERTY=" + tc.prop,
+			"TIMEOUT_SECONDS=5",
+		}
+		if tc.min != "" {
+			env = append(env, "MIN="+tc.min)
+		} else {
+			env = append(env, "EXPECTED="+tc.expected)
+		}
+		if code, out := run(t, "hermetic-assert-twin.ps1", env...); code != 0 {
+			t.Errorf("%s: exit %d\n%s", tc.prop, code, out)
+		}
+	}
+	code, out = run(t, "hermetic-assert-twin.ps1",
+		"ENGINE_URL="+s.srv.URL, "DEVICE_ID=dev-7",
+		"PROPERTY=commands.in_flight[0].elapsed_seconds", "MIN=60", "TIMEOUT_SECONDS=3")
+	if code == 0 {
+		t.Errorf("a value below MIN passed:\n%s", out)
+	}
+	code, _ = run(t, "hermetic-assert-twin.ps1",
+		"ENGINE_URL="+s.srv.URL, "DEVICE_ID=dev-7",
+		"PROPERTY=commands.in_flight[3].post_id", "EXPECTED=x", "TIMEOUT_SECONDS=3")
+	if code == 0 {
+		t.Error("an out-of-range index passed")
 	}
 }

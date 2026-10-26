@@ -120,6 +120,9 @@ func runConfig(params *configContext) error {
 	response.Configuration.HealthReportIntervalSeconds = tuningPtr(
 		params.Tuning.HealthReportIntervalSeconds,
 	)
+	response.Configuration.CommandHeartbeatSeconds = tuningPtr(
+		params.Tuning.CommandHeartbeatSeconds,
+	)
 
 	// Create the data directory. EnsureSecureDir (rather than a bare MkdirAll)
 	// is what locks it to 0700 on Linux/macOS on both a fresh install and a
