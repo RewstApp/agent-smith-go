@@ -755,10 +755,20 @@ func (svc *serviceContext) runCycle(
 	// Publish the fleet-health object for this connection and keep it current
 	// while the cycle lasts (sc-129687). Cycle-scoped and off the connection
 	// path: a slow twin publish can delay a health update, never a command.
+	// The cycle joins it on the way out - after cancelling it - so a report in
+	// flight when the service stops cannot write the health file or log after
+	// the service has closed its log (the test suite's temp-dir cleanup caught
+	// exactly that on Windows and macOS).
+	healthDone := make(chan struct{})
 	utils.SafeGo(logger, func() {
-		svc.reportHealth(client, notifier, logger, true)
+		defer close(healthDone)
+		svc.reportHealth(cycleCtx, client, notifier, logger, true)
 		svc.healthLoop(cycleCtx, client, device, notifier, logger)
 	}, "scope", "fleet_health")
+	defer func() {
+		cycleCancel()
+		<-healthDone
+	}()
 
 	// Replay commands a previous run accepted from the broker but never
 	// finished - the acknowledged-but-unexecuted window this journal closes.

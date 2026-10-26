@@ -94,11 +94,18 @@ func (svc *serviceContext) connectionError() string {
 // failed publish is a Warn: the twin is informational and must never affect
 // command handling.
 func (svc *serviceContext) reportHealth(
+	ctx context.Context,
 	client mqtt.Client,
 	notifier plugins.NotifierWrapper,
 	logger hclog.Logger,
 	force bool,
 ) bool {
+	// A cycle that is already ending publishes nothing: the service may be
+	// closing its log and the twin is about to be republished by the next
+	// connection anyway.
+	if ctx.Err() != nil {
+		return false
+	}
 	health := svc.healthSnapshot(notifier)
 	svc.healthMu.Lock()
 	unchanged := !force && health.Same(svc.lastHealth)
@@ -114,7 +121,12 @@ func (svc *serviceContext) reportHealth(
 	}
 	props := mqtt.ReportedProperties{AgentVersion: version.Version, Health: health}
 	if err := publish(client, props); err != nil {
-		logger.Warn("Failed to update device twin fleet health", "error", err)
+		if ctx.Err() == nil {
+			logger.Warn("Failed to update device twin fleet health", "error", err)
+		}
+		return false
+	}
+	if ctx.Err() != nil {
 		return false
 	}
 	svc.healthMu.Lock()
@@ -149,7 +161,7 @@ func (svc *serviceContext) healthLoop(
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			svc.reportHealth(client, notifier, logger, false)
+			svc.reportHealth(ctx, client, notifier, logger, false)
 		}
 	}
 }

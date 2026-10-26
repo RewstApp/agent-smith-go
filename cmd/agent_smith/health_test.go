@@ -153,14 +153,14 @@ func TestReportHealth_PublishesOnChangeAndWritesTheFile(t *testing.T) {
 	logger := hclog.NewNullLogger()
 	dataDir := svc.healthDir()
 
-	if !svc.reportHealth(nil, notifier, logger, true) {
+	if !svc.reportHealth(context.Background(), nil, notifier, logger, true) {
 		t.Fatal("the forced first report was not published")
 	}
-	if svc.reportHealth(nil, notifier, logger, false) {
+	if svc.reportHealth(context.Background(), nil, notifier, logger, false) {
 		t.Error("an unchanged health was published again")
 	}
 	svc.spool.countDrop(dropReasonExpired)
-	if !svc.reportHealth(nil, notifier, logger, false) {
+	if !svc.reportHealth(context.Background(), nil, notifier, logger, false) {
 		t.Error("a changed counter was not published")
 	}
 	if pub.count() != 2 {
@@ -189,11 +189,11 @@ func TestReportHealth_PublishFailureIsNotFatalAndIsRetriedNextTime(t *testing.T)
 	svc, pub := newHealthTestService(t)
 	pub.err = errors.New("broker went away")
 	logger := hclog.NewNullLogger()
-	if svc.reportHealth(nil, &mockNotifierWrapper{}, logger, true) {
+	if svc.reportHealth(context.Background(), nil, &mockNotifierWrapper{}, logger, true) {
 		t.Fatal("a failed publish was reported as published")
 	}
 	pub.err = nil
-	if !svc.reportHealth(nil, &mockNotifierWrapper{}, logger, false) {
+	if !svc.reportHealth(context.Background(), nil, &mockNotifierWrapper{}, logger, false) {
 		t.Error(
 			"after a failed publish the next unchanged check should publish, since nothing was recorded",
 		)
@@ -242,5 +242,20 @@ func TestHealthSame_IgnoresTheClockFields(t *testing.T) {
 	c := &mqtt.Health{Plugins: []mqtt.PluginHealth{{Name: "x"}}}
 	if a.Same(c) || c.Same(nil) {
 		t.Error("plugin and nil differences were not detected")
+	}
+}
+
+func TestReportHealth_DoesNothingOnceTheCycleEnded(t *testing.T) {
+	svc, pub := newHealthTestService(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if svc.reportHealth(ctx, nil, &mockNotifierWrapper{}, hclog.NewNullLogger(), true) {
+		t.Fatal("a cancelled cycle published")
+	}
+	if pub.count() != 0 {
+		t.Errorf("published %d times after cancellation", pub.count())
+	}
+	if _, err := os.Stat(filepath.Join(svc.healthDir(), healthFileName)); !os.IsNotExist(err) {
+		t.Error("the health file was written after cancellation")
 	}
 }
