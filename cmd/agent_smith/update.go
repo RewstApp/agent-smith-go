@@ -225,6 +225,9 @@ func runUpdate(params *updateContext) {
 	if params.Tuning.HealthReportIntervalSeconds != tuningFlagUnset {
 		device.HealthReportIntervalSeconds = tuningPtr(params.Tuning.HealthReportIntervalSeconds)
 	}
+	if params.Tuning.CommandHeartbeatSeconds != tuningFlagUnset {
+		device.CommandHeartbeatSeconds = tuningPtr(params.Tuning.CommandHeartbeatSeconds)
+	}
 
 	// Save the updated configuration file
 	configBytes, err := json.MarshalIndent(device, "", "  ")

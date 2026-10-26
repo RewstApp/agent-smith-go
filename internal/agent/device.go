@@ -104,6 +104,11 @@ type Device struct {
 	// to DefaultHealthReportInterval. The health is always published once per
 	// connection cycle regardless.
 	HealthReportIntervalSeconds *int `json:"health_report_interval_seconds,omitempty"`
+	// CommandHeartbeatSeconds optionally overrides how often a running
+	// command's progress (elapsed time, output size, last line) is published to
+	// the device twin (sc-129689). When unset (or non-positive) the agent falls
+	// back to DefaultCommandHeartbeatInterval.
+	CommandHeartbeatSeconds *int `json:"command_heartbeat_seconds,omitempty"`
 }
 
 const (
@@ -246,6 +251,20 @@ func (d Device) ResolvedMaxOutputBytes() int {
 // a burst of spool drops or plugin restarts becomes at most one twin update a
 // minute, which is well inside IoT Hub's twin update allowance.
 const DefaultHealthReportInterval = 60 * time.Second
+
+// DefaultCommandHeartbeatInterval is how often a running command's progress is
+// published to the device twin when CommandHeartbeatSeconds is unset.
+const DefaultCommandHeartbeatInterval = 30 * time.Second
+
+// ResolvedCommandHeartbeatInterval returns the command progress heartbeat
+// interval, honoring the per-device override when set to a positive value and
+// falling back to DefaultCommandHeartbeatInterval otherwise. Always positive.
+func (d Device) ResolvedCommandHeartbeatInterval() time.Duration {
+	if d.CommandHeartbeatSeconds != nil && *d.CommandHeartbeatSeconds > 0 {
+		return time.Duration(*d.CommandHeartbeatSeconds) * time.Second
+	}
+	return DefaultCommandHeartbeatInterval
+}
 
 // ResolvedHealthReportInterval returns the fleet-health re-publish interval,
 // honoring the per-device override when set to a positive value and falling

@@ -1015,7 +1015,10 @@ func (svc *serviceContext) processInboundGuarded(
 ) {
 	defer utils.Recover(logger, "worker", workerId, "scope", "processMessage")
 	svc.executing.Add(1)
-	defer svc.executing.Add(-1)
+	defer func() {
+		svc.executing.Add(-1)
+		svc.kickHealth()
+	}()
 	svc.processInbound(item, ctx, device, logger, notifier)
 }
 

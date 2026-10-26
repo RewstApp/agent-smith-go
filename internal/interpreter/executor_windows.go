@@ -46,6 +46,11 @@ func (e *defaultExecutor) ExecutionStats() ExecutionStats {
 	return executionStatsOf(e.PowershellExecutor, e.PwshExecutor)
 }
 
+// InFlight implements ProgressReporter across the shells it delegates to.
+func (e *defaultExecutor) InFlight() []Progress {
+	return inFlightOf(e.PowershellExecutor, e.PwshExecutor)
+}
+
 func (e *defaultExecutor) Execute(
 	ctx context.Context,
 	message *Message,

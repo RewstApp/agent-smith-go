@@ -318,7 +318,7 @@ jobs:
           device_id: hermetic-${{ github.run_id }}-${{ matrix.os }}-journal
           service: ${{ matrix.service }}
           log_file: ${{ matrix.log_file }}
-          extra_args: --command-timeout-seconds 120 --health-report-interval-seconds 5
+          extra_args: --command-timeout-seconds 120 --health-report-interval-seconds 5 --command-heartbeat-seconds 5
       - name: Baseline "Duplicate delivery acknowledged" before the lost PUBACK
         id: bl_dup
         uses: ./.github/actions/capture-log-count
@@ -435,6 +435,30 @@ jobs:
           max_attempts: 60
           interval_seconds: 2
 
+      - name: Assert the twin heartbeat names the running command (sc-129689)
+        timeout-minutes: 5
+        uses: ./.github/actions/it-script
+        with:
+          script: hermetic-assert-twin
+        env:
+          ENGINE_URL: ${{ steps.setup.outputs.engine_url }}
+          DEVICE_ID: ${{ steps.setup.outputs.device_id }}
+          PROPERTY: commands.in_flight[0].post_id
+          EXPECTED: "hold-1"
+          TIMEOUT_SECONDS: "60"
+
+      - name: Assert the heartbeat keeps counting while the command runs
+        timeout-minutes: 5
+        uses: ./.github/actions/it-script
+        with:
+          script: hermetic-assert-twin
+        env:
+          ENGINE_URL: ${{ steps.setup.outputs.engine_url }}
+          DEVICE_ID: ${{ steps.setup.outputs.device_id }}
+          PROPERTY: commands.in_flight[0].elapsed_seconds
+          MIN: "10"
+          TIMEOUT_SECONDS: "60"
+
       - name: Queue one more command than the journal holds
         timeout-minutes: 5
         uses: ./.github/actions/it-script
@@ -482,6 +506,18 @@ jobs:
           RECORDED: "true"
           MIN_ATTEMPTS: "1"
           TIMEOUT_SECONDS: "240"
+
+      - name: Assert the heartbeat list is empty once nothing is running
+        timeout-minutes: 5
+        uses: ./.github/actions/it-script
+        with:
+          script: hermetic-assert-twin
+        env:
+          ENGINE_URL: ${{ steps.setup.outputs.engine_url }}
+          DEVICE_ID: ${{ steps.setup.outputs.device_id }}
+          PROPERTY: commands.in_flight.Count
+          EXPECTED: "0"
+          TIMEOUT_SECONDS: "60"
 
       - name: Enqueue one command after the backlog drained
         timeout-minutes: 5

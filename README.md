@@ -42,6 +42,7 @@ rewst_agent_config.win.exe --org-id YOUR_ORG_ID --config-url CONFIG_URL --config
 - `--no-auto-updates`: Disable auto updates
 - `--mqtt-qos`: MQTT subscription QoS level (`0` = at-most-once, `1` = at-least-once). Defaults to `1` when omitted. Azure IoT Hub does not support QoS 2.
 - `--health-report-interval-seconds`: how often a changed fleet-health object is re-published to the device twin (default `60`; see "Fleet Health in the Device Twin").
+- `--command-heartbeat-seconds`: how often a running command's progress is published to the device twin (default `30`; see "Progress heartbeats for running commands").
 
 Example with optional parameters:
 ```bash
@@ -1137,6 +1138,40 @@ PATCH per device and serves the merged result at
 is true while the journal is full and false again after it recovers, and
 `hermetic-postback-spool` asserts `health.spool.dropped_attempts` is 1 after
 the abandonment.
+
+#### Progress heartbeats for running commands
+
+A command used to report nothing until it finished or hit its
+`command_timeout_seconds` (30 minutes by default): for a long installer or a
+script that had hung, Rewst and the operator saw the same silence and could
+not tell "still working, output growing" from "stuck". Since sc-129689 the
+twin also carries the running commands:
+
+```json
+"commands": {
+  "in_flight": [
+    { "post_id": "019a...", "started_at": "2026-10-26T12:00:00Z", "elapsed_seconds": 95,
+      "stdout_bytes": 20480, "stderr_bytes": 0, "last_output_line": "Installing package 12 of 40" }
+  ]
+}
+```
+
+The byte counts are bytes *produced*, so they keep growing past the
+`max_output_bytes` ceiling; `last_output_line` is the last non-empty line of
+standard output (standard error when stdout has none), truncated to 256
+bytes. While anything is running the object is republished every
+`command_heartbeat_seconds` (default 30; `--command-heartbeat-seconds`) by
+the same reporter that publishes the fleet health - one PATCH carries both,
+so the two can never race - and the publish after the last command finishes
+sends an empty list to clear it, at once rather than at the next tick (a
+finished command wakes the reporter; wake-ups are spaced at least a second
+apart so a stream of short commands cannot flood the twin). The health
+counters keep their own, longer coalescing interval inside that loop.
+`--diagnostic`'s "Fleet Health" section lists the commands in flight at the
+last report. **Proven end to end by** `hermetic-journal`, which asserts
+through the stub broker's twin that the 45 s `hold` command is named in
+`commands.in_flight[0]`, that its `elapsed_seconds` reaches 10 while it runs,
+and that the list is empty once nothing is running.
 
 ### Verified, Version-Gated Auto-Updates
 

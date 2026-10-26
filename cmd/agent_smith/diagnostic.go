@@ -590,7 +590,7 @@ func runAllChecksWith(
 // journal, so what the machine says can be compared with what Rewst sees.
 func runFleetHealth(target agentInfo) {
 	printSection("Fleet Health")
-	health, err := readHealthFile(target.OrgId)
+	props, err := readHealthFile(target.OrgId)
 	if err != nil {
 		printResult(
 			false,
@@ -601,6 +601,7 @@ func runFleetHealth(target agentInfo) {
 		)
 		return
 	}
+	health := props.Health
 	printResult(
 		true,
 		fmt.Sprintf(
@@ -629,6 +630,20 @@ func runFleetHealth(target agentInfo) {
 	for _, p := range health.Plugins {
 		fmt.Printf("    plugin %s: restarts=%d notify_failures=%d notify_timeouts=%d\n",
 			p.Name, p.Restarts, p.NotifyFailures, p.NotifyTimeouts)
+	}
+	if props.Commands == nil || len(props.Commands.InFlight) == 0 {
+		fmt.Println("    in flight: none at the last report")
+	}
+	for _, c := range inFlightOrNone(props.Commands) {
+		fmt.Printf(
+			"    in flight %s: started %s, elapsed %ds, stdout %d B, stderr %d B, last line %q\n",
+			c.PostID,
+			c.StartedAt,
+			c.ElapsedSeconds,
+			c.StdoutBytes,
+			c.StderrBytes,
+			c.LastOutputLine,
+		)
 	}
 }
 
