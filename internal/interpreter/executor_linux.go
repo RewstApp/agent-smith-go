@@ -41,6 +41,11 @@ func (e *defaultExecutor) AlwaysPostback() bool {
 	return true
 }
 
+// ExecutionStats implements StatsReporter by summing the shells it delegates to.
+func (e *defaultExecutor) ExecutionStats() ExecutionStats {
+	return executionStatsOf(e.BashExecutor, e.PwshExecutor)
+}
+
 func (e *defaultExecutor) Execute(
 	ctx context.Context,
 	message *Message,

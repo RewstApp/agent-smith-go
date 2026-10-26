@@ -65,7 +65,7 @@ jobs:
           device_id: hermetic-${{ github.run_id }}-${{ matrix.os }}-postback-spool
           service: ${{ matrix.service }}
           log_file: ${{ matrix.log_file }}
-          extra_args: --postback-max-attempts 2 --postback-base-retry-backoff-seconds 1
+          extra_args: --postback-max-attempts 2 --postback-base-retry-backoff-seconds 1 --health-report-interval-seconds 5
       - name: Script the engine to answer spool-1 with three 5xx before accepting it
         uses: ./.github/actions/it-script
         with:
@@ -254,6 +254,18 @@ jobs:
           TIMEOUT_SECONDS: "30"
 
 
+      - name: Assert the twin counts the abandoned result (sc-129687)
+        timeout-minutes: 5
+        uses: ./.github/actions/it-script
+        with:
+          script: hermetic-assert-twin
+        env:
+          ENGINE_URL: ${{ steps.setup.outputs.engine_url }}
+          DEVICE_ID: ${{ steps.setup.outputs.device_id }}
+          PROPERTY: health.spool.dropped_attempts
+          EXPECTED: "1"
+          TIMEOUT_SECONDS: "60"
+
       - name: Dump agent log on failure
         if: failure()
         uses: ./.github/actions/dump-agent-log
@@ -306,7 +318,7 @@ jobs:
           device_id: hermetic-${{ github.run_id }}-${{ matrix.os }}-journal
           service: ${{ matrix.service }}
           log_file: ${{ matrix.log_file }}
-          extra_args: --command-timeout-seconds 120
+          extra_args: --command-timeout-seconds 120 --health-report-interval-seconds 5
       - name: Baseline "Duplicate delivery acknowledged" before the lost PUBACK
         id: bl_dup
         uses: ./.github/actions/capture-log-count
@@ -447,6 +459,18 @@ jobs:
           BASELINE: "0"
           TIMEOUT_SECONDS: "120"
 
+      - name: Assert the twin reports the journal degraded (sc-129687)
+        timeout-minutes: 5
+        uses: ./.github/actions/it-script
+        with:
+          script: hermetic-assert-twin
+        env:
+          ENGINE_URL: ${{ steps.setup.outputs.engine_url }}
+          DEVICE_ID: ${{ steps.setup.outputs.device_id }}
+          PROPERTY: health.journal.degraded
+          EXPECTED: "True"
+          TIMEOUT_SECONDS: "60"
+
       - name: Assert every queued command still executed and was reported, the in-memory one included
         timeout-minutes: 6
         uses: ./.github/actions/it-script
@@ -495,6 +519,18 @@ jobs:
           MIN_ATTEMPTS: "1"
           TIMEOUT_SECONDS: "120"
 
+
+      - name: Assert the twin reports the journal durable again and the backlog drained
+        timeout-minutes: 5
+        uses: ./.github/actions/it-script
+        with:
+          script: hermetic-assert-twin
+        env:
+          ENGINE_URL: ${{ steps.setup.outputs.engine_url }}
+          DEVICE_ID: ${{ steps.setup.outputs.device_id }}
+          PROPERTY: health.journal.degraded
+          EXPECTED: "False"
+          TIMEOUT_SECONDS: "60"
 
       - name: Dump agent log on failure
         if: failure()

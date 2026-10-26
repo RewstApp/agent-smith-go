@@ -522,3 +522,49 @@ func TestFixture_ScriptedPostbackResponses(t *testing.T) {
 		t.Errorf("unscripted post_id snapshot %+v", u)
 	}
 }
+
+// A reported-properties PATCH is kept per device and served back merged, so
+// the harness can read what the agent reports about itself (sc-129687).
+func TestFixture_TwinReportedPropertiesAreStoredAndMerged(t *testing.T) {
+	brokerAddr, engineURL, _, clientTLS, h := startFixture(t)
+	c := connectDevice(t, brokerAddr, "dev-8", clientTLS, func(mqtt.Client, mqtt.Message) {})
+	defer c.Disconnect(100)
+	topic := "$iothub/twin/PATCH/properties/reported/?$rid=1"
+	for _, payload := range []string{
+		`{"agent_version":"v1.6.1","health":{"journal":{"pending":1}}}`,
+		`{"health":{"journal":{"pending":0,"degraded":false}}}`,
+	} {
+		tok := c.Publish(topic, 0, false, payload)
+		if !tok.WaitTimeout(5*time.Second) || tok.Error() != nil {
+			t.Fatalf("publish: %v", tok.Error())
+		}
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for len(h.twin("dev-8")) < 2 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond) // sleep-ok: poll interval
+	}
+	hc := &http.Client{Timeout: 5 * time.Second}
+	resp, err := hc.Get(engineURL + "/_control/devices/dev-8/twin")
+	if err != nil || resp.StatusCode != 200 {
+		t.Fatalf("twin: %v %v", err, resp)
+	}
+	var got struct {
+		Reported map[string]json.RawMessage `json:"reported"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatal(err)
+	}
+	if string(got.Reported["agent_version"]) != `"v1.6.1"` {
+		t.Errorf("agent_version lost by the merge: %s", got.Reported["agent_version"])
+	}
+	if !strings.Contains(string(got.Reported["health"]), `"degraded":false`) {
+		t.Errorf("the later PATCH did not replace health: %s", got.Reported["health"])
+	}
+	enqueue := bytes.NewBufferString(`{"device_id":"dev-8","post_id":"p8","commands":"echo"}`)
+	if _, err := hc.Post(engineURL+"/_control/enqueue", "application/json", enqueue); err != nil {
+		t.Fatal(err)
+	}
+	if s := h.snapshot("dev-8"); s.Queued+s.Inflight+s.Delivered != 1 {
+		t.Errorf("the twin store disturbed message delivery: %+v", s)
+	}
+}

@@ -98,6 +98,12 @@ type Device struct {
 	// deadline (see utils.SasTokenRenewMargin), so a longer lifetime means less
 	// frequent — but always graceful — reconnects.
 	SasTokenLifetimeHours *int `json:"sas_token_lifetime_hours,omitempty"`
+	// HealthReportIntervalSeconds optionally overrides how often the agent
+	// re-publishes its fleet-health object to the device twin when something in
+	// it changed (sc-129687). When unset (or non-positive) the agent falls back
+	// to DefaultHealthReportInterval. The health is always published once per
+	// connection cycle regardless.
+	HealthReportIntervalSeconds *int `json:"health_report_interval_seconds,omitempty"`
 }
 
 const (
@@ -233,6 +239,22 @@ func (d Device) ResolvedMaxOutputBytes() int {
 		return *d.MaxOutputBytes
 	}
 	return DefaultMaxOutputBytes
+}
+
+// DefaultHealthReportInterval is how often a changed fleet-health object is
+// re-published to the device twin when HealthReportIntervalSeconds is unset:
+// a burst of spool drops or plugin restarts becomes at most one twin update a
+// minute, which is well inside IoT Hub's twin update allowance.
+const DefaultHealthReportInterval = 60 * time.Second
+
+// ResolvedHealthReportInterval returns the fleet-health re-publish interval,
+// honoring the per-device override when set to a positive value and falling
+// back to DefaultHealthReportInterval otherwise. It is always positive.
+func (d Device) ResolvedHealthReportInterval() time.Duration {
+	if d.HealthReportIntervalSeconds != nil && *d.HealthReportIntervalSeconds > 0 {
+		return time.Duration(*d.HealthReportIntervalSeconds) * time.Second
+	}
+	return DefaultHealthReportInterval
 }
 
 // ResolvedLogMaxBytes returns the size at which the log file is rotated,

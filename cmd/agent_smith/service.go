@@ -196,6 +196,9 @@ func (svc *serviceContext) Execute(
 	// loss in that window discarded all of them with no redelivery. See
 	// commandJournal for why the acknowledgement cannot simply be held until
 	// execution finishes.
+	if svc.startedAt.IsZero() {
+		svc.startedAt = time.Now()
+	}
 	svc.journal = newCommandJournal(
 		filepath.Join(agent.GetDataDirectory(svc.OrgId), "command_journal"),
 		resolveJournalMaxPending(),
@@ -612,6 +615,8 @@ func (svc *serviceContext) runCycle(
 	opts.SetAutoAckDisabled(true)
 	opts.OnConnectionLost = func(client mqtt.Client, err error) {
 		logger.Error("Connection lost", "error", err)
+		svc.recordConnectionError(err)
+		svc.connectedAt.Store(0)
 		lost <- struct{}{}
 	}
 
@@ -738,6 +743,7 @@ func (svc *serviceContext) runCycle(
 
 	logger.Info("Subscribed to messages", "topic", topic, "qos", qos)
 	_ = notifier.Notify("AgentStatus:Online") // Best effort notification
+	svc.connectedAt.Store(time.Now().UnixNano())
 
 	// Now that connectivity is restored, re-attempt any postbacks that were
 	// spooled to disk when the engine was previously unreachable. Run it on a
@@ -745,6 +751,14 @@ func (svc *serviceContext) runCycle(
 	utils.SafeGo(logger, func() {
 		svc.flushPostbackSpool(cycleCtx, device, logger, notifier)
 	}, "scope", "postback_spool_flush")
+
+	// Publish the fleet-health object for this connection and keep it current
+	// while the cycle lasts (sc-129687). Cycle-scoped and off the connection
+	// path: a slow twin publish can delay a health update, never a command.
+	utils.SafeGo(logger, func() {
+		svc.reportHealth(client, notifier, logger, true)
+		svc.healthLoop(cycleCtx, client, device, notifier, logger)
+	}, "scope", "fleet_health")
 
 	// Replay commands a previous run accepted from the broker but never
 	// finished - the acknowledged-but-unexecuted window this journal closes.
@@ -1176,6 +1190,7 @@ func (svc *serviceContext) replayJournal(
 		return
 	}
 
+	svc.journalExpired.Add(int64(len(expired)))
 	for _, e := range expired {
 		logger.Error(
 			"Journaled command expired before it could run; discarding it",
@@ -1197,6 +1212,7 @@ func (svc *serviceContext) replayJournal(
 		if !e.StartedAt.IsZero() {
 			svc.reportInterrupted(ctx, e, device, logger, notifier)
 			interrupted++
+			svc.journalInterrupted.Add(1)
 			continue
 		}
 		logger.Info(

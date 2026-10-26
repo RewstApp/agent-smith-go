@@ -152,6 +152,8 @@ selectLoop:
 				runAllChecksWith(ctx, params, target, dialer)
 			case "7":
 				runHostInfo(ctx, params, target)
+			case "8":
+				runFleetHealth(target)
 			case "0", "q", "quit", "exit":
 				if hasMultiple {
 					continue selectLoop
@@ -190,6 +192,7 @@ func printMenu(target agentInfo, hasMultiple bool) {
 	fmt.Println("  │  [5] View live log data                          │")
 	fmt.Println("  │  [6] Run all checks                              │")
 	fmt.Println("  │  [7] Show host information                       │")
+	fmt.Println("  │  [8] Show fleet health (as reported to the twin) │")
 	fmt.Println(lastOption)
 	fmt.Println("  └──────────────────────────────────────────────────┘")
 	fmt.Printf("  Current agent: %s\n", target.OrgId)
@@ -577,6 +580,56 @@ func runAllChecksWith(
 	runConnectivityTestWith(target, dialer)
 	runTempDirTest(target)
 	runHostInfo(ctx, params, target)
+	runFleetHealth(target)
+}
+
+// ── Check 8: Fleet health ──
+
+// runFleetHealth prints the fleet-health object the service last published to
+// the device twin (sc-129687), read from the file it leaves beside the
+// journal, so what the machine says can be compared with what Rewst sees.
+func runFleetHealth(target agentInfo) {
+	printSection("Fleet Health")
+	health, err := readHealthFile(target.OrgId)
+	if err != nil {
+		printResult(
+			false,
+			fmt.Sprintf(
+				"No fleet-health report yet (%v); the service writes one after it subscribes",
+				err,
+			),
+		)
+		return
+	}
+	printResult(
+		true,
+		fmt.Sprintf(
+			"Reported at %s, up %ds, connected at %q, last connection error %q",
+			health.ReportedAt,
+			health.UptimeSeconds,
+			health.ConnectedAt,
+			health.LastConnectionError,
+		),
+	)
+	fmt.Printf(
+		"    journal: pending=%d degraded=%t expired_total=%d interrupted_total=%d\n",
+		health.Journal.Pending,
+		health.Journal.Degraded,
+		health.Journal.ExpiredTotal,
+		health.Journal.InterruptedTotal,
+	)
+	fmt.Printf("    spool: entries=%d dropped expired=%d capacity=%d attempts=%d corrupt=%d\n",
+		health.Spool.Entries, health.Spool.DroppedExpired, health.Spool.DroppedCapacity,
+		health.Spool.DroppedAttempts, health.Spool.DroppedCorrupt)
+	fmt.Printf("    commands: executing=%d completed_total=%d timed_out_total=%d\n",
+		health.Commands.Executing, health.Commands.CompletedTotal, health.Commands.TimedOutTotal)
+	if len(health.Plugins) == 0 {
+		fmt.Println("    plugins: none")
+	}
+	for _, p := range health.Plugins {
+		fmt.Printf("    plugin %s: restarts=%d notify_failures=%d notify_timeouts=%d\n",
+			p.Name, p.Restarts, p.NotifyFailures, p.NotifyTimeouts)
+	}
 }
 
 // ── Check 7: Host information ──

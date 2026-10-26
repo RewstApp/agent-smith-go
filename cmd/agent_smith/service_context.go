@@ -11,6 +11,7 @@ import (
 
 	"github.com/RewstApp/agent-smith-go/internal/agent"
 	"github.com/RewstApp/agent-smith-go/internal/interpreter"
+	"github.com/RewstApp/agent-smith-go/internal/mqtt"
 )
 
 type serviceContext struct {
@@ -85,6 +86,23 @@ type serviceContext struct {
 	// journalDegraded is true while the command journal is failing writes, so
 	// the failure and the eventual recovery are each reported exactly once.
 	journalDegraded atomic.Bool
+	// Fleet health (sc-129687): startedAt anchors uptime; connectedAt (unix
+	// nanoseconds, 0 while disconnected) and lastConnectionError describe the
+	// connection; journalExpired and journalInterrupted count what the journal
+	// replay reported; lastHealth is the object last published so the reporter
+	// publishes on change; publishHealth is the twin publish, injectable for
+	// tests.
+	startedAt           time.Time
+	connectedAt         atomic.Int64
+	connErrMu           sync.Mutex
+	lastConnectionError string
+	journalExpired      atomic.Int64
+	journalInterrupted  atomic.Int64
+	healthMu            sync.Mutex
+	lastHealth          *mqtt.Health
+	publishHealth       func(client mqtt.Client, props mqtt.ReportedProperties) error
+	// healthFileDir overrides where the health file is written; tests only.
+	healthFileDir string
 }
 
 // newServiceFlagSet builds the flag set for service mode, binding flags to the

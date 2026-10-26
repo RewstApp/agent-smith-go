@@ -113,6 +113,77 @@ func NewClientOptions(device agent.Device) (*mqtt.ClientOptions, error) {
 
 type ReportedProperties struct {
 	AgentVersion string `json:"agent_version"`
+	// Health is the agent's own view of its state (sc-129687): the command
+	// backlog and the journal's condition, the postback spool and what it has
+	// dropped, the notification plugins' supervision counters, the command
+	// outcomes and the connection. Every counter is since process start. nil
+	// omits the object, which is what the first publish of an older agent sent.
+	Health *Health `json:"health,omitempty"`
+}
+
+// Health is the device twin's fleet-health object. The JSON shape is a
+// documented contract (README "Fleet Health in the Device Twin"); a field is
+// added, never renamed.
+type Health struct {
+	ReportedAt          string         `json:"reported_at"`
+	UptimeSeconds       int64          `json:"uptime_seconds"`
+	ConnectedAt         string         `json:"connected_at,omitempty"`
+	LastConnectionError string         `json:"last_connection_error"`
+	Journal             JournalHealth  `json:"journal"`
+	Spool               SpoolHealth    `json:"spool"`
+	Plugins             []PluginHealth `json:"plugins"`
+	Commands            CommandHealth  `json:"commands"`
+}
+
+type JournalHealth struct {
+	Pending          int   `json:"pending"`
+	Degraded         bool  `json:"degraded"`
+	ExpiredTotal     int64 `json:"expired_total"`
+	InterruptedTotal int64 `json:"interrupted_total"`
+}
+
+type SpoolHealth struct {
+	Entries         int   `json:"entries"`
+	DroppedExpired  int64 `json:"dropped_expired"`
+	DroppedCapacity int64 `json:"dropped_capacity"`
+	DroppedAttempts int64 `json:"dropped_attempts"`
+	DroppedCorrupt  int64 `json:"dropped_corrupt"`
+}
+
+type PluginHealth struct {
+	Name           string `json:"name"`
+	Restarts       int64  `json:"restarts"`
+	NotifyFailures int64  `json:"notify_failures"`
+	NotifyTimeouts int64  `json:"notify_timeouts"`
+}
+
+type CommandHealth struct {
+	Executing      int32 `json:"executing"`
+	CompletedTotal int64 `json:"completed_total"`
+	TimedOutTotal  int64 `json:"timed_out_total"`
+}
+
+// Same reports whether two health objects describe the same state once the
+// fields that change on every tick (the report time and the uptime) are set
+// aside, so the reporter publishes on change and not on the clock.
+func (h *Health) Same(other *Health) bool {
+	if h == nil || other == nil {
+		return h == other
+	}
+	if h.ConnectedAt != other.ConnectedAt ||
+		h.LastConnectionError != other.LastConnectionError ||
+		h.Journal != other.Journal ||
+		h.Spool != other.Spool ||
+		h.Commands != other.Commands ||
+		len(h.Plugins) != len(other.Plugins) {
+		return false
+	}
+	for i := range h.Plugins {
+		if h.Plugins[i] != other.Plugins[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // UpdateReportedProperties publishes reported properties to the Azure IoT Hub
