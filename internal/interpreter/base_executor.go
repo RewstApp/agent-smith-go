@@ -54,9 +54,11 @@ type baseExecutor struct {
 	BuildExecuteCommandArgs  BuildExecuteCommandArgsFunc
 	BuildExecuteFileArgs     BuildExecuteFileArgsFunc
 	FS                       utils.FileSystem
-	// completed and timedOut count outcomes for ExecutionStats (sc-129687);
-	// inFlight tracks the commands being run, for ProgressReporter (sc-129689).
+	// completed, timedOut and failed count outcomes for ExecutionStats
+	// (sc-129687); inFlight tracks the commands being run, for
+	// ProgressReporter (sc-129689).
 	completed atomic.Int64
+	failed    atomic.Int64
 	timedOut  atomic.Int64
 	inFlight  inFlightSet
 
@@ -124,14 +126,14 @@ func (e *baseExecutor) Execute(
 	// Parse the commands
 	commandBytes, err := base64.StdEncoding.DecodeString(message.Commands)
 	if err != nil {
-		return errorResultBytes(logger, err)
+		return e.failedResult(logger, err)
 	}
 
 	// Decode using UTF16LE
 	decoder := unicode.UTF16(unicode.LittleEndian, unicode.IgnoreBOM).NewDecoder()
 	commands, _, err := transform.String(decoder, string(commandBytes))
 	if err != nil {
-		return errorResultBytes(logger, err)
+		return e.failedResult(logger, err)
 	}
 
 	// Log diagnostics in debug mode. The shell version and whoami values are
@@ -154,12 +156,12 @@ func (e *baseExecutor) Execute(
 	scriptsDir := agent.GetScriptsDirectory(device.RewstOrgId)
 	err = e.FS.EnsureSecureDir(scriptsDir)
 	if err != nil {
-		return errorResultBytes(logger, err)
+		return e.failedResult(logger, err)
 	}
 
 	tempfile, err := os.CreateTemp(scriptsDir, scriptTempPattern)
 	if err != nil {
-		return errorResultBytes(logger, err)
+		return e.failedResult(logger, err)
 	}
 
 	// Single cleanup: close the handle (Windows blocks Remove on open files), then
@@ -191,14 +193,14 @@ func (e *baseExecutor) Execute(
 		_, err = tempfile.Write(utf8BOM)
 		if err != nil {
 			logger.Error("Failed to write BOM", "error", err)
-			return errorResultBytes(logger, err)
+			return e.failedResult(logger, err)
 		}
 	}
 
 	_, err = tempfile.WriteString(commands)
 	if err != nil {
 		logger.Error("Failed to write command file", "error", err)
-		return errorResultBytes(logger, err)
+		return e.failedResult(logger, err)
 	}
 
 	logger.Info("Command saved to", "message_id", message.PostId, "path", tempfile.Name())
@@ -207,7 +209,7 @@ func (e *baseExecutor) Execute(
 	// The deferred cleanup will still run Remove; its Close becomes a no-op (ErrClosed).
 	if err := tempfile.Close(); err != nil {
 		logger.Error("Failed to close temp file handle", "error", err)
-		return errorResultBytes(logger, err)
+		return e.failedResult(logger, err)
 	}
 
 	// Re-read the file by path and compare it against what was just written.
@@ -224,7 +226,7 @@ func (e *baseExecutor) Execute(
 			"path", tempfile.Name(),
 			"error", err,
 		)
-		return errorResultBytes(logger, err)
+		return e.failedResult(logger, err)
 	}
 
 	// Capture stdout and stderr through independently bounded writers so a script
@@ -305,6 +307,26 @@ func (e *baseExecutor) Execute(
 		)
 	}
 
+	// Classify the outcome once, here, where the result is chosen: a command
+	// that ran to its own end counts as completed whatever its exit code; one
+	// killed at the per-command deadline as timed out; one that never started
+	// (the shell is missing, the script could not be written) as failed; and
+	// one cut short by the service stopping or the cycle ending counts as
+	// nothing - the journal replay reports it to the engine as interrupted, so
+	// counting it here would make the twin say it completed.
+	switch {
+	case err == nil:
+		e.completed.Add(1)
+	case errors.Is(execCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil:
+		e.timedOut.Add(1)
+	case ctx.Err() != nil:
+		// Interrupted: counted by nothing, see above.
+	case cmd.ProcessState == nil:
+		e.failed.Add(1)
+	default:
+		e.completed.Add(1)
+	}
+
 	if err != nil {
 		// Distinguish a command killed by the per-command timeout from a normal
 		// non-zero exit. execCtx exceeding its deadline while the parent ctx is
@@ -330,10 +352,8 @@ func (e *baseExecutor) Execute(
 			if stderrBuf.Len() > 0 {
 				errMsg = fmt.Sprintf("%s: %s", errMsg, stderrBuf.String())
 			}
-			e.timedOut.Add(1)
 			return timeoutResultBytes(logger, errMsg, stdoutBuf.String(), trunc)
 		}
-		e.completed.Add(1)
 
 		logger.Error("Command failed", "error", err)
 		logger.Debug(
@@ -346,7 +366,6 @@ func (e *baseExecutor) Execute(
 		return resultBytes(logger, stderrBuf.String(), stdoutBuf.String(), trunc)
 	}
 
-	e.completed.Add(1)
 	logger.Info(
 		"Command completed",
 		"message_id",
@@ -369,9 +388,20 @@ func (e *baseExecutor) AlwaysPostback() bool {
 	return false
 }
 
+// failedResult counts a command that could not be run at all and returns the
+// error result for it.
+func (e *baseExecutor) failedResult(logger hclog.Logger, err error) []byte {
+	e.failed.Add(1)
+	return errorResultBytes(logger, err)
+}
+
 // ExecutionStats implements StatsReporter.
 func (e *baseExecutor) ExecutionStats() ExecutionStats {
-	return ExecutionStats{Completed: e.completed.Load(), TimedOut: e.timedOut.Load()}
+	return ExecutionStats{
+		Completed: e.completed.Load(),
+		TimedOut:  e.timedOut.Load(),
+		Failed:    e.failed.Load(),
+	}
 }
 
 // InFlight implements ProgressReporter.

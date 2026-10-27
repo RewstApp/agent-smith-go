@@ -449,3 +449,55 @@ func TestBaseExecutor_Diagnostics_ConcurrentCachedOnce(t *testing.T) {
 		)
 	}
 }
+
+// TestBaseExecutor_ExecutionStats_ClassifiesEveryOutcome pins what the twin's
+// command counters mean: a command that ran to its own end is completed
+// whatever its exit code, one killed at the deadline is timed out, one that
+// could not be run at all is failed, and one interrupted by the service
+// stopping is counted by none of them.
+func TestBaseExecutor_ExecutionStats_ClassifiesEveryOutcome(t *testing.T) {
+	executor := newBashExecutor()
+	logger := hclog.NewNullLogger()
+	timeout := 1
+	device := agent.Device{RewstOrgId: "test-org-stats", CommandTimeoutSeconds: &timeout}
+	run := func(ctx context.Context, e *baseExecutor, commands string) {
+		msg := Message{PostId: "test:stats", Commands: encodeCommand(commands)}
+		e.Execute(ctx, &msg, device, logger, nil, nil)
+	}
+	want := func(step string, completed, timedOut, failed int64) {
+		t.Helper()
+		got := executor.ExecutionStats()
+		if got != (ExecutionStats{Completed: completed, TimedOut: timedOut, Failed: failed}) {
+			t.Errorf("%s: stats %+v, want completed=%d timed_out=%d failed=%d",
+				step, got, completed, timedOut, failed)
+		}
+	}
+
+	run(context.Background(), executor, "exit 0")
+	want("exit 0", 1, 0, 0)
+	run(context.Background(), executor, "exit 3")
+	want("non-zero exit still completed", 2, 0, 0)
+	run(context.Background(), executor, "sleep 30")
+	want("timed out", 2, 1, 0)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(200 * time.Millisecond) // sleep-ok: lets the command start before the stop
+		cancel()
+	}()
+	run(ctx, executor, "sleep 5")
+	want("interrupted by the service stopping counts as nothing", 2, 1, 0)
+
+	// A command that never ran: the message does not decode.
+	msg := Message{PostId: "test:stats", Commands: "not base64!"}
+	executor.Execute(context.Background(), &msg, device, logger, nil, nil)
+	want("undecodable command failed", 2, 1, 1)
+
+	// A shell that cannot be started.
+	missing := newBashExecutor()
+	missing.Shell = filepath.Join(t.TempDir(), "no-such-shell")
+	run(context.Background(), missing, "exit 0")
+	if got := missing.ExecutionStats(); got != (ExecutionStats{Failed: 1}) {
+		t.Errorf("missing shell: stats %+v, want failed=1 only", got)
+	}
+}

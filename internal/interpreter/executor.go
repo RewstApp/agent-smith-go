@@ -27,9 +27,14 @@ type BuildExecuteFileArgsFunc = func(path string) []string
 // process start, for the device twin's fleet-health object (sc-129687).
 type ExecutionStats struct {
 	// Completed counts commands that ran to their own end, whatever their exit
-	// code; TimedOut counts those killed at the per-command deadline.
+	// code; TimedOut counts those killed at the per-command deadline; Failed
+	// counts those that could not be run at all (the script could not be
+	// written or verified, the shell could not be started). A command cut
+	// short by the service stopping is counted by none of them: the journal
+	// replay reports it as interrupted.
 	Completed int64
 	TimedOut  int64
+	Failed    int64
 }
 
 // StatsReporter is implemented by executors that count their outcomes. The
@@ -47,6 +52,7 @@ func executionStatsOf(executors ...Executor) ExecutionStats {
 			s := r.ExecutionStats()
 			total.Completed += s.Completed
 			total.TimedOut += s.TimedOut
+			total.Failed += s.Failed
 		}
 	}
 	return total

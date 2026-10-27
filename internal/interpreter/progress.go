@@ -1,14 +1,14 @@
 package interpreter
 
 import (
-	"bytes"
 	"sort"
 	"sync"
 	"time"
 )
 
 // lastOutputLineMax bounds the last output line a heartbeat carries, so a
-// script that prints one enormous line cannot bloat the device twin.
+// script that prints one enormous line cannot bloat the device twin. The
+// bounded writer tracks the tail as it is written (see trackLinesLocked).
 const lastOutputLineMax = 256
 
 // Progress is a running command's state for the device twin's heartbeat
@@ -89,29 +89,10 @@ func (s *inFlightSet) snapshot() []Progress {
 // lastOutputLine is the last non-empty line of stdout, or of stderr when stdout
 // has none, truncated to lastOutputLineMax bytes.
 func lastOutputLine(stdout, stderr *boundedWriter) string {
-	if line := stdout.lastLine(); line != "" {
+	if line := stdout.LastLine(); line != "" {
 		return line
 	}
-	return stderr.lastLine()
-}
-
-// lastLine returns the writer's last non-empty line, truncated to
-// lastOutputLineMax. It scans only the tail it needs under the lock.
-func (w *boundedWriter) lastLine() string {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	kept := bytes.TrimRight(w.kept, "\r\n")
-	if len(kept) == 0 {
-		return ""
-	}
-	if i := bytes.LastIndexByte(kept, '\n'); i >= 0 {
-		kept = kept[i+1:]
-	}
-	kept = bytes.TrimRight(kept, "\r")
-	if len(kept) > lastOutputLineMax {
-		kept = kept[len(kept)-lastOutputLineMax:]
-	}
-	return string(kept)
+	return stderr.LastLine()
 }
 
 // inFlightOf gathers the running commands of every executor that reports them.

@@ -119,8 +119,10 @@ type ReportedProperties struct {
 	// outcomes and the connection. Every counter is since process start. nil
 	// omits the object, which is what the first publish of an older agent sent.
 	Health *Health `json:"health,omitempty"`
-	// Commands carries the running commands' progress heartbeats (sc-129689);
-	// nil omits the object, an empty InFlight clears a previous report.
+	// Commands carries the running commands' progress heartbeats (sc-129689).
+	// The service sends it on every publish, empty when nothing runs, so the
+	// list a previous process left behind is always overwritten; nil (an older
+	// agent, or a health file written by one) omits the object.
 	Commands *CommandsProgress `json:"commands,omitempty"`
 }
 
@@ -180,6 +182,11 @@ type CommandHealth struct {
 	Executing      int32 `json:"executing"`
 	CompletedTotal int64 `json:"completed_total"`
 	TimedOutTotal  int64 `json:"timed_out_total"`
+	// FailedTotal counts commands that could not be run at all (script not
+	// written or verified, shell not started); a command interrupted by a
+	// service stop is counted by none of these - the journal replay reports
+	// it as interrupted.
+	FailedTotal int64 `json:"failed_total"`
 }
 
 // Same reports whether two health objects describe the same state once the

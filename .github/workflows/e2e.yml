@@ -435,6 +435,18 @@ jobs:
           max_attempts: 60
           interval_seconds: 2
 
+      - name: Queue one more command than the journal holds
+        timeout-minutes: 5
+        uses: ./.github/actions/it-script
+        with:
+          script: hermetic-enqueue-commands
+        env:
+          ENGINE_URL: ${{ steps.setup.outputs.engine_url }}
+          DEVICE_ID: ${{ steps.setup.outputs.device_id }}
+          SCENARIO: quick
+          COUNT: 20
+          POST_ID_PREFIX: fill
+
       - name: Assert the twin heartbeat names the running command (sc-129689)
         timeout-minutes: 5
         uses: ./.github/actions/it-script
@@ -458,18 +470,6 @@ jobs:
           PROPERTY: commands.in_flight[0].elapsed_seconds
           MIN: "10"
           TIMEOUT_SECONDS: "60"
-
-      - name: Queue one more command than the journal holds
-        timeout-minutes: 5
-        uses: ./.github/actions/it-script
-        with:
-          script: hermetic-enqueue-commands
-        env:
-          ENGINE_URL: ${{ steps.setup.outputs.engine_url }}
-          DEVICE_ID: ${{ steps.setup.outputs.device_id }}
-          SCENARIO: quick
-          COUNT: 20
-          POST_ID_PREFIX: fill
 
       - name: Assert the journal reported itself full exactly once
         timeout-minutes: 5

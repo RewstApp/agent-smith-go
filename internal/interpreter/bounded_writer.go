@@ -1,6 +1,10 @@
 package interpreter
 
-import "sync"
+import (
+	"bytes"
+	"sync"
+	"unicode/utf8"
+)
 
 // boundedWriter is an io.Writer that keeps at most limit bytes of what is written
 // to it, discards the rest, and counts every byte the writer produced either way.
@@ -24,6 +28,13 @@ type boundedWriter struct {
 	limit    int
 	kept     []byte
 	produced int64
+	// lastLine and partial track the last non-empty line for the progress
+	// heartbeat (sc-129689) from every byte written, kept or not, so the line
+	// keeps moving after the ceiling is reached. partial is the line in
+	// progress since the last terminator; lastLine the last one completed.
+	// Both are bounded to the lastOutputLineMax-byte tail.
+	lastLine []byte
+	partial  []byte
 }
 
 // newBoundedWriter returns a writer that keeps at most limit bytes. Callers pass
@@ -42,6 +53,7 @@ func (w *boundedWriter) Write(p []byte) (int, error) {
 	// ErrShortWrite and the command sees its output fail.
 	n := len(p)
 	w.produced += int64(n)
+	w.trackLinesLocked(p)
 
 	if remaining := w.limit - len(w.kept); remaining > 0 {
 		if len(p) > remaining {
@@ -72,6 +84,56 @@ func (w *boundedWriter) appendLocked(p []byte) {
 		w.kept = next
 	}
 	w.kept = append(w.kept, p...)
+}
+
+// trackLinesLocked folds p into the last-line tail. Both '\n' and '\r' end a
+// line, so a progress bar redrawn with bare carriage returns reports its
+// latest frame, and CRLF endings leave no stray '\r'; an empty line never
+// replaces the last non-empty one. The work is linear in the write and keeps
+// at most lastOutputLineMax bytes, however long the line.
+func (w *boundedWriter) trackLinesLocked(p []byte) {
+	for len(p) > 0 {
+		i := bytes.IndexAny(p, "\r\n")
+		if i < 0 {
+			w.partial = appendTail(w.partial, p)
+			return
+		}
+		w.partial = appendTail(w.partial, p[:i])
+		if len(w.partial) > 0 {
+			w.lastLine, w.partial = w.partial, w.lastLine[:0]
+		}
+		p = p[i+1:]
+	}
+}
+
+// appendTail appends p to tail, keeping only the last lastOutputLineMax bytes.
+func appendTail(tail, p []byte) []byte {
+	if len(p) >= lastOutputLineMax {
+		return append(tail[:0], p[len(p)-lastOutputLineMax:]...)
+	}
+	tail = append(tail, p...)
+	if excess := len(tail) - lastOutputLineMax; excess > 0 {
+		n := copy(tail, tail[excess:])
+		tail = tail[:n]
+	}
+	return tail
+}
+
+// LastLine returns the last non-empty line written so far - the line in
+// progress when the output does not end in a terminator - truncated to its
+// last lastOutputLineMax bytes and cut on a rune boundary, so a long line of
+// multi-byte characters never starts with a continuation byte.
+func (w *boundedWriter) LastLine() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	line := w.partial
+	if len(line) == 0 {
+		line = w.lastLine
+	}
+	for len(line) > 0 && !utf8.RuneStart(line[0]) {
+		line = line[1:]
+	}
+	return string(line)
 }
 
 // String returns the bytes that were kept, which for output below the ceiling is
