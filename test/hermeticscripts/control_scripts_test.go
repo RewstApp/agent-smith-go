@@ -524,5 +524,19 @@ Write-Output "    commands: executing=0 completed_total=2 timed_out_total=1 fail
 		"PATTERNS=Fleet Health\ninterrupted_total=1")
 	if code == 0 || !strings.Contains(out, "interrupted_total=1") {
 		t.Errorf("a missing line passed: exit %d\n%s", code, out)
+	
+	}
+	// No pattern at all, and a menu that does not end in exit, are refused
+	// before the agent runs.
+	for _, env := range [][]string{
+		{"MENU=8,0", "PATTERNS="},
+		{"MENU=8,0", "PATTERNS=\n\n"},
+		{"MENU=8", "PATTERNS=Fleet Health"},
+	} {
+		code, out := run(t, "hermetic-assert-diagnostic.ps1",
+			append([]string{"AGENT_BINARY=" + fake, "ORG_ID=org-1"}, env...)...)
+		if code == 0 {
+			t.Errorf("%v passed:\n%s", env, out)
+		}
 	}
 }
