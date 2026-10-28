@@ -513,9 +513,14 @@ Write-Output "    commands: executing=0 completed_total=2 timed_out_total=1 fail
 	if err := os.WriteFile(fake, []byte(script), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	code, out := run(t, "hermetic-assert-diagnostic.ps1",
-		"AGENT_BINARY="+fake, "ORG_ID=org-1", "MENU=8,0",
-		"PATTERNS=Fleet Health\ncompleted_total=2 timed_out_total=1\nmenu: 8,0\nargs: --org-id org-1 --diagnostic")
+	code, out := run(
+		t,
+		"hermetic-assert-diagnostic.ps1",
+		"AGENT_BINARY="+fake,
+		"ORG_ID=org-1",
+		"MENU=8,0",
+		"PATTERNS=Fleet Health\ncompleted_total=2 timed_out_total=1\nmenu: 8,0\nargs: --org-id org-1 --diagnostic",
+	)
 	if code != 0 {
 		t.Fatalf("exit %d\n%s", code, out)
 	}
@@ -524,7 +529,6 @@ Write-Output "    commands: executing=0 completed_total=2 timed_out_total=1 fail
 		"PATTERNS=Fleet Health\ninterrupted_total=1")
 	if code == 0 || !strings.Contains(out, "interrupted_total=1") {
 		t.Errorf("a missing line passed: exit %d\n%s", code, out)
-	
 	}
 	// No pattern at all, and a menu that does not end in exit, are refused
 	// before the agent runs.
