@@ -47,6 +47,11 @@
     "windows": "\"Write-Output ok\"",
     "_note": "A command that finishes at once and does not post its own result (unlike the Windows `success` form), so the engine sees exactly the agent's postback - the sc-126322 spool, lost-PUBACK and journal-full scenarios count those."
   },
+  "progress": {
+    "unix": "\"yes x | head -c 2097152; echo; echo progress: past the ceiling; sleep 300\"",
+    "windows": "\"$chunk = [string]::new([char]120, 1048576); 1..2 | ForEach-Object { $chunk }; Write-Output 'progress: past the ceiling'; Start-Sleep -Seconds 300\"",
+    "_note": "2 MiB to stdout - twice the 1 MiB ceiling the fleet-health scenario installs with - then one last line and a long sleep (sc-131253): the heartbeat must report that line, and stdout bytes past the ceiling, while the command still runs, and the service is restarted under it to prove the twin's in-flight list does not keep a phantom entry. Quote- and backslash-free apart from the single quotes, like the verbose scripts."
+  },
   "hold": {
     "unix": "\"sleep 45\"",
     "windows": "\"Start-Sleep -Seconds 45\"",

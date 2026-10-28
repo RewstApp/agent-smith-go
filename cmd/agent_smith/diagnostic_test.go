@@ -639,6 +639,60 @@ func TestRunDiagnosticWith_MenuExit(t *testing.T) {
 	runDiag(t, newDiagnosticParams("org-1"), "0\n", &mockTLSDialer{}, &mockLogFileOpener{})
 }
 
+// Input that ends without an exit choice exits rather than looping on the menu
+// forever (sc-131253): a piped "8" with no trailing "0", and nothing at all.
+func TestRunDiagnosticWith_EndOfInputExits(t *testing.T) {
+	for _, input := range []string{"8\n", "8", ""} {
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			runDiag(t, newDiagnosticParams("org-1"), input, &mockTLSDialer{}, &mockLogFileOpener{})
+		}()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("input %q: the menu did not exit at end of input", input)
+		}
+	}
+}
+
+// With several agents, end of input backs out of the menu and then exits the
+// agent selection too.
+func TestRunDiagnosticFull_EndOfInputExitsWithSeveralAgents(t *testing.T) {
+	root := t.TempDir()
+	for _, orgId := range []string{
+		"43fb08b0-92cf-462a-924d-0b6be7a43a48",
+		"53f5b9c3-a168-4fa4-b155-e2dca1d1d40a",
+	} {
+		orgDir := filepath.Join(root, orgId)
+		_ = os.MkdirAll(orgDir, 0o755)
+		data, _ := json.Marshal(agent.Device{DeviceId: orgId, RewstOrgId: orgId})
+		_ = os.WriteFile(filepath.Join(orgDir, "config.json"), data, 0o644)
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		runDiagnosticFull(
+			ctx,
+			&diagnosticContext{
+				ServiceManager: &mockServiceManager{openService: &mockService{isActive: true}},
+			},
+			strings.NewReader("1\n8\n"),
+			&mockTLSDialer{},
+			&mockLogFileOpener{},
+			root,
+			nil,
+		)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the diagnostic did not exit at end of input with several agents")
+	}
+}
+
 func TestRunDiagnosticWith_MenuQuit(t *testing.T) {
 	runDiag(t, newDiagnosticParams("org-1"), "q\n", &mockTLSDialer{}, &mockLogFileOpener{})
 }

@@ -25,8 +25,23 @@ runs:
     - name: Stop service (Windows)
       if: runner.os == 'Windows'
       shell: pwsh
+      env:
+        SERVICE: ${{ inputs.service }}
       run: |
-        sc.exe stop "${{ inputs.service }}"
+        # sc.exe stop returns once the SCM has accepted the request, while
+        # the agent is still draining (it kills a running command first), so a
+        # start right after it fails with 1056. Wait, bounded, for Stopped -
+        # what systemctl stop already does on Linux and the bootout wait does
+        # on macOS (sc-131253).
+        sc.exe stop $env:SERVICE | Out-Host
+        $deadline = (Get-Date).AddSeconds(240)
+        while ((Get-Date) -lt $deadline) {
+          $status = (Get-Service -Name $env:SERVICE -ErrorAction Stop).Status
+          if ($status -eq 'Stopped') { exit 0 }
+          Start-Sleep -Seconds 1
+        }
+        Write-Output "::error::$($env:SERVICE) was still $status 240 s after the stop request"
+        exit 1
 
     - name: Stop service (macOS)
       if: runner.os == 'macOS'
@@ -45,6 +60,21 @@ runs:
         # start-service bootstraps it again.
         if [ "$UNLOAD" = "true" ]; then
           sudo launchctl bootout "system/${{ inputs.service }}" || true
+          # bootout returns while launchd is still stopping the daemon (the
+          # agent drains its workers first), and a bootstrap issued in that
+          # window fails, leaving nothing to start (sc-131253: a start 60 ms
+          # after the stop exited 3). Wait, bounded, until it is unloaded.
+          # Only print's "Could not find service" (exit 113) means unloaded;
+          # any other failure (sudo, launchd) is not taken as one.
+          rc=0
+          for _ in $(seq 1 60); do
+            rc=0
+            sudo launchctl print "system/${{ inputs.service }}" >/dev/null 2>&1 || rc=$?
+            if [ "$rc" -eq 113 ]; then exit 0; fi
+            sleep 1
+          done
+          echo "::error::${{ inputs.service }} was not unloaded 60 s after bootout (last launchctl print exit $rc)"
+          exit 1
         else
           sudo launchctl stop "system/${{ inputs.service }}" || true
         fi

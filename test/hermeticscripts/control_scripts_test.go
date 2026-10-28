@@ -498,3 +498,49 @@ func TestAssertConfigValue_ReadsTheConfigBesideTheLog(t *testing.T) {
 		t.Errorf("a mismatch passed: exit %d\n%s", code, out)
 	}
 }
+
+// hermetic-assert-diagnostic pipes the menu choices into the agent's
+// --diagnostic mode and checks its output (sc-131253). A PowerShell script
+// stands in for the agent binary so the test runs on every platform.
+func TestAssertDiagnostic_PipesTheMenuAndChecksTheOutput(t *testing.T) {
+	fake := filepath.Join(t.TempDir(), "fake-agent.ps1")
+	script := `$in = @($input)
+Write-Output "args: $($args -join ' ')"
+Write-Output "menu: $($in -join ',')"
+Write-Output "  Fleet Health"
+Write-Output "    commands: executing=0 completed_total=2 timed_out_total=1 failed_total=0"
+`
+	if err := os.WriteFile(fake, []byte(script), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	code, out := run(
+		t,
+		"hermetic-assert-diagnostic.ps1",
+		"AGENT_BINARY="+fake,
+		"ORG_ID=org-1",
+		"MENU=8,0",
+		"PATTERNS=Fleet Health\ncompleted_total=2 timed_out_total=1\nmenu: 8,0\nargs: --org-id org-1 --diagnostic",
+	)
+	if code != 0 {
+		t.Fatalf("exit %d\n%s", code, out)
+	}
+	code, out = run(t, "hermetic-assert-diagnostic.ps1",
+		"AGENT_BINARY="+fake, "ORG_ID=org-1", "MENU=8,0",
+		"PATTERNS=Fleet Health\ninterrupted_total=1")
+	if code == 0 || !strings.Contains(out, "interrupted_total=1") {
+		t.Errorf("a missing line passed: exit %d\n%s", code, out)
+	}
+	// No pattern at all, and a menu that does not end in exit, are refused
+	// before the agent runs.
+	for _, env := range [][]string{
+		{"MENU=8,0", "PATTERNS="},
+		{"MENU=8,0", "PATTERNS=\n\n"},
+		{"MENU=8", "PATTERNS=Fleet Health"},
+	} {
+		code, out := run(t, "hermetic-assert-diagnostic.ps1",
+			append([]string{"AGENT_BINARY=" + fake, "ORG_ID=org-1"}, env...)...)
+		if code == 0 {
+			t.Errorf("%v passed:\n%s", env, out)
+		}
+	}
+}

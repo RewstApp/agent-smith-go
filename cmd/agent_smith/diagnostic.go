@@ -198,9 +198,18 @@ func printMenu(target agentInfo, hasMultiple bool) {
 	fmt.Printf("  Current agent: %s\n", target.OrgId)
 }
 
+// prompt reads one choice. When the input has ended (choices piped in have run
+// out, or the terminal closed) it answers "0", which exits at every level of
+// the menu, rather than returning an empty string forever: an empty choice is
+// "Invalid option", and the menu would print itself in a loop until killed
+// (sc-131253: the e2e suite pipes the menu choices in).
 func prompt(reader *bufio.Reader, message string) string {
 	fmt.Print(message)
-	input, _ := reader.ReadString('\n')
+	input, err := reader.ReadString('\n')
+	if err != nil && strings.TrimSpace(input) == "" {
+		fmt.Println()
+		return "0"
+	}
 	return strings.TrimSpace(input)
 }
 
