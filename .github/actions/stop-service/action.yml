@@ -45,6 +45,16 @@ runs:
         # start-service bootstraps it again.
         if [ "$UNLOAD" = "true" ]; then
           sudo launchctl bootout "system/${{ inputs.service }}" || true
+          # bootout returns while launchd is still stopping the daemon (the
+          # agent drains its workers first), and a bootstrap issued in that
+          # window fails, leaving nothing to start (sc-131253: a start 60 ms
+          # after the stop exited 3). Wait, bounded, until it is unloaded.
+          for _ in $(seq 1 60); do
+            sudo launchctl print "system/${{ inputs.service }}" >/dev/null 2>&1 || exit 0
+            sleep 1
+          done
+          echo "::error::${{ inputs.service }} was still loaded 60 s after bootout"
+          exit 1
         else
           sudo launchctl stop "system/${{ inputs.service }}" || true
         fi

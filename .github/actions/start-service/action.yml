@@ -33,6 +33,14 @@ runs:
         # action): bootstrap is a no-op failure when it is already loaded,
         # which is the state after kill-service, so the error is ignored.
         sudo launchctl bootstrap system "/Library/LaunchDaemons/${{ inputs.service }}.plist" 2>/dev/null || true
+        # Confirm it is loaded before starting it: a bootstrap racing the end
+        # of a bootout fails silently, and `start` on an unloaded label exits
+        # 3. Retry the bootstrap, bounded, until launchd knows the daemon.
+        for _ in $(seq 1 30); do
+          sudo launchctl print "system/${{ inputs.service }}" >/dev/null 2>&1 && break
+          sleep 1
+          sudo launchctl bootstrap system "/Library/LaunchDaemons/${{ inputs.service }}.plist" 2>/dev/null || true
+        done
         # Bare label, not a "system/<label>" service target: launchctl's `start`
         # is a legacy subcommand that resolves a label in the current domain, so
         # the target form is taken as a literal label and exits 3 (ESRCH). This
