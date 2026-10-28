@@ -202,18 +202,12 @@ func (svc *serviceContext) reportHealth(
 			return false
 		}
 	}
-	publish := svc.publishHealth
-	if publish == nil {
-		publish = func(client mqtt.Client, props mqtt.ReportedProperties) error {
-			return mqtt.UpdateReportedProperties(client, props, utils.MqttPublishTimeout)
-		}
-	}
 	props := mqtt.ReportedProperties{
 		AgentVersion: version.Version,
 		Health:       health,
 		Commands:     progress,
 	}
-	err := publish(client, props)
+	err := svc.publishReported(client, props, healthReportRID)
 	svc.healthMu.Lock()
 	svc.lastAttemptAt = time.Now()
 	svc.publishFailed = err != nil

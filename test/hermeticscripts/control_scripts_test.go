@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -428,5 +429,72 @@ func TestAssertTwin_ReadsADottedPathAndFailsOnAMismatch(t *testing.T) {
 		"PROPERTY=commands.in_flight[3].post_id", "EXPECTED=x", "TIMEOUT_SECONDS=3")
 	if code == 0 {
 		t.Error("an out-of-range index passed")
+	}
+}
+
+// The sc-129688 helpers: hermetic-set-desired posts the desired properties to
+// the fixture, hermetic-assert-config-value reads the agent's config file next
+// to its log.
+func TestSetDesired_PostsTheJSONObjectToTheDeviceControl(t *testing.T) {
+	var mu sync.Mutex
+	var gotPath, gotBody, gotType string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		gotPath, gotBody, gotType = r.URL.Path, string(body), r.Header.Get("Content-Type")
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"device_id":"dev-9","version":3,"desired":{"worker_count":-1}}`))
+	}))
+	t.Cleanup(srv.Close)
+	code, out := run(t, "hermetic-set-desired.ps1",
+		"ENGINE_URL="+srv.URL, "DEVICE_ID=dev-9", `DESIRED={"worker_count": -1}`)
+	if code != 0 {
+		t.Fatalf("exit %d\n%s", code, out)
+	}
+	mu.Lock()
+	path, posted, contentType := gotPath, gotBody, gotType
+	mu.Unlock()
+	if path != "/_control/devices/dev-9/desired" ||
+		!strings.HasPrefix(contentType, "application/json") {
+		t.Errorf("posted to %s as %s", path, contentType)
+	}
+	var body map[string]any
+	if err := json.Unmarshal([]byte(posted), &body); err != nil ||
+		body["worker_count"] != float64(-1) {
+		t.Errorf("body %q: %v", posted, err)
+	}
+	if !strings.Contains(out, "version 3") {
+		t.Errorf("output does not name the version: %s", out)
+	}
+	code, out = run(t, "hermetic-set-desired.ps1",
+		"ENGINE_URL="+srv.URL, "DEVICE_ID=dev-9", "DESIRED=not json")
+	if code == 0 {
+		t.Errorf("a malformed DESIRED was posted:\n%s", out)
+	}
+}
+
+func TestAssertConfigValue_ReadsTheConfigBesideTheLog(t *testing.T) {
+	dir := t.TempDir()
+	logFile := filepath.Join(dir, "rewst_agent.log")
+	config := `{"command_timeout_seconds": 3, "logging_level": "debug", "disable_auto_updates": true}`
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(config), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for key, want := range map[string]string{
+		"command_timeout_seconds": "3",
+		"logging_level":           "debug",
+		"disable_auto_updates":    "True",
+	} {
+		code, out := run(t, "hermetic-assert-config-value.ps1",
+			"LOG_FILE="+logFile, "KEY="+key, "EXPECTED="+want)
+		if code != 0 {
+			t.Errorf("%s: exit %d\n%s", key, code, out)
+		}
+	}
+	code, out := run(t, "hermetic-assert-config-value.ps1",
+		"LOG_FILE="+logFile, "KEY=command_timeout_seconds", "EXPECTED=120")
+	if code == 0 || !strings.Contains(out, "expected '120'") {
+		t.Errorf("a mismatch passed: exit %d\n%s", code, out)
 	}
 }

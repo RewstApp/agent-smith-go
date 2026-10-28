@@ -199,9 +199,37 @@ func (t tuningFlags) validate() error {
 		{"command-heartbeat-seconds", t.CommandHeartbeatSeconds},
 	}
 	for _, c := range checks {
-		if t.provided[c.name] && c.value <= 0 {
-			return fmt.Errorf("invalid %s: must be a positive integer", c.name)
+		if !t.provided[c.name] {
+			continue
 		}
+		if err := validatePositiveSetting(c.name, c.value); err != nil {
+			return err
+		}
+	}
+	if t.provided["worker-count"] {
+		if err := validateWorkerCount(t.WorkerCount); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// validateWorkerCount bounds the worker count from above as well, whether it
+// arrives as --worker-count or as a device-twin desired property: every
+// worker is a goroutine started before the agent connects (agent.MaxWorkerCount).
+func validateWorkerCount(value int) error {
+	if value > agent.MaxWorkerCount {
+		return fmt.Errorf("invalid worker-count: must be at most %d", agent.MaxWorkerCount)
+	}
+	return nil
+}
+
+// validatePositiveSetting is the rule every integer tuning setting follows,
+// whether it arrives as a CLI flag or as a device-twin desired property
+// (sc-129688): it must be a positive integer.
+func validatePositiveSetting(name string, value int) error {
+	if value <= 0 {
+		return fmt.Errorf("invalid %s: must be a positive integer", name)
 	}
 	return nil
 }

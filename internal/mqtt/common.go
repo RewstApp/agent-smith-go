@@ -124,6 +124,11 @@ type ReportedProperties struct {
 	// list a previous process left behind is always overwritten; nil (an older
 	// agent, or a health file written by one) omits the object.
 	Commands *CommandsProgress `json:"commands,omitempty"`
+	// SettingsAck acknowledges the desired properties the agent was sent, one
+	// entry per key (sc-129688). IoT Hub merges reported properties key by
+	// key, so a PATCH carrying some keys leaves the others' acknowledgements
+	// in place; nil omits the object.
+	SettingsAck map[string]SettingAck `json:"settings_ack,omitempty"`
 }
 
 // CommandsProgress is the device twin's running-commands object.
@@ -227,6 +232,18 @@ func UpdateReportedProperties(
 	props ReportedProperties,
 	timeout time.Duration,
 ) error {
+	return UpdateReportedPropertiesRID(client, props, "1", timeout)
+}
+
+// UpdateReportedPropertiesRID is UpdateReportedProperties under the request id
+// rid, so the hub's answer on the twin response topic can be matched to this
+// publish (sc-129688).
+func UpdateReportedPropertiesRID(
+	client mqtt.Client,
+	props ReportedProperties,
+	rid string,
+	timeout time.Duration,
+) error {
 	payload, err := json.Marshal(props)
 	if err != nil {
 		return fmt.Errorf("failed to marshal reported properties: %w", err)
@@ -236,7 +253,7 @@ func UpdateReportedProperties(
 		timeout = utils.MqttPublishTimeout
 	}
 
-	topic := "$iothub/twin/PATCH/properties/reported/?$rid=1"
+	topic := "$iothub/twin/PATCH/properties/reported/?$rid=" + rid
 	token := client.Publish(topic, 0, false, payload)
 	if !token.WaitTimeout(timeout) {
 		return fmt.Errorf("timed out after %v waiting to publish reported properties", timeout)

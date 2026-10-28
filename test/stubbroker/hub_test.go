@@ -568,3 +568,109 @@ func TestFixture_TwinReportedPropertiesAreStoredAndMerged(t *testing.T) {
 		t.Errorf("the twin store disturbed message delivery: %+v", s)
 	}
 }
+
+// The fixture plays IoT Hub's twin for runtime settings (sc-129688): a GET is
+// answered with desired and reported, a desired change set through the
+// control surface is delivered as a PATCH with its $version, a reported PATCH
+// is answered with 204, and reported properties merge key by key.
+func TestFixture_TwinDesiredPropertiesGetPatchAndMerge(t *testing.T) {
+	brokerAddr, engineURL, _, clientTLS, h := startFixture(t)
+	c := connectDevice(t, brokerAddr, "dev-9", clientTLS, func(mqtt.Client, mqtt.Message) {})
+	defer c.Disconnect(100)
+	got := make(chan mqtt.Message, 16)
+	sub := c.SubscribeMultiple(map[string]byte{
+		"$iothub/twin/PATCH/properties/desired/#": 0,
+		"$iothub/twin/res/#":                      0,
+	}, func(_ mqtt.Client, m mqtt.Message) { got <- m })
+	if !sub.WaitTimeout(5*time.Second) || sub.Error() != nil {
+		t.Fatalf("twin subscribe: %v", sub.Error())
+	}
+	next := func() mqtt.Message {
+		t.Helper()
+		select {
+		case m := <-got:
+			return m
+		case <-time.After(5 * time.Second):
+			t.Fatal("no twin message")
+			return nil
+		}
+	}
+	hc := &http.Client{Timeout: 5 * time.Second}
+	setDesired := func(body string) {
+		t.Helper()
+		resp, err := hc.Post(
+			engineURL+"/_control/devices/dev-9/desired",
+			"application/json",
+			strings.NewReader(body),
+		)
+		if err != nil || resp.StatusCode != 200 {
+			t.Fatalf("desired: %v %v", err, resp)
+		}
+	}
+
+	// Set before the GET: the GET carries it.
+	setDesired(`{"command_timeout_seconds": 5}`)
+	if m := next(); !strings.HasPrefix(
+		m.Topic(),
+		"$iothub/twin/PATCH/properties/desired/?$version=1",
+	) ||
+		!strings.Contains(string(m.Payload()), `"command_timeout_seconds":5`) ||
+		!strings.Contains(string(m.Payload()), `"$version":1`) {
+		t.Fatalf("desired PATCH %s %s", m.Topic(), m.Payload())
+	}
+	if tok := c.Publish("$iothub/twin/GET/?$rid=1001", 0, false, []byte{}); !tok.WaitTimeout(
+		5 * time.Second,
+	) {
+		t.Fatal("GET publish")
+	}
+	m := next()
+	if m.Topic() != "$iothub/twin/res/200/?$rid=1001" {
+		t.Fatalf("GET answer topic %s", m.Topic())
+	}
+	var doc struct {
+		Desired map[string]json.RawMessage `json:"desired"`
+	}
+	if err := json.Unmarshal(m.Payload(), &doc); err != nil ||
+		string(
+			doc.Desired["$version"],
+		) != "1" || string(doc.Desired["command_timeout_seconds"]) != "5" {
+		t.Fatalf("GET answer %s: %v", m.Payload(), err)
+	}
+
+	// A reported PATCH is answered with 204, and per-key objects accumulate.
+	for _, payload := range []string{
+		`{"settings_ack":{"command_timeout_seconds":{"status":"applied"}}}`,
+		`{"settings_ack":{"worker_count":{"status":"rejected"}}}`,
+	} {
+		tok := c.Publish("$iothub/twin/PATCH/properties/reported/?$rid=1", 0, false, payload)
+		if !tok.WaitTimeout(5*time.Second) || tok.Error() != nil {
+			t.Fatalf("reported publish: %v", tok.Error())
+		}
+		if m := next(); !strings.HasPrefix(m.Topic(), "$iothub/twin/res/204/?$rid=1") {
+			t.Fatalf("reported PATCH answer %s", m.Topic())
+		}
+	}
+	ack := string(h.twin("dev-9")["settings_ack"])
+	if !strings.Contains(ack, "command_timeout_seconds") || !strings.Contains(ack, "worker_count") {
+		t.Errorf("reported properties did not merge key by key: %s", ack)
+	}
+
+	// null removes a desired key.
+	setDesired(`{"command_timeout_seconds": null, "logging_level": "debug"}`)
+	_ = next()
+	resp, err := hc.Get(engineURL + "/_control/devices/dev-9/desired")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var read struct {
+		Version int64                      `json:"version"`
+		Desired map[string]json.RawMessage `json:"desired"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&read); err != nil {
+		t.Fatal(err)
+	}
+	if read.Version != 2 || read.Desired["command_timeout_seconds"] != nil ||
+		string(read.Desired["logging_level"]) != `"debug"` {
+		t.Errorf("desired after removal: %+v", read)
+	}
+}

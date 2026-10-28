@@ -1302,3 +1302,46 @@ func TestAutoUpdateRunner_StopCancelsInFlightRun(t *testing.T) {
 		t.Fatal("runner did not stop in time")
 	}
 }
+
+// The update helper inherits the settings in effect when it is launched, not
+// the ones the updater was built with: a logging level or auto-update toggle
+// applied from the device twin must survive the update (sc-129688).
+func TestUpdate_WithLiveDeviceUsesTheSettingsInEffect(t *testing.T) {
+	built := Device{RewstOrgId: "org-live", LoggingLevel: "info"}
+	live := built
+	live.LoggingLevel = "debug"
+	live.DisableAutoUpdates = true
+	var got []string
+	u := NewUpdater(
+		hclog.NewNullLogger(),
+		&built,
+		"",
+		"",
+		func(_ string, args []string) error {
+			got = args
+			return nil
+		},
+		nil,
+		WithLiveDevice(func() Device { return live }),
+	)
+	if err := u.Update("/tmp/installer"); err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(got, " ")
+	if !strings.Contains(joined, "--logging-level debug") ||
+		!strings.Contains(joined, "--no-auto-updates") {
+		t.Errorf("update args %v do not carry the live settings", got)
+	}
+	// Without the option the device it was built with is used.
+	u = NewUpdater(hclog.NewNullLogger(), &built, "", "", func(_ string, args []string) error {
+		got = args
+		return nil
+	}, nil)
+	if err := u.Update("/tmp/installer"); err != nil {
+		t.Fatal(err)
+	}
+	if joined := strings.Join(got, " "); !strings.Contains(joined, "--logging-level info") ||
+		strings.Contains(joined, "--no-auto-updates") {
+		t.Errorf("update args %v", got)
+	}
+}

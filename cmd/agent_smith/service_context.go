@@ -12,6 +12,7 @@ import (
 	"github.com/RewstApp/agent-smith-go/internal/agent"
 	"github.com/RewstApp/agent-smith-go/internal/interpreter"
 	"github.com/RewstApp/agent-smith-go/internal/mqtt"
+	"github.com/hashicorp/go-hclog"
 )
 
 type serviceContext struct {
@@ -115,6 +116,17 @@ type serviceContext struct {
 	lastAttemptAt time.Time
 	publishFailed bool
 	lastFileIDs   []string
+	// Runtime settings from the device twin (sc-129688): settings is the
+	// device configuration in effect, which the twin can change after
+	// startup; rootLogger is the logger whose level logging_level sets;
+	// autoUpdate starts and stops the auto-updater; reconfigure ends the
+	// connection cycle so a new worker count takes effect; twinRequests
+	// numbers the twin GETs.
+	settings     liveSettings
+	rootLogger   hclog.Logger
+	autoUpdate   *autoUpdateControl
+	reconfigure  chan struct{}
+	twinRequests atomic.Int64
 }
 
 // newServiceFlagSet builds the flag set for service mode, binding flags to the

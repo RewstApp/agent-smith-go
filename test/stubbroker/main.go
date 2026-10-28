@@ -354,18 +354,45 @@ func serve(conn net.Conn, modeFile string) {
 				log.Printf("[%s] SUBSCRIBE -> withholding SUBACK", remote)
 				break
 			}
-			log.Printf("[%s] SUBSCRIBE -> SUBACK", remote)
-			// One granted-QoS byte per requested topic filter; the agent
-			// subscribes to exactly one, and QoS 1 is granted regardless of what
-			// it asked for (a broker may grant lower, never higher).
-			suback := []byte{packetID[0], packetID[1], 0x01}
+			filters, err := subscribeFilters(payload[2:])
+			if err != nil {
+				log.Printf("[%s] malformed SUBSCRIBE: %v", remote, err)
+				return
+			}
+			log.Printf("[%s] SUBSCRIBE %v -> SUBACK", remote, filters)
+			// One granted-QoS byte per requested topic filter: QoS 1 for the
+			// cloud-to-device topic regardless of what was asked (a broker may
+			// grant lower, never higher), QoS 0 for the twin topics, as IoT Hub
+			// grants them.
+			suback := []byte{packetID[0], packetID[1]}
+			c2d, twinDesired := false, false
+			for _, f := range filters {
+				switch {
+				case strings.HasPrefix(f, "devices/"):
+					suback = append(suback, 0x01)
+					c2d = true
+				case f == twinDesiredFilter:
+					suback = append(suback, 0x00)
+					twinDesired = true
+				case f == twinResponseFilter:
+					suback = append(suback, 0x00)
+					client.twinResponses = true
+				default:
+					suback = append(suback, 0x00)
+				}
+			}
 			if err := client.write(pktSuback, 0, suback); err != nil {
 				log.Printf("[%s] failed to send SUBACK: %v", remote, err)
 				return
 			}
 			// The device is now listening: deliver whatever it is owed.
 			if client.clientID != "" && broker != nil {
-				broker.subscribed(client.clientID, client)
+				if twinDesired {
+					broker.twinSubscribed(client.clientID, client)
+				}
+				if c2d {
+					broker.subscribed(client.clientID, client)
+				}
 			}
 
 		case pktUnsubscribe:
@@ -408,10 +435,35 @@ func serve(conn net.Conn, modeFile string) {
 				body = body[2:]
 			}
 			// A reported-properties PATCH is kept per device so the harness can
-			// read what the agent reports about itself (sc-129687).
-			if strings.HasPrefix(topic, "$iothub/twin/PATCH/properties/reported/") &&
-				client.clientID != "" && broker != nil {
-				broker.recordTwin(client.clientID, body)
+			// read what the agent reports about itself (sc-129687), and answered
+			// with 204 on the response topic when the device listens there, as
+			// IoT Hub does. A GET is answered with the whole twin (sc-129688).
+			if client.clientID != "" && broker != nil {
+				switch {
+				case strings.HasPrefix(topic, "$iothub/twin/PATCH/properties/reported/"):
+					version := broker.recordTwin(client.clientID, body)
+					if client.twinResponses {
+						respond := fmt.Sprintf(
+							"$iothub/twin/res/204/?$rid=%s&$version=%d",
+							requestID(topic), version,
+						)
+						if err := client.publish(respond, nil); err != nil {
+							log.Printf("[%s] failed to answer the twin PATCH: %v", remote, err)
+							return
+						}
+					}
+				case strings.HasPrefix(topic, "$iothub/twin/GET/"):
+					if client.twinResponses {
+						if err := broker.twinGet(
+							client.clientID,
+							client,
+							requestID(topic),
+						); err != nil {
+							log.Printf("[%s] failed to answer the twin GET: %v", remote, err)
+							return
+						}
+					}
+				}
 			}
 			if qos != 1 {
 				log.Printf("[%s] PUBLISH (qos %d) -> no response required", remote, qos)
@@ -520,4 +572,45 @@ func hostPort(host, listen string) string {
 		return listen
 	}
 	return net.JoinHostPort(host, port)
+}
+
+// The device-twin topic filters the agent subscribes to (sc-129688).
+const (
+	twinDesiredFilter  = "$iothub/twin/PATCH/properties/desired/#"
+	twinResponseFilter = "$iothub/twin/res/#"
+)
+
+// subscribeFilters parses a SUBSCRIBE payload after the packet id: a sequence
+// of length-prefixed topic filters, each followed by its requested QoS byte.
+func subscribeFilters(b []byte) ([]string, error) {
+	var filters []string
+	for len(b) > 0 {
+		if len(b) < 2 {
+			return nil, fmt.Errorf("truncated topic filter length")
+		}
+		n := int(b[0])<<8 | int(b[1])
+		if len(b) < 2+n+1 {
+			return nil, fmt.Errorf("truncated topic filter")
+		}
+		filters = append(filters, string(b[2:2+n]))
+		b = b[2+n+1:]
+	}
+	if len(filters) == 0 {
+		return nil, fmt.Errorf("no topic filters")
+	}
+	return filters, nil
+}
+
+// requestID extracts the $rid query parameter from a twin topic, "" if none.
+func requestID(topic string) string {
+	_, query, ok := strings.Cut(topic, "?")
+	if !ok {
+		return ""
+	}
+	for _, kv := range strings.Split(query, "&") {
+		if k, v, ok := strings.Cut(kv, "="); ok && k == "$rid" {
+			return v
+		}
+	}
+	return ""
 }

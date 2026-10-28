@@ -68,10 +68,19 @@ type deviceState struct {
 	// redelivered with DUP on the next subscribe - the lost-acknowledgement
 	// case the command journal's tombstones exist for (sc-126322).
 	loseNextPuback bool
-	// twin holds the device's reported properties as the last PATCH left them:
-	// a shallow merge of every reported-properties publish, the way IoT Hub's
-	// twin accumulates them (sc-129687).
-	twin map[string]json.RawMessage
+	// twin holds the device's reported properties as the PATCHes left them:
+	// each reported-properties publish is merged in as a JSON merge patch
+	// (objects merge key by key, null removes a key), the way IoT Hub's twin
+	// accumulates them (sc-129687), so a per-key acknowledgement object grows
+	// rather than being replaced (sc-129688). reportedVersion counts them.
+	twin            map[string]json.RawMessage
+	reportedVersion int64
+	// desired is the twin's desired properties as the control surface set
+	// them, desiredVersion their $version, and twinSubscriber the connection
+	// listening on the desired-properties PATCH topic (sc-129688).
+	desired        map[string]json.RawMessage
+	desiredVersion int64
+	twinSubscriber *clientConn
 }
 
 // clientConn is one accepted MQTT connection.
@@ -79,12 +88,25 @@ type clientConn struct {
 	conn     net.Conn
 	writeMu  sync.Mutex
 	clientID string
+	// twinResponses is set once the connection subscribes to the twin
+	// response topic; only then are GETs and reported PATCHes answered. It is
+	// read and written on the connection's own goroutine only.
+	twinResponses bool
 }
 
 func (c *clientConn) write(packetType, flags byte, payload []byte) error {
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
 	return writePacket(c.conn, packetType, flags, payload)
+}
+
+// publish sends a QoS 0 PUBLISH of body on topic to the client.
+func (c *clientConn) publish(topic string, body []byte) error {
+	payload := make([]byte, 0, 2+len(topic)+len(body))
+	payload = append(payload, byte(len(topic)>>8), byte(len(topic)))
+	payload = append(payload, topic...)
+	payload = append(payload, body...)
+	return c.write(pktPublish, 0, payload)
 }
 
 // postback is one result the engine received.
@@ -262,13 +284,14 @@ func (h *hub) puback(deviceID string, pid uint16) {
 	log.Printf("PUBACK pid=%d from %s (%s) -> delivered", pid, deviceID, m.ID)
 }
 
-// recordTwin merges a reported-properties PATCH into the device's twin. A
-// payload that is not a JSON object is ignored, as IoT Hub would reject it.
-func (h *hub) recordTwin(deviceID string, payload []byte) {
+// recordTwin merges a reported-properties PATCH into the device's twin and
+// returns the reported version after it. A payload that is not a JSON object
+// is ignored, as IoT Hub would reject it.
+func (h *hub) recordTwin(deviceID string, payload []byte) int64 {
 	var patch map[string]json.RawMessage
 	if err := json.Unmarshal(payload, &patch); err != nil {
 		log.Printf("%s: twin PATCH is not a JSON object: %v", deviceID, err)
-		return
+		return 0
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -276,10 +299,119 @@ func (h *hub) recordTwin(deviceID string, payload []byte) {
 	if d.twin == nil {
 		d.twin = map[string]json.RawMessage{}
 	}
-	for k, v := range patch {
-		d.twin[k] = v
-	}
+	mergePatch(d.twin, patch)
+	d.reportedVersion++
 	log.Printf("%s: twin reported properties updated (%d key(s))", deviceID, len(patch))
+	return d.reportedVersion
+}
+
+// mergePatch applies patch to doc as a JSON merge patch (RFC 7386): null
+// removes a key, an object merges into an object key by key, anything else
+// replaces.
+func mergePatch(doc, patch map[string]json.RawMessage) {
+	for k, v := range patch {
+		if string(v) == "null" {
+			delete(doc, k)
+			continue
+		}
+		var sub map[string]json.RawMessage
+		var cur map[string]json.RawMessage
+		if json.Unmarshal(v, &sub) == nil && sub != nil &&
+			json.Unmarshal(doc[k], &cur) == nil && cur != nil {
+			mergePatch(cur, sub)
+			merged, err := json.Marshal(cur)
+			if err == nil {
+				doc[k] = merged
+				continue
+			}
+		}
+		doc[k] = v
+	}
+}
+
+// twinSubscribed records c as the device's listener for desired-properties
+// PATCHes (sc-129688).
+func (h *hub) twinSubscribed(deviceID string, c *clientConn) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.device(deviceID).twinSubscriber = c
+}
+
+// desiredDocLocked is the desired properties with their $version, as IoT Hub
+// sends them.
+func desiredDocLocked(d *deviceState) map[string]json.RawMessage {
+	doc := map[string]json.RawMessage{}
+	for k, v := range d.desired {
+		doc[k] = v
+	}
+	doc["$version"] = json.RawMessage(strconv.FormatInt(d.desiredVersion, 10))
+	return doc
+}
+
+// twinGet answers a twin GET with the whole twin: desired (with $version) and
+// reported.
+func (h *hub) twinGet(deviceID string, c *clientConn, rid string) error {
+	h.mu.Lock()
+	d := h.device(deviceID)
+	reported := map[string]json.RawMessage{}
+	for k, v := range d.twin {
+		reported[k] = v
+	}
+	body, err := json.Marshal(map[string]any{
+		"desired":  desiredDocLocked(d),
+		"reported": reported,
+	})
+	h.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	log.Printf("%s: twin GET rid=%s -> 200", deviceID, rid)
+	return c.publish(fmt.Sprintf("$iothub/twin/res/200/?$rid=%s", rid), body)
+}
+
+// setDesired merges patch into the device's desired properties, bumps their
+// $version, and delivers the PATCH to the device if it is listening. It
+// returns the new version and the whole desired document. The PATCH is
+// written after the hub's lock is released, so a slow client cannot stall the
+// rest of the fixture.
+func (h *hub) setDesired(
+	deviceID string,
+	patch map[string]json.RawMessage,
+) (int64, map[string]json.RawMessage) {
+	h.mu.Lock()
+	d := h.device(deviceID)
+	if d.desired == nil {
+		d.desired = map[string]json.RawMessage{}
+	}
+	mergePatch(d.desired, patch)
+	d.desiredVersion++
+	version, doc, listener := d.desiredVersion, desiredDocLocked(d), d.twinSubscriber
+	h.mu.Unlock()
+
+	if listener == nil {
+		log.Printf(
+			"%s: desired $version=%d set; no listener, the device reads it on its next GET",
+			deviceID, version,
+		)
+		return version, doc
+	}
+	body := map[string]json.RawMessage{}
+	for k, v := range patch {
+		body[k] = v
+	}
+	body["$version"] = json.RawMessage(strconv.FormatInt(version, 10))
+	data, err := json.Marshal(body)
+	if err != nil {
+		log.Printf("%s: failed to encode the desired PATCH: %v", deviceID, err)
+		return version, doc
+	}
+	topic := fmt.Sprintf("$iothub/twin/PATCH/properties/desired/?$version=%d", version)
+	if err := listener.publish(topic, data); err != nil {
+		log.Printf("%s: failed to deliver the desired PATCH: %v", deviceID, err)
+	} else {
+		log.Printf("%s: desired PATCH $version=%d delivered", deviceID, version)
+	}
+	return version, doc
 }
 
 // twin returns the device's reported properties as last merged.
@@ -313,6 +445,9 @@ func (h *hub) disconnected(deviceID string, c *clientConn) {
 	delete(d.conns, c)
 	if d.subscriber == c {
 		d.subscriber = nil
+	}
+	if d.twinSubscriber == c {
+		d.twinSubscriber = nil
 	}
 	for pid, m := range d.inflight {
 		delete(d.inflight, pid)
@@ -602,7 +737,8 @@ func (h *hub) handleEnqueue(w http.ResponseWriter, r *http.Request) {
 // handleDevice serves /_control/devices/{id} (snapshot), the offline and
 // online controls at /_control/devices/{id}/offline?seconds=N and
 // /_control/devices/{id}/online, the lose-next-puback arm, and
-// /_control/devices/{id}/twin (the reported properties as last merged).
+// /_control/devices/{id}/twin (the reported properties as last merged), and
+// /_control/devices/{id}/desired (set or read the desired properties).
 func (h *hub) handleDevice(w http.ResponseWriter, r *http.Request) {
 	rest := strings.TrimPrefix(r.URL.Path, "/_control/devices/")
 	id, action, _ := strings.Cut(rest, "/")
@@ -626,6 +762,19 @@ func (h *hub) handleDevice(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"device_id": id, "lose_next_puback": true})
 	case "twin":
 		_ = json.NewEncoder(w).Encode(map[string]any{"device_id": id, "reported": h.twin(id)})
+	case "desired":
+		// POST a JSON object to merge into the desired properties (null removes
+		// a key) and deliver it as a PATCH; GET reads them (sc-129688).
+		var patch map[string]json.RawMessage
+		if r.Method == http.MethodPost {
+			if err := json.NewDecoder(r.Body).Decode(&patch); err != nil || patch == nil {
+				http.Error(w, "body must be a JSON object", http.StatusBadRequest)
+				return
+			}
+		}
+		version, doc := h.setDesiredOrRead(id, patch)
+		_ = json.NewEncoder(w).
+			Encode(map[string]any{"device_id": id, "version": version, "desired": doc})
 	default:
 		_ = json.NewEncoder(w).Encode(h.snapshot(id))
 	}
@@ -689,4 +838,19 @@ func connectClientID(payload []byte) (string, error) {
 		return "", fmt.Errorf("short CONNECT client id")
 	}
 	return string(payload[pos : pos+idLen]), nil
+}
+
+// setDesiredOrRead applies patch when there is one, and otherwise reads the
+// desired properties without bumping their version.
+func (h *hub) setDesiredOrRead(
+	deviceID string,
+	patch map[string]json.RawMessage,
+) (int64, map[string]json.RawMessage) {
+	if patch != nil {
+		return h.setDesired(deviceID, patch)
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	d := h.device(deviceID)
+	return d.desiredVersion, desiredDocLocked(d)
 }

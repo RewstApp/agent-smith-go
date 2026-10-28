@@ -270,6 +270,19 @@ type defaultUpdater struct {
 	idlePoll     time.Duration
 	idleMaxWait  time.Duration
 	holdDuration time.Duration
+	// liveDevice, when set, supplies the device settings in effect now, so the
+	// update helper inherits a logging level or auto-update toggle applied
+	// from the device twin after startup (sc-129688). nil reads *device.
+	liveDevice func() Device
+}
+
+// UpdaterOption configures an optional behaviour of the updater.
+type UpdaterOption func(*defaultUpdater)
+
+// WithLiveDevice makes the updater read the device settings from current at
+// the moment it needs them rather than from the device it was built with.
+func WithLiveDevice(current func() Device) UpdaterOption {
+	return func(u *defaultUpdater) { u.liveDevice = current }
 }
 
 func NewUpdater(
@@ -279,8 +292,9 @@ func NewUpdater(
 	githubToken string,
 	runCommand RunCommandFunc,
 	activity CommandActivity,
+	opts ...UpdaterOption,
 ) Updater {
-	return &defaultUpdater{
+	u := &defaultUpdater{
 		logger:           logger,
 		device:           device,
 		latestReleaseUrl: latestReleaseUrl,
@@ -292,6 +306,18 @@ func NewUpdater(
 		updatesDir:       GetUpdatesDirectory(device.RewstOrgId),
 		activity:         activity,
 	}
+	for _, opt := range opts {
+		opt(u)
+	}
+	return u
+}
+
+// currentDevice is the device settings in effect now; see WithLiveDevice.
+func (u *defaultUpdater) currentDevice() Device {
+	if u.liveDevice != nil {
+		return u.liveDevice()
+	}
+	return *u.device
 }
 
 func (u *defaultUpdater) Check(ctx context.Context) (Release, error) {
@@ -341,23 +367,24 @@ func (u *defaultUpdater) Check(ctx context.Context) (Release, error) {
 }
 
 func (u *defaultUpdater) Update(updaterExecutablePath string) error {
+	device := u.currentDevice()
 	args := []string{
 		"--org-id",
-		u.device.RewstOrgId,
+		device.RewstOrgId,
 		"--update",
 		"--logging-level",
-		string(u.device.LoggingLevel),
+		string(device.LoggingLevel),
 	}
 
-	if u.device.UseSyslog {
+	if device.UseSyslog {
 		args = append(args, "--syslog")
 	}
 
-	if u.device.DisableAgentPostback {
+	if device.DisableAgentPostback {
 		args = append(args, "--disable-agent-postback")
 	}
 
-	if u.device.DisableAutoUpdates {
+	if device.DisableAutoUpdates {
 		args = append(args, "--no-auto-updates")
 	}
 
@@ -559,16 +586,27 @@ func (u *defaultUpdater) waitForIdle(ctx context.Context) error {
 		poll = updateIdlePollInterval
 	}
 	if maxWait <= 0 {
-		maxWait = u.device.ResolvedCommandTimeout() + updateIdleWaitMargin
+		maxWait = u.currentDevice().ResolvedCommandTimeout() + updateIdleWaitMargin
 	}
 	if hold <= 0 {
 		hold = updateHoldDuration
 	}
 
 	// Park new commands for the whole wait plus the helper's own window; the
-	// hold is re-armed to the shorter post-launch window once the wait ends.
+	// hold is re-armed to the shorter post-launch window once the wait ends -
+	// unless the wait was abandoned, in which case no helper is coming and the
+	// hold is lifted instead. Re-arming it there parked every new command for
+	// the post-launch window behind a restart that never happened (sc-129688:
+	// the device twin can now stop the updater mid-wait).
 	u.activity.HoldNewCommands(maxWait + hold)
-	defer u.activity.HoldNewCommands(hold)
+	abandoned := false
+	defer func() {
+		if abandoned {
+			u.activity.ReleaseNewCommands()
+			return
+		}
+		u.activity.HoldNewCommands(hold)
+	}()
 
 	executing := u.activity.Executing()
 	if executing == 0 {
@@ -589,7 +627,7 @@ func (u *defaultUpdater) waitForIdle(ctx context.Context) error {
 	for {
 		select {
 		case <-ctx.Done():
-			u.activity.ReleaseNewCommands()
+			abandoned = true
 			u.logger.Info(
 				"Update deferral abandoned: updater stopping",
 				"executing", u.activity.Executing(),
@@ -725,6 +763,13 @@ func (r *AutoUpdateRunner) Start() {
 				return
 			case <-timer.C:
 				if err := r.runUpdate(); err != nil {
+					// Stop cancels the context before signalling the loop, so a
+					// check or download it interrupted fails with a cancellation:
+					// that is the updater being turned off, not an update failure.
+					if r.ctx.Err() != nil {
+						r.logger.Info("Auto updater stopped")
+						return
+					}
 					r.logger.Error("Update failed, starting retry backoff", "error", err)
 					if r.retryWithBackoff() {
 						// A stop observed inside the backoff wait exits here rather
