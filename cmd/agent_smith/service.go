@@ -182,11 +182,13 @@ func (svc *serviceContext) Execute(
 		logger = utils.ConfigureLogger(agentLoggerName, sysLogger, device.LoggingLevel)
 	}
 
-	// Resolve the postback retry budget from the device config, falling back to
-	// the documented defaults when unset. Existing deployments that omit these
-	// keys keep the previous behaviour.
-	svc.PostbackMaxAttempts = device.ResolvedPostbackMaxAttempts()
-	svc.PostbackBaseRetryBackoff = device.ResolvedPostbackBaseRetryBackoff()
+	// The settings in effect start as the config file has them; the device
+	// twin can change some of them at run time (sc-129688). This also resolves
+	// the postback retry budget, falling back to the documented defaults when
+	// unset.
+	svc.setLiveDevice(device)
+	svc.rootLogger = logger
+	svc.reconfigure = make(chan struct{}, 1)
 
 	// Create the durable command journal so an inbound command is persisted
 	// before it is acknowledged to the broker. Without it, paho sent the QoS 1
@@ -259,7 +261,9 @@ func (svc *serviceContext) Execute(
 		}
 	}, "scope", "clock_heartbeat")
 
-	if !device.DisableAutoUpdates {
+	// The auto-updater runs while disable_auto_updates is false; the device
+	// twin can turn it off and on again at run time (sc-129688).
+	svc.autoUpdate = newAutoUpdateControl(func() *agent.AutoUpdateRunner {
 		updater := agent.NewUpdater(
 			logger,
 			&device,
@@ -283,17 +287,18 @@ func (svc *serviceContext) Execute(
 				return detachedCommand(path, args, out, out).Start()
 			},
 			svc, // the updater waits for in-flight commands before restarting us
+			agent.WithLiveDevice(svc.currentDevice),
 		)
-		runner := agent.NewAutoUpdateRunner(
+		return agent.NewAutoUpdateRunner(
 			logger,
 			updater,
 			agent.DefaultUpdateInterval(),
 			agent.DefaultMaxRetries(),
 			agent.DefaultBaseBackoff(),
 		)
-		runner.Start()
-		defer runner.Stop()
-	}
+	})
+	svc.autoUpdate.set(!device.DisableAutoUpdates)
+	defer svc.autoUpdate.set(false)
 
 	// Show header
 	logger.Info(
@@ -445,7 +450,15 @@ func (svc *serviceContext) Execute(
 		// Move to the next timeout
 		rg.Next()
 
-		shouldReturn, clearBackoff, exitCode := svc.runCycle(ctx, device, logger, notifier, stopped)
+		// Each cycle starts from the settings in effect, so a worker count the
+		// device twin changed takes effect here (sc-129688).
+		shouldReturn, clearBackoff, exitCode := svc.runCycle(
+			ctx,
+			svc.liveDeviceOr(device),
+			logger,
+			notifier,
+			stopped,
+		)
 		if clearBackoff {
 			rg.Clear()
 			rg.Next()
@@ -765,9 +778,18 @@ func (svc *serviceContext) runCycle(
 		svc.reportHealth(cycleCtx, client, notifier, logger, reportConnected)
 		svc.healthLoop(cycleCtx, client, device, notifier, logger)
 	}, "scope", "fleet_health")
+	// Runtime settings from the device twin (sc-129688): subscribe to the
+	// desired properties, read the whole twin, and apply changes for the life
+	// of the cycle. Cycle-scoped and joined like the health reporter.
+	settingsDone := make(chan struct{})
+	utils.SafeGo(logger, func() {
+		defer close(settingsDone)
+		svc.twinSettingsLoop(cycleCtx, client, device, logger)
+	}, "scope", "twin_settings")
 	defer func() {
 		cycleCancel()
 		<-healthDone
+		<-settingsDone
 	}()
 
 	// Replay commands a previous run accepted from the broker but never
@@ -808,6 +830,16 @@ func (svc *serviceContext) runCycle(
 		return true, true, 0
 	case <-lost:
 		_ = notifier.Notify("AgentStatus:Offline") // Best effort notification
+		return false, true, 0
+	case <-svc.reconfigure:
+		// A worker count from the device twin: end this cycle the way a SAS
+		// renewal does, so the next one starts its pool at the new size while
+		// this one's workers finish what they are running (sc-129688).
+		logger.Info(
+			"Ending the connection cycle to apply the new worker count",
+			"worker_count", svc.liveDeviceOr(device).ResolvedWorkerCount(),
+		)
+		_ = notifier.Notify("AgentStatus:Reconnecting") // Best effort notification
 		return false, true, 0
 	case <-renewTimer.C:
 		logger.Info(
@@ -1014,6 +1046,10 @@ func (svc *serviceContext) processInboundGuarded(
 	notifier plugins.NotifierWrapper,
 ) {
 	defer utils.Recover(logger, "worker", workerId, "scope", "processMessage")
+	// A command runs under the settings in effect when it starts: a timeout or
+	// output ceiling the device twin changed applies from the next command on
+	// (sc-129688).
+	device = svc.liveDeviceOr(device)
 	svc.executing.Add(1)
 	defer svc.executing.Add(-1)
 	svc.processInbound(item, ctx, device, logger, notifier)
@@ -1334,11 +1370,10 @@ func (svc *serviceContext) sendPostbackWithRetry(
 	logger hclog.Logger,
 	notifier plugins.NotifierWrapper,
 ) bool {
-	maxAttempts := svc.PostbackMaxAttempts
+	maxAttempts, baseBackoff := svc.postbackBudget()
 	if maxAttempts < 1 {
 		maxAttempts = postbackMaxAttempts
 	}
-	baseBackoff := svc.PostbackBaseRetryBackoff
 	if baseBackoff <= 0 {
 		baseBackoff = postbackBaseRetryBackoff
 	}

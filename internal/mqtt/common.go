@@ -124,6 +124,11 @@ type ReportedProperties struct {
 	// list a previous process left behind is always overwritten; nil (an older
 	// agent, or a health file written by one) omits the object.
 	Commands *CommandsProgress `json:"commands,omitempty"`
+	// SettingsAck acknowledges the desired properties the agent was sent, one
+	// entry per key (sc-129688). IoT Hub merges reported properties key by
+	// key, so a PATCH carrying some keys leaves the others' acknowledgements
+	// in place; nil omits the object.
+	SettingsAck map[string]SettingAck `json:"settings_ack,omitempty"`
 }
 
 // CommandsProgress is the device twin's running-commands object.

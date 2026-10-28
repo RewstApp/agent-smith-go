@@ -813,6 +813,253 @@ jobs:
   # live-sweeps, live-update-retry, live-auto-update and live-windows-only
   # jobs. Nothing here reaches the hub or the engine, so the job gates the
   # merge with the hermetic jobs.
+  # ---- Runtime settings from the device twin (sc-129688) ----
+  # Desired properties set through the stub broker's control surface: a
+  # command timeout applied live bounds the next command, an invalid value is
+  # rejected and an unknown key reported unsupported, a logging level switches
+  # the log at once, and the config file carries the applied values across a
+  # restart.
+  hermetic-runtime-settings:
+    permissions:
+      contents: read
+    needs: [build, build-integration-test, set-matrix]
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.set-matrix.outputs.matrix) }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Set up the hermetic scenario
+        timeout-minutes: 20
+        id: setup
+        uses: ./.github/actions/hermetic-setup
+        with:
+          os: ${{ matrix.os }}
+          binary: ${{ matrix.binary }}
+          org_id: ${{ vars.IT_ORG_ID }}
+          device_id: hermetic-${{ github.run_id }}-${{ matrix.os }}-runtime-settings
+          service: ${{ matrix.service }}
+          log_file: ${{ matrix.log_file }}
+          extra_args: --command-timeout-seconds 120
+
+      - name: Assert the agent subscribed to the twin's desired properties
+        timeout-minutes: 5
+        uses: ./.github/actions/it-script
+        with:
+          script: hermetic-assert-log-count-exactly
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+          PATTERN: Subscribed to device twin desired properties
+          EXPECTED: "1"
+          BASELINE: "0"
+          TIMEOUT_SECONDS: "60"
+
+      - name: Set a 3 s command timeout through the twin
+        timeout-minutes: 5
+        uses: ./.github/actions/it-script
+        with:
+          script: hermetic-set-desired
+        env:
+          ENGINE_URL: ${{ steps.setup.outputs.engine_url }}
+          DEVICE_ID: ${{ steps.setup.outputs.device_id }}
+          DESIRED: '{"command_timeout_seconds": 3}'
+
+      - name: Assert the twin acknowledges the timeout as applied
+        timeout-minutes: 5
+        uses: ./.github/actions/it-script
+        with:
+          script: hermetic-assert-twin
+        env:
+          ENGINE_URL: ${{ steps.setup.outputs.engine_url }}
+          DEVICE_ID: ${{ steps.setup.outputs.device_id }}
+          PROPERTY: settings_ack.command_timeout_seconds.status
+          EXPECTED: applied
+          TIMEOUT_SECONDS: "60"
+
+      - name: Baseline "Command timed out" before the held command
+        id: bl_timeout
+        uses: ./.github/actions/capture-log-count
+        with:
+          log_file: ${{ matrix.log_file }}
+          pattern: "Command timed out: "
+
+      - name: Enqueue a 45 s command the installed 120 s timeout would let finish
+        timeout-minutes: 5
+        uses: ./.github/actions/it-script
+        with:
+          script: hermetic-enqueue-commands
+        env:
+          ENGINE_URL: ${{ steps.setup.outputs.engine_url }}
+          DEVICE_ID: ${{ steps.setup.outputs.device_id }}
+          SCENARIO: hold
+          COUNT: 1
+          POST_ID_PREFIX: settings
+
+      - name: Assert the command was killed by the twin's timeout well before it ended
+        timeout-minutes: 5
+        uses: ./.github/actions/it-script
+        with:
+          script: hermetic-assert-log-count-exactly
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+          PATTERN: "Command timed out: "
+          EXPECTED: "1"
+          BASELINE: ${{ steps.bl_timeout.outputs.count }}
+          TIMEOUT_SECONDS: "30"
+
+      - name: Baseline debug lines before the logging-level change
+        id: bl_debug
+        uses: ./.github/actions/capture-log-count
+        with:
+          log_file: ${{ matrix.log_file }}
+          pattern: "[DEBUG]"
+
+      - name: Set debug logging, an invalid worker count and an unknown key
+        timeout-minutes: 5
+        uses: ./.github/actions/it-script
+        with:
+          script: hermetic-set-desired
+        env:
+          ENGINE_URL: ${{ steps.setup.outputs.engine_url }}
+          DEVICE_ID: ${{ steps.setup.outputs.device_id }}
+          DESIRED: '{"logging_level": "debug", "worker_count": -1, "no_such_setting": 1}'
+
+      - name: Assert the invalid worker count is rejected
+        timeout-minutes: 5
+        uses: ./.github/actions/it-script
+        with:
+          script: hermetic-assert-twin
+        env:
+          ENGINE_URL: ${{ steps.setup.outputs.engine_url }}
+          DEVICE_ID: ${{ steps.setup.outputs.device_id }}
+          PROPERTY: settings_ack.worker_count.status
+          EXPECTED: rejected
+          TIMEOUT_SECONDS: "60"
+
+      - name: Assert the unknown key is reported unsupported
+        timeout-minutes: 5
+        uses: ./.github/actions/it-script
+        with:
+          script: hermetic-assert-twin
+        env:
+          ENGINE_URL: ${{ steps.setup.outputs.engine_url }}
+          DEVICE_ID: ${{ steps.setup.outputs.device_id }}
+          PROPERTY: settings_ack.no_such_setting.status
+          EXPECTED: unsupported
+          TIMEOUT_SECONDS: "60"
+
+      - name: Assert the logging level is acknowledged as applied
+        timeout-minutes: 5
+        uses: ./.github/actions/it-script
+        with:
+          script: hermetic-assert-twin
+        env:
+          ENGINE_URL: ${{ steps.setup.outputs.engine_url }}
+          DEVICE_ID: ${{ steps.setup.outputs.device_id }}
+          PROPERTY: settings_ack.logging_level.value
+          EXPECTED: debug
+          TIMEOUT_SECONDS: "60"
+
+      - name: Wait for debug lines in the log
+        timeout-minutes: 5
+        uses: ./.github/actions/wait-for-log-line
+        with:
+          log_file: ${{ matrix.log_file }}
+          pattern: "[DEBUG]"
+          baseline_count: ${{ steps.bl_debug.outputs.count }}
+          max_attempts: "60"
+          interval_seconds: "2"
+
+      - name: Assert the log switched to debug without a restart
+        timeout-minutes: 5
+        uses: ./.github/actions/assert-log-contains
+        with:
+          log_file: ${{ matrix.log_file }}
+          patterns: "[DEBUG]"
+
+      - name: Baseline "Subscribed to messages" before the restart
+        id: bl_sub
+        uses: ./.github/actions/capture-log-count
+        with:
+          log_file: ${{ matrix.log_file }}
+          pattern: Subscribed to messages
+
+      - name: Stop the agent
+        timeout-minutes: 5
+        uses: ./.github/actions/stop-service
+        with:
+          service: ${{ matrix.service }}
+          unload: "true"
+
+      - name: Start the agent
+        timeout-minutes: 5
+        uses: ./.github/actions/start-service
+        with:
+          service: ${{ matrix.service }}
+
+      - name: Wait for the restarted agent to subscribe
+        timeout-minutes: 5
+        uses: ./.github/actions/wait-for-log-line
+        with:
+          log_file: ${{ matrix.log_file }}
+          pattern: Subscribed to messages
+          baseline_count: ${{ steps.bl_sub.outputs.count }}
+          max_attempts: "60"
+          interval_seconds: "2"
+
+      - name: Assert the config file kept the twin's command timeout
+        timeout-minutes: 5
+        uses: ./.github/actions/it-script
+        with:
+          script: hermetic-assert-config-value
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+          KEY: command_timeout_seconds
+          EXPECTED: "3"
+
+      - name: Assert the config file kept the twin's logging level
+        timeout-minutes: 5
+        uses: ./.github/actions/it-script
+        with:
+          script: hermetic-assert-config-value
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+          KEY: logging_level
+          EXPECTED: debug
+
+      - name: Assert the config file kept the installed worker count
+        timeout-minutes: 5
+        uses: ./.github/actions/it-script
+        with:
+          script: hermetic-assert-config-value
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+          KEY: worker_count
+          EXPECTED: "1"
+
+      - name: Dump agent log on failure
+        if: failure()
+        uses: ./.github/actions/dump-agent-log
+        with:
+          log_file: ${{ matrix.log_file }}
+
+      - name: Stop stub config endpoint
+        timeout-minutes: 15
+        if: always()
+        uses: ./.github/actions/stub-config
+        with:
+          mode: stop
+
+      - name: Stop stub broker and engine
+        timeout-minutes: 15
+        if: always()
+        uses: ./.github/actions/stub-broker
+        with:
+          mode: stop
+
   e2e-go:
     permissions:
       contents: read
