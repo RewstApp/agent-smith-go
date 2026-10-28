@@ -762,7 +762,7 @@ func (svc *serviceContext) runCycle(
 	healthDone := make(chan struct{})
 	utils.SafeGo(logger, func() {
 		defer close(healthDone)
-		svc.reportHealth(cycleCtx, client, notifier, logger, true)
+		svc.reportHealth(cycleCtx, client, notifier, logger, reportConnected)
 		svc.healthLoop(cycleCtx, client, device, notifier, logger)
 	}, "scope", "fleet_health")
 	defer func() {
@@ -1015,10 +1015,7 @@ func (svc *serviceContext) processInboundGuarded(
 ) {
 	defer utils.Recover(logger, "worker", workerId, "scope", "processMessage")
 	svc.executing.Add(1)
-	defer func() {
-		svc.executing.Add(-1)
-		svc.kickHealth()
-	}()
+	defer svc.executing.Add(-1)
 	svc.processInbound(item, ctx, device, logger, notifier)
 }
 
@@ -1132,6 +1129,10 @@ func (svc *serviceContext) processMessage(
 		svc.Sys,
 		svc.Domain,
 	)
+	// The command's heartbeat entry disappeared when Execute returned; wake
+	// the twin reporter now rather than after the postback and its retries,
+	// which can take a minute and a half against an unreachable engine.
+	svc.kickHealth()
 
 	// A command cut short by the cycle ending did not produce a result the
 	// engine should trust; leave it for the replay to report.

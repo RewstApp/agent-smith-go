@@ -622,8 +622,9 @@ func runFleetHealth(target agentInfo) {
 	fmt.Printf("    spool: entries=%d dropped expired=%d capacity=%d attempts=%d corrupt=%d\n",
 		health.Spool.Entries, health.Spool.DroppedExpired, health.Spool.DroppedCapacity,
 		health.Spool.DroppedAttempts, health.Spool.DroppedCorrupt)
-	fmt.Printf("    commands: executing=%d completed_total=%d timed_out_total=%d\n",
-		health.Commands.Executing, health.Commands.CompletedTotal, health.Commands.TimedOutTotal)
+	fmt.Printf("    commands: executing=%d completed_total=%d timed_out_total=%d failed_total=%d\n",
+		health.Commands.Executing, health.Commands.CompletedTotal, health.Commands.TimedOutTotal,
+		health.Commands.FailedTotal)
 	if len(health.Plugins) == 0 {
 		fmt.Println("    plugins: none")
 	}

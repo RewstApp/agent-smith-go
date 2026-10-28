@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"path/filepath"
+	"slices"
 	"time"
 
 	"github.com/RewstApp/agent-smith-go/internal/agent"
@@ -57,6 +58,7 @@ func (svc *serviceContext) healthSnapshot(notifier plugins.NotifierWrapper) *mqt
 		stats := reporter.ExecutionStats()
 		h.Commands.CompletedTotal = stats.Completed
 		h.Commands.TimedOutTotal = stats.TimedOut
+		h.Commands.FailedTotal = stats.Failed
 	}
 	if notifier != nil {
 		for _, p := range notifier.PluginStats() {
@@ -71,22 +73,17 @@ func (svc *serviceContext) healthSnapshot(notifier plugins.NotifierWrapper) *mqt
 	return h
 }
 
-// recordConnectionError keeps the most recent connection-lost reason for the
-// health object; an empty string clears it.
 // progressSnapshot gathers the running commands' heartbeats (sc-129689) from
-// the executor, when it reports them. nil when nothing is running.
+// the executor, when it reports them. Never nil: an empty list is what clears
+// the twin's view, including the list a previous process left behind.
 func (svc *serviceContext) progressSnapshot() *mqtt.CommandsProgress {
+	out := &mqtt.CommandsProgress{InFlight: []mqtt.CommandProgress{}}
 	reporter, ok := svc.Executor.(interpreter.ProgressReporter)
 	if !ok {
-		return nil
-	}
-	running := reporter.InFlight()
-	if len(running) == 0 {
-		return nil
+		return out
 	}
 	now := time.Now()
-	out := &mqtt.CommandsProgress{InFlight: make([]mqtt.CommandProgress, 0, len(running))}
-	for _, p := range running {
+	for _, p := range reporter.InFlight() {
 		out.InFlight = append(out.InFlight, mqtt.CommandProgress{
 			PostID:         p.PostID,
 			StartedAt:      p.StartedAt.UTC().Format(time.RFC3339),
@@ -100,7 +97,8 @@ func (svc *serviceContext) progressSnapshot() *mqtt.CommandsProgress {
 }
 
 // kickHealth wakes the twin reporter without blocking, for a command that
-// just finished: its heartbeat entry should clear now, not at the next tick.
+// just finished: once nothing is running its entry should clear now, not at
+// the next tick.
 func (svc *serviceContext) kickHealth() {
 	svc.healthMu.Lock()
 	kick := svc.healthKick
@@ -114,6 +112,8 @@ func (svc *serviceContext) kickHealth() {
 	}
 }
 
+// recordConnectionError keeps the most recent connection-lost reason for the
+// health object; an empty string clears it.
 func (svc *serviceContext) recordConnectionError(err error) {
 	svc.connErrMu.Lock()
 	defer svc.connErrMu.Unlock()
@@ -130,17 +130,39 @@ func (svc *serviceContext) connectionError() string {
 	return svc.lastConnectionError
 }
 
-// reportHealth publishes the current health object to the device twin when it
-// differs from the last one published (or when force is set, as on every new
-// connection), and leaves a copy in the data directory for --diagnostic. A
-// failed publish is a Warn: the twin is informational and must never affect
-// command handling.
+// reportReason is why the reporter is being asked to publish; it decides what
+// has to have changed for a publish to go out.
+type reportReason int
+
+const (
+	// reportConnected is the publish after a subscribe: everything, always, so
+	// the twin reflects this process whatever a previous one left there.
+	reportConnected reportReason = iota
+	// reportHealthTick is the health interval: publish when the counters
+	// differ from the last object published (whichever reason published it).
+	reportHealthTick
+	// reportHeartbeat is the heartbeat interval: publish while anything runs,
+	// since its elapsed time and output counts moved.
+	reportHeartbeat
+	// reportFinished is a command finishing: publish only once nothing runs
+	// and the last publish still listed something, to clear the list at once.
+	// A completion while other commands run waits for the heartbeat, so a
+	// steady stream of short commands beside a long one cannot publish at the
+	// spacing floor.
+	reportFinished
+)
+
+// reportHealth publishes the current health object and the running commands
+// to the device twin when the reason calls for it, and leaves a copy in the
+// data directory for --diagnostic when the health or the set of running
+// commands changed. A failed publish is a Warn: the twin is informational and
+// must never affect command handling. It reports whether it published.
 func (svc *serviceContext) reportHealth(
 	ctx context.Context,
 	client mqtt.Client,
 	notifier plugins.NotifierWrapper,
 	logger hclog.Logger,
-	force bool,
+	reason reportReason,
 ) bool {
 	// A cycle that is already ending publishes nothing: the service may be
 	// closing its log and the twin is about to be republished by the next
@@ -148,22 +170,37 @@ func (svc *serviceContext) reportHealth(
 	if ctx.Err() != nil {
 		return false
 	}
-	health := svc.healthSnapshot(notifier)
+	// The cheap, in-memory checks come first; the health snapshot lists the
+	// journal and spool directories under their locks and is taken only when
+	// a publish is still possible.
 	progress := svc.progressSnapshot()
-	inFlight := progress != nil
+	inFlight := len(progress.InFlight) > 0
 	svc.healthMu.Lock()
-	// A running command is a change every time (its elapsed time moved); the
-	// publish after the last one ran clears the list; otherwise only a change
-	// in the health counters, no more often than the health interval, counts.
-	changed := force || inFlight || svc.lastInFlight ||
-		(!health.Same(svc.lastHealth) && time.Since(svc.lastPublishedAt) >= svc.healthInterval)
-	clearing := !inFlight && svc.lastInFlight
+	lastInFlight, failed := svc.lastInFlight, svc.publishFailed
 	svc.healthMu.Unlock()
-	if !changed {
-		return false
+	switch reason {
+	case reportHeartbeat:
+		if !inFlight {
+			return false
+		}
+	case reportFinished:
+		// After a failed publish the clear waits for a tick rather than
+		// retrying on every completion.
+		if inFlight || !lastInFlight || failed {
+			return false
+		}
 	}
-	if clearing {
-		progress = &mqtt.CommandsProgress{InFlight: []mqtt.CommandProgress{}}
+	health := svc.healthSnapshot(notifier)
+	if reason == reportHealthTick {
+		// A list the last publish left behind that no kick has cleared (the
+		// clearing publish failed) counts as a change too.
+		svc.healthMu.Lock()
+		pendingClear := lastInFlight && !inFlight
+		same := health.Same(svc.lastHealth) && !pendingClear
+		svc.healthMu.Unlock()
+		if same {
+			return false
+		}
 	}
 	publish := svc.publishHealth
 	if publish == nil {
@@ -176,7 +213,12 @@ func (svc *serviceContext) reportHealth(
 		Health:       health,
 		Commands:     progress,
 	}
-	if err := publish(client, props); err != nil {
+	err := publish(client, props)
+	svc.healthMu.Lock()
+	svc.lastAttemptAt = time.Now()
+	svc.publishFailed = err != nil
+	svc.healthMu.Unlock()
+	if err != nil {
 		if ctx.Err() == nil {
 			logger.Warn("Failed to update device twin fleet health", "error", err)
 		}
@@ -185,21 +227,40 @@ func (svc *serviceContext) reportHealth(
 	if ctx.Err() != nil {
 		return false
 	}
+	ids := postIDs(progress)
 	svc.healthMu.Lock()
+	fileChanged := reason == reportConnected || !health.Same(svc.lastHealth) ||
+		!slices.Equal(ids, svc.lastFileIDs)
 	svc.lastHealth = health
 	svc.lastInFlight = inFlight
-	svc.lastPublishedAt = time.Now()
+	if fileChanged {
+		svc.lastFileIDs = ids
+	}
 	svc.healthMu.Unlock()
-	svc.writeHealthFile(&props, logger)
+	// The file is for --diagnostic, which shows the state at the last report;
+	// rewriting it (two fsyncs) every heartbeat just to move elapsed_seconds
+	// would compete with the journal and spool for the directory for nothing.
+	if fileChanged {
+		svc.writeHealthFile(&props, logger)
+	}
 	logger.Debug(
 		"Device twin fleet health updated",
 		"journal_pending", health.Journal.Pending,
 		"journal_degraded", health.Journal.Degraded,
 		"spool_entries", health.Spool.Entries,
 		"executing", health.Commands.Executing,
-		"in_flight", len(inFlightOrNone(progress)),
+		"in_flight", len(progress.InFlight),
 	)
 	return true
+}
+
+// postIDs lists the running commands' post ids, in report order.
+func postIDs(p *mqtt.CommandsProgress) []string {
+	ids := make([]string, 0, len(p.InFlight))
+	for _, c := range p.InFlight {
+		ids = append(ids, c.PostID)
+	}
+	return ids
 }
 
 func inFlightOrNone(p *mqtt.CommandsProgress) []mqtt.CommandProgress {
@@ -209,9 +270,24 @@ func inFlightOrNone(p *mqtt.CommandsProgress) []mqtt.CommandProgress {
 	return p.InFlight
 }
 
-// healthLoop re-checks the health every interval for the life of the
-// connection cycle and publishes when it changed, so a burst of changes
-// becomes at most one twin update per interval.
+// recentPublish reports whether a publish was attempted within the spacing
+// floor, so two ticks that align (the 60 s health tick and the 30 s heartbeat
+// do, every minute) do not send two PATCHes a few milliseconds apart.
+func (svc *serviceContext) recentPublish() (bool, time.Duration) {
+	svc.healthMu.Lock()
+	defer svc.healthMu.Unlock()
+	since := time.Since(svc.lastAttemptAt)
+	return since < kickMinSpacing, kickMinSpacing - since
+}
+
+// healthLoop keeps the twin current for the life of the connection cycle: the
+// health counters are re-checked every health interval and published when
+// they changed, the running commands are republished every heartbeat
+// interval while anything runs, and a command finishing publishes the
+// clearing update at once. Publishes are spaced at least kickMinSpacing
+// apart: a tick inside the floor is skipped (the next one comes), a kick
+// inside it is deferred to the end of the floor rather than dropped, so the
+// clearing update is coalesced, never lost.
 func (svc *serviceContext) healthLoop(
 	ctx context.Context,
 	client mqtt.Client,
@@ -219,14 +295,8 @@ func (svc *serviceContext) healthLoop(
 	notifier plugins.NotifierWrapper,
 	logger hclog.Logger,
 ) {
-	// The loop ticks at the heartbeat interval so a running command's elapsed
-	// time is republished on that cadence; the health counters still coalesce
-	// to their own, longer interval inside reportHealth. A kick from a command
-	// that just finished publishes at once, spaced by at least a second so a
-	// stream of short commands cannot flood the twin.
 	kick := make(chan struct{}, 1)
 	svc.healthMu.Lock()
-	svc.healthInterval = device.ResolvedHealthReportInterval()
 	svc.healthKick = kick
 	svc.healthMu.Unlock()
 	defer func() {
@@ -234,27 +304,50 @@ func (svc *serviceContext) healthLoop(
 		svc.healthKick = nil
 		svc.healthMu.Unlock()
 	}()
-	ticker := time.NewTicker(device.ResolvedCommandHeartbeatInterval())
-	defer ticker.Stop()
+	healthTicker := time.NewTicker(device.ResolvedHealthReportInterval())
+	defer healthTicker.Stop()
+	heartbeatTicker := time.NewTicker(device.ResolvedCommandHeartbeatInterval())
+	defer heartbeatTicker.Stop()
+	var deferred *time.Timer
+	var deferredC <-chan time.Time
+	defer func() {
+		if deferred != nil {
+			deferred.Stop()
+		}
+	}()
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
-			svc.reportHealth(ctx, client, notifier, logger, false)
-		case <-kick:
-			svc.healthMu.Lock()
-			recent := time.Since(svc.lastPublishedAt) < kickMinSpacing
-			svc.healthMu.Unlock()
-			if !recent {
-				svc.reportHealth(ctx, client, notifier, logger, false)
+		case <-healthTicker.C:
+			if recent, _ := svc.recentPublish(); !recent {
+				svc.reportHealth(ctx, client, notifier, logger, reportHealthTick)
 			}
+		case <-heartbeatTicker.C:
+			if recent, _ := svc.recentPublish(); !recent {
+				svc.reportHealth(ctx, client, notifier, logger, reportHeartbeat)
+			}
+		case <-kick:
+			if deferredC != nil {
+				// Already waiting; the deferred publish reports the state then.
+				continue
+			}
+			recent, wait := svc.recentPublish()
+			if !recent {
+				svc.reportHealth(ctx, client, notifier, logger, reportFinished)
+				continue
+			}
+			deferred = time.NewTimer(wait)
+			deferredC = deferred.C
+		case <-deferredC:
+			deferredC = nil
+			svc.reportHealth(ctx, client, notifier, logger, reportFinished)
 		}
 	}
 }
 
-// kickMinSpacing is the least time between two publishes triggered by
-// commands finishing; the next tick catches up on anything skipped.
+// kickMinSpacing is the least time between two twin publishes from this
+// reporter, whatever triggered them.
 const kickMinSpacing = time.Second
 
 // healthDir is where the health file lives: the org's data directory, or the

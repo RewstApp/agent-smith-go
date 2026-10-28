@@ -1106,7 +1106,7 @@ reports a `health` object, assembled from the counters it already keeps:
   "journal":  { "pending": 0, "degraded": false, "expired_total": 0, "interrupted_total": 0 },
   "spool":    { "entries": 0, "dropped_expired": 0, "dropped_capacity": 0, "dropped_attempts": 0, "dropped_corrupt": 0 },
   "plugins":  [ { "name": "teams", "restarts": 0, "notify_failures": 0, "notify_timeouts": 0 } ],
-  "commands": { "executing": 0, "completed_total": 12, "timed_out_total": 0 }
+  "commands": { "executing": 0, "completed_total": 12, "timed_out_total": 0, "failed_total": 0 }
 }
 ```
 
@@ -1116,21 +1116,39 @@ the number of accepted commands not yet finished, `journal.degraded` is true
 while the journal is failing writes (the once-per-transition Error in the log),
 `spool.entries` is the number of results waiting for the engine and the
 `dropped_*` counters are the spool's documented drop reasons, `plugins` mirrors
-the supervision counters per configured plugin, `commands.timed_out_total`
-counts commands killed at the per-command deadline, and
+the supervision counters per configured plugin, `commands.completed_total`
+counts commands that ran to their own end whatever their exit code,
+`commands.timed_out_total` those killed at the per-command deadline,
+`commands.failed_total` those that could not be run at all (the script could
+not be written or verified, the shell could not be started), and
 `last_connection_error` is the reason the last connection was lost (empty when
-none since start).
+none since start). A command cut short by the service stopping is counted by
+none of the three: the journal replay reports it to the engine as
+`interrupted`, and counting it as completed here would have the twin
+contradict that (sc-130762).
 
 The object is published after every successful subscribe and then re-checked
 every `health_report_interval_seconds` (default 60; `--health-report-interval-seconds`
-at install or `--update`) for the life of the connection: it is re-published
-only when something other than the clock changed, so a burst of drops or
-plugin restarts becomes at most one twin update per interval, well inside IoT
-Hub's twin allowance. The publish runs off the connection path with the usual
+at install or `--update`) on its own ticker for the life of the connection: it
+is re-published only when something other than the clock changed since the
+last publish, whichever publish that was, so a burst of drops or plugin
+restarts becomes at most one twin update per interval, well inside IoT Hub's
+twin allowance. The publish runs off the connection path with the usual
 bounded wait, and a failure is a Warn: the twin is informational and can never
 affect command handling. The service also leaves the last object it published
 in `<data directory>/health.json`, which `--diagnostic` shows under "Fleet
-Health" so what the machine says can be compared with what Rewst sees.
+Health" so what the machine says can be compared with what Rewst sees; the
+file is rewritten only when the health object or the set of running commands
+changed, not on every heartbeat.
+
+The PATCH is published at QoS 0 and the agent does not subscribe to the
+hub's `$iothub/twin/res/#` responses, so a PATCH the hub rejects (a throttled
+device, a reported-properties document over the 32 KB limit) is recorded as
+published and the change is re-sent only when a later counter moves or the
+next connection re-publishes everything. The per-device PATCH rate is bounded
+by the health interval, the heartbeat interval while a command runs, and one
+clearing publish per command that finishes with nothing else running, which
+keeps a device far inside the hub's twin-update throttle.
 
 **Proven end to end by** the stub broker, which keeps every reported-properties
 PATCH per device and serves the merged result at
@@ -1158,15 +1176,29 @@ twin also carries the running commands:
 
 The byte counts are bytes *produced*, so they keep growing past the
 `max_output_bytes` ceiling; `last_output_line` is the last non-empty line of
-standard output (standard error when stdout has none), truncated to 256
-bytes. While anything is running the object is republished every
-`command_heartbeat_seconds` (default 30; `--command-heartbeat-seconds`) by
-the same reporter that publishes the fleet health - one PATCH carries both,
-so the two can never race - and the publish after the last command finishes
-sends an empty list to clear it, at once rather than at the next tick (a
-finished command wakes the reporter; wake-ups are spaced at least a second
-apart so a stream of short commands cannot flood the twin). The health
-counters keep their own, longer coalescing interval inside that loop.
+standard output (standard error when stdout has none), truncated to its last
+256 bytes on a character boundary. The line is tracked from every byte the
+command writes as it is written - not read back from the bounded buffer - so
+it keeps moving after the output ceiling is reached, a progress bar redrawn
+with bare carriage returns reports its latest frame, and reading it never
+scans the buffer under the lock the output copier needs (sc-130762).
+
+While anything is running the object is republished every
+`command_heartbeat_seconds` (default 30; `--command-heartbeat-seconds`) on
+its own ticker by the same reporter that publishes the fleet health - one
+PATCH carries both, so the two can never race. The `commands` object is sent
+on *every* publish, empty when nothing runs, so the list a previous process
+left in the twin is overwritten by the next connection rather than surviving
+a restart as a phantom entry. A command finishing wakes the reporter the
+moment its entry disappears (before the result postback and its retries),
+and the wake-up publishes the clearing update at once when nothing else is
+running; a completion beside other running commands waits for the heartbeat,
+so with several workers a stream of short commands next to a long one cannot
+publish faster than the heartbeat. Publishes are spaced at least a second
+apart: a tick inside that floor is skipped (the next one comes), a wake-up
+inside it is deferred to the end of the floor rather than dropped. After a
+failed publish the wake-ups are held until a tick succeeds, so a broker that
+has stopped acknowledging is retried once per interval, not once per command.
 `--diagnostic`'s "Fleet Health" section lists the commands in flight at the
 last report. **Proven end to end by** `hermetic-journal`, which asserts
 through the stub broker's twin that the 45 s `hold` command is named in
