@@ -451,7 +451,15 @@ func (svc *serviceContext) Execute(
 		rg.Next()
 
 		// Each cycle starts from the settings in effect, so a worker count the
-		// device twin changed takes effect here (sc-129688).
+		// device twin changed takes effect here (sc-129688). A reconfigure
+		// request still queued from before - the previous cycle ended for
+		// another reason first - is satisfied by this snapshot, so it is
+		// discarded rather than left to end the new cycle for nothing; one
+		// made after the snapshot stays queued.
+		select {
+		case <-svc.reconfigure:
+		default:
+		}
 		shouldReturn, clearBackoff, exitCode := svc.runCycle(
 			ctx,
 			svc.liveDeviceOr(device),

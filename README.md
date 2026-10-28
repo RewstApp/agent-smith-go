@@ -1221,16 +1221,23 @@ these settings from the device twin's **desired properties**:
 | `max_output_bytes` | `--max-output-bytes` (positive integer) | from the next command |
 | `postback_max_attempts` | `--postback-max-attempts` (positive integer) | from the next postback |
 | `postback_base_retry_backoff_seconds` | `--postback-base-retry-backoff-seconds` (positive integer) | from the next postback |
-| `worker_count` | `--worker-count` (positive integer) | at the next safe point (below) |
+| `worker_count` | `--worker-count` (positive integer, at most 256) | at the next safe point (below) |
 | `disable_auto_updates` | `--no-auto-updates` (`true`/`false`) | at once: the auto-updater stops or starts |
 
 On every connection the agent subscribes to
 `$iothub/twin/PATCH/properties/desired/#` and the twin response topic
 `$iothub/twin/res/#`, then asks for the whole twin (`$iothub/twin/GET`), so a
 change made while it was offline is applied when it reconnects; after that
-each PATCH applies as it arrives. A document whose `$version` is not newer
-than the one already applied is ignored, so a GET answer racing a PATCH
-cannot roll a setting back. A running command is never killed to apply a
+each PATCH applies as it arrives. A PATCH whose `$version` is not newer
+than the one already applied is ignored, and a GET answer is ignored only
+when it is strictly older, so a GET answer racing a PATCH cannot roll a
+setting back while a GET at the applied version still fills in anything
+missed. If the agent falls behind and has to drop twin messages, it reads the
+whole twin again once any outstanding GET is answered. The worker count is
+capped at 256 from every source - the CLI flag and the twin reject more, and
+a config file carrying more is clamped - because each worker is started
+before the agent connects, and an absurd value would otherwise fail every
+start before the twin could correct it. A running command is never killed to apply a
 setting: a new timeout or output ceiling applies from the next command, and a
 new `worker_count` ends the connection cycle the way a SAS renewal does - the
 next cycle starts its pool at the new size while the old one finishes what it
@@ -1241,7 +1248,12 @@ A failed write is a Warn and the setting still applies to the running
 process. The auto-update helper is started with the logging level and
 auto-update toggle in effect, so an update does not undo them.
 
-Each key is acknowledged under `reported.settings_ack.<key>`:
+Each key is acknowledged under `reported.settings_ack.<key>`, with every
+field always present - IoT Hub merges reported properties recursively, so a
+field left out would keep the previous acknowledgement's value. An
+acknowledgement is published under its own request id and sent again, with a
+doubling delay capped at ten minutes, until the hub answers it with a 2xx;
+the GET on every reconnect re-acknowledges every key as well:
 
 ```json
 "settings_ack": {
@@ -1264,8 +1276,11 @@ Credentials, endpoints and every other config key cannot be changed this
 way. The twin subscription is best effort: if it fails the agent logs a Warn
 and runs on its config file, and the command path is never affected. Since
 the agent now listens on the twin response topic it also logs a Warn when the
-hub refuses a reported-properties update (a throttled or oversized PATCH),
-once per streak of refusals.
+hub refuses a fleet-health update (a throttled or oversized PATCH), once per
+streak of refusals; an answer to a request no longer awaited is only logged
+at Debug. Turning auto-updates off while an update waits for running
+commands lifts the hold on new commands at once, and is logged as the
+updater stopping, not as an update failure.
 
 **Proven end to end by** `hermetic-runtime-settings`: through the stub
 broker's `/_control/devices/{id}/desired` control it sets

@@ -115,6 +115,14 @@ const (
 	// DefaultWorkerCount is the number of concurrent command-execution workers
 	// used when WorkerCount is not configured.
 	DefaultWorkerCount = 10
+	// MaxWorkerCount caps the command-execution workers whatever the source:
+	// each worker is a goroutine started before the agent connects, so an
+	// absurd value (a typo pushed through the device twin, a hand-edited
+	// config file) would otherwise exhaust memory at every start, before the
+	// agent could reach the twin where a corrected value would apply
+	// (sc-129688). The CLI flag and the twin reject a larger value; a config
+	// file that carries one is clamped here.
+	MaxWorkerCount = 256
 	// DefaultMessageQueueSize is the buffered inbound message queue capacity used
 	// when MessageQueueSize is not configured.
 	DefaultMessageQueueSize = 100
@@ -167,11 +175,11 @@ const (
 )
 
 // ResolvedWorkerCount returns the number of command-execution workers to start,
-// honoring the per-device override when set to a positive value and falling back
-// to DefaultWorkerCount otherwise.
+// honoring the per-device override when set to a positive value (clamped to
+// MaxWorkerCount) and falling back to DefaultWorkerCount otherwise.
 func (d Device) ResolvedWorkerCount() int {
 	if d.WorkerCount != nil && *d.WorkerCount > 0 {
-		return *d.WorkerCount
+		return min(*d.WorkerCount, MaxWorkerCount)
 	}
 	return DefaultWorkerCount
 }

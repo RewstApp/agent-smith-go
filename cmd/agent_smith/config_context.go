@@ -206,6 +206,21 @@ func (t tuningFlags) validate() error {
 			return err
 		}
 	}
+	if t.provided["worker-count"] {
+		if err := validateWorkerCount(t.WorkerCount); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// validateWorkerCount bounds the worker count from above as well, whether it
+// arrives as --worker-count or as a device-twin desired property: every
+// worker is a goroutine started before the agent connects (agent.MaxWorkerCount).
+func validateWorkerCount(value int) error {
+	if value > agent.MaxWorkerCount {
+		return fmt.Errorf("invalid worker-count: must be at most %d", agent.MaxWorkerCount)
+	}
 	return nil
 }
 

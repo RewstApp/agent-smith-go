@@ -334,3 +334,16 @@ func TestMqttConnectTimeout(t *testing.T) {
 		})
 	}
 }
+
+// A worker count from any source is clamped to MaxWorkerCount: every worker is
+// a goroutine started before the agent connects (sc-129688).
+func TestResolvedWorkerCount_IsClampedToTheMaximum(t *testing.T) {
+	huge := 50_000_000
+	if got := (Device{WorkerCount: &huge}).ResolvedWorkerCount(); got != MaxWorkerCount {
+		t.Errorf("ResolvedWorkerCount() = %d, want %d", got, MaxWorkerCount)
+	}
+	exact := MaxWorkerCount
+	if got := (Device{WorkerCount: &exact}).ResolvedWorkerCount(); got != MaxWorkerCount {
+		t.Errorf("ResolvedWorkerCount() = %d at the maximum", got)
+	}
+}

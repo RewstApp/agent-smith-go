@@ -31,11 +31,16 @@ const (
 // desired property was removed; Value is the value still in effect).
 // DesiredVersion is the desired properties' $version the acknowledgement
 // answers, so Rewst can tell an applied change from a pending one.
+//
+// Every field is always sent: IoT Hub applies a reported PATCH as a recursive
+// JSON merge, so a field left out would keep the previous acknowledgement's
+// value - an "applied" status beside the last rejection's detail. An empty
+// Value is sent as null, which removes it.
 type SettingAck struct {
-	Value          json.RawMessage `json:"value,omitempty"`
+	Value          json.RawMessage `json:"value"`
 	Status         string          `json:"status"`
 	DesiredVersion int64           `json:"desired_version"`
-	Detail         string          `json:"detail,omitempty"`
+	Detail         string          `json:"detail"`
 }
 
 // SubscribeTwin subscribes to the desired-properties PATCH topic and the twin

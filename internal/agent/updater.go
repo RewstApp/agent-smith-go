@@ -593,9 +593,20 @@ func (u *defaultUpdater) waitForIdle(ctx context.Context) error {
 	}
 
 	// Park new commands for the whole wait plus the helper's own window; the
-	// hold is re-armed to the shorter post-launch window once the wait ends.
+	// hold is re-armed to the shorter post-launch window once the wait ends -
+	// unless the wait was abandoned, in which case no helper is coming and the
+	// hold is lifted instead. Re-arming it there parked every new command for
+	// the post-launch window behind a restart that never happened (sc-129688:
+	// the device twin can now stop the updater mid-wait).
 	u.activity.HoldNewCommands(maxWait + hold)
-	defer u.activity.HoldNewCommands(hold)
+	abandoned := false
+	defer func() {
+		if abandoned {
+			u.activity.ReleaseNewCommands()
+			return
+		}
+		u.activity.HoldNewCommands(hold)
+	}()
 
 	executing := u.activity.Executing()
 	if executing == 0 {
@@ -616,7 +627,7 @@ func (u *defaultUpdater) waitForIdle(ctx context.Context) error {
 	for {
 		select {
 		case <-ctx.Done():
-			u.activity.ReleaseNewCommands()
+			abandoned = true
 			u.logger.Info(
 				"Update deferral abandoned: updater stopping",
 				"executing", u.activity.Executing(),
@@ -752,6 +763,13 @@ func (r *AutoUpdateRunner) Start() {
 				return
 			case <-timer.C:
 				if err := r.runUpdate(); err != nil {
+					// Stop cancels the context before signalling the loop, so a
+					// check or download it interrupted fails with a cancellation:
+					// that is the updater being turned off, not an update failure.
+					if r.ctx.Err() != nil {
+						r.logger.Info("Auto updater stopped")
+						return
+					}
 					r.logger.Error("Update failed, starting retry backoff", "error", err)
 					if r.retryWithBackoff() {
 						// A stop observed inside the backoff wait exits here rather

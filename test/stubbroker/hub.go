@@ -371,45 +371,47 @@ func (h *hub) twinGet(deviceID string, c *clientConn, rid string) error {
 
 // setDesired merges patch into the device's desired properties, bumps their
 // $version, and delivers the PATCH to the device if it is listening. It
-// returns the new version and the whole desired document.
+// returns the new version and the whole desired document. The PATCH is
+// written after the hub's lock is released, so a slow client cannot stall the
+// rest of the fixture.
 func (h *hub) setDesired(
 	deviceID string,
 	patch map[string]json.RawMessage,
 ) (int64, map[string]json.RawMessage) {
 	h.mu.Lock()
-	defer h.mu.Unlock()
 	d := h.device(deviceID)
 	if d.desired == nil {
 		d.desired = map[string]json.RawMessage{}
 	}
 	mergePatch(d.desired, patch)
 	d.desiredVersion++
-	doc := desiredDocLocked(d)
-	if d.twinSubscriber != nil {
-		body := map[string]json.RawMessage{}
-		for k, v := range patch {
-			body[k] = v
-		}
-		body["$version"] = json.RawMessage(strconv.FormatInt(d.desiredVersion, 10))
-		data, err := json.Marshal(body)
-		if err == nil {
-			topic := fmt.Sprintf(
-				"$iothub/twin/PATCH/properties/desired/?$version=%d",
-				d.desiredVersion,
-			)
-			if err := d.twinSubscriber.publish(topic, data); err != nil {
-				log.Printf("%s: failed to deliver the desired PATCH: %v", deviceID, err)
-			} else {
-				log.Printf("%s: desired PATCH $version=%d delivered", deviceID, d.desiredVersion)
-			}
-		}
-	} else {
+	version, doc, listener := d.desiredVersion, desiredDocLocked(d), d.twinSubscriber
+	h.mu.Unlock()
+
+	if listener == nil {
 		log.Printf(
 			"%s: desired $version=%d set; no listener, the device reads it on its next GET",
-			deviceID, d.desiredVersion,
+			deviceID, version,
 		)
+		return version, doc
 	}
-	return d.desiredVersion, doc
+	body := map[string]json.RawMessage{}
+	for k, v := range patch {
+		body[k] = v
+	}
+	body["$version"] = json.RawMessage(strconv.FormatInt(version, 10))
+	data, err := json.Marshal(body)
+	if err != nil {
+		log.Printf("%s: failed to encode the desired PATCH: %v", deviceID, err)
+		return version, doc
+	}
+	topic := fmt.Sprintf("$iothub/twin/PATCH/properties/desired/?$version=%d", version)
+	if err := listener.publish(topic, data); err != nil {
+		log.Printf("%s: failed to deliver the desired PATCH: %v", deviceID, err)
+	} else {
+		log.Printf("%s: desired PATCH $version=%d delivered", deviceID, version)
+	}
+	return version, doc
 }
 
 // twin returns the device's reported properties as last merged.

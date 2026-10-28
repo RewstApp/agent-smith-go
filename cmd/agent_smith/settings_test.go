@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -65,7 +66,7 @@ func TestReadDesired_AllowListValidationAndStatuses(t *testing.T) {
 		"shared_access_key": "stolen",
 		"no_such_setting": 1,
 		"$metadata": {}
-	}`))
+	}`), false)
 	if err != nil || update == nil {
 		t.Fatalf("readDesired: %+v %v", update, err)
 	}
@@ -119,7 +120,7 @@ func TestReadDesired_ClearedAndUnchangedAndUnsupportedCap(t *testing.T) {
 		doc["junk_"+strings.Repeat("x", i%3)+string(rune('a'+i%26))+string(rune('a'+i/26))] = i
 	}
 	payload, _ := json.Marshal(doc)
-	update, err := svc.readDesired(payload)
+	update, err := svc.readDesired(payload, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -160,7 +161,7 @@ func TestApplyDesired_AppliesLivePersistsAndAcknowledges(t *testing.T) {
 		"postback_max_attempts": 7,
 		"postback_base_retry_backoff_seconds": 2,
 		"worker_count": 3
-	}`), hclog.NewNullLogger())
+	}`), false, hclog.NewNullLogger())
 	for key, ack := range acks {
 		if ack.Status != settingApplied || ack.Detail != "" {
 			t.Errorf("%s: %+v", key, ack)
@@ -216,10 +217,12 @@ func TestApplyDesired_AppliesLivePersistsAndAcknowledges(t *testing.T) {
 	// The same version again, and an older one, are ignored.
 	if svc.applyDesired(
 		[]byte(`{"$version": 3, "worker_count": 9}`),
+		false,
 		hclog.NewNullLogger(),
 	) != nil ||
 		svc.applyDesired(
 			[]byte(`{"$version": 2, "worker_count": 9}`),
+			false,
 			hclog.NewNullLogger(),
 		) != nil {
 		t.Error("a desired document no newer than the one applied was applied")
@@ -232,7 +235,11 @@ func TestApplyDesired_AppliesLivePersistsAndAcknowledges(t *testing.T) {
 func TestApplyDesired_RejectedValueKeepsThePreviousOne(t *testing.T) {
 	svc, _ := newSettingsTestService(t, settingsTestConfig)
 	before, _ := os.ReadFile(svc.ConfigFile)
-	acks := svc.applyDesired([]byte(`{"$version": 5, "worker_count": -1}`), hclog.NewNullLogger())
+	acks := svc.applyDesired(
+		[]byte(`{"$version": 5, "worker_count": -1}`),
+		false,
+		hclog.NewNullLogger(),
+	)
 	if acks["worker_count"].Status != settingRejected {
 		t.Fatalf("acks %+v", acks)
 	}
@@ -255,6 +262,7 @@ func TestApplyDesired_PersistFailureStillAppliesAndSaysSo(t *testing.T) {
 	svc.ConfigFile = filepath.Join(t.TempDir(), "missing", "config.json")
 	acks := svc.applyDesired(
 		[]byte(`{"$version": 1, "command_timeout_seconds": 9}`),
+		false,
 		hclog.NewNullLogger(),
 	)
 	ack := acks["command_timeout_seconds"]
@@ -292,7 +300,11 @@ func TestApplyDesired_TogglesTheAutoUpdater(t *testing.T) {
 	})
 	svc.autoUpdate.set(true)
 	defer svc.autoUpdate.set(false)
-	svc.applyDesired([]byte(`{"$version": 1, "disable_auto_updates": true}`), hclog.NewNullLogger())
+	svc.applyDesired(
+		[]byte(`{"$version": 1, "disable_auto_updates": true}`),
+		false,
+		hclog.NewNullLogger(),
+	)
 	if svc.autoUpdate.runner != nil {
 		t.Fatal("disable_auto_updates=true left the updater running")
 	}
@@ -301,6 +313,7 @@ func TestApplyDesired_TogglesTheAutoUpdater(t *testing.T) {
 	}
 	svc.applyDesired(
 		[]byte(`{"$version": 2, "disable_auto_updates": false}`),
+		false,
 		hclog.NewNullLogger(),
 	)
 	if svc.autoUpdate.runner == nil || created != 2 {
@@ -319,6 +332,9 @@ type twinTestClient struct {
 	handler   pahomqtt.MessageHandler
 	filters   map[string]byte
 	published []string
+	// onPublish, when set, runs after a publish is recorded, on the
+	// publisher's goroutine (the loop's), outside the lock.
+	onPublish func(topic string)
 }
 
 func (c *twinTestClient) SubscribeMultiple(
@@ -333,10 +349,47 @@ func (c *twinTestClient) SubscribeMultiple(
 
 func (c *twinTestClient) Publish(topic string, _ byte, _ bool, _ interface{}) pahomqtt.Token {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	c.published = append(c.published, topic)
+	hook := c.onPublish
+	c.mu.Unlock()
+	if hook != nil {
+		hook(topic)
+	}
 	return &mockMQTTToken{}
 }
+
+// topicsWithPrefix lists the request ids of the publishes on topics that
+// start with prefix ("...?$rid="), in order.
+func (c *twinTestClient) ridsFor(prefix string) []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var out []string
+	for _, topic := range c.published {
+		if rid, ok := strings.CutPrefix(topic, prefix); ok {
+			out = append(out, rid)
+		}
+	}
+	return out
+}
+
+// waitForRIDs polls until at least n publishes on prefix were made.
+func (c *twinTestClient) waitForRIDs(t *testing.T, prefix string, n int) []string {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if rids := c.ridsFor(prefix); len(rids) >= n {
+			return rids
+		}
+		time.Sleep(5 * time.Millisecond) // sleep-ok: poll interval inside a bounded wait
+	}
+	t.Fatalf("want %d publish(es) on %s, got %v", n, prefix, c.ridsFor(prefix))
+	return nil
+}
+
+const (
+	twinGetPrefix      = "$iothub/twin/GET/?$rid="
+	twinReportedPrefix = "$iothub/twin/PATCH/properties/reported/?$rid="
+)
 
 func (c *twinTestClient) deliver(topic, payload string) {
 	c.mu.Lock()
@@ -537,5 +590,223 @@ func TestExecute_ReconfigureEndsTheCycleAndReconnects(t *testing.T) {
 	case <-done:
 	case <-time.After(10 * time.Second):
 		t.Fatal("Execute did not exit")
+	}
+}
+
+// Review fixes on sc-129688.
+
+func TestReadDesired_WorkerCountHasACeiling(t *testing.T) {
+	svc, _ := newSettingsTestService(t, settingsTestConfig)
+	update, err := svc.readDesired(
+		[]byte(`{"$version": 1, "worker_count": 50000000}`),
+		false,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ack := update.acks["worker_count"]
+	if ack.Status != settingRejected || !strings.Contains(ack.Detail, "at most 256") {
+		t.Errorf("an absurd worker count was not rejected: %+v", ack)
+	}
+	if len(update.changed) != 0 {
+		t.Errorf("changed %v", update.changed)
+	}
+	if update, _ := svc.readDesired(
+		[]byte(`{"$version": 2, "worker_count": 256}`),
+		false,
+	); update.acks["worker_count"].Status != settingApplied {
+		t.Errorf("the maximum itself was rejected: %+v", update.acks["worker_count"])
+	}
+}
+
+func TestTuningFlags_WorkerCountHasTheSameCeiling(t *testing.T) {
+	tf := tuningFlags{WorkerCount: 257, provided: map[string]bool{"worker-count": true}}
+	if err := tf.validate(); err == nil || !strings.Contains(err.Error(), "at most 256") {
+		t.Errorf("--worker-count 257: %v", err)
+	}
+	tf.WorkerCount = 256
+	if err := tf.validate(); err != nil {
+		t.Errorf("--worker-count 256: %v", err)
+	}
+}
+
+// Every acknowledgement field is sent, so the hub's merge cannot keep a
+// previous acknowledgement's detail beside a new status.
+func TestSettingAck_SendsEveryField(t *testing.T) {
+	data, err := json.Marshal(mqtt.SettingAck{Status: settingApplied, DesiredVersion: 4})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"value", "status", "desired_version", "detail"} {
+		if _, ok := fields[key]; !ok {
+			t.Errorf("%s missing from %s", key, data)
+		}
+	}
+	if string(fields["detail"]) != `""` || string(fields["value"]) != "null" {
+		t.Errorf("empty fields must clear the previous ones: %s", data)
+	}
+}
+
+func TestReadDesired_NullDocumentIsReportedPlainly(t *testing.T) {
+	svc, _ := newSettingsTestService(t, settingsTestConfig)
+	_, err := svc.readDesired([]byte("null"), false)
+	if err == nil || strings.Contains(err.Error(), "%!") {
+		t.Errorf("null document: %v", err)
+	}
+}
+
+func TestReadDesired_VersionRules(t *testing.T) {
+	svc, _ := newSettingsTestService(t, settingsTestConfig)
+	log := hclog.NewNullLogger()
+	if svc.applyDesired(
+		[]byte(`{"$version": 8, "command_timeout_seconds": 8}`),
+		false,
+		log,
+	) == nil {
+		t.Fatal("v8 was not applied")
+	}
+	// A whole-twin answer at the applied version is applied again (it fills a
+	// dropped PATCH and re-acknowledges); a PATCH at that version is not.
+	if acks := svc.applyDesired(
+		[]byte(`{"$version": 8, "command_timeout_seconds": 8, "max_output_bytes": 4096}`),
+		true,
+		log,
+	); acks["max_output_bytes"].Status != settingApplied {
+		t.Errorf("a full document at the applied version was skipped: %+v", acks)
+	}
+	if svc.applyDesired([]byte(`{"$version": 8, "worker_count": 2}`), false, log) != nil {
+		t.Error("a PATCH at the applied version was applied")
+	}
+	if svc.applyDesired([]byte(`{"$version": 7, "worker_count": 2}`), true, log) != nil {
+		t.Error("an older full document was applied")
+	}
+	// A document without a $version applies but never moves the version back,
+	// so an older document cannot roll the settings back afterwards.
+	if svc.applyDesired([]byte(`{"command_timeout_seconds": 11}`), false, log) == nil {
+		t.Fatal("a document without a version was not applied")
+	}
+	if svc.applyDesired([]byte(`{"$version": 5, "command_timeout_seconds": 5}`), true, log) != nil {
+		t.Error("an older document was applied after an unversioned one")
+	}
+	if got := svc.liveDeviceOr(agent.Device{}).ResolvedCommandTimeout(); got != 11*time.Second {
+		t.Errorf("timeout %s, want 11s", got)
+	}
+}
+
+// Messages dropped while a GET is outstanding still get their own GET once it
+// is answered: the overflow is not consumed by the outstanding one.
+func TestTwinSettingsLoop_OverflowDuringAGetStillRefetches(t *testing.T) {
+	svc, _ := newSettingsTestService(t, settingsTestConfig)
+	client := &twinTestClient{}
+	flooded := false
+	client.onPublish = func(topic string) {
+		if !strings.HasPrefix(topic, twinGetPrefix) || flooded {
+			return
+		}
+		flooded = true
+		// More PATCHes than the buffer holds, while the first GET is out.
+		for v := 1; v <= 80; v++ {
+			client.deliver(
+				fmt.Sprintf("$iothub/twin/PATCH/properties/desired/?$version=%d", v),
+				fmt.Sprintf(`{"$version":%d,"command_timeout_seconds":%d}`, v, v),
+			)
+		}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		svc.twinSettingsLoop(ctx, client, agent.Device{}, hclog.NewNullLogger())
+		close(done)
+	}()
+	defer func() {
+		cancel()
+		<-done
+	}()
+	first := client.waitForRIDs(t, twinGetPrefix, 1)[0]
+	// The first GET's answer is older than what was dropped.
+	client.deliver(
+		"$iothub/twin/res/200/?$rid="+first,
+		`{"desired":{"$version":10,"command_timeout_seconds":10}}`,
+	)
+	rids := client.waitForRIDs(t, twinGetPrefix, 2)
+	client.deliver(
+		"$iothub/twin/res/200/?$rid="+rids[1],
+		`{"desired":{"$version":80,"command_timeout_seconds":80}}`,
+	)
+	deadline := time.Now().Add(5 * time.Second)
+	for svc.liveDeviceOr(agent.Device{}).ResolvedCommandTimeout() != 80*time.Second &&
+		time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond) // sleep-ok: poll interval inside a bounded wait
+	}
+	if got := svc.liveDeviceOr(agent.Device{}).ResolvedCommandTimeout(); got != 80*time.Second {
+		t.Errorf("after the refetch the timeout is %s, want the dropped PATCHes' 80s", got)
+	}
+}
+
+// An acknowledgement the hub refuses is sent again until it is accepted, and
+// only a refusal of a fleet-health PATCH is reported as one.
+func TestTwinSettingsLoop_RetriesRefusedAcknowledgements(t *testing.T) {
+	origTimeout, origMax := ackResponseTimeout, ackRetryMax
+	ackResponseTimeout, ackRetryMax = 50*time.Millisecond, 100*time.Millisecond
+	defer func() { ackResponseTimeout, ackRetryMax = origTimeout, origMax }()
+
+	svc, _ := newSettingsTestService(t, settingsTestConfig)
+	svc.publishHealth = nil // publish through the client, under request ids
+	client := &twinTestClient{}
+	var logBuf syncBuffer
+	logger := hclog.New(&hclog.LoggerOptions{Output: &logBuf, Level: hclog.Debug})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		svc.twinSettingsLoop(ctx, client, agent.Device{}, logger)
+		close(done)
+	}()
+	defer func() {
+		cancel()
+		<-done
+	}()
+	get := client.waitForRIDs(t, twinGetPrefix, 1)[0]
+	client.deliver(
+		"$iothub/twin/res/200/?$rid="+get,
+		`{"desired":{"$version":1,"command_timeout_seconds":9}}`,
+	)
+	first := client.waitForRIDs(t, twinReportedPrefix, 1)[0]
+	client.deliver("$iothub/twin/res/429/?$rid="+first, "")
+	rids := client.waitForRIDs(t, twinReportedPrefix, 2)
+	if rids[1] == first {
+		t.Fatalf("the retry reused the refused request id %s", first)
+	}
+	client.deliver("$iothub/twin/res/204/?$rid="+rids[1], "")
+	// sleep-ok: several retry delays pass; nothing more may be sent
+	time.Sleep(300 * time.Millisecond)
+	if got := client.ridsFor(twinReportedPrefix); len(got) != 2 {
+		t.Errorf("acknowledgements sent %v, want exactly the refused one and its retry", got)
+	}
+	out := logBuf.String()
+	if !strings.Contains(out, "refused the settings acknowledgement") {
+		t.Errorf("the refusal was not logged:\n%s", out)
+	}
+
+	// A late answer to a GET no longer awaited is not a refused update.
+	client.deliver("$iothub/twin/res/429/?$rid=999999", "")
+	// A refused fleet-health PATCH is, once per streak.
+	client.deliver("$iothub/twin/res/429/?$rid="+healthReportRID, "")
+	client.deliver("$iothub/twin/res/429/?$rid="+healthReportRID, "")
+	deadline := time.Now().Add(5 * time.Second)
+	for !strings.Contains(logBuf.String(), "rejected a reported-properties update") &&
+		time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond) // sleep-ok: poll interval inside a bounded wait
+	}
+	// sleep-ok: lets the second refusal be processed before counting
+	time.Sleep(100 * time.Millisecond)
+	if n := strings.Count(logBuf.String(), "rejected a reported-properties update"); n != 1 {
+		t.Errorf("health refusals logged %d times, want once per streak:\n%s", n, logBuf.String())
+	}
+	if !strings.Contains(logBuf.String(), "no longer awaited") {
+		t.Errorf("the late GET answer was not recognised:\n%s", logBuf.String())
 	}
 }

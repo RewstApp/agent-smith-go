@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/RewstApp/agent-smith-go/internal/agent"
@@ -70,11 +71,23 @@ var runtimeSettings = map[string]runtimeSetting{
 		func(d agent.Device) int { return int(d.ResolvedCommandTimeout() / time.Second) },
 		func(d *agent.Device, v *int) { d.CommandTimeoutSeconds = v },
 	),
-	"worker_count": intSetting(
-		"worker-count",
-		func(d agent.Device) int { return d.ResolvedWorkerCount() },
-		func(d *agent.Device, v *int) { d.WorkerCount = v },
-	),
+	"worker_count": {
+		parse: func(raw json.RawMessage) (any, error) {
+			n, err := parsePositiveSetting("worker-count", raw)
+			if err != nil {
+				return nil, err
+			}
+			if err := validateWorkerCount(n); err != nil {
+				return nil, err
+			}
+			return n, nil
+		},
+		get: func(d agent.Device) any { return d.ResolvedWorkerCount() },
+		set: func(d *agent.Device, v any) {
+			n := v.(int)
+			d.WorkerCount = &n
+		},
+	},
 	"max_output_bytes": intSetting(
 		"max-output-bytes",
 		func(d agent.Device) int { return d.ResolvedMaxOutputBytes() },
@@ -210,13 +223,17 @@ func (svc *serviceContext) postbackBudget() (int, time.Duration) {
 	return svc.PostbackMaxAttempts, svc.PostbackBaseRetryBackoff
 }
 
-// readDesired validates a desired document against the settings in effect.
-// It returns nil when the document is older than one already applied (a GET
-// answer racing a PATCH, or a redelivery). Nothing is applied here.
-func (svc *serviceContext) readDesired(payload []byte) (*desiredUpdate, error) {
+// readDesired validates a desired document against the settings in effect;
+// full marks a whole-twin GET answer rather than a PATCH. It returns nil when
+// the document is older than one already applied (a GET answer racing a
+// PATCH, or a redelivery). Nothing is applied here.
+func (svc *serviceContext) readDesired(payload []byte, full bool) (*desiredUpdate, error) {
 	var doc map[string]json.RawMessage
-	if err := json.Unmarshal(payload, &doc); err != nil || doc == nil {
+	if err := json.Unmarshal(payload, &doc); err != nil {
 		return nil, fmt.Errorf("the desired properties are not a JSON object: %w", err)
+	}
+	if doc == nil {
+		return nil, errors.New("the desired properties are not a JSON object: null")
 	}
 	var version int64
 	if raw, ok := doc["$version"]; ok {
@@ -235,7 +252,14 @@ func (svc *serviceContext) readDesired(payload []byte) (*desiredUpdate, error) {
 	svc.settings.mu.RLock()
 	current, applied := svc.settings.device, svc.settings.version
 	svc.settings.mu.RUnlock()
-	if version != 0 && version <= applied {
+	// A PATCH no newer than the last document applied is a redelivery or
+	// arrived out of order. A whole-twin GET answer at the same version is
+	// still applied: it is the complete desired state, so it fills in a PATCH
+	// that was dropped (see twinSettingsLoop) and re-acknowledges every key on
+	// reconnect, which repairs an acknowledgement the hub never stored. Only a
+	// strictly older GET answer is skipped. A document without a $version is
+	// applied but never moves the version back (applyDesired).
+	if version != 0 && (version < applied || (!full && version == applied)) {
 		return nil, nil
 	}
 
@@ -302,9 +326,10 @@ func (svc *serviceContext) readDesired(payload []byte) (*desiredUpdate, error) {
 // when there is nothing to report.
 func (svc *serviceContext) applyDesired(
 	payload []byte,
+	full bool,
 	logger hclog.Logger,
 ) map[string]mqtt.SettingAck {
-	update, err := svc.readDesired(payload)
+	update, err := svc.readDesired(payload, full)
 	if err != nil {
 		logger.Warn("Ignored the device twin's desired properties", "error", err)
 		return nil
@@ -316,7 +341,7 @@ func (svc *serviceContext) applyDesired(
 
 	svc.settings.mu.Lock()
 	svc.settings.device = update.device
-	svc.settings.version = update.version
+	svc.settings.version = max(svc.settings.version, update.version)
 	svc.PostbackMaxAttempts = update.device.ResolvedPostbackMaxAttempts()
 	svc.PostbackBaseRetryBackoff = update.device.ResolvedPostbackBaseRetryBackoff()
 	svc.settings.mu.Unlock()
@@ -416,11 +441,28 @@ type twinEvent struct {
 	payload []byte
 }
 
+// Twin request ids. The fleet-health reporter's reported PATCHes all carry
+// healthReportRID; GETs and settings acknowledgements are numbered from
+// twinRequestIDBase so an answer can be matched to what it answers.
+const (
+	healthReportRID   = "1"
+	twinRequestIDBase = 1000
+)
+
+// ackResponseTimeout is how long an acknowledgement waits for the hub's
+// answer before it is sent again, and the first retry delay; ackRetryMax caps
+// the doubling. Variables so tests can shorten them.
+var (
+	ackResponseTimeout = 30 * time.Second
+	ackRetryMax        = 10 * time.Minute
+)
+
 // twinSettingsLoop subscribes the connection to the twin's desired-properties
 // PATCHes and responses, asks for the whole twin so a change made while the
 // agent was offline is applied now, and applies every PATCH that follows, for
-// the life of the connection cycle. A failure here is a Warn and leaves the
-// command path untouched: the settings then stay what the config file says.
+// the life of the connection cycle. Acknowledgements are re-sent until the hub
+// answers one with a 2xx. A failure here is a Warn and leaves the command path
+// untouched: the settings then stay what the config file says.
 func (svc *serviceContext) twinSettingsLoop(
 	ctx context.Context,
 	client mqtt.Client,
@@ -428,17 +470,22 @@ func (svc *serviceContext) twinSettingsLoop(
 	logger hclog.Logger,
 ) {
 	events := make(chan twinEvent, 64)
-	var overflowMu sync.Mutex
-	overflowed := false
+	// overflowed records a message paho delivered while the buffer was full;
+	// wake makes the loop notice even if nothing else arrives. The flag is
+	// consumed only when a GET can actually be sent, so a drop while a GET is
+	// outstanding (even a dropped GET answer) still gets its own GET.
+	var overflowed atomic.Bool
+	wake := make(chan struct{}, 1)
 	handler := func(topic string, payload []byte) {
 		select {
 		case events <- twinEvent{topic: topic, payload: payload}:
 		default:
-			// paho's delivery goroutine must not block. A dropped PATCH is
-			// recovered by asking for the whole twin again.
-			overflowMu.Lock()
-			overflowed = true
-			overflowMu.Unlock()
+			// paho's delivery goroutine must not block.
+			overflowed.Store(true)
+			select {
+			case wake <- struct{}{}:
+			default:
+			}
 		}
 	}
 	if err := mqtt.SubscribeTwin(
@@ -457,11 +504,16 @@ func (svc *serviceContext) twinSettingsLoop(
 	}
 	logger.Info("Subscribed to device twin desired properties")
 
+	nextRID := func() string {
+		return strconv.FormatInt(svc.twinRequests.Add(1)+twinRequestIDBase, 10)
+	}
+
+	// The outstanding GET, if any.
 	pending := ""
 	getTimer := time.NewTimer(twinGetTimeout)
 	defer getTimer.Stop()
 	requestFull := func() {
-		pending = strconv.FormatInt(svc.twinRequests.Add(1)+twinRequestIDBase, 10)
+		pending = nextRID()
 		if err := mqtt.RequestTwin(client, pending, utils.MqttPublishTimeout); err != nil {
 			if ctx.Err() == nil {
 				logger.Warn("Failed to request the device twin", "error", err)
@@ -471,6 +523,55 @@ func (svc *serviceContext) twinSettingsLoop(
 		}
 		getTimer.Reset(twinGetTimeout)
 	}
+	recoverOverflow := func() {
+		if pending == "" && overflowed.CompareAndSwap(true, false) {
+			logger.Warn("Device twin messages arrived faster than they were applied; " +
+				"reading the whole twin again")
+			requestFull()
+		}
+	}
+
+	// Acknowledgements not yet confirmed by the hub, newest per key; ackRID is
+	// the request id of the publish awaiting an answer.
+	unconfirmed := map[string]mqtt.SettingAck{}
+	ackRID := ""
+	ackDelay := ackResponseTimeout
+	ackTimer := time.NewTimer(time.Hour)
+	ackTimer.Stop()
+	defer ackTimer.Stop()
+	sendAcks := func() {
+		if len(unconfirmed) == 0 || ctx.Err() != nil {
+			return
+		}
+		rid := nextRID()
+		props := mqtt.ReportedProperties{AgentVersion: version.Version, SettingsAck: unconfirmed}
+		if err := svc.publishReported(client, props, rid); err != nil {
+			if ctx.Err() == nil {
+				logger.Warn(
+					"Failed to acknowledge runtime settings in the device twin; retrying",
+					"error", err,
+					"retry_in", ackDelay,
+				)
+			}
+			ackRID = ""
+			ackTimer.Reset(ackDelay)
+			ackDelay = min(2*ackDelay, ackRetryMax)
+			return
+		}
+		ackRID = rid
+		ackTimer.Reset(ackResponseTimeout)
+	}
+	acknowledge := func(acks map[string]mqtt.SettingAck) {
+		if len(acks) == 0 {
+			return
+		}
+		for key, ack := range acks {
+			unconfirmed[key] = ack
+		}
+		ackDelay = ackResponseTimeout
+		sendAcks()
+	}
+
 	requestFull()
 
 	rejecting := false
@@ -478,6 +579,7 @@ func (svc *serviceContext) twinSettingsLoop(
 		select {
 		case <-ctx.Done():
 			return
+		case <-wake:
 		case <-getTimer.C:
 			if pending != "" {
 				logger.Warn(
@@ -487,12 +589,19 @@ func (svc *serviceContext) twinSettingsLoop(
 				)
 				pending = ""
 			}
+		case <-ackTimer.C:
+			// Unanswered or refused: send the acknowledgements again.
+			ackRID = ""
+			sendAcks()
 		case ev := <-events:
-			switch status, rid, isResponse := mqtt.ParseTwinResponse(ev.topic); {
+			status, rid, isResponse := mqtt.ParseTwinResponse(ev.topic)
+			switch {
 			case mqtt.IsDesiredPatch(ev.topic):
-				svc.reportSettings(ctx, client, svc.applyDesired(ev.payload, logger), logger)
-			case isResponse && rid != "" && rid == pending:
+				acknowledge(svc.applyDesired(ev.payload, false, logger))
+			case !isResponse:
+			case rid != "" && rid == pending:
 				pending = ""
+				getTimer.Stop()
 				if status != 200 {
 					logger.Warn("The device twin GET failed", "status", status)
 					break
@@ -503,61 +612,62 @@ func (svc *serviceContext) twinSettingsLoop(
 					break
 				}
 				if len(doc.Desired) > 0 {
-					svc.reportSettings(ctx, client, svc.applyDesired(doc.Desired, logger), logger)
+					acknowledge(svc.applyDesired(doc.Desired, true, logger))
 				}
-			case isResponse && status >= 300:
-				// An answer to a reported-properties PATCH: the hub refused it
-				// (throttled, too large). Logged once per refusal streak.
-				if !rejecting {
-					logger.Warn(
-						"The device twin rejected a reported-properties update",
-						"status", status,
-					)
+			case rid != "" && rid == ackRID:
+				ackRID = ""
+				if status/100 == 2 {
+					clear(unconfirmed)
+					ackDelay = ackResponseTimeout
+					ackTimer.Stop()
+					break
 				}
-				rejecting = true
-			case isResponse:
-				rejecting = false
-			}
-			overflowMu.Lock()
-			refetch := overflowed
-			overflowed = false
-			overflowMu.Unlock()
-			if refetch && pending == "" {
-				logger.Warn("Device twin messages arrived faster than they were applied; " +
-					"reading the whole twin again")
-				requestFull()
+				logger.Warn(
+					"The device twin refused the settings acknowledgement; retrying",
+					"status", status,
+					"retry_in", ackDelay,
+				)
+				ackTimer.Reset(ackDelay)
+				ackDelay = min(2*ackDelay, ackRetryMax)
+			case rid == healthReportRID:
+				// An answer to a fleet-health PATCH. A refusal (throttled, too
+				// large) is logged once per streak of refusals.
+				if status >= 300 {
+					if !rejecting {
+						logger.Warn(
+							"The device twin rejected a reported-properties update",
+							"status", status,
+						)
+					}
+					rejecting = true
+				} else {
+					rejecting = false
+				}
+			default:
+				logger.Debug(
+					"Ignored a device twin answer to a request no longer awaited",
+					"status", status,
+					"rid", rid,
+				)
 			}
 		}
+		recoverOverflow()
 	}
 }
 
-// twinRequestIDBase keeps the twin GET request ids apart from the fixed id the
-// reported-properties PATCHes use.
-const twinRequestIDBase = 1000
-
-// reportSettings publishes the acknowledgements under reported.settings_ack.
-func (svc *serviceContext) reportSettings(
-	ctx context.Context,
+// publishReported publishes reported properties under the request id rid:
+// through the test seam when one is set, otherwise to the hub. The fleet-health
+// reporter and the settings acknowledgements share it, so both publish the same
+// way.
+func (svc *serviceContext) publishReported(
 	client mqtt.Client,
-	acks map[string]mqtt.SettingAck,
-	logger hclog.Logger,
-) {
-	if len(acks) == 0 || ctx.Err() != nil {
-		return
+	props mqtt.ReportedProperties,
+	rid string,
+) error {
+	if svc.publishHealth != nil {
+		return svc.publishHealth(client, props)
 	}
-	publish := svc.publishHealth
-	if publish == nil {
-		publish = func(client mqtt.Client, props mqtt.ReportedProperties) error {
-			return mqtt.UpdateReportedProperties(client, props, utils.MqttPublishTimeout)
-		}
-	}
-	err := publish(
-		client,
-		mqtt.ReportedProperties{AgentVersion: version.Version, SettingsAck: acks},
-	)
-	if err != nil && ctx.Err() == nil {
-		logger.Warn("Failed to acknowledge runtime settings in the device twin", "error", err)
-	}
+	return mqtt.UpdateReportedPropertiesRID(client, props, rid, utils.MqttPublishTimeout)
 }
 
 // autoUpdateControl starts and stops the auto-update runner as the

@@ -232,6 +232,18 @@ func UpdateReportedProperties(
 	props ReportedProperties,
 	timeout time.Duration,
 ) error {
+	return UpdateReportedPropertiesRID(client, props, "1", timeout)
+}
+
+// UpdateReportedPropertiesRID is UpdateReportedProperties under the request id
+// rid, so the hub's answer on the twin response topic can be matched to this
+// publish (sc-129688).
+func UpdateReportedPropertiesRID(
+	client mqtt.Client,
+	props ReportedProperties,
+	rid string,
+	timeout time.Duration,
+) error {
 	payload, err := json.Marshal(props)
 	if err != nil {
 		return fmt.Errorf("failed to marshal reported properties: %w", err)
@@ -241,7 +253,7 @@ func UpdateReportedProperties(
 		timeout = utils.MqttPublishTimeout
 	}
 
-	topic := "$iothub/twin/PATCH/properties/reported/?$rid=1"
+	topic := "$iothub/twin/PATCH/properties/reported/?$rid=" + rid
 	token := client.Publish(topic, 0, false, payload)
 	if !token.WaitTimeout(timeout) {
 		return fmt.Errorf("timed out after %v waiting to publish reported properties", timeout)

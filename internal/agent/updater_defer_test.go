@@ -196,6 +196,12 @@ func TestRun_DeferralAbandonedWhenTheUpdaterStops(t *testing.T) {
 	if !strings.Contains(joined, "release") || strings.Contains(joined, "launch") {
 		t.Errorf("events = %v, want the hold released and no launch", events)
 	}
+	// The release must be the last word: no helper is coming, so a hold
+	// re-armed after it would park every new command for ten minutes behind a
+	// restart that never happens (sc-129688).
+	if len(events) == 0 || events[len(events)-1] != "release" {
+		t.Errorf("events = %v, want the release last", events)
+	}
 	if !strings.Contains(f.log.String(), "Update deferral abandoned: updater stopping") {
 		t.Errorf("log lacks the abandonment line:\n%s", f.log.String())
 	}
@@ -221,4 +227,58 @@ func TestUpdateDeferralDefaults(t *testing.T) {
 	if got, want := d.ResolvedCommandTimeout()+updateIdleWaitMargin, DefaultCommandTimeout+time.Minute; got != want {
 		t.Errorf("derived ceiling = %s, want %s", got, want)
 	}
+}
+
+// blockingUpdater's Run waits until its context is cancelled, the way a check
+// or download does when the runner is stopped mid-request.
+type blockingUpdater struct {
+	Updater
+	entered chan struct{}
+}
+
+func (b *blockingUpdater) Run(ctx context.Context) error {
+	close(b.entered)
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+// Stopping the runner while a check or download is in flight is the updater
+// being turned off (sc-129688: the device twin can do that), not an update
+// failure: it is logged as a stop, never as an Error with a retry backoff.
+func TestAutoUpdateRunner_StopDuringARunIsNotAnUpdateFailure(t *testing.T) {
+	var buf syncLogBuffer
+	logger := hclog.New(&hclog.LoggerOptions{Output: &buf, Level: hclog.Debug})
+	u := &blockingUpdater{entered: make(chan struct{})}
+	r := NewAutoUpdateRunner(logger, u, time.Millisecond, 3, time.Millisecond)
+	r.Start()
+	select {
+	case <-u.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the runner never ran the updater")
+	}
+	r.Stop()
+	out := buf.String()
+	if strings.Contains(out, "Update failed") || strings.Contains(out, "[ERROR]") {
+		t.Errorf("a stop was logged as an update failure:\n%s", out)
+	}
+	if strings.Count(out, "Auto updater stopped") != 1 {
+		t.Errorf("want exactly one stop line:\n%s", out)
+	}
+}
+
+type syncLogBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncLogBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncLogBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
 }
