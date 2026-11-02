@@ -576,6 +576,10 @@ func TestAssertProxyStats_ChecksTheCountForTheTarget(t *testing.T) {
 		{"KIND=tunnels", "TARGET=127.0.0.1:443", "MIN=3"},
 		{"KIND=tunnels", "TARGET=10.0.0.1:443", "MIN=1"},
 		{"KIND=bogus", "TARGET=127.0.0.1:443", "MIN=1"},
+		{"KIND=tunnels", "TARGET=127.0.0.1:443"},
+		{"KIND=tunnels", "TARGET=127.0.0.1:443", "MIN=0"},
+		{"KIND=tunnels", "TARGET=127.0.0.1:443", "MIN=lots"},
+		{"KIND=tunnels", "MIN=1"},
 	} {
 		if code, out := run(
 			t,

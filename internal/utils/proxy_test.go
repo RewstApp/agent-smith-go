@@ -1,7 +1,6 @@
 package utils
 
 import (
-	"net/http"
 	"net/url"
 	"strings"
 	"testing"
@@ -24,6 +23,7 @@ func proxyOf(t *testing.T, fn ProxyFunc, target string) string {
 // The explicit proxy URL wins over the environment, and applies to loopback
 // too; NO_PROXY still excludes what it names.
 func TestResolveProxy_ExplicitOverEnvironment(t *testing.T) {
+	clearProxyEnv(t)
 	t.Setenv("HTTPS_PROXY", "http://env-proxy:8080")
 	t.Setenv("HTTP_PROXY", "http://env-proxy:8080")
 	t.Setenv("NO_PROXY", "internal.example.com,10.0.0.0/8,192.168.1.5,skip.example.org:8443")
@@ -48,20 +48,72 @@ func TestResolveProxy_ExplicitOverEnvironment(t *testing.T) {
 	}
 }
 
+// A blank field defers to the environment, read when the proxy is resolved -
+// not cached for the process the way http.ProxyFromEnvironment does.
 func TestResolveProxy_EnvironmentWhenUnset(t *testing.T) {
-	// http.ProxyFromEnvironment reads the environment once per process, so
-	// only its wiring is checked here: an unset field yields it.
+	clearProxyEnv(t)
+	t.Setenv("HTTPS_PROXY", "http://env-proxy:8080")
+	t.Setenv("NO_PROXY", "skip.example.com")
 	fn, err := ResolveProxy("  ")
 	if err != nil {
 		t.Fatal(err)
 	}
-	req := &http.Request{URL: mustURL(t, "https://hub.example.net/")}
-	if _, err := fn(req); err != nil {
-		t.Errorf("environment proxy: %v", err)
+	for target, want := range map[string]string{
+		"https://hub.example.net/":  "http://env-proxy:8080",
+		"https://skip.example.com/": "none",
+		// Go's environment rules never proxy loopback.
+		"https://127.0.0.1:8443/": "none",
+	} {
+		if got := proxyOf(t, fn, target); got != want {
+			t.Errorf("%s: %s, want %s", target, got, want)
+		}
+	}
+	clearProxyEnv(t)
+	fn, _ = ResolveProxy("")
+	if got := proxyOf(t, fn, "https://hub.example.net/"); got != "none" {
+		t.Errorf("the environment was cached: %s", got)
+	}
+}
+
+func clearProxyEnv(t *testing.T) {
+	t.Helper()
+	for _, name := range []string{
+		"HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "NO_PROXY", "no_proxy",
+		"REQUEST_METHOD",
+	} {
+		t.Setenv(name, "")
+	}
+}
+
+// NO_PROXY follows Go's semantics: a bare name matches itself and its
+// subdomains, ".name" and "*.name" subdomains only.
+func TestResolveProxy_NoProxyFollowsGoSemantics(t *testing.T) {
+	clearProxyEnv(t)
+	t.Setenv("NO_PROXY", "*.corp.local,.dot.example,bare.example")
+	fn, _ := ResolveProxy("http://proxy:3128")
+	for target, want := range map[string]string{
+		"https://rewst.corp.local/": "none",
+		"https://corp.local/":       "http://proxy:3128",
+		"https://a.dot.example/":    "none",
+		"https://dot.example/":      "http://proxy:3128",
+		"https://bare.example/":     "none",
+		"https://sub.bare.example/": "none",
+		"https://notbare.example/":  "http://proxy:3128",
+	} {
+		if got := proxyOf(t, fn, target); got != want {
+			t.Errorf("%s: %s, want %s", target, got, want)
+		}
+	}
+	t.Setenv("NO_PROXY", "")
+	t.Setenv("no_proxy", "lower.example")
+	fn, _ = ResolveProxy("http://proxy:3128")
+	if got := proxyOf(t, fn, "https://lower.example/"); got != "none" {
+		t.Errorf("lowercase no_proxy ignored: %s", got)
 	}
 }
 
 func TestResolveProxy_NoProxyStarExcludesEverything(t *testing.T) {
+	clearProxyEnv(t)
 	t.Setenv("NO_PROXY", "*")
 	fn, _ := ResolveProxy("http://proxy.corp:3128")
 	if got := proxyOf(t, fn, "https://hub.example.net/"); got != "none" {
@@ -89,8 +141,11 @@ func TestParseProxyURL_Validates(t *testing.T) {
 func TestRedactURL_NeverShowsThePassword(t *testing.T) {
 	for raw, want := range map[string]string{
 		"http://user:s3cret@proxy:3128": "http://user:xxxxx@proxy:3128",
+		"http://user:@proxy:3128":       "http://user:xxxxx@proxy:3128",
+		"http://TOKEN123@proxy:3128":    "http://xxxxx@proxy:3128",
 		"http://proxy:3128":             "http://proxy:3128",
 		"":                              "",
+		"   ":                           "",
 	} {
 		if got := RedactURL(raw); got != want {
 			t.Errorf("RedactURL(%q) = %q, want %q", raw, got, want)

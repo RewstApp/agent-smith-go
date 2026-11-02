@@ -274,6 +274,9 @@ type defaultUpdater struct {
 	// update helper inherits a logging level or auto-update toggle applied
 	// from the device twin after startup (sc-129688). nil reads *device.
 	liveDevice func() Device
+	// proxy is the outbound proxy for the release and download requests;
+	// nil resolves the device's own (sc-129691).
+	proxy utils.ProxyFunc
 }
 
 // UpdaterOption configures an optional behaviour of the updater.
@@ -300,31 +303,35 @@ func NewUpdater(
 		latestReleaseUrl: latestReleaseUrl,
 		githubToken:      githubToken,
 		runCommand:       runCommand,
-		checkClient:      &http.Client{Timeout: checkTimeout, Transport: proxied(logger, device)},
-		downloadClient: &http.Client{
-			Timeout:   downloadTimeout,
-			Transport: proxied(logger, device),
-		},
-		chmod:      os.Chmod,
-		updatesDir: GetUpdatesDirectory(device.RewstOrgId),
-		activity:   activity,
+		checkClient:      &http.Client{Timeout: checkTimeout},
+		downloadClient:   &http.Client{Timeout: downloadTimeout},
+		chmod:            os.Chmod,
+		updatesDir:       GetUpdatesDirectory(device.RewstOrgId),
+		activity:         activity,
 	}
 	for _, opt := range opts {
 		opt(u)
 	}
+	// One transport for both clients, through the proxy the caller resolved
+	// (WithProxy) or, without one, the device's own - an invalid proxy_url
+	// then falls back to the environment, since this path cannot report it.
+	proxy := u.proxy
+	if proxy == nil {
+		var err error
+		if proxy, err = device.Proxy(); err != nil {
+			proxy, _ = utils.ResolveProxy("")
+		}
+	}
+	transport := utils.ProxyTransport(proxy)
+	u.checkClient.Transport = transport
+	u.downloadClient.Transport = transport
 	return u
 }
 
-// proxied is a transport that honours the device's proxy (sc-129691). An
-// invalid proxy_url falls back to the environment, with a Warn, rather than
-// failing every update check.
-func proxied(logger hclog.Logger, device *Device) *http.Transport {
-	proxy, err := device.Proxy()
-	if err != nil {
-		logger.Warn("Ignoring an invalid proxy_url for auto-updates", "error", err)
-		proxy = http.ProxyFromEnvironment
-	}
-	return utils.ProxyTransport(proxy)
+// WithProxy makes the updater's release and download requests go through
+// proxy, the one the service resolved at startup (sc-129691).
+func WithProxy(proxy utils.ProxyFunc) UpdaterOption {
+	return func(u *defaultUpdater) { u.proxy = proxy }
 }
 
 // currentDevice is the device settings in effect now; see WithLiveDevice.

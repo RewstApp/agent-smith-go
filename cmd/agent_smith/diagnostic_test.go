@@ -243,6 +243,7 @@ func TestRunConnectivityTest_EmptyHost(t *testing.T) {
 }
 
 func TestRunConnectivityTest_BothFail(t *testing.T) {
+	clearProxyEnv(t)
 	dialer := &mockTLSDialer{result: false}
 	target := agentInfo{
 		OrgId:  "org-1",
@@ -255,6 +256,7 @@ func TestRunConnectivityTest_BothFail(t *testing.T) {
 }
 
 func TestRunConnectivityTest_BothSucceed(t *testing.T) {
+	clearProxyEnv(t)
 	dialer := &mockTLSDialer{result: true}
 	target := agentInfo{
 		OrgId:  "org-1",
@@ -270,7 +272,7 @@ func TestRunConnectivityTest_BothSucceed(t *testing.T) {
 // 443 and 443 through the proxy separately, and names the transport the agent
 // would use, in the agent's own order (sc-129691).
 func TestCheckConnectivity_ProxyFromTheConfig(t *testing.T) {
-	t.Setenv("NO_PROXY", "")
+	clearProxyEnv(t)
 	yes := true
 	dialer := &mockTLSDialer{direct: map[string]bool{"8883": false, "443": false}, viaProxy: &yes}
 	r := checkConnectivity(agent.Device{
@@ -297,7 +299,7 @@ func TestCheckConnectivity_ProxyFromTheConfig(t *testing.T) {
 }
 
 func TestCheckConnectivity_ProxyFailsButDirectTLSWorks(t *testing.T) {
-	t.Setenv("NO_PROXY", "")
+	clearProxyEnv(t)
 	no := false
 	dialer := &mockTLSDialer{direct: map[string]bool{"8883": true, "443": true}, viaProxy: &no}
 	r := checkConnectivity(agent.Device{
@@ -310,8 +312,7 @@ func TestCheckConnectivity_ProxyFailsButDirectTLSWorks(t *testing.T) {
 }
 
 func TestCheckConnectivity_NoProxy(t *testing.T) {
-	t.Setenv("HTTPS_PROXY", "")
-	t.Setenv("https_proxy", "")
+	clearProxyEnv(t)
 	dialer := &mockTLSDialer{direct: map[string]bool{"8883": false, "443": true}}
 	r := checkConnectivity(agent.Device{AzureIotHubHost: "127.0.0.1"}, dialer)
 	if r.proxy != nil || r.proxyLine() != "none" {
@@ -323,12 +324,40 @@ func TestCheckConnectivity_NoProxy(t *testing.T) {
 }
 
 func TestCheckConnectivity_InvalidProxyURLIsReportedAndIgnored(t *testing.T) {
+	clearProxyEnv(t)
 	r := checkConnectivity(
 		agent.Device{AzureIotHubHost: "127.0.0.1", ProxyURL: "socks5://p:1080"},
 		&mockTLSDialer{result: true},
 	)
 	if r.proxyErr == nil {
 		t.Error("an invalid proxy_url was not reported")
+	}
+}
+
+// A proxy from the environment is used, and named as coming from it - and a
+// blank proxy_url is not mistaken for a configured one.
+func TestCheckConnectivity_ProxyFromTheEnvironment(t *testing.T) {
+	clearProxyEnv(t)
+	t.Setenv("HTTPS_PROXY", "http://envproxy:9")
+	yes := true
+	dialer := &mockTLSDialer{direct: map[string]bool{}, viaProxy: &yes}
+	r := checkConnectivity(agent.Device{AzureIotHubHost: "hub.example.com", ProxyURL: "  "}, dialer)
+	if r.proxyLine() != "http://envproxy:9 (from the environment of this shell)" {
+		t.Errorf("proxy line %q", r.proxyLine())
+	}
+	if r.chosen != "MQTT over WebSocket (443) through http://envproxy:9" {
+		t.Errorf("chosen %q", r.chosen)
+	}
+}
+
+// clearProxyEnv removes every proxy variable for the test, so a developer's or
+// runner's own proxy settings cannot change what the diagnostic resolves.
+func clearProxyEnv(t *testing.T) {
+	t.Helper()
+	for _, name := range []string{
+		"HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "NO_PROXY", "no_proxy",
+	} {
+		t.Setenv(name, "")
 	}
 }
 

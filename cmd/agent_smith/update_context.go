@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"strings"
 
 	"github.com/RewstApp/agent-smith-go/internal/agent"
 	"github.com/RewstApp/agent-smith-go/internal/service"
@@ -107,6 +108,8 @@ func newUpdateContext(
 		return nil, fmt.Errorf("invalid org-id")
 	}
 
+	// A blank --proxy-url removes a saved one, the same as an empty value.
+	params.ProxyURL = strings.TrimSpace(params.ProxyURL)
 	if params.ProxyURL != "" {
 		if _, err := utils.ParseProxyURL(params.ProxyURL); err != nil {
 			return nil, err

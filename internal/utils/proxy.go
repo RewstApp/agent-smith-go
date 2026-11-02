@@ -7,6 +7,8 @@ import (
 	"net/url"
 	"os"
 	"strings"
+
+	"golang.org/x/net/http/httpproxy"
 )
 
 // Outbound proxy support (sc-129691). Every connection the agent makes - the
@@ -18,9 +20,11 @@ import (
 //     because a service rarely inherits a user's proxy environment and an
 //     operator who sets one means it;
 //  2. otherwise HTTPS_PROXY / HTTP_PROXY / NO_PROXY from the process
-//     environment, with Go's standard rules (which never proxy loopback).
+//     environment, with Go's standard rules (which never proxy loopback),
+//     read when the proxy is resolved rather than cached for the process.
 //
-// Credentials in a proxy URL are never logged: use RedactURL.
+// A blank value is unset. Credentials in a proxy URL are never logged: use
+// RedactURL or DescribeProxy.
 
 // ProxyFunc is the signature net/http and the WebSocket dialer take.
 type ProxyFunc = func(*http.Request) (*url.URL, error)
@@ -41,11 +45,17 @@ func ParseProxyURL(raw string) (*url.URL, error) {
 }
 
 // ResolveProxy returns the proxy function for an explicit proxy URL, or for
-// the environment when explicit is empty. An invalid explicit URL is an error
+// the environment when explicit is blank. An invalid explicit URL is an error
 // rather than a silent direct connection.
 func ResolveProxy(explicit string) (ProxyFunc, error) {
 	if strings.TrimSpace(explicit) == "" {
-		return http.ProxyFromEnvironment, nil
+		fromEnv := httpproxy.FromEnvironment().ProxyFunc()
+		return func(req *http.Request) (*url.URL, error) {
+			if req == nil || req.URL == nil {
+				return nil, nil
+			}
+			return fromEnv(req.URL)
+		}, nil
 	}
 	proxy, err := ParseProxyURL(explicit)
 	if err != nil {
@@ -80,26 +90,38 @@ func ProxyTransport(fn ProxyFunc) *http.Transport {
 	return t
 }
 
-// RedactURL renders raw with any password replaced, for logs and the
+// RedactURL renders raw with its credentials masked, for logs and the
 // diagnostic. An unparseable value is withheld entirely, since it may still
 // hold a credential.
 func RedactURL(raw string) string {
-	if raw == "" {
+	if strings.TrimSpace(raw) == "" {
 		return ""
 	}
 	u, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil || u.Host == "" {
 		return "[unparseable proxy URL withheld]"
 	}
-	return u.Redacted()
+	return DescribeProxy(u)
 }
 
-// DescribeProxy renders the proxy for logs: the redacted URL, or "none".
+// DescribeProxy renders a proxy for logs: "none", or the URL with its
+// credentials masked. A password is masked and the user name kept; a user name
+// with no password is masked too, since a proxy that takes a token as the user
+// name carries the credential there.
 func DescribeProxy(u *url.URL) string {
 	if u == nil {
 		return "none"
 	}
-	return u.Redacted()
+	if u.User == nil {
+		return u.String()
+	}
+	masked := *u
+	if _, hasPassword := u.User.Password(); hasPassword {
+		masked.User = url.UserPassword(u.User.Username(), "xxxxx")
+	} else {
+		masked.User = url.User("xxxxx")
+	}
+	return masked.String()
 }
 
 func noProxyEnv() string {
@@ -109,19 +131,24 @@ func noProxyEnv() string {
 	return os.Getenv("no_proxy")
 }
 
-// noProxyList is a parsed NO_PROXY value: "*" (everything), host names (which
-// match the name and its subdomains, with or without a leading dot), IP
-// addresses and CIDR ranges, each optionally with a port.
+// noProxyList is a parsed NO_PROXY value with Go's semantics
+// (golang.org/x/net/http/httpproxy): "*" matches everything; "example.com"
+// matches the name and its subdomains; ".example.com" and "*.example.com"
+// match subdomains only; IP addresses and CIDR ranges match addresses; any
+// entry may carry a port. Unlike httpproxy, loopback is not exempt: an
+// explicit proxy applies to it unless NO_PROXY names it.
 type noProxyList struct {
 	all     bool
 	entries []noProxyEntry
 }
 
 type noProxyEntry struct {
-	domain string
-	ip     net.IP
-	cidr   *net.IPNet
-	port   string
+	// suffix is ".example.com"; matchBare also matches "example.com" itself.
+	suffix    string
+	matchBare bool
+	ip        net.IP
+	cidr      *net.IPNet
+	port      string
 }
 
 func parseNoProxy(value string) noProxyList {
@@ -148,9 +175,17 @@ func parseNoProxy(value string) noProxyList {
 			list.entries = append(list.entries, noProxyEntry{ip: ip, port: port})
 			continue
 		}
+		host = strings.TrimPrefix(host, "*")
+		if host == "" || host == "." {
+			continue
+		}
+		matchBare := !strings.HasPrefix(host, ".")
+		if matchBare {
+			host = "." + host
+		}
 		list.entries = append(
 			list.entries,
-			noProxyEntry{domain: strings.TrimPrefix(host, "."), port: port},
+			noProxyEntry{suffix: host, matchBare: matchBare, port: port},
 		)
 	}
 	return list
@@ -185,7 +220,7 @@ func (l noProxyList) matches(target *url.URL) bool {
 				return true
 			}
 		default:
-			if host == e.domain || strings.HasSuffix(host, "."+e.domain) {
+			if strings.HasSuffix(host, e.suffix) || (e.matchBare && host == e.suffix[1:]) {
 				return true
 			}
 		}

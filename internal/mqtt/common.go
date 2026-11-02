@@ -76,7 +76,9 @@ func WaitToken(token Token, timeout time.Duration, interrupt <-chan struct{}) To
 	}
 }
 
-func NewClientOptions(device agent.Device) (*mqtt.ClientOptions, error) {
+// NewClientOptions builds the client options for device. proxy is the outbound
+// proxy the caller resolved once (sc-129691); nil means the environment.
+func NewClientOptions(device agent.Device, proxy utils.ProxyFunc) (*mqtt.ClientOptions, error) {
 	var (
 		opts *mqtt.ClientOptions
 		err  error
@@ -84,10 +86,6 @@ func NewClientOptions(device agent.Device) (*mqtt.ClientOptions, error) {
 
 	switch device.Broker {
 	default:
-		proxy, proxyErr := device.Proxy()
-		if proxyErr != nil {
-			return nil, proxyErr
-		}
 		opts, err = newAzureIotHubClientOptions(azureIotHubDevice{
 			DeviceId:        device.DeviceId,
 			Host:            device.AzureIotHubHost,

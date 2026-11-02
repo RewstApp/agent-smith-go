@@ -31,17 +31,16 @@ var refuseDirect atomic.Bool
 // webSocketPath is where IoT Hub serves MQTT over WebSocket.
 const webSocketPath = "/$iothub/websocket"
 
-// serveWebSocket runs the broker's MQTT session over WebSocket on addr, with
+// serveWebSocket runs the broker's MQTT session over WebSocket on ln, with
 // the broker's own certificate.
-func serveWebSocket(addr string, tlsConfig *tls.Config, modeFile string) {
+func serveWebSocket(ln net.Listener, tlsConfig *tls.Config, modeFile string) {
 	srv := &http.Server{
-		Addr:              addr,
 		Handler:           webSocketHandler(modeFile),
 		TLSConfig:         tlsConfig.Clone(),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
-	log.Printf("stub broker WebSocket endpoint listening on %s%s", addr, webSocketPath)
-	if err := srv.ListenAndServeTLS("", ""); err != nil {
+	log.Printf("stub broker WebSocket endpoint listening on %s%s", ln.Addr(), webSocketPath)
+	if err := srv.ServeTLS(ln, "", ""); err != nil {
 		log.Fatalf("WebSocket listener failed: %v", err)
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/RewstApp/agent-smith-go/internal/agent"
@@ -393,6 +394,8 @@ func newConfigContext(
 	params.Domain = domain
 	params.FS = fsys
 	params.ServiceManager = svcMgr
+	// A blank --proxy-url is unset, the same as no flag (sc-129691).
+	params.ProxyURL = strings.TrimSpace(params.ProxyURL)
 	proxy, err := utils.ResolveProxy(params.ProxyURL)
 	if err != nil {
 		return nil, err

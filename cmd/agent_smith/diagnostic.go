@@ -4,12 +4,10 @@ import (
 	"bufio"
 	"context"
 	"crypto/tls"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net"
-	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
@@ -20,6 +18,7 @@ import (
 	"time"
 
 	"github.com/RewstApp/agent-smith-go/internal/agent"
+	"github.com/RewstApp/agent-smith-go/internal/mqtt"
 	"github.com/RewstApp/agent-smith-go/internal/utils"
 	"github.com/RewstApp/agent-smith-go/internal/version"
 	"github.com/hashicorp/go-hclog"
@@ -413,21 +412,24 @@ func (r connectivityResult) proxyLine() string {
 }
 
 // checkConnectivity tests direct 8883, direct 443 and, when a proxy applies,
-// 443 through it (sc-129691). The environment proxy is the one of the shell
-// running --diagnostic, which may differ from the service's.
+// 443 through it (sc-129691), with the agent's own tunnel. The environment
+// proxy is the one of the shell running --diagnostic, which may differ from
+// the service's.
 func checkConnectivity(device agent.Device, dialer tlsDialer) connectivityResult {
 	var r connectivityResult
 	host := device.AzureIotHubHost
-	target := &url.URL{Scheme: "https", Host: net.JoinHostPort(host, "443")}
-	proxy, err := device.Proxy()
+	explicit := strings.TrimSpace(device.ProxyURL)
+	proxy, err := utils.ResolveProxy(explicit)
 	if err != nil {
 		r.proxyErr = err
-		proxy = http.ProxyFromEnvironment
+		explicit = ""
+		proxy, _ = utils.ResolveProxy("")
 	}
-	r.proxy = utils.ProxyFor(proxy, target)
+	wsBroker, _ := url.Parse(mqtt.WebSocketBrokerURL(host))
+	r.proxy = mqtt.BrokerProxy(proxy, wsBroker)
 	if r.proxy != nil {
 		r.proxySource = "the environment of this shell"
-		if device.ProxyURL != "" && r.proxyErr == nil {
+		if explicit != "" {
 			r.proxySource = "proxy_url"
 		}
 	}
@@ -444,17 +446,29 @@ func checkConnectivity(device agent.Device, dialer tlsDialer) connectivityResult
 		fmt.Println(okOrFailed(r.proxied443))
 	}
 
-	// The agent's order (mqtt.newAzureIotHubClientOptions): with a proxy, the
-	// WebSocket through it and then direct TLS; without, direct TLS and then
-	// the direct WebSocket.
-	ws := "MQTT over WebSocket (443)"
-	switch {
-	case r.proxy != nil && r.proxied443:
-		r.chosen = ws + " through " + utils.DescribeProxy(r.proxy)
-	case r.direct8883:
-		r.chosen = "MQTT over TLS (8883)"
-	case r.proxy == nil && r.direct443:
-		r.chosen = ws
+	// The transport the agent would use: the first broker, in the agent's own
+	// order (mqtt.Brokers), whose path worked.
+	for _, raw := range mqtt.Brokers(host, proxy) {
+		broker, err := url.Parse(raw)
+		if err != nil {
+			continue
+		}
+		via := mqtt.BrokerProxy(proxy, broker)
+		ok := r.direct8883
+		if broker.Scheme == "wss" {
+			ok = r.direct443
+			if via != nil {
+				ok = r.proxied443
+			}
+		}
+		if !ok {
+			continue
+		}
+		r.chosen = mqtt.Transport(broker)
+		if via != nil {
+			r.chosen += " through " + utils.DescribeProxy(via)
+		}
+		break
 	}
 	return r
 }
@@ -466,61 +480,18 @@ func okOrFailed(ok bool) string {
 	return "FAILED"
 }
 
-// testTLSConnectionViaProxy opens a CONNECT tunnel through proxy to host:port
-// and completes a TLS handshake inside it.
+// testTLSConnectionViaProxy opens the agent's CONNECT tunnel through proxy to
+// host:port (utils.DialTunnel) and completes a TLS handshake inside it.
 func testTLSConnectionViaProxy(proxy *url.URL, host, port string) bool {
-	proxyAddr := proxy.Host
-	if proxy.Port() == "" {
-		port := "80"
-		if proxy.Scheme == "https" {
-			port = "443"
-		}
-		proxyAddr = net.JoinHostPort(proxy.Hostname(), port)
-	}
-	deadline := time.Now().Add(10 * time.Second)
-	conn, err := (&net.Dialer{Timeout: 10 * time.Second}).Dial("tcp", proxyAddr)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	conn, err := utils.DialTunnel(ctx, proxy, net.JoinHostPort(host, port))
 	if err != nil {
 		return false
 	}
 	defer func() { _ = conn.Close() }()
-	_ = conn.SetDeadline(deadline)
-	if proxy.Scheme == "https" {
-		tlsConn := tls.Client(
-			conn,
-			&tls.Config{ServerName: proxy.Hostname(), MinVersion: tls.VersionTLS12},
-		)
-		if err := tlsConn.Handshake(); err != nil {
-			return false
-		}
-		conn = tlsConn
-	}
-	addr := net.JoinHostPort(host, port)
-	req := &http.Request{
-		Method: http.MethodConnect,
-		URL:    &url.URL{Opaque: addr},
-		Host:   addr,
-		Header: http.Header{},
-	}
-	if proxy.User != nil {
-		password, _ := proxy.User.Password()
-		credentials := base64.StdEncoding.EncodeToString(
-			[]byte(proxy.User.Username() + ":" + password),
-		)
-		req.Header.Set("Proxy-Authorization", "Basic "+credentials)
-	}
-	if err := req.Write(conn); err != nil {
-		return false
-	}
-	resp, err := http.ReadResponse(bufio.NewReader(conn), req)
-	if err != nil {
-		return false
-	}
-	_ = resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return false
-	}
 	tunneled := tls.Client(conn, &tls.Config{ServerName: host, MinVersion: tls.VersionTLS12})
-	return tunneled.Handshake() == nil
+	return tunneled.HandshakeContext(ctx) == nil
 }
 
 func testTLSConnection(host, port string) bool {

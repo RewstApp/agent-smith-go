@@ -1233,29 +1233,41 @@ result postbacks, the install-time config fetch and the auto-update release
 and download requests - resolves its proxy the same way:
 
 1. **`proxy_url`** in the config file (`--proxy-url` at install or
-   `--update`), an `http://` or `https://` URL with optional credentials. It
-   applies to every destination, loopback included, except those `NO_PROXY`
-   names (host names with their subdomains, IP addresses, CIDR ranges, each
-   optionally with a port, or `*`).
+   `--update`, where a blank value removes it), an `http://` or `https://`
+   URL with optional credentials. It applies to every destination, loopback
+   included, except those `NO_PROXY` names, read with Go's semantics:
+   `example.com` matches the name and its subdomains, `.example.com` and
+   `*.example.com` subdomains only, and IP addresses, CIDR ranges, a port
+   suffix and `*` work as usual.
 2. Otherwise **`HTTPS_PROXY` / `HTTP_PROXY` / `NO_PROXY`** from the service's
-   environment, with Go's standard rules.
+   environment, with Go's standard rules (loopback is never proxied).
 
 When a proxy applies to the hub, the agent tries the WebSocket through it
 first, because MQTT over TLS on 8883 cannot traverse an HTTP proxy, and keeps
-direct 8883 as the fallback; without one the order is unchanged. Each
+direct 8883 as the fallback; without one the order is unchanged. The wait for
+the broker's answer covers every broker in that order, so a first broker that
+hangs - a proxy that stalls the tunnel, a firewall that drops 8883 silently -
+no longer uses up the whole wait before the fallback is tried. The WebSocket
+is dialled through the agent's own CONNECT tunnel rather than the WebSocket
+library's proxy dialer, which handles only `http://` proxies and panics on a
+proxy status line without a reason phrase; the tunnel handles both schemes and
+reports any refusal as an error. Each
 connection logs which transport and proxy it used (`Connected to the broker:
 transport="MQTT over WebSocket (443)" proxy=http://user:xxxxx@proxy:3128`).
 Proxy credentials are redacted in every log line - including install's
-"Received configuration" line - and in `--diagnostic`; the config file keeps
-them, under the owner-only permissions it already has. An invalid `proxy_url`
+"Received configuration" line - and in `--diagnostic`: a password is masked
+and the user name kept, and a user name with no password is masked too, since
+a proxy that takes a token as the user name carries the credential there. The
+config file keeps them, under the owner-only permissions it already has. An invalid `proxy_url`
 fails the install or `--update` that sets it; one found in an existing config
 file is logged as an Error and ignored, rather than failing every connection.
 
 `--diagnostic`'s "MQTT/WebSocket Connectivity" section prints the proxy in
 effect and where it came from (`proxy_url`, or the environment of the shell
 running the diagnostic, which may differ from the service's), tests direct
-8883, direct 443 and 443 through the proxy separately, and names the transport
-the agent would use. A diagnostic bundle (sc-129690) is to redact the proxy
+8883, direct 443 and 443 through the proxy separately - the last through the
+same tunnel code the agent uses - and names the transport the agent would use,
+read from the agent's own broker order. A diagnostic bundle (sc-129690) is to redact the proxy
 the same way.
 
 **Proven end to end by** `hermetic-proxy`: the stub broker refuses direct MQTT

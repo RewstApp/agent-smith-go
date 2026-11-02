@@ -63,6 +63,21 @@ inputs:
     description: "How long the device stays refused unless brought online first"
     required: false
     default: "45"
+  proxy:
+    description: >-
+      "true" also serves MQTT over WebSocket on ws_port and an HTTP proxy on
+      proxy_port (Basic auth agent:s3cret-proxy) that tunnels any :443 to it
+      (sc-129691). Off by default, so a taken port cannot affect other jobs.
+    required: false
+    default: "false"
+  ws_port:
+    description: "TLS port for MQTT over WebSocket when proxy is true"
+    required: false
+    default: "8444"
+  proxy_port:
+    description: "Port for the HTTP proxy when proxy is true"
+    required: false
+    default: "3128"
   postback_port:
     description: >
       TLS port for the stand-in engine's postback receiver, served with the
@@ -124,9 +139,16 @@ runs:
         PORT: ${{ inputs.port }}
         ENGINE_PORT: ${{ inputs.engine_port }}
         POSTBACK_PORT: ${{ inputs.postback_port }}
+        PROXY: ${{ inputs.proxy }}
+        WS_PORT: ${{ inputs.ws_port }}
+        PROXY_PORT: ${{ inputs.proxy_port }}
       run: |
         set -euo pipefail
         printf 'withhold' > "$MODE_FILE"
+        proxy_args=()
+        if [ "$PROXY" = "true" ]; then
+          proxy_args=(-ws-listen ":$WS_PORT" -proxy-listen ":$PROXY_PORT")
+        fi
         rm -f "$CA_FILE"
         # The fixture is behind the `integration` build tag; see its package doc.
         go build -tags integration -o "$WORKDIR/stubbroker" ./test/stubbroker
@@ -143,6 +165,7 @@ runs:
           -mode-file "$MODE_FILE" \
           -engine-listen "$HOST:$ENGINE_PORT" \
           -postback-listen ":$POSTBACK_PORT" \
+          ${proxy_args[@]+"${proxy_args[@]}"} \
           -log "$LOG_FILE" > /dev/null 2>&1 &
         echo $! > "$PID_FILE"
 
@@ -190,6 +213,9 @@ runs:
         PORT: ${{ inputs.port }}
         ENGINE_PORT: ${{ inputs.engine_port }}
         POSTBACK_PORT: ${{ inputs.postback_port }}
+        PROXY: ${{ inputs.proxy }}
+        WS_PORT: ${{ inputs.ws_port }}
+        PROXY_PORT: ${{ inputs.proxy_port }}
       run: |
         $ErrorActionPreference = 'Stop'
         Set-Content -Path $env:MODE_FILE -Value 'withhold' -NoNewline
@@ -217,7 +243,14 @@ runs:
           "-engine-listen", "`"$($env:HOST):$($env:ENGINE_PORT)`"",
           "-postback-listen", "`":$($env:POSTBACK_PORT)`"",
           "-log", "`"$($env:LOG_FILE)`""
-        ) -join ' '
+        )
+        if ($env:PROXY -eq 'true') {
+          $arguments += @(
+            "-ws-listen", "`":$($env:WS_PORT)`"",
+            "-proxy-listen", "`":$($env:PROXY_PORT)`""
+          )
+        }
+        $arguments = $arguments -join ' '
         $created = Invoke-CimMethod -ClassName Win32_Process -MethodName Create `
           -Arguments @{ CommandLine = $arguments }
         if ($created.ReturnValue -ne 0) {

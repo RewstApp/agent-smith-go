@@ -174,11 +174,20 @@ func TestNewAzureIotHubClientOptions_BrokerOrderFollowsTheProxy(t *testing.T) {
 	); got != "wss://hub.azure-devices.net:443/$iothub/websocket tls://hub.azure-devices.net:8883" {
 		t.Errorf("proxied broker order: %s", got)
 	}
-	if proxied.WebsocketOptions == nil || proxied.WebsocketOptions.Proxy == nil {
-		t.Fatal("the WebSocket transport was not given the proxy")
+	if proxied.CustomOpenConnectionFn == nil {
+		t.Fatal("connections are not opened through the agent's own tunnel")
 	}
-	if got, _ := proxied.WebsocketOptions.Proxy(&http.Request{}); got != proxyURL {
-		t.Errorf("WebSocket proxy %v", got)
+	if got := strings.Join(
+		Brokers("hub.azure-devices.net", base.Proxy),
+		" ",
+	); got != serverStrings(
+		proxied.Servers,
+	) {
+		t.Errorf(
+			"Brokers %s disagrees with the client's order %s",
+			got,
+			serverStrings(proxied.Servers),
+		)
 	}
 }
 

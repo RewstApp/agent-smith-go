@@ -6,7 +6,6 @@ import (
 	"crypto/tls"
 	"encoding/base64"
 	"fmt"
-	"net/http"
 	"net/url"
 	"time"
 
@@ -22,8 +21,22 @@ type azureIotHubDevice struct {
 	// documented default (utils.DefaultSasTokenLifetime) is used.
 	TokenLifetime time.Duration
 	// Proxy is the outbound proxy the WebSocket transport dials through; nil
-	// means http.ProxyFromEnvironment (sc-129691).
+	// means the environment (utils.ResolveProxy("")), sc-129691.
 	Proxy utils.ProxyFunc
+}
+
+// Brokers lists the broker URLs in the order the agent tries them: MQTT over
+// TLS on 8883 first, with the WebSocket endpoint on 443 as the fallback for
+// networks that block 8883 - unless a proxy applies to the WebSocket endpoint.
+// 8883 cannot traverse an HTTP proxy, so a proxied network tries the WebSocket
+// through it first, with direct 8883 as the fallback (sc-129691). --diagnostic
+// reads the same order to name the transport the agent would use.
+func Brokers(host string, proxy utils.ProxyFunc) []string {
+	tlsBroker, wsBroker := TLSBrokerURL(host), WebSocketBrokerURL(host)
+	if wsURL, err := url.Parse(wsBroker); err == nil && BrokerProxy(proxy, wsURL) != nil {
+		return []string{wsBroker, tlsBroker}
+	}
+	return []string{tlsBroker, wsBroker}
 }
 
 // WebSocketBrokerURL is the address of IoT Hub's MQTT-over-WebSocket endpoint.
@@ -105,30 +118,23 @@ func newAzureIotHubClientOptions(device azureIotHubDevice) (*mqtt.ClientOptions,
 		return nil, err
 	}
 
-	// Initialize MQTT options. MQTT over TLS on 8883 comes first and the
-	// WebSocket endpoint on 443 is the fallback for networks that block 8883 -
-	// unless a proxy applies to the WebSocket endpoint: 8883 cannot traverse an
-	// HTTP proxy, so a proxied network tries the WebSocket through it first
-	// (sc-129691). The WebSocket used to be registered as a bare wss://<hub>,
-	// a path IoT Hub does not serve.
+	// Initialize MQTT options. The brokers are tried in Brokers' order; every
+	// connection is opened by openConnection, which dials the WebSocket through
+	// the proxy with the agent's own CONNECT tunnel (utils.DialTunnel) rather
+	// than gorilla's proxy dialer, which handles only http:// proxies and
+	// panics on a status line without a reason phrase (sc-129691).
 	proxy := device.Proxy
 	if proxy == nil {
-		proxy = http.ProxyFromEnvironment
+		var err error
+		if proxy, err = utils.ResolveProxy(""); err != nil {
+			return nil, err
+		}
 	}
-	tlsBroker, wsBroker := TLSBrokerURL(device.Host), WebSocketBrokerURL(device.Host)
 	opts := mqtt.NewClientOptions()
-	wsURL, err := url.Parse(wsBroker)
-	if err != nil {
-		return nil, fmt.Errorf("invalid IoT Hub host %q: %w", device.Host, err)
+	for _, broker := range Brokers(device.Host, proxy) {
+		opts.AddBroker(broker)
 	}
-	if BrokerProxy(proxy, wsURL) != nil {
-		opts.AddBroker(wsBroker)
-		opts.AddBroker(tlsBroker)
-	} else {
-		opts.AddBroker(tlsBroker)
-		opts.AddBroker(wsBroker)
-	}
-	opts.SetWebsocketOptions(&mqtt.WebsocketOptions{Proxy: proxy})
+	opts.SetCustomOpenConnectionFn(openConnection(proxy))
 	opts.SetClientID(device.DeviceId)
 	opts.SetUsername(fmt.Sprintf("%s/%s/?api-version=2021-04-12", device.Host, device.DeviceId))
 	opts.SetPassword(sasToken)

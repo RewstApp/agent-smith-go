@@ -192,6 +192,9 @@ func (svc *serviceContext) Execute(
 	// Outbound proxy (sc-129691): every connection resolves it the same way
 	// (utils.ResolveProxy). An invalid proxy_url would otherwise fail every
 	// connection cycle, so it is reported and set aside instead.
+	// It is resolved once, here, and handed to everything that dials; this is
+	// the one place an invalid value is handled.
+	device.ProxyURL = strings.TrimSpace(device.ProxyURL)
 	proxy, err := device.Proxy()
 	if err != nil {
 		logger.Error(
@@ -199,8 +202,9 @@ func (svc *serviceContext) Execute(
 			"error", err,
 		)
 		device.ProxyURL = ""
-		proxy = http.ProxyFromEnvironment
+		proxy, _ = utils.ResolveProxy("")
 	}
+	svc.proxy = proxy
 	if svc.HTTPClient != nil && svc.HTTPClient.Transport == nil {
 		svc.HTTPClient.Transport = utils.ProxyTransport(proxy)
 	}
@@ -314,6 +318,7 @@ func (svc *serviceContext) Execute(
 			},
 			svc, // the updater waits for in-flight commands before restarting us
 			agent.WithLiveDevice(svc.currentDevice),
+			agent.WithProxy(svc.proxy),
 		)
 		return agent.NewAutoUpdateRunner(
 			logger,
@@ -645,7 +650,7 @@ func (svc *serviceContext) runCycle(
 	// Create a channel to wait for lost connection
 	lost := make(chan struct{}, 1)
 
-	opts, err := mqtt.NewClientOptions(device)
+	opts, err := mqtt.NewClientOptions(device, svc.proxy)
 	if err != nil {
 		logger.Error("Failed to create client options", "error", err)
 		return true, false, service.GenericError
@@ -711,8 +716,14 @@ func (svc *serviceContext) runCycle(
 	// Bound the CONNACK wait as a backstop against a token that never resolves,
 	// and make it interruptible so a stop issued mid-handshake is honored at once
 	// instead of after the timeout. See utils.MqttConnectWaitMargin for why the
-	// bound sits above paho's own ConnectTimeout.
-	connectTimeout := device.MqttConnectTimeout() + utils.MqttConnectWaitMargin
+	// bound sits above paho's own ConnectTimeout. paho tries the brokers one
+	// after another, each for up to ConnectTimeout, so the bound covers every
+	// one of them: sized for a single attempt, a first broker that hangs (a
+	// proxy that stalls the tunnel, a firewall that drops 8883 silently) used
+	// it all up and the fallback was never tried (sc-129691).
+	brokers := max(len(opts.Servers), 1)
+	connectTimeout := device.MqttConnectTimeout()*time.Duration(brokers) +
+		utils.MqttConnectWaitMargin
 	connectStarted := time.Now()
 	// Snapshot what a previous *process* left in the journal before this cycle
 	// can receive anything. Replay acts only on this snapshot, minus every key
@@ -742,11 +753,10 @@ func (svc *serviceContext) runCycle(
 		return false, false, 0
 	}
 	if broker := attempted.Load(); broker != nil {
-		cycleProxy, _ := device.Proxy()
 		logger.Info(
 			"Connected to the broker",
 			"transport", mqtt.Transport(broker),
-			"proxy", utils.DescribeProxy(mqtt.BrokerProxy(cycleProxy, broker)),
+			"proxy", utils.DescribeProxy(mqtt.BrokerProxy(svc.proxy, broker)),
 		)
 	}
 

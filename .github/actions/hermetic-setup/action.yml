@@ -40,6 +40,12 @@ inputs:
     description: "Further install arguments"
     required: false
     default: ""
+  proxy:
+    description: >-
+      "true" starts the stub broker's WebSocket endpoint and HTTP proxy
+      (sc-129691); see the stub-broker action.
+    required: false
+    default: "false"
   direct_mqtt:
     description: >-
       "refuse" makes the stub broker close direct MQTT connections on 8883
@@ -90,6 +96,7 @@ runs:
       uses: ./.github/actions/stub-broker
       with:
         mode: start
+        proxy: ${{ inputs.proxy }}
 
     - name: Acknowledge subscriptions
       uses: ./.github/actions/stub-broker

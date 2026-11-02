@@ -1344,6 +1344,7 @@ jobs:
           service: ${{ matrix.service }}
           log_file: ${{ matrix.log_file }}
           direct_mqtt: refuse
+          proxy: "true"
           extra_args: --proxy-url http://agent:s3cret-proxy@127.0.0.1:3128
 
       - name: Assert the agent connected over WebSocket through the proxy
@@ -1352,9 +1353,7 @@ jobs:
         with:
           log_file: ${{ matrix.log_file }}
           patterns: |-
-            Connected to the broker
-            MQTT over WebSocket (443)
-            proxy=http://agent:xxxxx@127.0.0.1:3128
+            Connected to the broker: transport="MQTT over WebSocket (443)" proxy=http://agent:xxxxx@127.0.0.1:3128
 
       - name: Assert the proxy password never reached the log
         timeout-minutes: 5
