@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -17,6 +18,7 @@ import (
 	"time"
 
 	"github.com/RewstApp/agent-smith-go/internal/agent"
+	"github.com/RewstApp/agent-smith-go/internal/mqtt"
 	"github.com/RewstApp/agent-smith-go/internal/utils"
 	"github.com/RewstApp/agent-smith-go/internal/version"
 	"github.com/hashicorp/go-hclog"
@@ -25,12 +27,19 @@ import (
 // tlsDialer abstracts TLS connectivity checks so tests can inject fakes.
 type tlsDialer interface {
 	Dial(host, port string) bool
+	// DialViaProxy opens a TLS connection to host:port through an HTTP proxy
+	// with CONNECT, the way the agent's WebSocket transport does (sc-129691).
+	DialViaProxy(proxy *url.URL, host, port string) bool
 }
 
 type defaultTLSDialer struct{}
 
 func (d *defaultTLSDialer) Dial(host, port string) bool {
 	return testTLSConnection(host, port)
+}
+
+func (d *defaultTLSDialer) DialViaProxy(proxy *url.URL, host, port string) bool {
+	return testTLSConnectionViaProxy(proxy, host, port)
 }
 
 // logFileOpener abstracts os.Open so tests can inject an in-memory reader.
@@ -357,34 +366,132 @@ func runConnectivityTestWith(target agentInfo, dialer tlsDialer) {
 	}
 
 	fmt.Printf("    Host: %s\n", host)
-
-	// Test MQTT port (8883)
-	fmt.Printf("    Testing MQTT (TLS port 8883)... ")
-	mqttOk := dialer.Dial(host, "8883")
-	if mqttOk {
-		fmt.Println("OK")
-	} else {
-		fmt.Println("FAILED")
+	r := checkConnectivity(*target.Device, dialer)
+	fmt.Printf("    Proxy: %s\n", r.proxyLine())
+	if r.proxyErr != nil {
+		printResult(false, fmt.Sprintf("proxy_url is invalid and is ignored: %v", r.proxyErr))
 	}
-	printResult(mqttOk, fmt.Sprintf("MQTT TLS connection to %s:8883", host))
-
-	// Test WebSocket port (443)
-	fmt.Printf("    Testing WebSocket (port 443)... ")
-	wsOk := dialer.Dial(host, "443")
-	if wsOk {
-		fmt.Println("OK")
-	} else {
-		fmt.Println("FAILED")
+	printResult(r.direct8883, fmt.Sprintf("MQTT TLS connection to %s:8883 (direct)", host))
+	printResult(r.direct443, fmt.Sprintf("WebSocket connection to %s:443 (direct)", host))
+	if r.proxy != nil {
+		printResult(
+			r.proxied443,
+			fmt.Sprintf("WebSocket connection to %s:443 through the proxy", host),
+		)
 	}
-	printResult(wsOk, fmt.Sprintf("WebSocket connection to %s:443", host))
-
-	if !mqttOk && !wsOk {
+	if r.chosen == "" {
+		printResult(false, "No transport reaches the hub")
 		fmt.Println()
 		fmt.Println("    Troubleshooting tips:")
 		fmt.Println("    - Check firewall rules for outbound ports 8883 and 443")
 		fmt.Println("    - Verify DNS resolution for", host)
-		fmt.Println("    - Check proxy/VPN settings that may block connections")
+		fmt.Println("    - Set proxy_url (--proxy-url on --update) if egress needs a proxy")
+		return
 	}
+	printResult(true, "The agent connects with "+r.chosen)
+}
+
+// connectivityResult is what the connectivity check found: the proxy in
+// effect and where it came from, each path's outcome, and the transport the
+// agent would use - the first that works in the order the agent tries them.
+type connectivityResult struct {
+	proxy       *url.URL
+	proxySource string
+	proxyErr    error
+	direct8883  bool
+	direct443   bool
+	proxied443  bool
+	chosen      string
+}
+
+func (r connectivityResult) proxyLine() string {
+	if r.proxy == nil {
+		return "none"
+	}
+	return fmt.Sprintf("%s (from %s)", utils.DescribeProxy(r.proxy), r.proxySource)
+}
+
+// checkConnectivity tests direct 8883, direct 443 and, when a proxy applies,
+// 443 through it (sc-129691), with the agent's own tunnel. The environment
+// proxy is the one of the shell running --diagnostic, which may differ from
+// the service's.
+func checkConnectivity(device agent.Device, dialer tlsDialer) connectivityResult {
+	var r connectivityResult
+	host := device.AzureIotHubHost
+	explicit := strings.TrimSpace(device.ProxyURL)
+	proxy, err := utils.ResolveProxy(explicit)
+	if err != nil {
+		r.proxyErr = err
+		explicit = ""
+		proxy, _ = utils.ResolveProxy("")
+	}
+	wsBroker, _ := url.Parse(mqtt.WebSocketBrokerURL(host))
+	r.proxy = mqtt.BrokerProxy(proxy, wsBroker)
+	if r.proxy != nil {
+		r.proxySource = "the environment of this shell"
+		if explicit != "" {
+			r.proxySource = "proxy_url"
+		}
+	}
+
+	fmt.Printf("    Testing MQTT (TLS port 8883, direct)... ")
+	r.direct8883 = dialer.Dial(host, "8883")
+	fmt.Println(okOrFailed(r.direct8883))
+	fmt.Printf("    Testing WebSocket (port 443, direct)... ")
+	r.direct443 = dialer.Dial(host, "443")
+	fmt.Println(okOrFailed(r.direct443))
+	if r.proxy != nil {
+		fmt.Printf("    Testing WebSocket (port 443) through %s... ", utils.DescribeProxy(r.proxy))
+		r.proxied443 = dialer.DialViaProxy(r.proxy, host, "443")
+		fmt.Println(okOrFailed(r.proxied443))
+	}
+
+	// The transport the agent would use: the first broker, in the agent's own
+	// order (mqtt.Brokers), whose path worked.
+	for _, raw := range mqtt.Brokers(host, proxy) {
+		broker, err := url.Parse(raw)
+		if err != nil {
+			continue
+		}
+		via := mqtt.BrokerProxy(proxy, broker)
+		ok := r.direct8883
+		if broker.Scheme == "wss" {
+			ok = r.direct443
+			if via != nil {
+				ok = r.proxied443
+			}
+		}
+		if !ok {
+			continue
+		}
+		r.chosen = mqtt.Transport(broker)
+		if via != nil {
+			r.chosen += " through " + utils.DescribeProxy(via)
+		}
+		break
+	}
+	return r
+}
+
+func okOrFailed(ok bool) string {
+	if ok {
+		return "OK"
+	}
+	return "FAILED"
+}
+
+// testTLSConnectionViaProxy opens the agent's CONNECT tunnel through proxy to
+// host:port (utils.DialTunnel) and completes a TLS handshake inside it.
+func testTLSConnectionViaProxy(proxy *url.URL, host, port string) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	conn, err := utils.DialTunnel(ctx, proxy, net.JoinHostPort(host, port))
+	if err != nil {
+		return false
+	}
+	defer func() { _ = conn.Close() }()
+	tunneled := tls.Client(conn, &tls.Config{ServerName: host, MinVersion: tls.VersionTLS12})
+	return tunneled.HandshakeContext(ctx) == nil
 }
 
 func testTLSConnection(host, port string) bool {

@@ -3,14 +3,17 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/RewstApp/agent-smith-go/internal/agent"
@@ -186,6 +189,33 @@ func (svc *serviceContext) Execute(
 	// twin can change some of them at run time (sc-129688). This also resolves
 	// the postback retry budget, falling back to the documented defaults when
 	// unset.
+	// Outbound proxy (sc-129691): every connection resolves it the same way
+	// (utils.ResolveProxy). An invalid proxy_url would otherwise fail every
+	// connection cycle, so it is reported and set aside instead.
+	// It is resolved once, here, and handed to everything that dials; this is
+	// the one place an invalid value is handled.
+	device.ProxyURL = strings.TrimSpace(device.ProxyURL)
+	proxy, err := device.Proxy()
+	if err != nil {
+		logger.Error(
+			"Ignoring the configured proxy_url; connecting as the environment says",
+			"error", err,
+		)
+		device.ProxyURL = ""
+		proxy, _ = utils.ResolveProxy("")
+	}
+	svc.proxy = proxy
+	if svc.HTTPClient != nil && svc.HTTPClient.Transport == nil {
+		svc.HTTPClient.Transport = utils.ProxyTransport(proxy)
+	}
+	if device.ProxyURL != "" {
+		logger.Info(
+			"Outbound connections go through a proxy",
+			"proxy", utils.RedactURL(device.ProxyURL),
+			"source", "proxy_url",
+		)
+	}
+
 	svc.setLiveDevice(device)
 	svc.rootLogger = logger
 	svc.reconfigure = make(chan struct{}, 1)
@@ -288,6 +318,7 @@ func (svc *serviceContext) Execute(
 			},
 			svc, // the updater waits for in-flight commands before restarting us
 			agent.WithLiveDevice(svc.currentDevice),
+			agent.WithProxy(svc.proxy),
 		)
 		return agent.NewAutoUpdateRunner(
 			logger,
@@ -619,13 +650,22 @@ func (svc *serviceContext) runCycle(
 	// Create a channel to wait for lost connection
 	lost := make(chan struct{}, 1)
 
-	opts, err := mqtt.NewClientOptions(device)
+	opts, err := mqtt.NewClientOptions(device, svc.proxy)
 	if err != nil {
 		logger.Error("Failed to create client options", "error", err)
 		return true, false, service.GenericError
 	}
 
 	opts.SetAutoReconnect(false)
+	// Record the broker of each attempt so the successful one can be logged
+	// with its transport and proxy (sc-129691). paho tries the brokers in
+	// order, one at a time, so the last attempt before CONNACK is the one that
+	// connected.
+	var attempted atomic.Pointer[url.URL]
+	opts.SetConnectionAttemptHandler(func(broker *url.URL, tlsCfg *tls.Config) *tls.Config {
+		attempted.Store(broker)
+		return tlsCfg
+	})
 	// Acknowledge explicitly, after the message has been journaled, rather than
 	// letting paho acknowledge on return from the subscribe callback. The
 	// difference is what the PUBACK means: with auto-ack it meant "the payload is
@@ -676,8 +716,14 @@ func (svc *serviceContext) runCycle(
 	// Bound the CONNACK wait as a backstop against a token that never resolves,
 	// and make it interruptible so a stop issued mid-handshake is honored at once
 	// instead of after the timeout. See utils.MqttConnectWaitMargin for why the
-	// bound sits above paho's own ConnectTimeout.
-	connectTimeout := device.MqttConnectTimeout() + utils.MqttConnectWaitMargin
+	// bound sits above paho's own ConnectTimeout. paho tries the brokers one
+	// after another, each for up to ConnectTimeout, so the bound covers every
+	// one of them: sized for a single attempt, a first broker that hangs (a
+	// proxy that stalls the tunnel, a firewall that drops 8883 silently) used
+	// it all up and the fallback was never tried (sc-129691).
+	brokers := max(len(opts.Servers), 1)
+	connectTimeout := device.MqttConnectTimeout()*time.Duration(brokers) +
+		utils.MqttConnectWaitMargin
 	connectStarted := time.Now()
 	// Snapshot what a previous *process* left in the journal before this cycle
 	// can receive anything. Replay acts only on this snapshot, minus every key
@@ -705,6 +751,13 @@ func (svc *serviceContext) runCycle(
 	if token.Error() != nil {
 		logger.Error("Failed to connect", "error", token.Error())
 		return false, false, 0
+	}
+	if broker := attempted.Load(); broker != nil {
+		logger.Info(
+			"Connected to the broker",
+			"transport", mqtt.Transport(broker),
+			"proxy", utils.DescribeProxy(mqtt.BrokerProxy(svc.proxy, broker)),
+		)
 	}
 
 	err = mqtt.UpdateReportedProperties(client, mqtt.ReportedProperties{

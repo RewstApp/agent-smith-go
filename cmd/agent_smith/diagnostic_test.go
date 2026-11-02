@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -21,10 +22,24 @@ import (
 type mockTLSDialer struct {
 	result bool
 	calls  []string // records "host:port" for each Dial call
+	// direct and viaProxy, when set, answer per port and for the proxy.
+	direct   map[string]bool
+	viaProxy *bool
 }
 
 func (m *mockTLSDialer) Dial(host, port string) bool {
 	m.calls = append(m.calls, host+":"+port)
+	if m.direct != nil {
+		return m.direct[port]
+	}
+	return m.result
+}
+
+func (m *mockTLSDialer) DialViaProxy(proxy *url.URL, host, port string) bool {
+	m.calls = append(m.calls, "via "+proxy.Redacted()+" "+host+":"+port)
+	if m.viaProxy != nil {
+		return *m.viaProxy
+	}
 	return m.result
 }
 
@@ -228,6 +243,7 @@ func TestRunConnectivityTest_EmptyHost(t *testing.T) {
 }
 
 func TestRunConnectivityTest_BothFail(t *testing.T) {
+	clearProxyEnv(t)
 	dialer := &mockTLSDialer{result: false}
 	target := agentInfo{
 		OrgId:  "org-1",
@@ -240,6 +256,7 @@ func TestRunConnectivityTest_BothFail(t *testing.T) {
 }
 
 func TestRunConnectivityTest_BothSucceed(t *testing.T) {
+	clearProxyEnv(t)
 	dialer := &mockTLSDialer{result: true}
 	target := agentInfo{
 		OrgId:  "org-1",
@@ -248,6 +265,99 @@ func TestRunConnectivityTest_BothSucceed(t *testing.T) {
 	runConnectivityTestWith(target, dialer)
 	if len(dialer.calls) != 2 {
 		t.Errorf("expected 2 dial attempts, got %d", len(dialer.calls))
+	}
+}
+
+// The connectivity check names the proxy in effect, tests direct 8883, direct
+// 443 and 443 through the proxy separately, and names the transport the agent
+// would use, in the agent's own order (sc-129691).
+func TestCheckConnectivity_ProxyFromTheConfig(t *testing.T) {
+	clearProxyEnv(t)
+	yes := true
+	dialer := &mockTLSDialer{direct: map[string]bool{"8883": false, "443": false}, viaProxy: &yes}
+	r := checkConnectivity(agent.Device{
+		AzureIotHubHost: "hub.example.com",
+		ProxyURL:        "http://agent:s3cret@proxy.corp:3128",
+	}, dialer)
+	if r.proxyLine() != "http://agent:xxxxx@proxy.corp:3128 (from proxy_url)" {
+		t.Errorf("proxy line %q", r.proxyLine())
+	}
+	if r.direct8883 || r.direct443 || !r.proxied443 {
+		t.Errorf("results %+v", r)
+	}
+	if r.chosen != "MQTT over WebSocket (443) through http://agent:xxxxx@proxy.corp:3128" {
+		t.Errorf("chosen %q", r.chosen)
+	}
+	want := []string{
+		"hub.example.com:8883",
+		"hub.example.com:443",
+		"via http://agent:xxxxx@proxy.corp:3128 hub.example.com:443",
+	}
+	if strings.Join(dialer.calls, "|") != strings.Join(want, "|") {
+		t.Errorf("calls %v", dialer.calls)
+	}
+}
+
+func TestCheckConnectivity_ProxyFailsButDirectTLSWorks(t *testing.T) {
+	clearProxyEnv(t)
+	no := false
+	dialer := &mockTLSDialer{direct: map[string]bool{"8883": true, "443": true}, viaProxy: &no}
+	r := checkConnectivity(agent.Device{
+		AzureIotHubHost: "hub.example.com",
+		ProxyURL:        "http://proxy.corp:3128",
+	}, dialer)
+	if r.chosen != "MQTT over TLS (8883)" {
+		t.Errorf("chosen %q, want the agent's fallback", r.chosen)
+	}
+}
+
+func TestCheckConnectivity_NoProxy(t *testing.T) {
+	clearProxyEnv(t)
+	dialer := &mockTLSDialer{direct: map[string]bool{"8883": false, "443": true}}
+	r := checkConnectivity(agent.Device{AzureIotHubHost: "127.0.0.1"}, dialer)
+	if r.proxy != nil || r.proxyLine() != "none" {
+		t.Errorf("proxy %v", r.proxy)
+	}
+	if r.chosen != "MQTT over WebSocket (443)" || len(dialer.calls) != 2 {
+		t.Errorf("chosen %q calls %v", r.chosen, dialer.calls)
+	}
+}
+
+func TestCheckConnectivity_InvalidProxyURLIsReportedAndIgnored(t *testing.T) {
+	clearProxyEnv(t)
+	r := checkConnectivity(
+		agent.Device{AzureIotHubHost: "127.0.0.1", ProxyURL: "socks5://p:1080"},
+		&mockTLSDialer{result: true},
+	)
+	if r.proxyErr == nil {
+		t.Error("an invalid proxy_url was not reported")
+	}
+}
+
+// A proxy from the environment is used, and named as coming from it - and a
+// blank proxy_url is not mistaken for a configured one.
+func TestCheckConnectivity_ProxyFromTheEnvironment(t *testing.T) {
+	clearProxyEnv(t)
+	t.Setenv("HTTPS_PROXY", "http://envproxy:9")
+	yes := true
+	dialer := &mockTLSDialer{direct: map[string]bool{}, viaProxy: &yes}
+	r := checkConnectivity(agent.Device{AzureIotHubHost: "hub.example.com", ProxyURL: "  "}, dialer)
+	if r.proxyLine() != "http://envproxy:9 (from the environment of this shell)" {
+		t.Errorf("proxy line %q", r.proxyLine())
+	}
+	if r.chosen != "MQTT over WebSocket (443) through http://envproxy:9" {
+		t.Errorf("chosen %q", r.chosen)
+	}
+}
+
+// clearProxyEnv removes every proxy variable for the test, so a developer's or
+// runner's own proxy settings cannot change what the diagnostic resolves.
+func clearProxyEnv(t *testing.T) {
+	t.Helper()
+	for _, name := range []string{
+		"HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "NO_PROXY", "no_proxy",
+	} {
+		t.Setenv(name, "")
 	}
 }
 

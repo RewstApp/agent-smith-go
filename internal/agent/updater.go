@@ -274,6 +274,9 @@ type defaultUpdater struct {
 	// update helper inherits a logging level or auto-update toggle applied
 	// from the device twin after startup (sc-129688). nil reads *device.
 	liveDevice func() Device
+	// proxy is the outbound proxy for the release and download requests;
+	// nil resolves the device's own (sc-129691).
+	proxy utils.ProxyFunc
 }
 
 // UpdaterOption configures an optional behaviour of the updater.
@@ -309,7 +312,26 @@ func NewUpdater(
 	for _, opt := range opts {
 		opt(u)
 	}
+	// One transport for both clients, through the proxy the caller resolved
+	// (WithProxy) or, without one, the device's own - an invalid proxy_url
+	// then falls back to the environment, since this path cannot report it.
+	proxy := u.proxy
+	if proxy == nil {
+		var err error
+		if proxy, err = device.Proxy(); err != nil {
+			proxy, _ = utils.ResolveProxy("")
+		}
+	}
+	transport := utils.ProxyTransport(proxy)
+	u.checkClient.Transport = transport
+	u.downloadClient.Transport = transport
 	return u
+}
+
+// WithProxy makes the updater's release and download requests go through
+// proxy, the one the service resolved at startup (sc-129691).
+func WithProxy(proxy utils.ProxyFunc) UpdaterOption {
+	return func(u *defaultUpdater) { u.proxy = proxy }
 }
 
 // currentDevice is the device settings in effect now; see WithLiveDevice.

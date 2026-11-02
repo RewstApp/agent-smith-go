@@ -544,3 +544,69 @@ Write-Output "    commands: executing=0 completed_total=2 timed_out_total=1 fail
 		}
 	}
 }
+
+// hermetic-assert-proxy-stats reads the fixture proxy's counters (sc-129691).
+func TestAssertProxyStats_ChecksTheCountForTheTarget(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/_control/proxy" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(
+			[]byte(
+				`{"tunnels":{"127.0.0.1:443":2,"127.0.0.1:8443":1},"forwards":{"127.0.0.1:8766":1},"auth_failures":0}`,
+			),
+		)
+	}))
+	t.Cleanup(srv.Close)
+	base := []string{"ENGINE_URL=" + srv.URL, "TIMEOUT_SECONDS=2"}
+	for _, env := range [][]string{
+		{"KIND=tunnels", "TARGET=127.0.0.1:443", "MIN=2"},
+		{"KIND=forwards", "TARGET=127.0.0.1:8766", "MIN=1"},
+	} {
+		if code, out := run(
+			t,
+			"hermetic-assert-proxy-stats.ps1",
+			append(base, env...)...); code != 0 {
+			t.Errorf("%v: exit %d\n%s", env, code, out)
+		}
+	}
+	for _, env := range [][]string{
+		{"KIND=tunnels", "TARGET=127.0.0.1:443", "MIN=3"},
+		{"KIND=tunnels", "TARGET=10.0.0.1:443", "MIN=1"},
+		{"KIND=bogus", "TARGET=127.0.0.1:443", "MIN=1"},
+		{"KIND=tunnels", "TARGET=127.0.0.1:443"},
+		{"KIND=tunnels", "TARGET=127.0.0.1:443", "MIN=0"},
+		{"KIND=tunnels", "TARGET=127.0.0.1:443", "MIN=lots"},
+		{"KIND=tunnels", "MIN=1"},
+	} {
+		if code, out := run(
+			t,
+			"hermetic-assert-proxy-stats.ps1",
+			append(base, env...)...); code == 0 {
+			t.Errorf("%v passed:\n%s", env, out)
+		}
+	}
+}
+
+func TestAssertDiagnostic_AbsentLinesFailTheAssertion(t *testing.T) {
+	fake := filepath.Join(t.TempDir(), "fake-agent.ps1")
+	script := "$null = @($input)\nWrite-Output 'Proxy: http://agent:s3cret@127.0.0.1:3128'\n"
+	if err := os.WriteFile(fake, []byte(script), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	env := []string{"AGENT_BINARY=" + fake, "ORG_ID=org-1", "MENU=3,0", "PATTERNS=Proxy:"}
+	if code, out := run(
+		t,
+		"hermetic-assert-diagnostic.ps1",
+		append(env, "ABSENT=s3cret")...); code == 0 {
+		t.Errorf("an absent line that appeared passed:\n%s", out)
+	}
+	if code, out := run(
+		t,
+		"hermetic-assert-diagnostic.ps1",
+		append(env, "ABSENT=xxxxx")...); code != 0 {
+		t.Errorf("exit %d\n%s", code, out)
+	}
+}

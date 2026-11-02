@@ -109,6 +109,18 @@ type Device struct {
 	// the device twin (sc-129689). When unset (or non-positive) the agent falls
 	// back to DefaultCommandHeartbeatInterval.
 	CommandHeartbeatSeconds *int `json:"command_heartbeat_seconds,omitempty"`
+	// ProxyURL optionally routes every outbound connection - the MQTT
+	// WebSocket transport, postbacks, the config fetch and auto-updates -
+	// through an HTTP proxy (sc-129691). When empty the agent honours
+	// HTTPS_PROXY / HTTP_PROXY / NO_PROXY from its environment. Credentials in
+	// it are never logged. See utils.ResolveProxy.
+	ProxyURL string `json:"proxy_url,omitempty"`
+}
+
+// Proxy returns the proxy function every outbound connection uses; see
+// utils.ResolveProxy for the precedence. An invalid proxy_url is an error.
+func (d Device) Proxy() (utils.ProxyFunc, error) {
+	return utils.ResolveProxy(d.ProxyURL)
 }
 
 const (

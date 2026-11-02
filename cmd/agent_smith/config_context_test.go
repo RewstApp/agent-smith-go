@@ -295,3 +295,34 @@ func TestNewConfigContext(t *testing.T) {
 		}
 	}
 }
+
+// A blank --proxy-url at install is unset; an invalid one is refused.
+func TestNewConfigContext_ProxyURL(t *testing.T) {
+	args := []string{
+		"--org-id", "43fb08b0-92cf-462a-924d-0b6be7a43a48",
+		"--config-url", "https://example.com/config", "--config-secret", "s",
+	}
+	ctx, err := newConfigContext(append(args, "--proxy-url", "  "), nil, nil, nil, nil)
+	if err != nil || ctx.ProxyURL != "" {
+		t.Errorf("blank: %+v %v", ctx, err)
+	}
+	ctx, err = newConfigContext(
+		append(args, "--proxy-url", " http://proxy:3128 "),
+		nil,
+		nil,
+		nil,
+		nil,
+	)
+	if err != nil || ctx.ProxyURL != "http://proxy:3128" {
+		t.Errorf("padded: %+v %v", ctx, err)
+	}
+	if _, err := newConfigContext(
+		append(args, "--proxy-url", "ftp://p"),
+		nil,
+		nil,
+		nil,
+		nil,
+	); err == nil {
+		t.Error("an invalid proxy was accepted")
+	}
+}

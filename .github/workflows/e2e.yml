@@ -1313,6 +1313,152 @@ jobs:
         with:
           mode: stop
 
+  # ---- Outbound proxy (sc-129691) ----
+  # The stub broker refuses direct MQTT on 8883, so the only way in is its
+  # WebSocket endpoint through the fixture's authenticated HTTP proxy. The
+  # agent is installed with --proxy-url: the config fetch, the MQTT WebSocket
+  # and the postback must all go through it, the password must never reach the
+  # log, and --diagnostic must name the proxy and the transport that works.
+  hermetic-proxy:
+    permissions:
+      contents: read
+    needs: [build, build-integration-test, set-matrix]
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.set-matrix.outputs.matrix) }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Set up the hermetic scenario with only the proxy as egress
+        timeout-minutes: 20
+        id: setup
+        uses: ./.github/actions/hermetic-setup
+        with:
+          os: ${{ matrix.os }}
+          binary: ${{ matrix.binary }}
+          org_id: ${{ vars.IT_ORG_ID }}
+          device_id: hermetic-${{ github.run_id }}-${{ matrix.os }}-proxy
+          service: ${{ matrix.service }}
+          log_file: ${{ matrix.log_file }}
+          direct_mqtt: refuse
+          proxy: "true"
+          extra_args: --proxy-url http://agent:s3cret-proxy@127.0.0.1:3128
+
+      - name: Assert the agent connected over WebSocket through the proxy
+        timeout-minutes: 5
+        uses: ./.github/actions/assert-log-contains
+        with:
+          log_file: ${{ matrix.log_file }}
+          patterns: |-
+            Connected to the broker: transport="MQTT over WebSocket (443)" proxy=http://agent:xxxxx@127.0.0.1:3128
+
+      - name: Assert the proxy password never reached the log
+        timeout-minutes: 5
+        uses: ./.github/actions/assert-log-missing
+        with:
+          log_file: ${{ matrix.log_file }}
+          pattern: s3cret-proxy
+          baseline_count: "0"
+
+      - name: Assert the proxy tunnelled the MQTT WebSocket
+        timeout-minutes: 5
+        uses: ./.github/actions/it-script
+        with:
+          script: hermetic-assert-proxy-stats
+        env:
+          ENGINE_URL: ${{ steps.setup.outputs.engine_url }}
+          KIND: tunnels
+          TARGET: 127.0.0.1:443
+          MIN: "1"
+          TIMEOUT_SECONDS: "30"
+
+      - name: Assert the config fetch went through the proxy
+        timeout-minutes: 5
+        uses: ./.github/actions/it-script
+        with:
+          script: hermetic-assert-proxy-stats
+        env:
+          ENGINE_URL: ${{ steps.setup.outputs.engine_url }}
+          KIND: forwards
+          TARGET: 127.0.0.1:8766
+          MIN: "1"
+          TIMEOUT_SECONDS: "10"
+
+      - name: Enqueue a command
+        timeout-minutes: 5
+        uses: ./.github/actions/it-script
+        with:
+          script: hermetic-enqueue-commands
+        env:
+          ENGINE_URL: ${{ steps.setup.outputs.engine_url }}
+          DEVICE_ID: ${{ steps.setup.outputs.device_id }}
+          SCENARIO: quick
+          COUNT: 1
+          POST_ID_PREFIX: proxied
+
+      - name: Assert its result was posted back
+        timeout-minutes: 5
+        uses: ./.github/actions/it-script
+        with:
+          script: hermetic-assert-postback-responses
+        env:
+          ENGINE_URL: ${{ steps.setup.outputs.engine_url }}
+          POST_ID: proxied-1
+          RECORDED: "true"
+          MIN_ATTEMPTS: "1"
+          TIMEOUT_SECONDS: "120"
+
+      - name: Assert the postback went through the proxy
+        timeout-minutes: 5
+        uses: ./.github/actions/it-script
+        with:
+          script: hermetic-assert-proxy-stats
+        env:
+          ENGINE_URL: ${{ steps.setup.outputs.engine_url }}
+          KIND: tunnels
+          TARGET: 127.0.0.1:8443
+          MIN: "1"
+          TIMEOUT_SECONDS: "30"
+
+      - name: Assert --diagnostic names the proxy and the transport that works
+        timeout-minutes: 5
+        uses: ./.github/actions/it-script
+        with:
+          script: hermetic-assert-diagnostic
+        env:
+          AGENT_BINARY: ${{ github.workspace }}/dist/${{ matrix.binary }}
+          ORG_ID: ${{ vars.IT_ORG_ID }}
+          MENU: "3,0"
+          PATTERNS: |-
+            Proxy: http://agent:xxxxx@127.0.0.1:3128 (from proxy_url)
+            [FAIL] MQTT TLS connection to 127.0.0.1:8883 (direct)
+            [PASS] WebSocket connection to 127.0.0.1:443 through the proxy
+            [PASS] The agent connects with MQTT over WebSocket (443) through http://agent:xxxxx@127.0.0.1:3128
+          ABSENT: s3cret-proxy
+
+      - name: Dump agent log on failure
+        if: failure()
+        uses: ./.github/actions/dump-agent-log
+        with:
+          log_file: ${{ matrix.log_file }}
+
+      - name: Stop stub config endpoint
+        timeout-minutes: 15
+        if: always()
+        uses: ./.github/actions/stub-config
+        with:
+          mode: stop
+
+      - name: Stop stub broker and engine
+        timeout-minutes: 15
+        if: always()
+        uses: ./.github/actions/stub-broker
+        with:
+          mode: stop
+
   e2e-go:
     permissions:
       contents: read

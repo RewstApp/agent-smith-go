@@ -176,6 +176,9 @@ func runUpdate(params *updateContext) {
 	device.DisableAgentPostback = params.DisableAgentPostback
 	device.DisableAutoUpdates = params.NoAutoUpdates
 	device.GithubToken = params.GithubToken
+	if params.ProxyURLProvided {
+		device.ProxyURL = params.ProxyURL
+	}
 
 	if params.MqttQos != -1 {
 		qos := byte(params.MqttQos)

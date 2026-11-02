@@ -586,6 +586,8 @@ func (h *hub) engineMux() http.Handler {
 	mux.HandleFunc("/_control/devices/", h.handleDevice)
 	mux.HandleFunc("/_control/postbacks", h.handlePostbacks)
 	mux.HandleFunc("/_control/postback-responses", h.handlePostbackResponses)
+	mux.HandleFunc("/_control/proxy", handleProxyStats)
+	mux.HandleFunc("/_control/direct-mqtt", handleDirectMQTT)
 	return mux
 }
 

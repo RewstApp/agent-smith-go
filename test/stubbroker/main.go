@@ -110,6 +110,21 @@ func main() {
 		"",
 		"path to write this broker's log to (defaults to stderr)",
 	)
+	wsListen := flag.String(
+		"ws-listen",
+		"",
+		"TLS address for MQTT over WebSocket at "+webSocketPath+"; empty disables (sc-129691)",
+	)
+	proxyListen := flag.String(
+		"proxy-listen",
+		"",
+		"address for the HTTP proxy, which tunnels any :443 to -ws-listen; empty disables; needs -ws-listen",
+	)
+	proxyAuth := flag.String(
+		"proxy-auth",
+		"agent:s3cret-proxy",
+		"user:pass the proxy requires as Basic Proxy-Authorization; empty requires none",
+	)
 	flag.Parse()
 
 	// Redirected here rather than by the launching shell because on Windows the
@@ -132,9 +147,29 @@ func main() {
 		log.Fatal("both -host and -ca-out are required")
 	}
 
+	if *proxyListen != "" && *wsListen == "" {
+		log.Fatal(
+			"-proxy-listen needs -ws-listen: the proxy tunnels :443 to the WebSocket endpoint",
+		)
+	}
+
 	tlsConfig, caPEM, err := newTLSConfig(*host)
 	if err != nil {
 		log.Fatalf("failed to mint certificate chain: %v", err)
+	}
+	// The optional listeners are bound before the CA is written, so a port
+	// that is taken fails the start step - which waits for the CA - with the
+	// reason in the log, instead of an exit after the step has passed.
+	var wsLn, proxyLn net.Listener
+	if *wsListen != "" {
+		if wsLn, err = net.Listen("tcp", *wsListen); err != nil {
+			log.Fatalf("failed to listen for WebSocket on %s: %v", *wsListen, err)
+		}
+	}
+	if *proxyListen != "" {
+		if proxyLn, err = net.Listen("tcp", *proxyListen); err != nil {
+			log.Fatalf("failed to listen for the proxy on %s: %v", *proxyListen, err)
+		}
 	}
 	if err := os.WriteFile(*caOut, caPEM, 0o644); err != nil {
 		log.Fatalf("failed to write CA certificate: %v", err)
@@ -176,10 +211,33 @@ func main() {
 		}()
 	}
 
+	if wsLn != nil {
+		go serveWebSocket(wsLn, tlsConfig, *modeFile)
+	}
+	if proxyLn != nil {
+		wsTarget := hostPort(*host, *wsListen)
+		go func() {
+			log.Printf("stub proxy listening on %s (auth %t, :443 -> %s)",
+				*proxyListen, *proxyAuth != "", wsTarget)
+			srv := &http.Server{
+				Handler:           proxyHandler(*proxyAuth, wsTarget, proxies),
+				ReadHeaderTimeout: 10 * time.Second,
+			}
+			if err := srv.Serve(proxyLn); err != nil {
+				log.Fatalf("proxy listener failed: %v", err)
+			}
+		}()
+	}
+
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
 			log.Printf("accept failed: %v", err)
+			continue
+		}
+		if refuseDirect.Load() {
+			log.Printf("[%s] direct MQTT refused", conn.RemoteAddr())
+			_ = conn.Close()
 			continue
 		}
 		go serve(conn, *modeFile)

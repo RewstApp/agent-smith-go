@@ -162,3 +162,40 @@ func TestNewUpdateContext(t *testing.T) {
 		}
 	}
 }
+
+// --proxy-url on --update replaces the saved one; an empty or blank value
+// removes it; an invalid one is refused (sc-129691).
+func TestNewUpdateContext_ProxyURL(t *testing.T) {
+	orgId := "43fb08b0-92cf-462a-924d-0b6be7a43a48"
+	base := []string{"--org-id", orgId, "--update"}
+	ctx, err := newUpdateContext(
+		append(base, "--proxy-url", "http://u:p@proxy:3128"),
+		nil,
+		nil,
+		nil,
+		nil,
+	)
+	if err != nil || !ctx.ProxyURLProvided || ctx.ProxyURL != "http://u:p@proxy:3128" {
+		t.Fatalf("%+v %v", ctx, err)
+	}
+	for _, blank := range []string{"", "   "} {
+		ctx, err = newUpdateContext(append(base, "--proxy-url", blank), nil, nil, nil, nil)
+		if err != nil || !ctx.ProxyURLProvided || ctx.ProxyURL != "" {
+			t.Errorf("blank %q: %+v %v", blank, ctx, err)
+		}
+	}
+	ctx, err = newUpdateContext(base, nil, nil, nil, nil)
+	if err != nil || ctx.ProxyURLProvided {
+		t.Errorf("no flag: %+v %v", ctx, err)
+	}
+	if _, err := newUpdateContext(
+		append(base, "--proxy-url", "socks5://u:secret@p:1080"),
+		nil,
+		nil,
+		nil,
+		nil,
+	); err == nil ||
+		strings.Contains(err.Error(), "secret") {
+		t.Errorf("an invalid proxy: %v", err)
+	}
+}

@@ -40,6 +40,20 @@ inputs:
     description: "Further install arguments"
     required: false
     default: ""
+  proxy:
+    description: >-
+      "true" starts the stub broker's WebSocket endpoint and HTTP proxy
+      (sc-129691); see the stub-broker action.
+    required: false
+    default: "false"
+  direct_mqtt:
+    description: >-
+      "refuse" makes the stub broker close direct MQTT connections on 8883
+      before the agent is installed, so only the WebSocket endpoint through
+      the fixture's proxy reaches it - a network whose only egress is a proxy
+      (sc-129691). Default "accept".
+    required: false
+    default: "accept"
 
 outputs:
   engine_url:
@@ -82,11 +96,22 @@ runs:
       uses: ./.github/actions/stub-broker
       with:
         mode: start
+        proxy: ${{ inputs.proxy }}
 
     - name: Acknowledge subscriptions
       uses: ./.github/actions/stub-broker
       with:
         mode: ack
+
+    - name: Refuse direct MQTT on 8883
+      if: inputs.direct_mqtt == 'refuse'
+      shell: pwsh
+      env:
+        ENGINE_URL: ${{ steps.broker.outputs.engine_url }}
+      run: |
+        $state = Invoke-RestMethod -Method Post -Uri "$($env:ENGINE_URL)/_control/direct-mqtt?accept=false" -TimeoutSec 30
+        if ($state.accept) { throw "the stub broker still accepts direct MQTT" }
+        Write-Output "direct MQTT on 8883 is refused; only the proxy reaches the broker"
 
     - name: Start stub config endpoint pointing at the fixture
       id: config

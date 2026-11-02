@@ -16,7 +16,7 @@ func TestNewClientOptions_DefaultAzureIotHub(t *testing.T) {
 		Broker:          "",             // triggers default case
 	}
 
-	opts, err := NewClientOptions(device)
+	opts, err := NewClientOptions(device, nil)
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
@@ -78,7 +78,7 @@ func TestNewClientOptions_ConnectTimeoutOverride(t *testing.T) {
 		MqttConnectTimeoutSeconds: &override,
 	}
 
-	opts, err := NewClientOptions(device)
+	opts, err := NewClientOptions(device, nil)
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}

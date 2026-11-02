@@ -12,6 +12,7 @@ import (
 	"github.com/RewstApp/agent-smith-go/internal/agent"
 	"github.com/RewstApp/agent-smith-go/internal/interpreter"
 	"github.com/RewstApp/agent-smith-go/internal/mqtt"
+	"github.com/RewstApp/agent-smith-go/internal/utils"
 	"github.com/hashicorp/go-hclog"
 )
 
@@ -127,6 +128,9 @@ type serviceContext struct {
 	autoUpdate   *autoUpdateControl
 	reconfigure  chan struct{}
 	twinRequests atomic.Int64
+	// proxy is the outbound proxy resolved once at startup (sc-129691); nil
+	// before Execute, which leaves MQTT and the updater on the environment.
+	proxy utils.ProxyFunc
 }
 
 // newServiceFlagSet builds the flag set for service mode, binding flags to the

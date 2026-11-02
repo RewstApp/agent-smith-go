@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/RewstApp/agent-smith-go/internal/agent"
@@ -257,6 +258,9 @@ type configContext struct {
 	ServiceUsername      string
 	ServicePassword      string
 	Tuning               tuningFlags
+	// ProxyURL routes the config fetch and, once saved to the config file,
+	// every connection the agent makes through an HTTP proxy (sc-129691).
+	ProxyURL string
 
 	// ConfigMaxAttempts and ConfigBaseRetryBackoffSeconds bound the retry of the
 	// install-time config fetch on a transient endpoint answer (sc-118306).
@@ -319,6 +323,7 @@ func newConfigFlagSet(params *configContext) *flag.FlagSet {
 	fs.StringVar(&params.GithubToken, "github-token", "", "GitHub token for update checks")
 	fs.IntVar(&params.MqttQos, "mqtt-qos", -1, "MQTT subscription QoS level (0 or 1)")
 	bindTuningFlags(fs, &params.Tuning)
+	bindProxyFlag(fs, &params.ProxyURL)
 	fs.StringVar(
 		&params.ServiceUsername,
 		"service-username",
@@ -389,7 +394,39 @@ func newConfigContext(
 	params.Domain = domain
 	params.FS = fsys
 	params.ServiceManager = svcMgr
-	params.HTTPClient = &http.Client{Timeout: configHTTPTimeout}
+	// A blank --proxy-url is unset, the same as no flag (sc-129691).
+	params.ProxyURL = strings.TrimSpace(params.ProxyURL)
+	proxy, err := utils.ResolveProxy(params.ProxyURL)
+	if err != nil {
+		return nil, err
+	}
+	params.HTTPClient = &http.Client{
+		Timeout:   configHTTPTimeout,
+		Transport: utils.ProxyTransport(proxy),
+	}
 
 	return &params, nil
+}
+
+// bindProxyFlag registers --proxy-url, shared by config and update modes.
+func bindProxyFlag(fs *flag.FlagSet, target *string) {
+	fs.StringVar(
+		target,
+		"proxy-url",
+		"",
+		"HTTP proxy for every outbound connection, e.g. http://user:pass@proxy:3128 "+
+			"(default: HTTPS_PROXY/HTTP_PROXY/NO_PROXY from the environment); "+
+			"on --update an empty value removes a saved one",
+	)
+}
+
+// flagProvided reports whether name was set on the command line.
+func flagProvided(fs *flag.FlagSet, name string) bool {
+	provided := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == name {
+			provided = true
+		}
+	})
+	return provided
 }
