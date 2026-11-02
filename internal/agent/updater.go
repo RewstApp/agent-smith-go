@@ -300,16 +300,31 @@ func NewUpdater(
 		latestReleaseUrl: latestReleaseUrl,
 		githubToken:      githubToken,
 		runCommand:       runCommand,
-		checkClient:      &http.Client{Timeout: checkTimeout},
-		downloadClient:   &http.Client{Timeout: downloadTimeout},
-		chmod:            os.Chmod,
-		updatesDir:       GetUpdatesDirectory(device.RewstOrgId),
-		activity:         activity,
+		checkClient:      &http.Client{Timeout: checkTimeout, Transport: proxied(logger, device)},
+		downloadClient: &http.Client{
+			Timeout:   downloadTimeout,
+			Transport: proxied(logger, device),
+		},
+		chmod:      os.Chmod,
+		updatesDir: GetUpdatesDirectory(device.RewstOrgId),
+		activity:   activity,
 	}
 	for _, opt := range opts {
 		opt(u)
 	}
 	return u
+}
+
+// proxied is a transport that honours the device's proxy (sc-129691). An
+// invalid proxy_url falls back to the environment, with a Warn, rather than
+// failing every update check.
+func proxied(logger hclog.Logger, device *Device) *http.Transport {
+	proxy, err := device.Proxy()
+	if err != nil {
+		logger.Warn("Ignoring an invalid proxy_url for auto-updates", "error", err)
+		proxy = http.ProxyFromEnvironment
+	}
+	return utils.ProxyTransport(proxy)
 }
 
 // currentDevice is the device settings in effect now; see WithLiveDevice.

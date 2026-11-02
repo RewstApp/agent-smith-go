@@ -2,7 +2,8 @@
 # (sc-131253). The menu reads its choices from standard input, so MENU (the
 # choices, comma-separated, e.g. "8,0": show fleet health, then exit) is piped
 # in. Env: AGENT_BINARY (path to the agent binary), ORG_ID, MENU, PATTERNS
-# (newline-separated substrings that must all appear).
+# (newline-separated substrings that must all appear) and optionally ABSENT
+# (newline-separated substrings that must not, e.g. a proxy password).
 $patterns = @(($env:PATTERNS -split "`r?`n") | Where-Object { $_ })
 if ($patterns.Count -eq 0) {
   Write-Error "PATTERNS names no line to look for; an empty assertion would pass whatever --diagnostic printed"
@@ -21,6 +22,14 @@ foreach ($pattern in $patterns) {
 }
 if ($missing.Count -gt 0) {
   Write-Error "--diagnostic output lacks: $($missing -join '; ')"
+  exit 1
+}
+$present = @()
+foreach ($absent in @(($env:ABSENT -split "`r?`n") | Where-Object { $_ })) {
+  if ($output.Contains($absent)) { $present += $absent }
+}
+if ($present.Count -gt 0) {
+  Write-Error "--diagnostic output must not contain: $($present -join '; ')"
   exit 1
 }
 Write-Output "--diagnostic output carries every expected line"

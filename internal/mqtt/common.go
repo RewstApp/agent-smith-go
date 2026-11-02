@@ -84,11 +84,16 @@ func NewClientOptions(device agent.Device) (*mqtt.ClientOptions, error) {
 
 	switch device.Broker {
 	default:
+		proxy, proxyErr := device.Proxy()
+		if proxyErr != nil {
+			return nil, proxyErr
+		}
 		opts, err = newAzureIotHubClientOptions(azureIotHubDevice{
 			DeviceId:        device.DeviceId,
 			Host:            device.AzureIotHubHost,
 			SharedAccessKey: device.SharedAccessKey,
 			TokenLifetime:   device.SasTokenLifetime(),
+			Proxy:           proxy,
 		})
 	}
 

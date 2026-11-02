@@ -6,6 +6,8 @@ import (
 	"crypto/tls"
 	"encoding/base64"
 	"fmt"
+	"net/http"
+	"net/url"
 	"time"
 
 	"github.com/RewstApp/agent-smith-go/internal/utils"
@@ -19,6 +21,45 @@ type azureIotHubDevice struct {
 	// TokenLifetime is how long the minted SAS token is valid. When zero the
 	// documented default (utils.DefaultSasTokenLifetime) is used.
 	TokenLifetime time.Duration
+	// Proxy is the outbound proxy the WebSocket transport dials through; nil
+	// means http.ProxyFromEnvironment (sc-129691).
+	Proxy utils.ProxyFunc
+}
+
+// WebSocketBrokerURL is the address of IoT Hub's MQTT-over-WebSocket endpoint.
+// IoT Hub serves it only at /$iothub/websocket on 443.
+func WebSocketBrokerURL(host string) string {
+	return fmt.Sprintf("wss://%s:443/$iothub/websocket", host)
+}
+
+// TLSBrokerURL is the address of IoT Hub's MQTT-over-TLS endpoint.
+func TLSBrokerURL(host string) string {
+	return fmt.Sprintf("tls://%s:8883", host)
+}
+
+// Transport names how a broker URL connects, for logs and the diagnostic.
+func Transport(broker *url.URL) string {
+	if broker == nil {
+		return "unknown"
+	}
+	switch broker.Scheme {
+	case "ws", "wss":
+		return "MQTT over WebSocket (443)"
+	default:
+		return "MQTT over TLS (8883)"
+	}
+}
+
+// BrokerProxy reports the proxy a connection to broker goes through: only the
+// WebSocket transport can traverse an HTTP proxy, so MQTT over TLS is always
+// direct.
+func BrokerProxy(proxy utils.ProxyFunc, broker *url.URL) *url.URL {
+	if broker == nil || (broker.Scheme != "wss" && broker.Scheme != "ws") {
+		return nil
+	}
+	target := *broker
+	target.Scheme = map[string]string{"wss": "https", "ws": "http"}[broker.Scheme]
+	return utils.ProxyFor(proxy, &target)
 }
 
 // generateSASToken generates a SAS token for Azure IoT Hub
@@ -64,12 +105,30 @@ func newAzureIotHubClientOptions(device azureIotHubDevice) (*mqtt.ClientOptions,
 		return nil, err
 	}
 
-	// Initialize MQTT options
+	// Initialize MQTT options. MQTT over TLS on 8883 comes first and the
+	// WebSocket endpoint on 443 is the fallback for networks that block 8883 -
+	// unless a proxy applies to the WebSocket endpoint: 8883 cannot traverse an
+	// HTTP proxy, so a proxied network tries the WebSocket through it first
+	// (sc-129691). The WebSocket used to be registered as a bare wss://<hub>,
+	// a path IoT Hub does not serve.
+	proxy := device.Proxy
+	if proxy == nil {
+		proxy = http.ProxyFromEnvironment
+	}
+	tlsBroker, wsBroker := TLSBrokerURL(device.Host), WebSocketBrokerURL(device.Host)
 	opts := mqtt.NewClientOptions()
-	opts.AddBroker(fmt.Sprintf("tls://%s:8883", device.Host)) // Use port 8883 for MQTT over TLS
-	opts.AddBroker(
-		fmt.Sprintf("wss://%s", device.Host),
-	) // Add websocket as a backup for Azure Iot Hub
+	wsURL, err := url.Parse(wsBroker)
+	if err != nil {
+		return nil, fmt.Errorf("invalid IoT Hub host %q: %w", device.Host, err)
+	}
+	if BrokerProxy(proxy, wsURL) != nil {
+		opts.AddBroker(wsBroker)
+		opts.AddBroker(tlsBroker)
+	} else {
+		opts.AddBroker(tlsBroker)
+		opts.AddBroker(wsBroker)
+	}
+	opts.SetWebsocketOptions(&mqtt.WebsocketOptions{Proxy: proxy})
 	opts.SetClientID(device.DeviceId)
 	opts.SetUsername(fmt.Sprintf("%s/%s/?api-version=2021-04-12", device.Host, device.DeviceId))
 	opts.SetPassword(sasToken)

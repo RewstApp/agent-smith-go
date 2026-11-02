@@ -3,14 +3,17 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/RewstApp/agent-smith-go/internal/agent"
@@ -186,6 +189,29 @@ func (svc *serviceContext) Execute(
 	// twin can change some of them at run time (sc-129688). This also resolves
 	// the postback retry budget, falling back to the documented defaults when
 	// unset.
+	// Outbound proxy (sc-129691): every connection resolves it the same way
+	// (utils.ResolveProxy). An invalid proxy_url would otherwise fail every
+	// connection cycle, so it is reported and set aside instead.
+	proxy, err := device.Proxy()
+	if err != nil {
+		logger.Error(
+			"Ignoring the configured proxy_url; connecting as the environment says",
+			"error", err,
+		)
+		device.ProxyURL = ""
+		proxy = http.ProxyFromEnvironment
+	}
+	if svc.HTTPClient != nil && svc.HTTPClient.Transport == nil {
+		svc.HTTPClient.Transport = utils.ProxyTransport(proxy)
+	}
+	if device.ProxyURL != "" {
+		logger.Info(
+			"Outbound connections go through a proxy",
+			"proxy", utils.RedactURL(device.ProxyURL),
+			"source", "proxy_url",
+		)
+	}
+
 	svc.setLiveDevice(device)
 	svc.rootLogger = logger
 	svc.reconfigure = make(chan struct{}, 1)
@@ -626,6 +652,15 @@ func (svc *serviceContext) runCycle(
 	}
 
 	opts.SetAutoReconnect(false)
+	// Record the broker of each attempt so the successful one can be logged
+	// with its transport and proxy (sc-129691). paho tries the brokers in
+	// order, one at a time, so the last attempt before CONNACK is the one that
+	// connected.
+	var attempted atomic.Pointer[url.URL]
+	opts.SetConnectionAttemptHandler(func(broker *url.URL, tlsCfg *tls.Config) *tls.Config {
+		attempted.Store(broker)
+		return tlsCfg
+	})
 	// Acknowledge explicitly, after the message has been journaled, rather than
 	// letting paho acknowledge on return from the subscribe callback. The
 	// difference is what the PUBACK means: with auto-ack it meant "the payload is
@@ -705,6 +740,14 @@ func (svc *serviceContext) runCycle(
 	if token.Error() != nil {
 		logger.Error("Failed to connect", "error", token.Error())
 		return false, false, 0
+	}
+	if broker := attempted.Load(); broker != nil {
+		cycleProxy, _ := device.Proxy()
+		logger.Info(
+			"Connected to the broker",
+			"transport", mqtt.Transport(broker),
+			"proxy", utils.DescribeProxy(mqtt.BrokerProxy(cycleProxy, broker)),
+		)
 	}
 
 	err = mqtt.UpdateReportedProperties(client, mqtt.ReportedProperties{

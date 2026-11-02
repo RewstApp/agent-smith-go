@@ -4,10 +4,13 @@ import (
 	"bufio"
 	"context"
 	"crypto/tls"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net"
+	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -25,12 +28,19 @@ import (
 // tlsDialer abstracts TLS connectivity checks so tests can inject fakes.
 type tlsDialer interface {
 	Dial(host, port string) bool
+	// DialViaProxy opens a TLS connection to host:port through an HTTP proxy
+	// with CONNECT, the way the agent's WebSocket transport does (sc-129691).
+	DialViaProxy(proxy *url.URL, host, port string) bool
 }
 
 type defaultTLSDialer struct{}
 
 func (d *defaultTLSDialer) Dial(host, port string) bool {
 	return testTLSConnection(host, port)
+}
+
+func (d *defaultTLSDialer) DialViaProxy(proxy *url.URL, host, port string) bool {
+	return testTLSConnectionViaProxy(proxy, host, port)
 }
 
 // logFileOpener abstracts os.Open so tests can inject an in-memory reader.
@@ -357,34 +367,160 @@ func runConnectivityTestWith(target agentInfo, dialer tlsDialer) {
 	}
 
 	fmt.Printf("    Host: %s\n", host)
-
-	// Test MQTT port (8883)
-	fmt.Printf("    Testing MQTT (TLS port 8883)... ")
-	mqttOk := dialer.Dial(host, "8883")
-	if mqttOk {
-		fmt.Println("OK")
-	} else {
-		fmt.Println("FAILED")
+	r := checkConnectivity(*target.Device, dialer)
+	fmt.Printf("    Proxy: %s\n", r.proxyLine())
+	if r.proxyErr != nil {
+		printResult(false, fmt.Sprintf("proxy_url is invalid and is ignored: %v", r.proxyErr))
 	}
-	printResult(mqttOk, fmt.Sprintf("MQTT TLS connection to %s:8883", host))
-
-	// Test WebSocket port (443)
-	fmt.Printf("    Testing WebSocket (port 443)... ")
-	wsOk := dialer.Dial(host, "443")
-	if wsOk {
-		fmt.Println("OK")
-	} else {
-		fmt.Println("FAILED")
+	printResult(r.direct8883, fmt.Sprintf("MQTT TLS connection to %s:8883 (direct)", host))
+	printResult(r.direct443, fmt.Sprintf("WebSocket connection to %s:443 (direct)", host))
+	if r.proxy != nil {
+		printResult(
+			r.proxied443,
+			fmt.Sprintf("WebSocket connection to %s:443 through the proxy", host),
+		)
 	}
-	printResult(wsOk, fmt.Sprintf("WebSocket connection to %s:443", host))
-
-	if !mqttOk && !wsOk {
+	if r.chosen == "" {
+		printResult(false, "No transport reaches the hub")
 		fmt.Println()
 		fmt.Println("    Troubleshooting tips:")
 		fmt.Println("    - Check firewall rules for outbound ports 8883 and 443")
 		fmt.Println("    - Verify DNS resolution for", host)
-		fmt.Println("    - Check proxy/VPN settings that may block connections")
+		fmt.Println("    - Set proxy_url (--proxy-url on --update) if egress needs a proxy")
+		return
 	}
+	printResult(true, "The agent connects with "+r.chosen)
+}
+
+// connectivityResult is what the connectivity check found: the proxy in
+// effect and where it came from, each path's outcome, and the transport the
+// agent would use - the first that works in the order the agent tries them.
+type connectivityResult struct {
+	proxy       *url.URL
+	proxySource string
+	proxyErr    error
+	direct8883  bool
+	direct443   bool
+	proxied443  bool
+	chosen      string
+}
+
+func (r connectivityResult) proxyLine() string {
+	if r.proxy == nil {
+		return "none"
+	}
+	return fmt.Sprintf("%s (from %s)", utils.DescribeProxy(r.proxy), r.proxySource)
+}
+
+// checkConnectivity tests direct 8883, direct 443 and, when a proxy applies,
+// 443 through it (sc-129691). The environment proxy is the one of the shell
+// running --diagnostic, which may differ from the service's.
+func checkConnectivity(device agent.Device, dialer tlsDialer) connectivityResult {
+	var r connectivityResult
+	host := device.AzureIotHubHost
+	target := &url.URL{Scheme: "https", Host: net.JoinHostPort(host, "443")}
+	proxy, err := device.Proxy()
+	if err != nil {
+		r.proxyErr = err
+		proxy = http.ProxyFromEnvironment
+	}
+	r.proxy = utils.ProxyFor(proxy, target)
+	if r.proxy != nil {
+		r.proxySource = "the environment of this shell"
+		if device.ProxyURL != "" && r.proxyErr == nil {
+			r.proxySource = "proxy_url"
+		}
+	}
+
+	fmt.Printf("    Testing MQTT (TLS port 8883, direct)... ")
+	r.direct8883 = dialer.Dial(host, "8883")
+	fmt.Println(okOrFailed(r.direct8883))
+	fmt.Printf("    Testing WebSocket (port 443, direct)... ")
+	r.direct443 = dialer.Dial(host, "443")
+	fmt.Println(okOrFailed(r.direct443))
+	if r.proxy != nil {
+		fmt.Printf("    Testing WebSocket (port 443) through %s... ", utils.DescribeProxy(r.proxy))
+		r.proxied443 = dialer.DialViaProxy(r.proxy, host, "443")
+		fmt.Println(okOrFailed(r.proxied443))
+	}
+
+	// The agent's order (mqtt.newAzureIotHubClientOptions): with a proxy, the
+	// WebSocket through it and then direct TLS; without, direct TLS and then
+	// the direct WebSocket.
+	ws := "MQTT over WebSocket (443)"
+	switch {
+	case r.proxy != nil && r.proxied443:
+		r.chosen = ws + " through " + utils.DescribeProxy(r.proxy)
+	case r.direct8883:
+		r.chosen = "MQTT over TLS (8883)"
+	case r.proxy == nil && r.direct443:
+		r.chosen = ws
+	}
+	return r
+}
+
+func okOrFailed(ok bool) string {
+	if ok {
+		return "OK"
+	}
+	return "FAILED"
+}
+
+// testTLSConnectionViaProxy opens a CONNECT tunnel through proxy to host:port
+// and completes a TLS handshake inside it.
+func testTLSConnectionViaProxy(proxy *url.URL, host, port string) bool {
+	proxyAddr := proxy.Host
+	if proxy.Port() == "" {
+		port := "80"
+		if proxy.Scheme == "https" {
+			port = "443"
+		}
+		proxyAddr = net.JoinHostPort(proxy.Hostname(), port)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	conn, err := (&net.Dialer{Timeout: 10 * time.Second}).Dial("tcp", proxyAddr)
+	if err != nil {
+		return false
+	}
+	defer func() { _ = conn.Close() }()
+	_ = conn.SetDeadline(deadline)
+	if proxy.Scheme == "https" {
+		tlsConn := tls.Client(
+			conn,
+			&tls.Config{ServerName: proxy.Hostname(), MinVersion: tls.VersionTLS12},
+		)
+		if err := tlsConn.Handshake(); err != nil {
+			return false
+		}
+		conn = tlsConn
+	}
+	addr := net.JoinHostPort(host, port)
+	req := &http.Request{
+		Method: http.MethodConnect,
+		URL:    &url.URL{Opaque: addr},
+		Host:   addr,
+		Header: http.Header{},
+	}
+	if proxy.User != nil {
+		password, _ := proxy.User.Password()
+		credentials := base64.StdEncoding.EncodeToString(
+			[]byte(proxy.User.Username() + ":" + password),
+		)
+		req.Header.Set("Proxy-Authorization", "Basic "+credentials)
+	}
+	if err := req.Write(conn); err != nil {
+		return false
+	}
+	resp, err := http.ReadResponse(bufio.NewReader(conn), req)
+	if err != nil {
+		return false
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return false
+	}
+	tunneled := tls.Client(conn, &tls.Config{ServerName: host, MinVersion: tls.VersionTLS12})
+	return tunneled.Handshake() == nil
 }
 
 func testTLSConnection(host, port string) bool {

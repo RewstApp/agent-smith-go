@@ -91,6 +91,7 @@ func runConfig(params *configContext) error {
 	response.Configuration.DisableAgentPostback = params.DisableAgentPostback
 	response.Configuration.DisableAutoUpdates = params.NoAutoUpdates
 	response.Configuration.GithubToken = params.GithubToken
+	response.Configuration.ProxyURL = params.ProxyURL
 
 	if params.MqttQos != -1 {
 		qos := byte(params.MqttQos)
@@ -141,8 +142,15 @@ func runConfig(params *configContext) error {
 		return fmt.Errorf("failed to print config file: %w", err)
 	}
 
-	// Got configuration
-	logger.Info("Received configuration", "configuration", string(configBytes))
+	// Got configuration. The proxy URL's credentials are redacted in the log
+	// line (sc-129691); the file itself keeps them.
+	logged := response.Configuration
+	logged.ProxyURL = utils.RedactURL(logged.ProxyURL)
+	loggedBytes, err := json.MarshalIndent(logged, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to print config file: %w", err)
+	}
+	logger.Info("Received configuration", "configuration", string(loggedBytes))
 
 	// Written atomically so a failed write cannot leave a truncated config file
 	// that the service is then unable to start from. SecureFileMode (0600

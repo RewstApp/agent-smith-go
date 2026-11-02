@@ -22,6 +22,10 @@ type updateContext struct {
 	ServiceUsername      string
 	ServicePassword      string
 	Tuning               tuningFlags
+	// ProxyURL replaces the saved proxy_url when ProxyURLProvided; an empty
+	// value removes it (sc-129691).
+	ProxyURL         string
+	ProxyURLProvided bool
 
 	Sys    agent.SystemInfoProvider
 	Domain agent.DomainInfoProvider
@@ -59,6 +63,7 @@ func newUpdateFlagSet(params *updateContext) *flag.FlagSet {
 	fs.StringVar(&params.GithubToken, "github-token", "", "GitHub token for update checks")
 	fs.IntVar(&params.MqttQos, "mqtt-qos", -1, "MQTT subscription QoS level (0 or 1)")
 	bindTuningFlags(fs, &params.Tuning)
+	bindProxyFlag(fs, &params.ProxyURL)
 	fs.StringVar(
 		&params.ServiceUsername,
 		"service-username",
@@ -92,6 +97,7 @@ func newUpdateContext(
 	}
 
 	params.Tuning.captureProvided(fs)
+	params.ProxyURLProvided = flagProvided(fs, "proxy-url")
 
 	if params.OrgId == "" {
 		return nil, fmt.Errorf("missing org-id")
@@ -99,6 +105,12 @@ func newUpdateContext(
 
 	if !isValidOrgId(params.OrgId) {
 		return nil, fmt.Errorf("invalid org-id")
+	}
+
+	if params.ProxyURL != "" {
+		if _, err := utils.ParseProxyURL(params.ProxyURL); err != nil {
+			return nil, err
+		}
 	}
 
 	if !params.Update {

@@ -110,6 +110,21 @@ func main() {
 		"",
 		"path to write this broker's log to (defaults to stderr)",
 	)
+	wsListen := flag.String(
+		"ws-listen",
+		":8444",
+		"TLS address for MQTT over WebSocket at "+webSocketPath+"; empty disables (sc-129691)",
+	)
+	proxyListen := flag.String(
+		"proxy-listen",
+		":3128",
+		"address for the HTTP proxy, which tunnels any :443 to -ws-listen; empty disables",
+	)
+	proxyAuth := flag.String(
+		"proxy-auth",
+		"agent:s3cret-proxy",
+		"user:pass the proxy requires as Basic Proxy-Authorization; empty requires none",
+	)
 	flag.Parse()
 
 	// Redirected here rather than by the launching shell because on Windows the
@@ -176,10 +191,34 @@ func main() {
 		}()
 	}
 
+	if *wsListen != "" {
+		go serveWebSocket(*wsListen, tlsConfig, *modeFile)
+	}
+	if *proxyListen != "" {
+		wsTarget := hostPort(*host, *wsListen)
+		go func() {
+			log.Printf("stub proxy listening on %s (auth %t, :443 -> %s)",
+				*proxyListen, *proxyAuth != "", wsTarget)
+			srv := &http.Server{
+				Addr:              *proxyListen,
+				Handler:           proxyHandler(*proxyAuth, wsTarget, proxies),
+				ReadHeaderTimeout: 10 * time.Second,
+			}
+			if err := srv.ListenAndServe(); err != nil {
+				log.Fatalf("proxy listener failed: %v", err)
+			}
+		}()
+	}
+
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
 			log.Printf("accept failed: %v", err)
+			continue
+		}
+		if refuseDirect.Load() {
+			log.Printf("[%s] direct MQTT refused", conn.RemoteAddr())
+			_ = conn.Close()
 			continue
 		}
 		go serve(conn, *modeFile)

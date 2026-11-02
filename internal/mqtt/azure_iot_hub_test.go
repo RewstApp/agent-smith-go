@@ -1,6 +1,8 @@
 package mqtt
 
 import (
+	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"testing"
@@ -137,5 +139,74 @@ func TestNewAzureIotHubClientOptions(t *testing.T) {
 
 	if opts.TLSConfig == nil {
 		t.Errorf("expected TLS config to be set")
+	}
+}
+
+// Without a proxy MQTT over TLS comes first and the WebSocket endpoint is the
+// fallback; with one, the WebSocket comes first because 8883 cannot traverse
+// an HTTP proxy (sc-129691). The WebSocket is IoT Hub's real endpoint path.
+func TestNewAzureIotHubClientOptions_BrokerOrderFollowsTheProxy(t *testing.T) {
+	t.Setenv("HTTPS_PROXY", "")
+	t.Setenv("NO_PROXY", "")
+	base := azureIotHubDevice{
+		DeviceId:        "d",
+		Host:            "hub.azure-devices.net",
+		SharedAccessKey: "c2VjcmV0a2V5",
+		Proxy:           func(*http.Request) (*url.URL, error) { return nil, nil },
+	}
+	direct, err := newAzureIotHubClientOptions(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := serverStrings(
+		direct.Servers,
+	); got != "tls://hub.azure-devices.net:8883 wss://hub.azure-devices.net:443/$iothub/websocket" {
+		t.Errorf("direct broker order: %s", got)
+	}
+	proxyURL, _ := url.Parse("http://user:pw@proxy.corp:3128")
+	base.Proxy = func(*http.Request) (*url.URL, error) { return proxyURL, nil }
+	proxied, err := newAzureIotHubClientOptions(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := serverStrings(
+		proxied.Servers,
+	); got != "wss://hub.azure-devices.net:443/$iothub/websocket tls://hub.azure-devices.net:8883" {
+		t.Errorf("proxied broker order: %s", got)
+	}
+	if proxied.WebsocketOptions == nil || proxied.WebsocketOptions.Proxy == nil {
+		t.Fatal("the WebSocket transport was not given the proxy")
+	}
+	if got, _ := proxied.WebsocketOptions.Proxy(&http.Request{}); got != proxyURL {
+		t.Errorf("WebSocket proxy %v", got)
+	}
+}
+
+func serverStrings(servers []*url.URL) string {
+	out := make([]string, 0, len(servers))
+	for _, s := range servers {
+		out = append(out, s.String())
+	}
+	return strings.Join(out, " ")
+}
+
+func TestTransportAndBrokerProxy(t *testing.T) {
+	ws, _ := url.Parse(WebSocketBrokerURL("hub"))
+	tlsURL, _ := url.Parse(TLSBrokerURL("hub"))
+	if Transport(ws) != "MQTT over WebSocket (443)" || Transport(tlsURL) != "MQTT over TLS (8883)" {
+		t.Errorf("transports %q %q", Transport(ws), Transport(tlsURL))
+	}
+	proxyURL, _ := url.Parse("http://proxy:3128")
+	fn := func(r *http.Request) (*url.URL, error) {
+		if r.URL.Scheme != "https" {
+			t.Errorf("the proxy was asked about scheme %q, want https", r.URL.Scheme)
+		}
+		return proxyURL, nil
+	}
+	if BrokerProxy(fn, ws) != proxyURL {
+		t.Error("the WebSocket broker is not proxied")
+	}
+	if BrokerProxy(fn, tlsURL) != nil {
+		t.Error("MQTT over TLS was reported as proxied")
 	}
 }
