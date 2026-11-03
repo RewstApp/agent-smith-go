@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -646,6 +647,20 @@ Write-Output "Diagnostic bundle written: $path"
 		"hermetic-assert-bundle.ps1",
 		append(base, "FAKE_DIAGNOSTIC=all clean")...); code != 0 {
 		t.Fatalf("a clean bundle failed: exit %d\n%s", code, out)
+	}
+	// Run the way Invoke-Elevated.ps1 runs a helper on Windows - in-process,
+	// then exiting with any non-zero $LASTEXITCODE: the deliberately failing
+	// agent call at the end must not leak its exit code into the step.
+	cmd := exec.Command(pwshPath(t), "-NoProfile", "-Command",
+		"$global:LASTEXITCODE = 0; & '"+scriptPath(t, "hermetic-assert-bundle.ps1")+
+			"'; if ($LASTEXITCODE) { exit $LASTEXITCODE }")
+	cmd.Env = append(os.Environ(), append(base, "FAKE_DIAGNOSTIC=all clean")...)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf(
+			"run as Invoke-Elevated runs it on Windows, a clean bundle exited %v\n%s",
+			err,
+			out,
+		)
 	}
 	for _, leak := range []string{"key SAK-SECRET-VALUE here", "proxy PROXY-PASS here"} {
 		code, out := run(t, "hermetic-assert-bundle.ps1", append(base, "FAKE_DIAGNOSTIC="+leak)...)
