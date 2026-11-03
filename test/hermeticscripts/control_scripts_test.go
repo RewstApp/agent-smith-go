@@ -610,3 +610,47 @@ func TestAssertDiagnostic_AbsentLinesFailTheAssertion(t *testing.T) {
 		t.Errorf("exit %d\n%s", code, out)
 	}
 }
+
+// hermetic-assert-bundle writes the bundle through the agent binary and checks
+// its entries and that no secret leaked (sc-129690). A PowerShell fake stands
+// in for the agent: it zips a bundle for the known org and fails for any other.
+func TestAssertBundle_ChecksEntriesAndSecrets(t *testing.T) {
+	dir := t.TempDir()
+	logFile := filepath.Join(dir, "rewst_agent.log")
+	config := `{"shared_access_key": "SAK-SECRET-VALUE", "device_id": "d"}`
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(config), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fake := filepath.Join(t.TempDir(), "fake-agent.ps1")
+	script := `param([string]$_org1, [string]$org, [string]$_d, [string]$_b, [string]$_bp, [string]$path)
+if ($org -ne 'org-1') { Write-Output "no agent for org $org is installed under /x; nothing to bundle"; exit 1 }
+$stage = Join-Path ([IO.Path]::GetTempPath()) ([guid]::NewGuid())
+New-Item -ItemType Directory -Path (Join-Path $stage 'logs') | Out-Null
+'{"shared_access_key": "***"}' | Set-Content (Join-Path $stage 'config.json')
+foreach ($n in 'host.txt','journal.txt','service.txt','spool.txt','version.txt') { 'x' | Set-Content (Join-Path $stage $n) }
+$env:FAKE_DIAGNOSTIC | Set-Content (Join-Path $stage 'diagnostic.txt')
+'tail' | Set-Content (Join-Path $stage 'logs/rewst_agent.log')
+Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $path
+Write-Output "Diagnostic bundle written: $path"
+`
+	if err := os.WriteFile(fake, []byte(script), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	bundle := filepath.Join(t.TempDir(), "b.zip")
+	base := []string{
+		"AGENT_BINARY=" + fake, "ORG_ID=org-1", "LOG_FILE=" + logFile,
+		"BUNDLE_PATH=" + bundle, "ABSENT=PROXY-PASS",
+	}
+	if code, out := run(
+		t,
+		"hermetic-assert-bundle.ps1",
+		append(base, "FAKE_DIAGNOSTIC=all clean")...); code != 0 {
+		t.Fatalf("a clean bundle failed: exit %d\n%s", code, out)
+	}
+	for _, leak := range []string{"key SAK-SECRET-VALUE here", "proxy PROXY-PASS here"} {
+		code, out := run(t, "hermetic-assert-bundle.ps1", append(base, "FAKE_DIAGNOSTIC="+leak)...)
+		if code == 0 || !strings.Contains(out, "contains a secret") {
+			t.Errorf("a leak (%s) passed: exit %d\n%s", leak, code, out)
+		}
+	}
+}

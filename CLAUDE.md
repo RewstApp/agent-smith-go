@@ -52,6 +52,7 @@ Required tools:
   - Configuration mode: `--config-url --config-secret --org-id`
   - Service mode: `--config-file --log-file --org-id` 
   - Uninstall mode: `--uninstall --org-id`
+  - Diagnostic mode: `--diagnostic [--org-id]`, an interactive menu; with `--bundle [--bundle-path]` it writes one redacted support zip instead (`cmd/agent_smith/bundle.go`, sc-129690): `config.json` with `shared_access_key`/`config_secret`/`github_token` as `***` and the proxy URL masked, 2 MiB log tails, journal and spool listings without payloads, the service manager's output, host info, `diagnostic.txt` (the other sections' console output, captured through the `diagOut` writer every section prints to), `health.json` and the version. The secret values are scrubbed from every entry (install logs the configuration whole), the zip is capped at 25 MiB by trimming the tails, written with `utils.WriteFileAtomic`, and an unreadable directory, a missing agent or several agents without `--org-id` fail with a message and exit 1. See the README's "Collecting a support bundle" section.
 
   Config mode reads the config endpoint's response body through an
   `io.LimitReader` capped at `maxConfigResponseSize` (10 MiB,

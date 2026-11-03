@@ -13,6 +13,10 @@ import (
 type diagnosticContext struct {
 	OrgId      string
 	Diagnostic bool
+	// Bundle writes one redacted support archive instead of showing the menu
+	// (sc-129690); BundlePath overrides where it goes.
+	Bundle     bool
+	BundlePath string
 
 	Sys    agent.SystemInfoProvider
 	Domain agent.DomainInfoProvider
@@ -28,6 +32,18 @@ func newDiagnosticFlagSet(params *diagnosticContext) *flag.FlagSet {
 	fs := flag.NewFlagSet("diagnostic", flag.ContinueOnError)
 	fs.StringVar(&params.OrgId, "org-id", "", "Organization ID")
 	fs.BoolVar(&params.Diagnostic, "diagnostic", false, "Run diagnostic mode")
+	fs.BoolVar(
+		&params.Bundle,
+		"bundle",
+		false,
+		"With --diagnostic: write one redacted support zip (config, log tails, journal and spool listings, service, host) and exit",
+	)
+	fs.StringVar(
+		&params.BundlePath,
+		"bundle-path",
+		"",
+		"With --bundle: where to write the zip (default <data directory>/diagnostic-<org>-<timestamp>.zip)",
+	)
 	fs.SetOutput(io.Discard)
 	return fs
 }
@@ -50,6 +66,10 @@ func newDiagnosticContext(
 
 	if !params.Diagnostic {
 		return nil, fmt.Errorf("missing diagnostic")
+	}
+
+	if params.BundlePath != "" && !params.Bundle {
+		return nil, fmt.Errorf("bundle-path requires bundle")
 	}
 
 	params.Sys = sys
