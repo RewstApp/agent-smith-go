@@ -1452,9 +1452,13 @@ what is already running? Neither was checked before.
   tag — a release process mistake that republishes or points the check
   endpoint at a stale release would silently downgrade the whole fleet. The
   comparison is now a proper semantic version check (`isNewerVersion`): an
-  update proceeds only when the latest release's `MAJOR.MINOR.PATCH` is greater
-  than the running version's, and a tag that fails to parse aborts the check
-  with an error instead of being guessed at in either direction.
+  update proceeds only when the latest release is semantically newer than the
+  running version under full semantic-versioning precedence (the numeric
+  components, then a full release above its pre-releases, then the
+  pre-release identifiers; see "Release channels" below), and a tag that fails
+  to parse — including a pre-release identifier with a leading zero or a
+  character outside the grammar — aborts the check with an error instead of
+  being guessed at in either direction.
 - **A size ceiling on the download.** `Download` bounds the installer to 200 MiB
   regardless of the `Content-Length` header (which can be absent or wrong) —
   generous headroom over the compiled binary's actual size, so a legitimate
@@ -1474,7 +1478,7 @@ The `release_channel` setting selects the ring:
 | Channel | The updater asks | Takes |
 |---|---|---|
 | `stable` (default) | `.../releases/latest` | the newest full release, never a pre-release |
-| `beta` | `.../releases?per_page=100` (`agent.ReleasesListUrl`) | the highest version in the list, pre-releases included, drafts skipped |
+| `beta` | `.../releases?per_page=30` (`agent.ReleasesListUrl`) | the highest version in the list, pre-releases included, drafts skipped |
 
 It is set at install and on `--update` with `--release-channel`, saved in
 the config file, changeable live through the device twin
@@ -1489,14 +1493,35 @@ its pre-releases (`v1.7.0-beta.2` → `v1.7.0`, so a beta device lands on
 the same build as the fleet once it ships), pre-releases order by their
 identifiers (`beta.1` → `beta.2`, numerically), and nothing ever moves
 backwards. The same digest verification and size ceiling apply on both
-channels.
+channels, and the release endpoint's body is bounded (4 MiB) like the
+config fetch and the download. The channel the check ran on is passed to
+the `--update` helper (`--release-channel`), so it survives the restart even
+when the twin's write of it to the config file failed, and `health.json` is
+rewritten when it changes so a support bundle never contradicts its own
+`config.json`. A saved `release_channel` that is neither name is reported
+once at start and followed as `stable`. Because a beta orders above every
+stable release of the same line, a ring on `v1.8.0-beta.0` does **not** take
+a `v1.7.1` hotfix shipped meanwhile: cut `v1.8.0-beta.1` from `main` (which
+now contains the hotfix) to carry it to the ring. The bare-number forms —
+the `x-rewst-agent-smith-version` header and the `AGENT_SMITH_VERSION`
+variable (`version.Number`) — report the numeric prefix (`1.8.0` on
+`v1.8.0-beta.0`), since they have only ever carried `MAJOR.MINOR.PATCH` and
+a consumer that splits them into integers must not break on the beta ring;
+the twin's `agent_version` and the startup log keep the full tag.
 
 **Publishing.** The release workflow (`.github/workflows/release.yml`) takes
 a `channel` input: `stable` is today's bump-and-release from `main`;
 `beta` runs commitizen's pre-release bump (`cz bump --prerelease beta`,
 `vX.Y.Z-beta.N` under the `semver2` scheme in `.cz.toml`, which renders
 full releases exactly as before), may run from a branch, and publishes a
-GitHub **pre-release**, which `releases/latest` keeps ignoring. The
+GitHub **pre-release**, which `releases/latest` keeps ignoring. The beta
+leg refuses a branch that does not contain `main`'s latest stable release,
+because a beta is numbered from the highest tag reachable from the branch
+and one cut below the published stable would never be installed; the
+build and release jobs check out the tag the bump pushed rather than the
+branch head. `changelog_merge_prerelease` folds the betas' commits into the
+stable release's notes, and the Windows build stamps winres with the
+numeric prefix (winres takes four numbers, not `1.8.0-beta.0.0`). The
 rollout practice: the Rewst IT org's agents run on `beta`, so a fix is
 proven there before the fleet takes the full release; customers who need
 stability stay on `stable` by default.
@@ -1814,7 +1839,7 @@ The end-to-end workflow (`e2e.yml`, manual dispatch with an `os` input; concurre
 
 #### Go e2e scenarios (`test/e2e`)
 
-The scenarios that need nothing but stubs the repository owns - the auto-update retry schedule and its recovery mid-sequence, the schedule's shape (capped, jittered, never immediate), a service stop during a backoff, the tampered- and missing-digest rejections, the startup script and installer sweeps, the install refused when the config endpoint answers without a `device_id` (sc-126322), and on Windows the update and uninstall that abort on a wedged `StopPending` service and the uninstall that continues past a locked directory - run as a Go test package against the real binary (sc-126321). `test/e2e` sits behind the `e2e` build tag: the config endpoint the agent installs from and the release endpoint its auto-updater polls are `httptest` servers inside the test process (the served configuration points the hub host at the loopback address with nothing listening, so the agent installs, starts and lives in its connect/backoff loop, which is all these scenarios need from it), the binary is installed as a real service and driven as a subprocess, and every wait is a bounded poll on a log-line count, a service state or a file - `sleeplint` applies. Each top-level test installs fresh and uninstalls on cleanup. Until this package the same scenarios were about ninety workflow steps across four jobs - start a fixture, capture a baseline, install, poll the log, assert through a composite action - and could only be run by dispatching the whole workflow; a scenario here runs on a developer machine in about a minute with the assertions CI makes. The `e2e-go` job compiles the package with `go test -c` as the runner user and runs the test binary elevated through the `run-e2e-package` action, one step per platform: on Linux and macOS under `sudo env` with the `E2E_*` variables passed as `NAME=VALUE` arguments (Ubuntu 26.04's sudo-rs ignores `-E`, sc-129246), directly on Windows. The run passes `-e2e.required`, so variables that fail to reach the test binary fail the job instead of skipping every scenario and reporting green - which is exactly what the first gate run did on ubuntu. It gates the merge with the hermetic jobs, since nothing in it reaches the hub or the engine.
+The scenarios that need nothing but stubs the repository owns - the auto-update retry schedule and its recovery mid-sequence, the schedule's shape (capped, jittered, never immediate), a service stop during a backoff, the tampered- and missing-digest rejections, the release channels (a `beta` agent follows a pre-release and a `stable` one ignores it, sc-129692), the startup script and installer sweeps, the install refused when the config endpoint answers without a `device_id` (sc-126322), and on Windows the update and uninstall that abort on a wedged `StopPending` service and the uninstall that continues past a locked directory - run as a Go test package against the real binary (sc-126321). `test/e2e` sits behind the `e2e` build tag: the config endpoint the agent installs from and the release endpoint its auto-updater polls are `httptest` servers inside the test process (the served configuration points the hub host at the loopback address with nothing listening, so the agent installs, starts and lives in its connect/backoff loop, which is all these scenarios need from it), the binary is installed as a real service and driven as a subprocess, and every wait is a bounded poll on a log-line count, a service state or a file - `sleeplint` applies. Each top-level test installs fresh and uninstalls on cleanup. Until this package the same scenarios were about ninety workflow steps across four jobs - start a fixture, capture a baseline, install, poll the log, assert through a composite action - and could only be run by dispatching the whole workflow; a scenario here runs on a developer machine in about a minute with the assertions CI makes. The `e2e-go` job compiles the package with `go test -c` as the runner user and runs the test binary elevated through the `run-e2e-package` action, one step per platform: on Linux and macOS under `sudo env` with the `E2E_*` variables passed as `NAME=VALUE` arguments (Ubuntu 26.04's sudo-rs ignores `-E`, sc-129246), directly on Windows. The run passes `-e2e.required`, so variables that fail to reach the test binary fail the job instead of skipping every scenario and reporting green - which is exactly what the first gate run did on ubuntu. It gates the merge with the hermetic jobs, since nothing in it reaches the hub or the engine.
 
 To run one scenario locally against built binaries (the integration-test binary from `scripts/build_integration_test.ps1` is required: it is what shortens the update interval and retry schedule to seconds and honours the release-url override file):
 

@@ -34,7 +34,11 @@ const DefaultNumber = "0.0.0"
 //	""          -> "0.0.0"   (DefaultNumber, never an index-out-of-range panic)
 //	"v"         -> "0.0.0"   (DefaultNumber)
 //	"  v1.5.7\n" -> "1.5.7"   (surrounding whitespace is dropped)
-//	"1.5.7-rc1" -> "1.5.7-rc1" (a suffix is kept; this is formatting, not validation)
+//	"v1.8.0-beta.0" -> "1.8.0" (a pre-release or build suffix is dropped: the
+//	                          header and the variable have only ever carried
+//	                          MAJOR.MINOR.PATCH, and a consumer that splits it
+//	                          into integers must not break on the beta ring,
+//	                          sc-129692; the twin's agent_version keeps the tag)
 //	"garbage"   -> "garbage" (passed through; the updater's semver parse is where
 //	                          a malformed value is rejected, with an error naming it)
 func Number() string {
@@ -47,6 +51,9 @@ func numberOf(v string) string {
 	v = strings.TrimSpace(v)
 	if len(v) > 0 && (v[0] == 'v' || v[0] == 'V') {
 		v = v[1:]
+	}
+	if i := strings.IndexAny(v, "-+"); i >= 0 {
+		v = v[:i]
 	}
 	if v == "" {
 		return DefaultNumber

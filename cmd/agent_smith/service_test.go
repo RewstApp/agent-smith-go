@@ -97,6 +97,18 @@ func TestLoadConfig(t *testing.T) {
 	}
 }
 
+// An unknown saved release_channel is reset to stable at service start; the
+// two channel names and an unset value are kept (sc-129692).
+func TestValidReleaseChannel(t *testing.T) {
+	for saved, want := range map[string]string{
+		"": "", "stable": "stable", "beta": "beta", "nightly": "stable", "Beta": "stable",
+	} {
+		if got := validReleaseChannel(saved, hclog.NewNullLogger()); got != want {
+			t.Errorf("saved %q: followed %q, want %q", saved, got, want)
+		}
+	}
+}
+
 // TestLoadConfig_MqttQos tests QoS validation in loadConfig
 func TestLoadConfig_MqttQos(t *testing.T) {
 	qos := func(v byte) *byte { return &v }

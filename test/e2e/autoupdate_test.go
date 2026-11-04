@@ -203,9 +203,12 @@ func TestReleaseChannels(t *testing.T) {
 	})
 
 	t.Run("StableIgnoresThePrerelease", func(t *testing.T) {
+		h.Update(h.ITBinary, true, "--release-channel", "stable")
+		// Baselines after the restart: the beta process kept logging
+		// "Updating agent" on every retry until it was stopped, and the
+		// stable one does not check until an interval after it starts.
 		updating := h.LogCount("Updating agent")
 		none := h.LogCount("No updates available")
-		h.Update(h.ITBinary, true, "--release-channel", "stable")
 		cfg := readTextFile(t, h.ConfigPath())
 		if !strings.Contains(cfg, `"release_channel": "stable"`) {
 			t.Errorf("the config file does not carry the stable channel:\n%s", cfg)

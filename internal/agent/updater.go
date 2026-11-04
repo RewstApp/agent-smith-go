@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -9,8 +10,10 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -355,7 +358,12 @@ func (u *defaultUpdater) currentDevice() Device {
 // full release once it is published, and a stable device never sees the
 // beta. Drafts are skipped on both.
 func (u *defaultUpdater) Check(ctx context.Context) (Release, error) {
-	channel := u.currentDevice().ResolvedReleaseChannel()
+	return u.check(ctx, u.currentDevice().ResolvedReleaseChannel())
+}
+
+// check is Check on a channel the caller resolved, so Run logs the channel
+// the release was actually selected on.
+func (u *defaultUpdater) check(ctx context.Context, channel string) (Release, error) {
 	u.logger.Info("Checking for updates", "channel", channel)
 	if u.githubToken != "" {
 		u.logger.Info("GitHub token provided for update check")
@@ -380,15 +388,34 @@ func (u *defaultUpdater) Check(ctx context.Context) (Release, error) {
 	return release, nil
 }
 
+// releasesListPageSize is how many releases the beta channel reads: GitHub's
+// list is newest first, so the highest version is in the first page; the
+// default page keeps the body small (about a tenth of the 100-entry one).
+const releasesListPageSize = 30
+
+// maxReleaseResponseSize bounds the release endpoint's body the way
+// maxConfigResponseSize bounds the config fetch and maxInstallerDownloadSize
+// the download: checkTimeout bounds the time, this bounds the bytes a
+// misdirected override or captive portal can push in that time. A 100-entry
+// list measured about 1.2 MiB; the default page about a third of that.
+const maxReleaseResponseSize = 4 << 20
+
 // ReleasesListUrl is the releases list the beta channel reads, derived from
 // the latest-release endpoint: GitHub's ".../releases/latest" becomes
 // ".../releases", and any other endpoint (an integration-test override) is
 // asked for its list the same way, so a stub serves both shapes under one
-// prefix. The page size is GitHub's maximum; the list is newest first, and
-// a release older than a hundred cannot be the highest version.
+// prefix. A trailing slash is dropped and an existing query string kept.
 func ReleasesListUrl(latestReleaseUrl string) string {
-	base := strings.TrimSuffix(latestReleaseUrl, "/latest")
-	return base + "?per_page=100"
+	u, err := url.Parse(latestReleaseUrl)
+	if err != nil {
+		return strings.TrimSuffix(latestReleaseUrl, "/latest") +
+			"?per_page=" + strconv.Itoa(releasesListPageSize)
+	}
+	u.Path = strings.TrimSuffix(strings.TrimSuffix(u.Path, "/"), "/latest")
+	q := u.Query()
+	q.Set("per_page", strconv.Itoa(releasesListPageSize))
+	u.RawQuery = q.Encode()
+	return u.String()
 }
 
 // highestRelease picks the release with the highest semantic version,
@@ -444,8 +471,18 @@ func (u *defaultUpdater) fetchJSON(ctx context.Context, url string, out any) err
 		return fmt.Errorf("unexpected status code: %d", resp.StatusCode)
 	}
 
-	if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
-		u.logger.Error("Failed to parse release", "error", err)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxReleaseResponseSize+1))
+	if err != nil {
+		u.logger.Error("Failed to read release", "url", url, "error", err)
+		return err
+	}
+	if len(body) > maxReleaseResponseSize {
+		err := fmt.Errorf("release endpoint response exceeds %d bytes", maxReleaseResponseSize)
+		u.logger.Error("Failed to read release", "url", url, "error", err)
+		return err
+	}
+	if err := json.Unmarshal(body, out); err != nil {
+		u.logger.Error("Failed to parse release", "url", url, "error", err)
 		return err
 	}
 	return nil
@@ -471,6 +508,12 @@ func (u *defaultUpdater) Update(updaterExecutablePath string) error {
 
 	if device.DisableAutoUpdates {
 		args = append(args, "--no-auto-updates")
+	}
+
+	// The channel the check ran on reaches the restarted agent even when the
+	// twin's persist of it failed (sc-129692).
+	if device.ReleaseChannel != "" {
+		args = append(args, "--release-channel", device.ReleaseChannel)
 	}
 
 	u.logger.Debug("Running update command", "path", updaterExecutablePath, "args", args)
@@ -609,7 +652,8 @@ func parseAssetDigest(asset Asset) (string, error) {
 }
 
 func (u *defaultUpdater) Run(ctx context.Context) error {
-	latestRelease, err := u.Check(ctx)
+	channel := u.currentDevice().ResolvedReleaseChannel()
+	latestRelease, err := u.check(ctx, channel)
 	if err != nil {
 		return err
 	}
@@ -617,7 +661,7 @@ func (u *defaultUpdater) Run(ctx context.Context) error {
 	u.logger.Info(
 		"Latest release",
 		"tag_name", latestRelease.TagName,
-		"channel", u.currentDevice().ResolvedReleaseChannel(),
+		"channel", channel,
 		"prerelease", latestRelease.Prerelease,
 	)
 
@@ -782,13 +826,8 @@ type semver struct {
 // compareVersions orders two parsed versions by semantic-versioning
 // precedence: -1 when a is lower, 1 when higher, 0 when equal.
 func compareVersions(a, b semver) int {
-	for i := range a.parts {
-		if a.parts[i] != b.parts[i] {
-			if a.parts[i] > b.parts[i] {
-				return 1
-			}
-			return -1
-		}
+	if c := slices.Compare(a.parts[:], b.parts[:]); c != 0 {
+		return c
 	}
 	switch {
 	case len(a.pre) == 0 && len(b.pre) == 0:
@@ -803,98 +842,98 @@ func compareVersions(a, b semver) int {
 			return c
 		}
 	}
-	switch {
-	case len(a.pre) > len(b.pre):
-		return 1 // "beta.1" is newer than "beta"
-	case len(a.pre) < len(b.pre):
-		return -1
-	}
-	return 0
+	return cmp.Compare(len(a.pre), len(b.pre)) // "beta.1" is newer than "beta"
 }
 
 // comparePrereleaseIdentifier applies the identifier rule: numeric
 // identifiers compare numerically and rank below alphanumeric ones; the rest
-// compare lexically in ASCII order.
+// compare lexically in ASCII order. parseVersion has refused leading zeros,
+// so two numeric identifiers compare by length and then digit by digit,
+// which needs no integer conversion and cannot overflow.
 func comparePrereleaseIdentifier(a, b string) int {
-	na, aNum := strconv.Atoi(a)
-	nb, bNum := strconv.Atoi(b)
+	aNum, bNum := isNumericIdentifier(a), isNumericIdentifier(b)
 	switch {
-	case aNum == nil && bNum == nil:
-		return cmpInt(na, nb)
-	case aNum == nil:
+	case aNum && bNum:
+		if c := cmp.Compare(len(a), len(b)); c != 0 {
+			return c
+		}
+		return strings.Compare(a, b)
+	case aNum:
 		return -1
-	case bNum == nil:
+	case bNum:
 		return 1
 	}
 	return strings.Compare(a, b)
 }
 
-func cmpInt(a, b int) int {
-	switch {
-	case a < b:
-		return -1
-	case a > b:
-		return 1
+// isNumericIdentifier reports whether id is one or more ASCII digits.
+func isNumericIdentifier(id string) bool {
+	for i := 0; i < len(id); i++ {
+		if id[i] < '0' || id[i] > '9' {
+			return false
+		}
 	}
-	return 0
+	return id != ""
 }
 
 // parseVersion parses a version tag: an optional leading "v", the numeric
 // MAJOR.MINOR.PATCH, an optional "-<pre-release>" whose dot-separated
-// identifiers are kept for precedence, and an optional "+<build>" that is
-// discarded.
-func parseVersion(v string) (semver, error) {
+// identifiers (ASCII letters, digits and hyphens; a numeric identifier has
+// no leading zero) are kept for precedence, and an optional "+<build>" that
+// is discarded. Every error quotes the tag as it was given.
+func parseVersion(tag string) (semver, error) {
 	var out semver
-	v = strings.TrimPrefix(v, "v")
+	v := strings.TrimPrefix(tag, "v")
 	if i := strings.IndexByte(v, '+'); i >= 0 {
 		v = v[:i]
 	}
+	core := v
 	if i := strings.IndexByte(v, '-'); i >= 0 {
+		core = v[:i]
 		pre := v[i+1:]
-		v = v[:i]
 		if pre == "" {
-			return out, fmt.Errorf("empty pre-release suffix in %q", v)
+			return out, fmt.Errorf("empty pre-release suffix in %q", tag)
 		}
 		out.pre = strings.Split(pre, ".")
 		for _, id := range out.pre {
-			if id == "" {
-				return out, fmt.Errorf("empty pre-release identifier in %q", pre)
+			if err := validatePrereleaseIdentifier(id); err != nil {
+				return out, fmt.Errorf("pre-release identifier %q in %q: %w", id, tag, err)
 			}
 		}
 	}
-	parts, err := parseSemver(v)
-	if err != nil {
-		return out, err
+	segments := strings.Split(core, ".")
+	if len(segments) != 3 {
+		return out, fmt.Errorf("expected MAJOR.MINOR.PATCH in %q", tag)
 	}
-	out.parts = parts
+	for i, segment := range segments {
+		if !isNumericIdentifier(segment) {
+			return out, fmt.Errorf("invalid numeric component %q in %q", segment, tag)
+		}
+		n, err := strconv.Atoi(segment)
+		if err != nil {
+			return out, fmt.Errorf("invalid numeric component %q in %q", segment, tag)
+		}
+		out.parts[i] = n
+	}
 	return out, nil
 }
 
-// parseSemver parses the numeric MAJOR.MINOR.PATCH components of a version
-// string, tolerating an optional leading "v" and discarding any
-// prerelease/build metadata suffix (introduced by "-" or "+").
-func parseSemver(v string) ([3]int, error) {
-	var parts [3]int
-
-	v = strings.TrimPrefix(v, "v")
-	if i := strings.IndexAny(v, "-+"); i >= 0 {
-		v = v[:i]
+// validatePrereleaseIdentifier applies the semantic-versioning grammar to
+// one dot-separated pre-release identifier.
+func validatePrereleaseIdentifier(id string) error {
+	if id == "" {
+		return errors.New("empty identifier")
 	}
-
-	segments := strings.Split(v, ".")
-	if len(segments) != 3 {
-		return parts, fmt.Errorf("expected MAJOR.MINOR.PATCH, got %q", v)
-	}
-
-	for i, segment := range segments {
-		n, err := strconv.Atoi(segment)
-		if err != nil || n < 0 {
-			return parts, fmt.Errorf("invalid numeric component %q", segment)
+	for i := 0; i < len(id); i++ {
+		c := id[i]
+		if (c < '0' || c > '9') && (c < 'A' || c > 'Z') && (c < 'a' || c > 'z') && c != '-' {
+			return fmt.Errorf("character %q is not allowed", c)
 		}
-		parts[i] = n
 	}
-
-	return parts, nil
+	if isNumericIdentifier(id) && len(id) > 1 && id[0] == '0' {
+		return errors.New("a numeric identifier cannot have a leading zero")
+	}
+	return nil
 }
 
 type AutoUpdateRunner struct {

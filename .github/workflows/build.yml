@@ -13,6 +13,11 @@ on:
         required: false
         type: boolean
         default: false
+      ref:
+        description: "Ref to build; empty builds the calling workflow's ref (release.yml passes the tag it pushed)"
+        required: false
+        type: string
+        default: ""
 
 jobs:
   build:
@@ -30,7 +35,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v5
         with:
-          ref: ${{ github.ref }}
+          ref: ${{ inputs.ref || github.ref }}
           fetch-depth: 0
 
       - name: Cache build output

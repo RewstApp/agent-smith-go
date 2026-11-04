@@ -223,6 +223,18 @@ func (svc *serviceContext) currentDevice() agent.Device {
 	return svc.liveDeviceOr(agent.Device{})
 }
 
+// reportedBase is what every twin publish carries: the version in tag form
+// ("v1.5.7", intentionally unlike the bare-number HTTP header and
+// AGENT_SMITH_VERSION variable - the twin has always carried the release tag
+// and Rewst-side consumers key on it; see version.Version / version.Number)
+// and the auto-update channel in effect (sc-129692).
+func (svc *serviceContext) reportedBase() mqtt.ReportedProperties {
+	return mqtt.ReportedProperties{
+		AgentVersion:   version.Version,
+		ReleaseChannel: svc.currentDevice().ResolvedReleaseChannel(),
+	}
+}
+
 func (svc *serviceContext) setLiveDevice(d agent.Device) {
 	svc.settings.mu.Lock()
 	defer svc.settings.mu.Unlock()
@@ -560,11 +572,8 @@ func (svc *serviceContext) twinSettingsLoop(
 			return
 		}
 		rid := nextRID()
-		props := mqtt.ReportedProperties{
-			AgentVersion:   version.Version,
-			ReleaseChannel: svc.currentDevice().ResolvedReleaseChannel(),
-			SettingsAck:    unconfirmed,
-		}
+		props := svc.reportedBase()
+		props.SettingsAck = unconfirmed
 		if err := svc.publishReported(client, props, rid); err != nil {
 			if ctx.Err() == nil {
 				logger.Warn(

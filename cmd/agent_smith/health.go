@@ -12,7 +12,6 @@ import (
 	"github.com/RewstApp/agent-smith-go/internal/interpreter"
 	"github.com/RewstApp/agent-smith-go/internal/mqtt"
 	"github.com/RewstApp/agent-smith-go/internal/utils"
-	"github.com/RewstApp/agent-smith-go/internal/version"
 	"github.com/RewstApp/agent-smith-go/plugins"
 	"github.com/hashicorp/go-hclog"
 )
@@ -191,22 +190,23 @@ func (svc *serviceContext) reportHealth(
 		}
 	}
 	health := svc.healthSnapshot(notifier)
+	props := svc.reportedBase()
+	props.Health = health
+	props.Commands = progress
 	if reason == reportHealthTick {
 		// A list the last publish left behind that no kick has cleared (the
-		// clearing publish failed) counts as a change too.
+		// clearing publish failed) counts as a change too, and so does a
+		// release channel the twin changed since the file was written
+		// (sc-129692): the file carries it, and --diagnostic --bundle copies
+		// the file beside the config it must agree with.
 		svc.healthMu.Lock()
 		pendingClear := lastInFlight && !inFlight
-		same := health.Same(svc.lastHealth) && !pendingClear
+		same := health.Same(svc.lastHealth) && !pendingClear &&
+			props.ReleaseChannel == svc.lastFileChannel
 		svc.healthMu.Unlock()
 		if same {
 			return false
 		}
-	}
-	props := mqtt.ReportedProperties{
-		AgentVersion:   version.Version,
-		ReleaseChannel: svc.currentDevice().ResolvedReleaseChannel(),
-		Health:         health,
-		Commands:       progress,
 	}
 	err := svc.publishReported(client, props, healthReportRID)
 	svc.healthMu.Lock()
@@ -224,12 +224,15 @@ func (svc *serviceContext) reportHealth(
 	}
 	ids := postIDs(progress)
 	svc.healthMu.Lock()
+	// The file carries the channel too, so a twin-driven channel change
+	// rewrites it even when the health object is unchanged (sc-129692).
 	fileChanged := reason == reportConnected || !health.Same(svc.lastHealth) ||
-		!slices.Equal(ids, svc.lastFileIDs)
+		!slices.Equal(ids, svc.lastFileIDs) || props.ReleaseChannel != svc.lastFileChannel
 	svc.lastHealth = health
 	svc.lastInFlight = inFlight
 	if fileChanged {
 		svc.lastFileIDs = ids
+		svc.lastFileChannel = props.ReleaseChannel
 	}
 	svc.healthMu.Unlock()
 	// The file is for --diagnostic, which shows the state at the last report;

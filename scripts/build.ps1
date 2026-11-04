@@ -17,7 +17,10 @@ if ($IsWindows) {
     go build -ldflags="-w -s $versionFlag" -o $buildOutput "./cmd/agent_smith"
 
     # Create a build winres.json for patch
-    $winVersion = "$(cz version -p).0"
+    # winres takes a four-part numeric version: a pre-release tag
+    # ("1.8.0-beta.0", sc-129692) contributes its MAJOR.MINOR.PATCH here and
+    # keeps its full form in the -X version stamp above.
+    $winVersion = ("$(cz version -p)" -split '[-+]')[0] + ".0"
     $winresObj = Get-Content -Path "./winres/winres.json" | Out-String | ConvertFrom-Json
     $winresObj."RT_MANIFEST"."#1"."0409"."identity"."version" = $winVersion
     $winresObj."RT_VERSION"."#1"."0000"."fixed"."file_version" = $winVersion

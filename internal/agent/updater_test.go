@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -10,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -146,7 +148,7 @@ func TestCheck_ChannelSelectsTheRelease(t *testing.T) {
 	if err != nil || got.TagName != "v1.1.0-beta.2" || !got.Prerelease {
 		t.Errorf("beta: %+v %v", got, err)
 	}
-	if len(paths) != 1 || paths[0] != "/releases?per_page=100" {
+	if len(paths) != 1 || paths[0] != "/releases?per_page=30" {
 		t.Errorf("beta asked %v, want the releases list", paths)
 	}
 
@@ -173,6 +175,56 @@ func TestCheck_ChannelSelectsTheRelease(t *testing.T) {
 	}
 }
 
+// The release endpoint's body is bounded like the config fetch and the
+// download: a response past the ceiling is refused, not buffered.
+func TestCheck_OversizedResponseIsRefused(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"tag_name": "v9.0.0", "assets": [], "x": "`))
+		filler := bytes.Repeat([]byte("a"), 64<<10)
+		for written := 0; written <= maxReleaseResponseSize; written += len(filler) {
+			if _, err := w.Write(filler); err != nil {
+				return
+			}
+		}
+		_, _ = w.Write([]byte(`"}`))
+	}))
+	defer server.Close()
+	_, err := NewUpdater(hclog.NewNullLogger(), newTestDevice(), server.URL, "", nil, nil).
+		Check(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "exceeds") {
+		t.Errorf("an oversized response was accepted: %v", err)
+	}
+}
+
+// The update helper is told the channel the check ran on.
+func TestUpdate_ForwardsTheReleaseChannel(t *testing.T) {
+	var got []string
+	device := newTestDevice()
+	device.ReleaseChannel = ReleaseChannelBeta
+	u := NewUpdater(
+		hclog.NewNullLogger(), device, "http://127.0.0.1:9/", "",
+		func(_ string, args []string) error {
+			got = args
+			return nil
+		},
+		nil,
+	)
+	if err := u.Update("installer"); err != nil {
+		t.Fatal(err)
+	}
+	if i := slices.Index(got, "--release-channel"); i < 0 || got[i+1] != ReleaseChannelBeta {
+		t.Errorf("args %v lack --release-channel beta", got)
+	}
+	device.ReleaseChannel = ""
+	if err := u.Update("installer"); err != nil {
+		t.Fatal(err)
+	}
+	if slices.Contains(got, "--release-channel") {
+		t.Errorf("an unset channel was forwarded: %v", got)
+	}
+}
+
 func TestHighestRelease(t *testing.T) {
 	if _, err := highestRelease(nil); err == nil {
 		t.Error("an empty list was accepted")
@@ -193,9 +245,11 @@ func TestHighestRelease(t *testing.T) {
 
 func TestReleasesListUrl(t *testing.T) {
 	cases := map[string]string{
-		"https://api.github.com/repos/rewstapp/agent-smith-go/releases/latest": "https://api.github.com/repos/rewstapp/agent-smith-go/releases?per_page=100",
-		"http://127.0.0.1:9/releases/latest":                                   "http://127.0.0.1:9/releases?per_page=100",
-		"http://127.0.0.1:9/custom":                                            "http://127.0.0.1:9/custom?per_page=100",
+		"https://api.github.com/repos/rewstapp/agent-smith-go/releases/latest": "https://api.github.com/repos/rewstapp/agent-smith-go/releases?per_page=30",
+		"http://127.0.0.1:9/releases/latest":                                   "http://127.0.0.1:9/releases?per_page=30",
+		"http://127.0.0.1:9/releases/latest/":                                  "http://127.0.0.1:9/releases?per_page=30",
+		"http://127.0.0.1:9/releases/latest?token=x":                           "http://127.0.0.1:9/releases?per_page=30&token=x",
+		"http://127.0.0.1:9/custom":                                            "http://127.0.0.1:9/custom?per_page=30",
 	}
 	for in, want := range cases {
 		if got := ReleasesListUrl(in); got != want {
@@ -673,7 +727,12 @@ func TestIsNewerVersion(t *testing.T) {
 			latest:  "v1.0.0",
 			want:    true,
 		},
-		{name: "prerelease suffix ignored", current: "v1.2.3", latest: "v1.2.4-rc.1", want: true},
+		{
+			name:    "prerelease of a newer patch is newer",
+			current: "v1.2.3",
+			latest:  "v1.2.4-rc.1",
+			want:    true,
+		},
 		{name: "malformed current", current: "not-a-version", latest: "v1.2.3", wantErr: true},
 		{name: "malformed latest", current: "v1.2.3", latest: "not-a-version", wantErr: true},
 		// Semantic-versioning precedence for pre-releases (sc-129692): the
@@ -737,6 +796,36 @@ func TestIsNewerVersion(t *testing.T) {
 			current: "v1.7.0",
 			latest:  "v1.7.0-beta..1",
 			wantErr: true,
+		},
+		{
+			name:    "leading zero identifier is malformed",
+			current: "v1.7.0",
+			latest:  "v1.7.0-beta.01",
+			wantErr: true,
+		},
+		{
+			name:    "identifier character outside the grammar",
+			current: "v1.7.0",
+			latest:  "v1.7.0-beta_1",
+			wantErr: true,
+		},
+		{
+			name:    "signed numeric component is malformed",
+			current: "v1.7.0",
+			latest:  "v1.+8.0",
+			wantErr: true,
+		},
+		{
+			name:    "long numeric identifiers compare by length",
+			current: "v1.7.0-beta.99999999999999999999",
+			latest:  "v1.7.0-beta.100000000000000000000",
+			want:    true,
+		},
+		{
+			name:    "hyphen inside an identifier",
+			current: "v1.7.0-beta-1",
+			latest:  "v1.7.0-beta-2",
+			want:    true,
 		},
 	}
 
