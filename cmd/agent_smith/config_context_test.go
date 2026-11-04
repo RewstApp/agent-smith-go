@@ -296,6 +296,28 @@ func TestNewConfigContext(t *testing.T) {
 	}
 }
 
+// --release-channel defaults to stable at install, takes beta, and refuses
+// anything else (sc-129692).
+func TestNewConfigContext_ReleaseChannel(t *testing.T) {
+	args := []string{
+		"--org-id", "43fb08b0-92cf-462a-924d-0b6be7a43a48",
+		"--config-url", "https://example.com/config", "--config-secret", "s",
+	}
+	ctx, err := newConfigContext(args, nil, nil, nil, nil)
+	if err != nil || ctx.ReleaseChannel != "stable" {
+		t.Errorf("default: %+v %v", ctx, err)
+	}
+	ctx, err = newConfigContext(append(args, "--release-channel", "beta"), nil, nil, nil, nil)
+	if err != nil || ctx.ReleaseChannel != "beta" {
+		t.Errorf("beta: %+v %v", ctx, err)
+	}
+	if _, err := newConfigContext(
+		append(args, "--release-channel", "nightly"), nil, nil, nil, nil,
+	); err == nil || !strings.Contains(err.Error(), "release-channel") {
+		t.Errorf("nightly: %v", err)
+	}
+}
+
 // A blank --proxy-url at install is unset; an invalid one is refused.
 func TestNewConfigContext_ProxyURL(t *testing.T) {
 	args := []string{

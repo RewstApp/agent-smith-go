@@ -1,10 +1,24 @@
 name: Release
 
-on: workflow_dispatch
+# channel (sc-129692): "stable" (the default) bumps from main and publishes a
+# full release, which every agent on the stable channel takes; "beta" bumps a
+# pre-release ("vX.Y.Z-beta.N", commitizen's pre-release bump under the
+# semver2 scheme in .cz.toml), publishes it as a GitHub pre-release - which
+# releases/latest keeps ignoring, so stable agents never see it - and may run
+# from a branch, so a fix can soak on the beta ring (the Rewst IT org) before
+# the fleet. See the README's "Release channels" section.
+on:
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: "Release channel: stable publishes a full release from main; beta publishes a pre-release"
+        type: choice
+        options: [stable, beta]
+        default: stable
 
 jobs:
   bump:
-    if: github.ref == 'refs/heads/main'
+    if: github.ref == 'refs/heads/main' || inputs.channel == 'beta'
     permissions:
       contents: write
     runs-on: ubuntu-latest
@@ -31,7 +45,12 @@ jobs:
         run: |
           git config --local user.email "automated_builds@rewst.io"
           git config --local user.name "Rewst GitHub Actions"
-          NEXT_VERSION=$(cz bump --yes --get-next)
+          if [ "${{ inputs.channel }}" = "beta" ]; then
+            NEXT_VERSION=$(cz bump --yes --get-next --prerelease beta)
+          else
+            NEXT_VERSION=$(cz bump --yes --get-next)
+          fi
+          echo "Tagging v$NEXT_VERSION on the ${{ inputs.channel }} channel"
           git tag "v$NEXT_VERSION"
           git push --tags
 
@@ -108,6 +127,8 @@ jobs:
       - name: Create release and upload files
         shell: pwsh
         run: |
-          gh release create ${{ steps.extract_version.outputs.version }} --title "${{ steps.extract_version.outputs.version }}" --notes-file release_notes.md (Get-Item ./signed/*)
+          $prerelease = @()
+          if ('${{ inputs.channel }}' -eq 'beta') { $prerelease = @('--prerelease') }
+          gh release create ${{ steps.extract_version.outputs.version }} --title "${{ steps.extract_version.outputs.version }}" --notes-file release_notes.md @prerelease (Get-Item ./signed/*)
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

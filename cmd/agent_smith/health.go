@@ -203,9 +203,10 @@ func (svc *serviceContext) reportHealth(
 		}
 	}
 	props := mqtt.ReportedProperties{
-		AgentVersion: version.Version,
-		Health:       health,
-		Commands:     progress,
+		AgentVersion:   version.Version,
+		ReleaseChannel: svc.currentDevice().ResolvedReleaseChannel(),
+		Health:         health,
+		Commands:       progress,
 	}
 	err := svc.publishReported(client, props, healthReportRID)
 	svc.healthMu.Lock()

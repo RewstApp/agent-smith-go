@@ -760,16 +760,23 @@ func (svc *serviceContext) runCycle(
 		)
 	}
 
+	channel := svc.currentDevice().ResolvedReleaseChannel()
 	err = mqtt.UpdateReportedProperties(client, mqtt.ReportedProperties{
 		// Tag form ("v1.5.7"), intentionally unlike the bare-number HTTP header and
 		// AGENT_SMITH_VERSION variable: the twin has always carried the release tag
 		// and Rewst-side consumers key on it. See version.Version / version.Number.
 		AgentVersion: version.Version,
+		// The auto-update channel the device follows (sc-129692).
+		ReleaseChannel: channel,
 	}, utils.MqttPublishTimeout)
 	if err != nil {
 		logger.Warn("Failed to update device twin reported properties", "error", err)
 	} else {
-		logger.Info("Device twin reported properties updated", "agent_version", version.Version)
+		logger.Info(
+			"Device twin reported properties updated",
+			"agent_version", version.Version,
+			"release_channel", channel,
+		)
 	}
 
 	// Raised first during teardown (registered after the MQTT teardown defer so

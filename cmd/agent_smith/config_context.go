@@ -261,6 +261,9 @@ type configContext struct {
 	// ProxyURL routes the config fetch and, once saved to the config file,
 	// every connection the agent makes through an HTTP proxy (sc-129691).
 	ProxyURL string
+	// ReleaseChannel is the auto-update channel saved into the config file
+	// (sc-129692): stable (the default) or beta.
+	ReleaseChannel string
 
 	// ConfigMaxAttempts and ConfigBaseRetryBackoffSeconds bound the retry of the
 	// install-time config fetch on a transient endpoint answer (sc-118306).
@@ -324,6 +327,7 @@ func newConfigFlagSet(params *configContext) *flag.FlagSet {
 	fs.IntVar(&params.MqttQos, "mqtt-qos", -1, "MQTT subscription QoS level (0 or 1)")
 	bindTuningFlags(fs, &params.Tuning)
 	bindProxyFlag(fs, &params.ProxyURL)
+	bindReleaseChannelFlag(fs, &params.ReleaseChannel, agent.ReleaseChannelStable)
 	fs.StringVar(
 		&params.ServiceUsername,
 		"service-username",
@@ -386,6 +390,10 @@ func newConfigContext(
 		return nil, err
 	}
 
+	if err := agent.ValidateReleaseChannel(params.ReleaseChannel); err != nil {
+		return nil, err
+	}
+
 	if params.ServicePassword != "" && params.ServiceUsername == "" {
 		return nil, fmt.Errorf("service-password requires service-username")
 	}
@@ -406,6 +414,21 @@ func newConfigContext(
 	}
 
 	return &params, nil
+}
+
+// bindReleaseChannelFlag registers --release-channel, shared by config and
+// update modes (sc-129692); the default differs because --update leaves the
+// saved channel alone when the flag is absent.
+func bindReleaseChannelFlag(fs *flag.FlagSet, target *string, value string) {
+	fs.StringVar(
+		target,
+		"release-channel",
+		value,
+		fmt.Sprintf(
+			"Auto-update release channel: %s (full releases) or %s (pre-releases too)",
+			agent.ReleaseChannelStable, agent.ReleaseChannelBeta,
+		),
+	)
 }
 
 // bindProxyFlag registers --proxy-url, shared by config and update modes.

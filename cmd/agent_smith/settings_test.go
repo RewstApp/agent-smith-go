@@ -113,6 +113,28 @@ func TestReadDesired_AllowListValidationAndStatuses(t *testing.T) {
 	}
 }
 
+// release_channel is a twin setting (sc-129692): the two channel names are
+// applied, anything else is rejected with the channel in effect kept.
+func TestReadDesired_ReleaseChannel(t *testing.T) {
+	svc, _ := newSettingsTestService(t, settingsTestConfig)
+	update, err := svc.readDesired([]byte(`{"$version": 7, "release_channel": "beta"}`), false)
+	if err != nil || update == nil || update.acks["release_channel"].Status != settingApplied ||
+		update.device.ReleaseChannel != "beta" {
+		t.Fatalf("beta: %+v %v", update, err)
+	}
+	if got := string(update.acks["release_channel"].Value); got != `"beta"` {
+		t.Errorf("acknowledged value %s", got)
+	}
+	update, err = svc.readDesired([]byte(`{"$version": 8, "release_channel": "nightly"}`), false)
+	if err != nil || update == nil || update.acks["release_channel"].Status != settingRejected ||
+		update.device.ReleaseChannel != "" {
+		t.Fatalf("nightly: %+v %v", update, err)
+	}
+	if got := string(update.acks["release_channel"].Value); got != `"stable"` {
+		t.Errorf("the rejection did not report the channel in effect: %s", got)
+	}
+}
+
 func TestReadDesired_ClearedAndUnchangedAndUnsupportedCap(t *testing.T) {
 	svc, _ := newSettingsTestService(t, settingsTestConfig)
 	doc := map[string]any{"$version": 2, "command_timeout_seconds": 120, "logging_level": nil}

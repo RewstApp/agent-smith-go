@@ -5,6 +5,7 @@ package e2e
 import (
 	"fmt"
 	"math"
+	"os"
 	"regexp"
 	"runtime"
 	"strconv"
@@ -165,6 +166,70 @@ func TestAutoUpdate(t *testing.T) {
 		h.ClearReleaseURL()
 		h.Update(h.Binary, false)
 	})
+}
+
+// TestReleaseChannels drives the integration build against a release stub
+// that publishes v0.0.0-it as the latest full release and v99.0.0-beta.1 as a
+// pre-release (sc-129692): on the beta channel the agent decides to update to
+// the pre-release, on the stable channel it reports no update, and the channel
+// is saved into the config file and reported on every check.
+func TestReleaseChannels(t *testing.T) {
+	h := New(t)
+	h.Install()
+
+	stub := newReleaseStub(t, itVersionTag, "", "")
+	stub.AddPrerelease("v99.0.0-beta.1")
+	stub.SetOK(true)
+	h.SetReleaseURL(stub.URL())
+
+	t.Run("BetaFollowsThePrerelease", func(t *testing.T) {
+		updating := h.LogCount("Updating agent")
+		h.Update(h.ITBinary, true, "--release-channel", "beta")
+		cfg := readFile(t, h.ConfigPath())
+		if !strings.Contains(cfg, `"release_channel": "beta"`) {
+			t.Errorf("the config file does not carry the beta channel:\n%s", cfg)
+		}
+		h.WaitForLogCount("Updating agent", updating, updateInterval+2*time.Minute)
+		lines := h.LogLines("Updating agent")
+		if last := lines[len(lines)-1]; !strings.Contains(last, "v99.0.0-beta.1") {
+			t.Errorf("the beta agent did not pick the pre-release: %s", last)
+		}
+		if h.LogCount("Checking for updates: channel=beta") == 0 {
+			t.Error("the check did not log the beta channel")
+		}
+		if stub.ListRequests() == 0 {
+			t.Error("the beta agent never read the releases list")
+		}
+	})
+
+	t.Run("StableIgnoresThePrerelease", func(t *testing.T) {
+		updating := h.LogCount("Updating agent")
+		none := h.LogCount("No updates available")
+		h.Update(h.ITBinary, true, "--release-channel", "stable")
+		cfg := readFile(t, h.ConfigPath())
+		if !strings.Contains(cfg, `"release_channel": "stable"`) {
+			t.Errorf("the config file does not carry the stable channel:\n%s", cfg)
+		}
+		h.WaitForLogCount("No updates available", none, updateInterval+2*time.Minute)
+		if got := h.LogCount("Updating agent"); got != updating {
+			t.Errorf("the stable agent decided to update %d time(s) on a pre-release", got-updating)
+		}
+		if h.LogCount("Checking for updates: channel=stable") == 0 {
+			t.Error("the check did not log the stable channel")
+		}
+	})
+
+	h.ClearReleaseURL()
+	h.Update(h.Binary, false)
+}
+
+func readFile(t *testing.T, path string) string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading %s: %v", path, err)
+	}
+	return string(data)
 }
 
 // retrySlot is one "Retrying update: attempt=N backoff=D" log line.

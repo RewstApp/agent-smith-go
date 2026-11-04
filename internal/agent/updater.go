@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -33,6 +34,10 @@ type Release struct {
 	Id      int     `json:"id"`
 	TagName string  `json:"tag_name"`
 	Assets  []Asset `json:"assets"`
+	// Prerelease and Draft are what the Releases list carries for each entry
+	// (sc-129692): the beta channel takes pre-releases, nothing takes a draft.
+	Prerelease bool `json:"prerelease"`
+	Draft      bool `json:"draft"`
 }
 
 type Updater interface {
@@ -342,16 +347,82 @@ func (u *defaultUpdater) currentDevice() Device {
 	return *u.device
 }
 
+// Check resolves the release the device's channel points at (sc-129692).
+// The stable channel asks the latest-release endpoint, which GitHub answers
+// with the newest full release and never a pre-release; the beta channel
+// lists the releases (ReleasesListUrl) and takes the highest semantic
+// version among them, pre-releases included - so a beta device moves to the
+// full release once it is published, and a stable device never sees the
+// beta. Drafts are skipped on both.
 func (u *defaultUpdater) Check(ctx context.Context) (Release, error) {
-	release := Release{}
-	u.logger.Info("Checking for updates")
+	channel := u.currentDevice().ResolvedReleaseChannel()
+	u.logger.Info("Checking for updates", "channel", channel)
 	if u.githubToken != "" {
 		u.logger.Info("GitHub token provided for update check")
 	}
+	if channel == ReleaseChannelBeta {
+		url := ReleasesListUrl(u.latestReleaseUrl)
+		var releases []Release
+		if err := u.fetchJSON(ctx, url, &releases); err != nil {
+			return Release{}, err
+		}
+		release, err := highestRelease(releases)
+		if err != nil {
+			u.logger.Error("No usable release in the list", "url", url, "error", err)
+			return Release{}, err
+		}
+		return release, nil
+	}
+	var release Release
+	if err := u.fetchJSON(ctx, u.latestReleaseUrl, &release); err != nil {
+		return Release{}, err
+	}
+	return release, nil
+}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.latestReleaseUrl, nil)
+// ReleasesListUrl is the releases list the beta channel reads, derived from
+// the latest-release endpoint: GitHub's ".../releases/latest" becomes
+// ".../releases", and any other endpoint (an integration-test override) is
+// asked for its list the same way, so a stub serves both shapes under one
+// prefix. The page size is GitHub's maximum; the list is newest first, and
+// a release older than a hundred cannot be the highest version.
+func ReleasesListUrl(latestReleaseUrl string) string {
+	base := strings.TrimSuffix(latestReleaseUrl, "/latest")
+	return base + "?per_page=100"
+}
+
+// highestRelease picks the release with the highest semantic version,
+// pre-releases included and drafts excluded. A tag that does not parse is
+// skipped with the others considered, so one malformed tag cannot hide a
+// valid release; an empty or all-draft list is an error.
+func highestRelease(releases []Release) (Release, error) {
+	var best Release
+	var bestVersion semver
+	found := false
+	for _, r := range releases {
+		if r.Draft {
+			continue
+		}
+		v, err := parseVersion(r.TagName)
+		if err != nil {
+			continue
+		}
+		if !found || compareVersions(v, bestVersion) > 0 {
+			best, bestVersion, found = r, v, true
+		}
+	}
+	if !found {
+		return Release{}, errors.New("the releases list holds no release with a usable version tag")
+	}
+	return best, nil
+}
+
+// fetchJSON performs one authenticated GET of the release endpoint and
+// decodes a 200 body into out.
+func (u *defaultUpdater) fetchJSON(ctx context.Context, url string, out any) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return release, err
+		return err
 	}
 	if u.githubToken != "" {
 		req.Header.Set("Authorization", "Bearer "+u.githubToken)
@@ -359,33 +430,25 @@ func (u *defaultUpdater) Check(ctx context.Context) (Release, error) {
 
 	resp, err := u.checkClient.Do(req)
 	if err != nil {
-		u.logger.Error("Failed to fetch latest release", "url", u.latestReleaseUrl, "error", err)
-		return release, err
+		u.logger.Error("Failed to fetch latest release", "url", url, "error", err)
+		return err
 	}
 	defer func() {
-		err = resp.Body.Close()
-		if err != nil {
+		if err := resp.Body.Close(); err != nil {
 			u.logger.Error("Failed to close response", "error", err)
 		}
 	}()
 
 	if resp.StatusCode != http.StatusOK {
-		u.logger.Error(
-			"Failed to fetch latest release",
-			"url",
-			u.latestReleaseUrl,
-			"status",
-			resp.StatusCode,
-		)
-		return release, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+		u.logger.Error("Failed to fetch latest release", "url", url, "status", resp.StatusCode)
+		return fmt.Errorf("unexpected status code: %d", resp.StatusCode)
 	}
 
-	if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
+	if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
 		u.logger.Error("Failed to parse release", "error", err)
-		return release, err
+		return err
 	}
-
-	return release, nil
+	return nil
 }
 
 func (u *defaultUpdater) Update(updaterExecutablePath string) error {
@@ -551,7 +614,12 @@ func (u *defaultUpdater) Run(ctx context.Context) error {
 		return err
 	}
 
-	u.logger.Info("Latest release", "tag_name", latestRelease.TagName)
+	u.logger.Info(
+		"Latest release",
+		"tag_name", latestRelease.TagName,
+		"channel", u.currentDevice().ResolvedReleaseChannel(),
+		"prerelease", latestRelease.Prerelease,
+	)
 
 	isNewer, err := isNewerVersion(version.Version, latestRelease.TagName)
 	if err != nil {
@@ -679,30 +747,127 @@ func (u *defaultUpdater) waitForIdle(ctx context.Context) error {
 
 // isNewerVersion reports whether latest is a semantically newer version than
 // current. Both are expected in the tag_format .cz.toml produces
-// ("vMAJOR.MINOR.PATCH", optionally with a prerelease/build suffix that is
-// ignored for comparison purposes). Comparing tags for inequality rather than
-// "newer than" let a release process mistake — republishing an older tag as
-// the one the check endpoint returns, or a test/staging feed pointed at a
-// stale release — silently downgrade the whole fleet; comparing for equality
-// with no ordering at all would do the same for a genuinely older tag. An
-// unparseable version is reported as an error instead of guessed at, so a
-// malformed tag can neither be silently skipped nor silently treated as newer.
+// ("vMAJOR.MINOR.PATCH", optionally "-<prerelease>" and "+<build>"). The
+// comparison follows semantic versioning 2.0 precedence (sc-129692): the
+// numeric components first, then a version without a pre-release suffix is
+// newer than the same version with one ("v1.7.0" after "v1.7.0-beta.1"), and
+// two pre-releases compare identifier by identifier (numerically where both
+// are numbers, "beta.2" after "beta.1"); build metadata is ignored. Comparing
+// tags for inequality rather than "newer than" let a release process mistake
+// — republishing an older tag as the one the check endpoint returns, or a
+// test/staging feed pointed at a stale release — silently downgrade the whole
+// fleet; comparing for equality with no ordering at all would do the same for
+// a genuinely older tag. An unparseable version is reported as an error
+// instead of guessed at, so a malformed tag can neither be silently skipped
+// nor silently treated as newer.
 func isNewerVersion(current, latest string) (bool, error) {
-	c, err := parseSemver(current)
+	c, err := parseVersion(current)
 	if err != nil {
 		return false, fmt.Errorf("invalid current version %q: %w", current, err)
 	}
-	l, err := parseSemver(latest)
+	l, err := parseVersion(latest)
 	if err != nil {
 		return false, fmt.Errorf("invalid latest version %q: %w", latest, err)
 	}
+	return compareVersions(l, c) > 0, nil
+}
 
-	for i := range c {
-		if l[i] != c[i] {
-			return l[i] > c[i], nil
+// semver is a parsed version: the numeric components and the pre-release
+// identifiers (none for a full release).
+type semver struct {
+	parts [3]int
+	pre   []string
+}
+
+// compareVersions orders two parsed versions by semantic-versioning
+// precedence: -1 when a is lower, 1 when higher, 0 when equal.
+func compareVersions(a, b semver) int {
+	for i := range a.parts {
+		if a.parts[i] != b.parts[i] {
+			if a.parts[i] > b.parts[i] {
+				return 1
+			}
+			return -1
 		}
 	}
-	return false, nil
+	switch {
+	case len(a.pre) == 0 && len(b.pre) == 0:
+		return 0
+	case len(a.pre) == 0:
+		return 1 // a full release is newer than any of its pre-releases
+	case len(b.pre) == 0:
+		return -1
+	}
+	for i := 0; i < len(a.pre) && i < len(b.pre); i++ {
+		if c := comparePrereleaseIdentifier(a.pre[i], b.pre[i]); c != 0 {
+			return c
+		}
+	}
+	switch {
+	case len(a.pre) > len(b.pre):
+		return 1 // "beta.1" is newer than "beta"
+	case len(a.pre) < len(b.pre):
+		return -1
+	}
+	return 0
+}
+
+// comparePrereleaseIdentifier applies the identifier rule: numeric
+// identifiers compare numerically and rank below alphanumeric ones; the rest
+// compare lexically in ASCII order.
+func comparePrereleaseIdentifier(a, b string) int {
+	na, aNum := strconv.Atoi(a)
+	nb, bNum := strconv.Atoi(b)
+	switch {
+	case aNum == nil && bNum == nil:
+		return cmpInt(na, nb)
+	case aNum == nil:
+		return -1
+	case bNum == nil:
+		return 1
+	}
+	return strings.Compare(a, b)
+}
+
+func cmpInt(a, b int) int {
+	switch {
+	case a < b:
+		return -1
+	case a > b:
+		return 1
+	}
+	return 0
+}
+
+// parseVersion parses a version tag: an optional leading "v", the numeric
+// MAJOR.MINOR.PATCH, an optional "-<pre-release>" whose dot-separated
+// identifiers are kept for precedence, and an optional "+<build>" that is
+// discarded.
+func parseVersion(v string) (semver, error) {
+	var out semver
+	v = strings.TrimPrefix(v, "v")
+	if i := strings.IndexByte(v, '+'); i >= 0 {
+		v = v[:i]
+	}
+	if i := strings.IndexByte(v, '-'); i >= 0 {
+		pre := v[i+1:]
+		v = v[:i]
+		if pre == "" {
+			return out, fmt.Errorf("empty pre-release suffix in %q", v)
+		}
+		out.pre = strings.Split(pre, ".")
+		for _, id := range out.pre {
+			if id == "" {
+				return out, fmt.Errorf("empty pre-release identifier in %q", pre)
+			}
+		}
+	}
+	parts, err := parseSemver(v)
+	if err != nil {
+		return out, err
+	}
+	out.parts = parts
+	return out, nil
 }
 
 // parseSemver parses the numeric MAJOR.MINOR.PATCH components of a version

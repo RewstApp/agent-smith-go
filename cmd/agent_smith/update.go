@@ -179,6 +179,9 @@ func runUpdate(params *updateContext) {
 	if params.ProxyURLProvided {
 		device.ProxyURL = params.ProxyURL
 	}
+	if params.ReleaseChannelProvided {
+		device.ReleaseChannel = params.ReleaseChannel
+	}
 
 	if params.MqttQos != -1 {
 		qos := byte(params.MqttQos)

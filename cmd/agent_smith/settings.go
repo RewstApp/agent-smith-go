@@ -114,6 +114,22 @@ var runtimeSettings = map[string]runtimeSetting{
 		get: func(d agent.Device) any { return d.DisableAutoUpdates },
 		set: func(d *agent.Device, v any) { d.DisableAutoUpdates = v.(bool) },
 	},
+	// Applies from the next update check: the updater reads the live device
+	// (agent.WithLiveDevice) when it resolves the release (sc-129692).
+	"release_channel": {
+		parse: func(raw json.RawMessage) (any, error) {
+			var channel string
+			if err := json.Unmarshal(raw, &channel); err != nil {
+				return nil, errors.New("invalid release-channel: must be a string")
+			}
+			if err := agent.ValidateReleaseChannel(channel); err != nil {
+				return nil, err
+			}
+			return channel, nil
+		},
+		get: func(d agent.Device) any { return d.ResolvedReleaseChannel() },
+		set: func(d *agent.Device, v any) { d.ReleaseChannel = v.(string) },
+	},
 }
 
 // intSetting is a positive-integer setting validated like its CLI flag.
@@ -544,7 +560,11 @@ func (svc *serviceContext) twinSettingsLoop(
 			return
 		}
 		rid := nextRID()
-		props := mqtt.ReportedProperties{AgentVersion: version.Version, SettingsAck: unconfirmed}
+		props := mqtt.ReportedProperties{
+			AgentVersion:   version.Version,
+			ReleaseChannel: svc.currentDevice().ResolvedReleaseChannel(),
+			SettingsAck:    unconfirmed,
+		}
 		if err := svc.publishReported(client, props, rid); err != nil {
 			if ctx.Err() == nil {
 				logger.Warn(
