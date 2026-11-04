@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -18,6 +19,7 @@ import (
 	"time"
 
 	"github.com/RewstApp/agent-smith-go/internal/agent"
+	"github.com/RewstApp/agent-smith-go/internal/mqtt"
 )
 
 // The diagnostic bundle (sc-129690) carries the configuration with its secrets
@@ -32,6 +34,7 @@ const (
 	bundleProxyPass    = "PROXYPASS789"
 	bundlePayloadMark  = "PAYLOAD-MARKER-do-not-ship"
 	bundleResultMark   = "RESULT-MARKER-do-not-ship"
+	bundleOutputMark   = "OUTPUT-LINE-MARKER-do-not-ship"
 	bundleJournalKeyID = "post:abc123"
 )
 
@@ -97,10 +100,25 @@ func newBundleRoot(t *testing.T) (root, dataDir string) {
 		CompletedAt: time.Date(2026, 11, 3, 8, 0, 0, 0, time.UTC),
 	})
 	writeJSON(t, filepath.Join(dataDir, "postback_spool", "e1.json"), spoolEntry{
-		PostId:    "spooled-1",
-		Result:    []byte(`{"output":"` + bundleResultMark + `"}`),
-		CreatedAt: time.Date(2026, 11, 3, 7, 0, 0, 0, time.UTC),
-		Attempts:  2,
+		PostId:        "spooled-1",
+		Result:        []byte(`{"output":"` + bundleResultMark + `"}`),
+		CreatedAt:     time.Date(2026, 11, 3, 7, 0, 0, 0, time.UTC),
+		Attempts:      2,
+		LastError:     "HTTP 422: unprocessable\n(body withheld)",
+		LastAttemptAt: time.Date(2026, 11, 3, 11, 0, 0, 0, time.UTC),
+	})
+	// The health file the service leaves beside the journal carries a running
+	// command's last output line: the bundle must withhold it.
+	writeJSON(t, filepath.Join(dataDir, healthFileName), mqtt.ReportedProperties{
+		AgentVersion: "v1.7.0-test",
+		Health:       &mqtt.Health{ReportedAt: "2026-11-03T11:59:00Z", UptimeSeconds: 42},
+		Commands: &mqtt.CommandsProgress{InFlight: []mqtt.CommandProgress{{
+			PostID:         "running-1",
+			StartedAt:      "2026-11-03T11:58:00Z",
+			ElapsedSeconds: 60,
+			StdoutBytes:    10,
+			LastOutputLine: "token: " + bundleOutputMark,
+		}}},
 	})
 	return root, dataDir
 }
@@ -179,7 +197,7 @@ func TestRunDiagnosticBundle_ContentsAndRedaction(t *testing.T) {
 	logName := filepath.Base(agent.GetLogFilePath(bundleOrg))
 	want := []string{
 		"config.json", "diagnostic.txt", "host.txt", "journal.txt", "service.txt",
-		"spool.txt", "version.txt",
+		"spool.txt", "version.txt", healthFileName,
 		"logs/" + logName, "logs/" + logName + ".1", "logs/" + logName + ".2",
 	}
 	names := make([]string, 0, len(entries))
@@ -192,9 +210,11 @@ func TestRunDiagnosticBundle_ContentsAndRedaction(t *testing.T) {
 		t.Errorf("entries %v, want %v", names, want)
 	}
 
-	// No secret, no command and no result reaches any entry, in any form.
+	// No secret, no command, no result and no command output reaches any
+	// entry, in any form.
 	forbidden := []string{
 		bundleSharedKey, bundleGithubToken, bundleProxyPass, bundlePayloadMark, bundleResultMark,
+		bundleOutputMark,
 		base64.StdEncoding.EncodeToString([]byte(`{"commands":"` + bundlePayloadMark + `"}`)),
 		base64.StdEncoding.EncodeToString([]byte(`{"output":"` + bundleResultMark + `"}`)),
 	}
@@ -224,9 +244,34 @@ func TestRunDiagnosticBundle_ContentsAndRedaction(t *testing.T) {
 			t.Errorf("journal.txt lacks %q:\n%s", s, journal)
 		}
 	}
-	if spool := string(entries["spool.txt"]); !strings.Contains(spool, "spooled-1") ||
-		!strings.Contains(spool, "e1.json") {
-		t.Errorf("spool.txt:\n%s", spool)
+	spool := string(entries["spool.txt"])
+	for _, s := range []string{
+		"spooled-1", "e1.json", "age", "5h0m0s", "last_error", "HTTP 422: unprocessable (body withheld)",
+		"2026-11-03T11:00:00Z",
+	} {
+		if !strings.Contains(spool, s) {
+			t.Errorf("spool.txt lacks %q:\n%s", s, spool)
+		}
+	}
+	// health.json is carried with the output line withheld, and the Fleet
+	// Health section and version.txt read the same file the bundle copies.
+	var health mqtt.ReportedProperties
+	if err := json.Unmarshal(entries[healthFileName], &health); err != nil {
+		t.Fatalf("health.json: %v\n%s", err, entries[healthFileName])
+	}
+	if health.AgentVersion != "v1.7.0-test" || health.Commands == nil ||
+		len(health.Commands.InFlight) != 1 ||
+		health.Commands.InFlight[0].LastOutputLine != bundleWithheld ||
+		health.Commands.InFlight[0].PostID != "running-1" {
+		t.Errorf("health.json %s", entries[healthFileName])
+	}
+	if !bytes.Contains(entries["version.txt"], []byte("agent version v1.7.0-test")) {
+		t.Errorf("version.txt %s", entries["version.txt"])
+	}
+	for _, s := range []string{"Reported at 2026-11-03T11:59:00Z", "in flight running-1", bundleWithheld} {
+		if !bytes.Contains(entries["diagnostic.txt"], []byte(s)) {
+			t.Errorf("diagnostic.txt lacks %q:\n%s", s, entries["diagnostic.txt"])
+		}
 	}
 	if !bytes.Contains(entries["service.txt"], []byte("stub status for")) {
 		t.Errorf("service.txt %s", entries["service.txt"])
@@ -244,16 +289,27 @@ func TestRunDiagnosticBundle_ContentsAndRedaction(t *testing.T) {
 	}
 }
 
-func TestRunDiagnosticBundle_DefaultPathIsInTheDataDirectory(t *testing.T) {
+// Without --bundle-path the zip lands in the working directory, not in the
+// owner-only data directory where nothing would ever sweep it.
+func TestRunDiagnosticBundle_DefaultPathIsInTheWorkingDirectory(t *testing.T) {
 	quiet(t)
 	root, dataDir := newBundleRoot(t)
+	wd := t.TempDir()
+	t.Chdir(wd)
 	got, err := runDiagnosticBundle(context.Background(), bundleTestParams(""), bundleTestEnv(root))
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := filepath.Join(dataDir, "diagnostic-"+bundleOrg+"-20261103T120000Z.zip")
+	want := filepath.Join(wd, "diagnostic-"+bundleOrg+"-20261103T120000Z.zip")
 	if got != want {
 		t.Errorf("default path %s, want %s", got, want)
+	}
+	if entries, err := os.ReadDir(dataDir); err == nil {
+		for _, e := range entries {
+			if strings.HasSuffix(e.Name(), ".zip") {
+				t.Errorf("the bundle was written into the data directory: %s", e.Name())
+			}
+		}
 	}
 	if _, err := os.Stat(got); err != nil {
 		t.Fatal(err)
@@ -395,6 +451,124 @@ func TestNewDiagnosticContext_BundleFlags(t *testing.T) {
 		[]string{"--diagnostic", "--bundle-path", "/tmp/x.zip"}, nil, nil, nil, nil,
 	); err == nil {
 		t.Error("--bundle-path without --bundle was accepted")
+	}
+}
+
+// A config.json that is JSON but not the agent's configuration is reported at
+// the top of diagnostic.txt, not just as a connectivity check with no host.
+func TestRunDiagnosticBundle_ReportsAConfigThatDoesNotLoad(t *testing.T) {
+	quiet(t)
+	root, dataDir := newBundleRoot(t)
+	writeJSON(t, filepath.Join(dataDir, "config.json"), map[string]any{
+		"device_id":          "dev-1",
+		"shared_access_key":  bundleSharedKey,
+		"azure_iot_hub_host": "127.0.0.1",
+		"worker_count":       "4",
+	})
+	path := filepath.Join(t.TempDir(), "bad.zip")
+	if _, err := runDiagnosticBundle(
+		context.Background(),
+		bundleTestParams(path),
+		bundleTestEnv(root),
+	); err != nil {
+		t.Fatal(err)
+	}
+	entries := readBundle(t, path)
+	diag := string(entries["diagnostic.txt"])
+	if !strings.Contains(diag, "config.json does not load as the agent's configuration") ||
+		!strings.Contains(diag, "worker_count") {
+		t.Errorf("diagnostic.txt does not name the parse error:\n%s", diag)
+	}
+	if bytes.Contains(entries["config.json"], []byte(bundleSharedKey)) {
+		t.Error("config.json was not redacted")
+	}
+}
+
+// The console is written best effort: a console that fails (a closed pipe)
+// must not empty the archive entry.
+func TestCaptureSections_KeepsTheEntryWhenTheConsoleFails(t *testing.T) {
+	previous := diagOut
+	diagOut = failingWriter{}
+	t.Cleanup(func() { diagOut = previous })
+	got := captureSections(func() { dprintf("line %d\n", 1); dprintln("line 2") })
+	if string(got) != "line 1\nline 2\n" {
+		t.Errorf("captured %q", got)
+	}
+}
+
+type failingWriter struct{}
+
+func (failingWriter) Write([]byte) (int, error) { return 0, errors.New("broken pipe") }
+
+// A proxy user name with no password is scrubbed only in its URL form, so a
+// user name that is also the host name or the service account survives.
+func TestRedactConfig_ProxyUserNameIsScrubbedOnlyAsUserinfo(t *testing.T) {
+	raw := []byte(`{"proxy_url": "http://administrator@proxy:3128", ` +
+		`"shared_access_key": "` + bundleSharedKey + `"}`)
+	redacted, secrets, err := redactConfig(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sort.Strings(secrets)
+	if strings.Join(secrets, ",") != bundleSharedKey+",administrator@" {
+		t.Errorf("secrets %q", secrets)
+	}
+	if !bytes.Contains(redacted, []byte(`"http://xxxxx@proxy:3128"`)) {
+		t.Errorf("config.json %s", redacted)
+	}
+	host := scrub(
+		[]byte("Hostname: administrator\nproxy http://administrator@proxy:3128 x"),
+		secrets,
+	)
+	if string(host) != "Hostname: administrator\nproxy http://***proxy:3128 x" {
+		t.Errorf("scrubbed %q", host)
+	}
+}
+
+// Tails start at a line boundary: a cut inside a line drops that partial
+// line, a cut right after a newline keeps the first full line, and a tail
+// with no newline at all is kept whole.
+func TestReadTail_CutsAtALineBoundary(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "log")
+	write := func(s string) {
+		if err := os.WriteFile(path, []byte(s), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	read := func(max int) string {
+		got, err := readTail(path, max)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(got)
+	}
+	write("first\nsecond\nthird\n")
+	if got := read(100); got != "first\nsecond\nthird\n" {
+		t.Errorf("whole file: %q", got)
+	}
+	if got := read(10); got != "third\n" { // cut inside "second"
+		t.Errorf("cut inside a line: %q", got)
+	}
+	if got := read(13); got != "second\nthird\n" { // cut right after "first\n"
+		t.Errorf("cut on a boundary: %q", got)
+	}
+	write("one very long line without a newline")
+	if got := read(10); got != " a newline" {
+		t.Errorf("no newline: %q", got)
+	}
+	write(strings.Repeat("x", 20) + "\n")
+	if got := read(10); got != "" {
+		t.Errorf("only a trailing newline: %q", got)
+	}
+	if got := string(trimTail([]byte("first\nsecond\nthird\n"), 13)); got != "second\nthird\n" {
+		t.Errorf("trimTail: %q", got)
+	}
+}
+
+func TestHealthEntry_DescribesAFileThatIsNotAReport(t *testing.T) {
+	got := string(healthEntry([]byte("not json")))
+	if !strings.Contains(got, "is not a fleet-health report") || strings.Contains(got, "not json") {
+		t.Errorf("%q", got)
 	}
 }
 

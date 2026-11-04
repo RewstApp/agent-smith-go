@@ -46,7 +46,3 @@ if ($LASTEXITCODE -eq 0) { Write-Output $out; Write-Error "a bundle of an org th
 if (-not $out.Contains('nothing to bundle')) { Write-Output $out; Write-Error "the failure is not explained"; exit 1 }
 if (Test-Path $missingPath) { Write-Error "a failed bundle left a file behind"; exit 1 }
 Write-Output "an org that is not installed fails clearly: $($out.Trim())"
-
-# The last agent call above fails on purpose, leaving LASTEXITCODE at 1;
-# every check passed, so say so explicitly rather than let it leak out.
-exit 0

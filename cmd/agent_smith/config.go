@@ -142,11 +142,12 @@ func runConfig(params *configContext) error {
 		return fmt.Errorf("failed to print config file: %w", err)
 	}
 
-	// Got configuration. The proxy URL's credentials are redacted in the log
-	// line (sc-129691); the file itself keeps them.
-	logged := response.Configuration
-	logged.ProxyURL = utils.RedactURL(logged.ProxyURL)
-	loggedBytes, err := json.MarshalIndent(logged, "", "  ")
+	// Got configuration. The log line carries it with the shared access key
+	// and the GitHub token replaced by *** (sc-129690: a reinstall that
+	// rotated the key used to leave the superseded one in the log, where no
+	// later redaction of the current config could find it) and the proxy
+	// URL's credentials masked (sc-129691); the file itself keeps them.
+	loggedBytes, err := json.MarshalIndent(response.Configuration.Redacted(), "", "  ")
 	if err != nil {
 		return fmt.Errorf("failed to print config file: %w", err)
 	}

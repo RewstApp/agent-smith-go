@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -31,9 +30,9 @@ func formatServiceName(orgId string) string {
 // (e.g. when PROGRAMDATA was unset during installation or the directory
 // cannot be read in the current process context).
 func fallbackScanAgents(root string) []agentInfo {
-	out, err := exec.Command( // #nosec G204
+	out, err := diagnosticCommand(
 		"sc", "query", "type=", "service", "state=", "all", "bufsize=", "65536",
-	).CombinedOutput()
+	)
 	if err != nil {
 		return nil
 	}
@@ -78,10 +77,10 @@ func fallbackScanAgents(root string) []agentInfo {
 	return agents
 }
 
-// queryServiceStatus queries the Windows SCM via sc.exe.
-// Returns (installed, running).
+// queryServiceStatus queries the Windows SCM via sc.exe, bounded by
+// diagnosticCommandTimeout. Returns (installed, running).
 func queryServiceStatus(name string) (bool, bool) {
-	out, err := exec.Command("sc", "query", name).CombinedOutput() // #nosec G204
+	out, err := diagnosticCommand("sc", "query", name)
 	if err != nil {
 		return false, false
 	}

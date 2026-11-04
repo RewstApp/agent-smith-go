@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/RewstApp/agent-smith-go/internal/agent"
+	"github.com/RewstApp/agent-smith-go/internal/mqtt"
 	"github.com/RewstApp/agent-smith-go/internal/utils"
 	"github.com/RewstApp/agent-smith-go/internal/version"
 )
@@ -27,8 +28,9 @@ import (
 // The diagnostic bundle (sc-129690): `--diagnostic --bundle` writes one zip
 // that answers a support case's first round of questions - the configuration
 // with its secrets redacted, the log tails, what the command journal and the
-// postback spool hold (never a command or a result), the service manager's
-// view, the host, the agent version and the console output of every check.
+// postback spool hold (never a command, a result or a line of output), the
+// service manager's view, the host, the agent version and the console output
+// of every check.
 
 const (
 	// bundleLogTailMax is the most of each log file the bundle keeps.
@@ -37,15 +39,13 @@ const (
 	bundleMaxBytes = 25 << 20
 	// bundleRedacted replaces every secret value in every entry.
 	bundleRedacted = "***"
-	// bundleCommandTimeout bounds each service-manager query.
-	bundleCommandTimeout = 30 * time.Second
+	// bundleWithheld stands in for a running command's last output line in
+	// health.json and the Fleet Health section: the bundle carries no output.
+	bundleWithheld = "(withheld from the bundle)"
 	// bundleMinSecretLength keeps a short value from being scrubbed out of
 	// unrelated text; every secret the agent holds is far longer.
 	bundleMinSecretLength = 6
 )
-
-// bundleSecretKeys are the config keys whose values the bundle redacts.
-var bundleSecretKeys = []string{"shared_access_key", "config_secret", "github_token"}
 
 // bundleEnv is what writing a bundle depends on, injectable for tests.
 type bundleEnv struct {
@@ -89,42 +89,65 @@ func runDiagnosticBundle(
 	if err != nil {
 		return "", fmt.Errorf("the agent's configuration is not valid JSON: %w", err)
 	}
+	// A config.json that is JSON but not the agent's configuration (a field of
+	// the wrong type, say) is the one fact the bundle may have been asked for:
+	// it is reported at the top of diagnostic.txt rather than surfacing only
+	// as a connectivity check that found no host.
 	var device agent.Device
-	_ = json.Unmarshal(configBytes, &device)
-	target.Device = &device
+	configErr := json.Unmarshal(configBytes, &device)
+	if configErr == nil {
+		target.Device = &device
+	}
+	now := env.now().UTC()
 
 	fixed := map[string][]byte{
 		"config.json": redacted,
 		"version.txt": []byte(fmt.Sprintf(
 			"agent version %s\nbundle tool %s %s/%s\nwritten %s\n",
 			agentVersionFrom(dataDir), version.Version, runtime.GOOS, runtime.GOARCH,
-			env.now().UTC().Format(time.RFC3339),
+			now.Format(time.RFC3339),
 		)),
 		"service.txt": serviceStatusText(ctx, target.ServiceName, env.serviceStatus),
 		"journal.txt": journalListing(filepath.Join(dataDir, "command_journal")),
-		"spool.txt":   spoolListing(filepath.Join(dataDir, "postback_spool")),
+		"spool.txt":   spoolListing(filepath.Join(dataDir, "postback_spool"), now),
 	}
 	if health, err := os.ReadFile(filepath.Join(dataDir, healthFileName)); err == nil {
-		fixed[healthFileName] = health
+		fixed[healthFileName] = healthEntry(health)
 	}
 	fixed["host.txt"] = captureSections(func() { runHostInfo(ctx, params, target) })
 	fixed["diagnostic.txt"] = captureSections(func() {
+		if configErr != nil {
+			printSection("Configuration")
+			printResult(false, fmt.Sprintf(
+				"config.json does not load as the agent's configuration: %v", configErr,
+			))
+		}
 		runCheckServiceStatus(params, target)
 		runCommandTest()
 		runConnectivityTestWith(target, env.dialer)
-		runTempDirTest(target)
-		runFleetHealth(target)
+		runTempDirTest(target, dataDir)
+		props, err := readHealthFileFrom(dataDir)
+		printFleetHealth(props, err, false)
 	})
 
 	logs := logFiles(filepath.Join(dataDir, filepath.Base(agent.GetLogFilePath(target.OrgId))))
-	data, err := buildBundle(fixed, logs, secrets)
+	data, err := buildBundle(fixed, logs, secrets, now)
 	if err != nil {
 		return "", err
 	}
 	path := params.BundlePath
 	if path == "" {
-		path = filepath.Join(dataDir, fmt.Sprintf(
-			"diagnostic-%s-%s.zip", target.OrgId, env.now().UTC().Format("20060102T150405Z"),
+		// The working directory, not the agent's data directory: that one is
+		// owner-only and never swept, so bundles would pile up there out of
+		// the operator's reach.
+		wd, err := os.Getwd()
+		if err != nil {
+			return "", fmt.Errorf(
+				"cannot resolve the working directory to write the bundle: %w", err,
+			)
+		}
+		path = filepath.Join(wd, fmt.Sprintf(
+			"diagnostic-%s-%s.zip", target.OrgId, now.Format("20060102T150405Z"),
 		))
 	}
 	if err := utils.WriteFileAtomic(
@@ -192,14 +215,16 @@ func bundleTarget(orgId string, env bundleEnv) (agentInfo, error) {
 
 // redactConfig returns the configuration with its secrets replaced and the
 // secret values themselves, which are then scrubbed from every other entry -
-// the log in particular, where install has written the configuration whole.
+// the log in particular, where an agent installed before the configuration
+// line was masked (see config.go) has written the configuration whole. The
+// keys are agent.SecretConfigKeys, the one list of credential fields.
 func redactConfig(raw []byte) ([]byte, []string, error) {
 	var doc map[string]any
 	if err := json.Unmarshal(raw, &doc); err != nil {
 		return nil, nil, err
 	}
 	var secrets []string
-	for _, key := range bundleSecretKeys {
+	for _, key := range agent.SecretConfigKeys {
 		if v, ok := doc[key].(string); ok && v != "" {
 			secrets = append(secrets, v)
 			doc[key] = bundleRedacted
@@ -210,7 +235,11 @@ func redactConfig(raw []byte) ([]byte, []string, error) {
 			if password, ok := u.User.Password(); ok && password != "" {
 				secrets = append(secrets, password)
 			} else if u.User.Username() != "" {
-				secrets = append(secrets, u.User.Username())
+				// A user name with no password may be a token, so it is a
+				// secret too - but only in its URL form ("name@"), since a
+				// bare user name is as likely to be the host name or the
+				// service account and would be scrubbed out of every entry.
+				secrets = append(secrets, u.User.Username()+"@")
 			}
 		}
 		doc["proxy_url"] = utils.RedactURL(raw)
@@ -239,13 +268,72 @@ func scrub(data []byte, secrets []string) []byte {
 	return data
 }
 
+// healthEntry is the fleet-health file as the bundle carries it: the health
+// object and the running commands' progress, with each command's last output
+// line withheld. A file that is not a report is described, not copied.
+func healthEntry(raw []byte) []byte {
+	var props mqtt.ReportedProperties
+	if err := json.Unmarshal(raw, &props); err != nil {
+		return []byte(fmt.Sprintf(
+			"%s is not a fleet-health report and is withheld: %v\n", healthFileName, err,
+		))
+	}
+	if props.Commands != nil {
+		for i := range props.Commands.InFlight {
+			if props.Commands.InFlight[i].LastOutputLine != "" {
+				props.Commands.InFlight[i].LastOutputLine = bundleWithheld
+			}
+		}
+	}
+	out, err := json.MarshalIndent(props, "", "  ")
+	if err != nil {
+		return []byte(fmt.Sprintf(
+			"%s could not be re-encoded and is withheld: %v\n", healthFileName, err,
+		))
+	}
+	return append(out, '\n')
+}
+
+// bundleEntry is one zip entry, already scrubbed. A log tail is trimmed from
+// its start when the zip must shrink; the fixed entries never are.
+type bundleEntry struct {
+	name string
+	data []byte
+	log  bool
+}
+
 // buildBundle zips the fixed entries and the log tails, scrubbed of every
-// secret. The tails start at bundleLogTailMax and are halved until the zip
-// fits bundleMaxBytes.
-func buildBundle(fixed map[string][]byte, logs []string, secrets []string) ([]byte, error) {
+// secret. Every file is read and scrubbed once; the tails start at
+// bundleLogTailMax and are halved until the zip fits bundleMaxBytes.
+func buildBundle(
+	fixed map[string][]byte,
+	logs []string,
+	secrets []string,
+	now time.Time,
+) ([]byte, error) {
+	names := make([]string, 0, len(fixed))
+	for name := range fixed {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	entries := make([]bundleEntry, 0, len(fixed)+len(logs))
+	for _, name := range names {
+		entries = append(entries, bundleEntry{name: name, data: scrub(fixed[name], secrets)})
+	}
+	for _, path := range logs {
+		data, err := readTail(path, bundleLogTailMax)
+		if err != nil {
+			data = []byte(fmt.Sprintf("could not read %s: %v\n", path, err))
+		}
+		entries = append(entries, bundleEntry{
+			name: "logs/" + filepath.Base(path),
+			data: scrub(data, secrets),
+			log:  true,
+		})
+	}
 	tail := bundleLogTailMax
 	for {
-		data, err := zipEntries(fixed, logs, secrets, tail)
+		data, err := zipEntries(entries, tail, now)
 		if err != nil {
 			return nil, err
 		}
@@ -261,42 +349,23 @@ func buildBundle(fixed map[string][]byte, logs []string, secrets []string) ([]by
 	}
 }
 
-func zipEntries(
-	fixed map[string][]byte,
-	logs []string,
-	secrets []string,
-	tail int,
-) ([]byte, error) {
+func zipEntries(entries []bundleEntry, tail int, now time.Time) ([]byte, error) {
 	var buf bytes.Buffer
 	zw := zip.NewWriter(&buf)
-	names := make([]string, 0, len(fixed))
-	for name := range fixed {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	add := func(name string, data []byte) error {
+	for _, e := range entries {
 		w, err := zw.CreateHeader(&zip.FileHeader{
-			Name:     name,
+			Name:     e.name,
 			Method:   zip.Deflate,
-			Modified: time.Now(),
+			Modified: now,
 		})
 		if err != nil {
-			return err
-		}
-		_, err = w.Write(scrub(data, secrets))
-		return err
-	}
-	for _, name := range names {
-		if err := add(name, fixed[name]); err != nil {
 			return nil, err
 		}
-	}
-	for _, path := range logs {
-		data, err := readTail(path, tail)
-		if err != nil {
-			data = []byte(fmt.Sprintf("could not read %s: %v\n", path, err))
+		data := e.data
+		if e.log {
+			data = trimTail(data, tail)
 		}
-		if err := add("logs/"+filepath.Base(path), data); err != nil {
+		if _, err := w.Write(data); err != nil {
 			return nil, err
 		}
 	}
@@ -306,10 +375,13 @@ func zipEntries(
 	return buf.Bytes(), nil
 }
 
-// readTail returns the last max bytes of path, starting at a line boundary
-// when the file was cut.
+// readTail returns the last max bytes of path. When the file was cut, the
+// tail starts at the first line boundary inside it (see cutToLine), and it is
+// opened the way the live log viewer opens the log (openSharedRead): with
+// FILE_SHARE_DELETE on Windows, so the service's log rotation is never blocked
+// by the bundle reading the file.
 func readTail(path string, max int) ([]byte, error) {
-	f, err := os.Open(path)
+	f, err := openSharedRead(path)
 	if err != nil {
 		return nil, err
 	}
@@ -318,21 +390,42 @@ func readTail(path string, max int) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	start := info.Size() - int64(max)
-	if start <= 0 {
+	if info.Size() <= int64(max) {
 		return io.ReadAll(f)
 	}
-	if _, err := f.Seek(start, io.SeekStart); err != nil {
+	// One byte before the cut tells whether the cut itself sits on a line
+	// boundary; cutToLine expects it.
+	if _, err := f.Seek(info.Size()-int64(max)-1, io.SeekStart); err != nil {
 		return nil, err
 	}
-	data, err := io.ReadAll(io.LimitReader(f, int64(max)))
+	data, err := io.ReadAll(io.LimitReader(f, int64(max)+1))
 	if err != nil {
 		return nil, err
 	}
-	if i := bytes.IndexByte(data, '\n'); i >= 0 && i+1 < len(data) {
-		data = data[i+1:]
+	return cutToLine(data), nil
+}
+
+// trimTail keeps the last max bytes of data, cut to a line boundary.
+func trimTail(data []byte, max int) []byte {
+	if len(data) <= max {
+		return data
 	}
-	return data, nil
+	return cutToLine(data[len(data)-max-1:])
+}
+
+// cutToLine drops the partial first line of a tail. data begins one byte
+// before the cut, so a leading newline means the cut was on a line boundary
+// and the whole tail is kept; otherwise the tail starts after its first
+// newline. A tail with no newline at all is one line longer than the tail
+// itself, which is kept rather than dropped - an empty entry would say less.
+func cutToLine(data []byte) []byte {
+	if len(data) == 0 {
+		return data
+	}
+	if i := bytes.IndexByte(data, '\n'); i >= 0 {
+		return data[i+1:]
+	}
+	return data[1:]
 }
 
 // logFiles is the active log and every rotated copy that exists, newest first.
@@ -360,7 +453,9 @@ func logFiles(active string) []string {
 }
 
 // journalListing describes the command journal: every file with its size and
-// time, and for an entry its key and timestamps - never the command.
+// time, and for an entry its key and timestamps - never the command. The
+// entries are decoded through projections without the payload field, so the
+// command bytes are never decoded.
 func journalListing(dir string) []byte {
 	return listing(
 		dir,
@@ -368,7 +463,11 @@ func journalListing(dir string) []byte {
 		func(name string, raw []byte) string {
 			switch {
 			case strings.HasSuffix(name, journalPendingSuffix):
-				var e journalEntry
+				var e struct {
+					Key        string    `json:"key"`
+					ReceivedAt time.Time `json:"received_at"`
+					StartedAt  time.Time `json:"started_at"`
+				}
 				if json.Unmarshal(raw, &e) != nil {
 					return "(unreadable entry)"
 				}
@@ -389,15 +488,34 @@ func journalListing(dir string) []byte {
 }
 
 // spoolListing describes the postback spool: every file with its size and
-// time, and for an entry its post id, age and attempts - never the result.
-func spoolListing(dir string) []byte {
-	return listing(dir, "post_id\tcreated_at\tattempts", func(_ string, raw []byte) string {
-		var e spoolEntry
-		if json.Unmarshal(raw, &e) != nil || e.PostId == "" {
-			return ""
-		}
-		return strings.Join([]string{e.PostId, stamp(e.CreatedAt), strconv.Itoa(e.Attempts)}, "\t")
-	})
+// time, and for an entry its post id, when it was spooled and how old it is,
+// its rejection count and the last rejection's time and reason - never the
+// result, whose field the projection leaves undecoded.
+func spoolListing(dir string, now time.Time) []byte {
+	return listing(
+		dir,
+		"post_id\tcreated_at\tage\tattempts\tlast_attempt_at\tlast_error",
+		func(_ string, raw []byte) string {
+			var e struct {
+				PostId        string    `json:"post_id"`
+				CreatedAt     time.Time `json:"created_at"`
+				Attempts      int       `json:"attempts"`
+				LastError     string    `json:"last_error"`
+				LastAttemptAt time.Time `json:"last_attempt_at"`
+			}
+			if json.Unmarshal(raw, &e) != nil || e.PostId == "" {
+				return ""
+			}
+			return strings.Join([]string{
+				e.PostId,
+				stamp(e.CreatedAt),
+				age(now, e.CreatedAt),
+				strconv.Itoa(e.Attempts),
+				stamp(e.LastAttemptAt),
+				strings.Join(strings.Fields(e.LastError), " "),
+			}, "\t")
+		},
+	)
 }
 
 func listing(dir, detailHeader string, detail func(name string, raw []byte) string) []byte {
@@ -439,6 +557,14 @@ func stamp(t time.Time) string {
 	return t.UTC().Format(time.RFC3339)
 }
 
+// age is how long before now t was, to the second, or "-" for a zero time.
+func age(now, t time.Time) string {
+	if t.IsZero() {
+		return "-"
+	}
+	return now.Sub(t).Truncate(time.Second).String()
+}
+
 // agentVersionFrom is the version the running service last reported, from its
 // health file, or "unknown".
 func agentVersionFrom(dataDir string) string {
@@ -462,12 +588,16 @@ func serviceStatusText(
 	return buf.Bytes()
 }
 
+// runServiceManagerCommand runs one service-manager query under the
+// diagnostic's shell-out bound (diagnosticCommandTimeout).
 func runServiceManagerCommand(ctx context.Context, argv []string) string {
-	ctx, cancel := context.WithTimeout(ctx, bundleCommandTimeout)
+	ctx, cancel := context.WithTimeout(ctx, diagnosticCommandTimeout)
 	defer cancel()
 	// #nosec G204 - fixed service-manager binaries; the name comes from the
 	// agent's own service naming.
-	out, err := exec.CommandContext(ctx, argv[0], argv[1:]...).CombinedOutput()
+	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
+	cmd.WaitDelay = diagnosticCommandWaitDelay
+	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Sprintf("%s(exit: %v)", out, err)
 	}
@@ -475,11 +605,13 @@ func runServiceManagerCommand(ctx context.Context, argv []string) string {
 }
 
 // captureSections runs the diagnostic sections with their output going to the
-// console and to the returned buffer.
+// returned buffer and, best effort, to the console: the buffer is written
+// first, so a console that is gone (a closed pipe, a vanished terminal) costs
+// the operator the echo and never the archive entry.
 func captureSections(run func()) []byte {
 	var buf bytes.Buffer
 	previous := diagOut
-	diagOut = io.MultiWriter(previous, &buf)
+	diagOut = io.MultiWriter(&buf, previous)
 	defer func() { diagOut = previous }()
 	run()
 	return buf.Bytes()

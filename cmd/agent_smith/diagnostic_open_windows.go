@@ -18,8 +18,14 @@ import (
 // With the flag the agent's rename succeeds, the viewer's handle keeps reading
 // the (now renamed) old file, and logRotated - which compares file identity by
 // volume and file index, not by path or size - sees that the file at the log
-// path is a different one and the viewer follows it.
+// path is a different one and the viewer follows it. The bundle's log tail
+// read (readTail) opens the log the same way, through openSharedRead.
 func (o *osLogFileOpener) Open(name string) (io.ReadCloser, error) {
+	return openSharedRead(name)
+}
+
+// openSharedRead opens name for reading with FILE_SHARE_DELETE.
+func openSharedRead(name string) (*os.File, error) {
 	p, err := windows.UTF16PtrFromString(name)
 	if err != nil {
 		return nil, &os.PathError{Op: "open", Path: name, Err: err}

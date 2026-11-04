@@ -371,7 +371,7 @@ func TestTestTLSConnection_InvalidHost(t *testing.T) {
 
 func TestRunTempDirTest_MissingDataDir(t *testing.T) {
 	target := agentInfo{OrgId: "diag-test-" + t.Name()}
-	runTempDirTest(target)
+	runTempDirTest(target, agent.GetDataDirectory(target.OrgId))
 	_ = os.RemoveAll(agent.GetScriptsDirectory(target.OrgId))
 }
 

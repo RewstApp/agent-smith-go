@@ -2,9 +2,15 @@
 #   . "$env:GITHUB_WORKSPACE/.github/actions/_lib/Invoke-Elevated.ps1"
 #   Invoke-Elevated -Script "$env:GITHUB_ACTION_PATH/assert.ps1" -Arguments @{ LogFile = $env:LOG_FILE }
 #
-# Runs a PowerShell script as the privileged user on every platform: directly
-# on Windows (the runner is already an administrator), under sudo on Linux and
-# macOS (the agent's log, config and scripts directories are root-owned). The
+# Runs a PowerShell script as the privileged user on every platform, always in
+# its own `pwsh -NoProfile -File` process: plain on Windows (the runner is
+# already an administrator), under sudo on Linux and macOS (the agent's log,
+# config and scripts directories are root-owned). One launch shape on every
+# platform is what keeps the exit-code semantics identical: a script that ends
+# on a native call that was expected to fail leaves `$LASTEXITCODE` non-zero,
+# which `pwsh -File` reports as 0 while an in-process `& script` (how Windows
+# used to run it) let leak out as the step's exit code - the bundle assertion
+# went red on Windows alone for a reason that was not the agent (sc-129690). The
 # environment is forwarded whole and explicitly - every variable of the calling
 # step as a NAME=VALUE argument to env(1) between sudo and pwsh - so
 # GITHUB_OUTPUT and the step's variables reach the script on every sudo. It
@@ -14,12 +20,10 @@
 # ubuntu read its LOG_FILE as null and the gate went red for a reason that was
 # not the agent (sc-129246). env(1) applies the assignments itself, so nothing
 # here depends on which sudo the image ships or on its env_keep policy.
-# On Windows the hashtable is splatted so every entry binds by parameter
-# name (an array splat would pass "-Name" as a positional value); under sudo
-# the pairs go on the command line as "-Name value", and the called script
+# The pairs go on the command line as "-Name value", and the called script
 # binds them to its typed parameters. A null value is omitted, which is how an
 # optional parameter is left at its default. A non-zero exit from the script
-# becomes this step's exit code.
+# (its `exit N`, or 1 for a terminating error) becomes this step's exit code.
 #
 # This is the one place the composite actions branch on the platform for the
 # helpers whose logic is identical everywhere (sc-126318). Actions whose
@@ -31,20 +35,18 @@ function Invoke-Elevated {
     [Parameter(Mandatory)][string]$Script,
     [hashtable]$Arguments = @{}
   )
-  $bound = @{}
   $argv = @()
   foreach ($key in $Arguments.Keys) {
     $value = $Arguments[$key]
     if ($null -eq $value) { continue }
-    $bound[$key] = $value
     $argv += "-$key"
     $argv += "$value"
   }
   $global:LASTEXITCODE = 0
+  $pwsh = (Get-Command pwsh).Source
   if ($IsWindows) {
-    & $Script @bound
+    & $pwsh -NoProfile -File $Script @argv
   } else {
-    $pwsh = (Get-Command pwsh).Source
     $environment = Get-ElevatedEnvironment
     sudo env @environment $pwsh -NoProfile -File $Script @argv
   }

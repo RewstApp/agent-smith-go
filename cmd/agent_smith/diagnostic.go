@@ -70,6 +70,30 @@ type osLogFileOpener struct{}
 // across a rotation.
 var liveLogOutput io.Writer = os.Stdout
 
+const (
+	// diagnosticCommandTimeout bounds every shell-out the diagnostic makes to
+	// the service manager - the installed-agent scan's status queries, the
+	// Windows SCM fallback scan and the bundle's service.txt - so a wedged SCM
+	// or a D-Bus stall fails one query instead of hanging the whole run
+	// (sc-129690), the same bound the host-info and service packages apply.
+	diagnosticCommandTimeout = 30 * time.Second
+	// diagnosticCommandWaitDelay backs the kill up: a descendant that escaped
+	// the kill but still holds the output pipe is abandoned after it.
+	diagnosticCommandWaitDelay = time.Second
+)
+
+// diagnosticCommand runs one service-manager query under
+// diagnosticCommandTimeout and returns its combined output.
+func diagnosticCommand(name string, args ...string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), diagnosticCommandTimeout)
+	defer cancel()
+	// #nosec G204 - fixed service-manager binaries; the arguments come from
+	// the agent's own service naming.
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.WaitDelay = diagnosticCommandWaitDelay
+	return cmd.CombinedOutput()
+}
+
 type agentInfo struct {
 	OrgId       string
 	ConfigFile  string
@@ -179,7 +203,7 @@ selectLoop:
 			case "3":
 				runConnectivityTestWith(target, dialer)
 			case "4":
-				runTempDirTest(target)
+				runTempDirTest(target, agent.GetDataDirectory(target.OrgId))
 			case "5":
 				runLiveLogsWith(ctx, target, opener)
 			case "6":
@@ -539,7 +563,10 @@ func testTLSConnection(host, port string) bool {
 
 // ── Check 4: Temp directory write test ──
 
-func runTempDirTest(target agentInfo) {
+// runTempDirTest checks the scripts directory is writable and the data
+// directory (dataDir, resolved by the caller so the bundle checks the one it
+// reads from) exists.
+func runTempDirTest(target agentInfo, dataDir string) {
 	printSection("Temp Directory Write Test")
 
 	scriptsDir := agent.GetScriptsDirectory(target.OrgId)
@@ -578,7 +605,6 @@ func runTempDirTest(target agentInfo) {
 	_ = os.Remove(testFile)
 
 	// Also check the data directory
-	dataDir := agent.GetDataDirectory(target.OrgId)
 	dprintf("    Data directory: %s\n", dataDir)
 	if info, err := os.Stat(dataDir); err != nil {
 		printResult(false, fmt.Sprintf("Data directory does not exist: %v", err))
@@ -719,7 +745,7 @@ func runAllChecksWith(
 	runCheckServiceStatus(params, target)
 	runCommandTest()
 	runConnectivityTestWith(target, dialer)
-	runTempDirTest(target)
+	runTempDirTest(target, agent.GetDataDirectory(target.OrgId))
 	runHostInfo(ctx, params, target)
 	runFleetHealth(target)
 }
@@ -730,8 +756,15 @@ func runAllChecksWith(
 // the device twin (sc-129687), read from the file it leaves beside the
 // journal, so what the machine says can be compared with what Rewst sees.
 func runFleetHealth(target agentInfo) {
-	printSection("Fleet Health")
 	props, err := readHealthFile(target.OrgId)
+	printFleetHealth(props, err, true)
+}
+
+// printFleetHealth prints the Fleet Health section from a health file read
+// (props, err). withOutput false withholds each running command's last output
+// line: the diagnostic bundle carries no command output (sc-129690).
+func printFleetHealth(props *mqtt.ReportedProperties, err error, withOutput bool) {
+	printSection("Fleet Health")
 	if err != nil {
 		printResult(
 			false,
@@ -783,6 +816,10 @@ func runFleetHealth(target agentInfo) {
 		dprintln("    in flight: none at the last report")
 	}
 	for _, c := range inFlightOrNone(props.Commands) {
+		last := c.LastOutputLine
+		if !withOutput && last != "" {
+			last = bundleWithheld
+		}
 		dprintf(
 			"    in flight %s: started %s, elapsed %ds, stdout %d B, stderr %d B, last line %q\n",
 			c.PostID,
@@ -790,7 +827,7 @@ func runFleetHealth(target agentInfo) {
 			c.ElapsedSeconds,
 			c.StdoutBytes,
 			c.StderrBytes,
-			c.LastOutputLine,
+			last,
 		)
 	}
 }
