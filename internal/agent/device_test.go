@@ -1,6 +1,9 @@
 package agent
 
 import (
+	"reflect"
+	"regexp"
+	"strings"
 	"testing"
 	"time"
 
@@ -345,5 +348,68 @@ func TestResolvedWorkerCount_IsClampedToTheMaximum(t *testing.T) {
 	exact := MaxWorkerCount
 	if got := (Device{WorkerCount: &exact}).ResolvedWorkerCount(); got != MaxWorkerCount {
 		t.Errorf("ResolvedWorkerCount() = %d at the maximum", got)
+	}
+}
+
+// Every Device field whose JSON name says it is a credential is listed in
+// SecretConfigKeys and masked by Redacted; every listed key is a real field.
+// A credential field added without either is caught here, not in a bundle.
+func TestSecretConfigKeys_CoverEveryCredentialField(t *testing.T) {
+	credential := regexp.MustCompile(`(?i)secret|token|password|credential|_key$|^key$`)
+	listed := map[string]bool{}
+	for _, k := range SecretConfigKeys {
+		listed[k] = true
+	}
+	fields := map[string]reflect.StructField{}
+	var filled Device
+	v := reflect.ValueOf(&filled).Elem()
+	for i := 0; i < v.NumField(); i++ {
+		f := v.Type().Field(i)
+		name := strings.Split(f.Tag.Get("json"), ",")[0]
+		if name == "" || name == "-" {
+			continue
+		}
+		fields[name] = f
+		if f.Type.Kind() == reflect.String {
+			v.Field(i).SetString("value-of-" + name)
+		}
+	}
+	for name, f := range fields {
+		// A credential is a string; sas_token_lifetime_hours is an int.
+		if f.Type.Kind() == reflect.String && credential.MatchString(name) && !listed[name] {
+			t.Errorf("%s (%s) looks like a credential and is not in SecretConfigKeys", name, f.Name)
+		}
+	}
+	for k := range listed {
+		if _, ok := fields[k]; !ok {
+			t.Errorf("SecretConfigKeys lists %q, which is not a Device field", k)
+		}
+	}
+	redacted := reflect.ValueOf(filled.Redacted())
+	for i := 0; i < redacted.NumField(); i++ {
+		f := redacted.Type().Field(i)
+		name := strings.Split(f.Tag.Get("json"), ",")[0]
+		if f.Type.Kind() != reflect.String {
+			continue
+		}
+		got := redacted.Field(i).String()
+		switch {
+		case listed[name] && got != RedactedValue:
+			t.Errorf("Redacted leaves %s as %q", name, got)
+		case name == "proxy_url" && got != "[unparseable proxy URL withheld]":
+			t.Errorf("Redacted leaves proxy_url as %q", got)
+		case !listed[name] && name != "proxy_url" && got != "value-of-"+name:
+			t.Errorf("Redacted changed %s to %q", name, got)
+		}
+	}
+	// The receiver is a copy.
+	if filled.SharedAccessKey != "value-of-shared_access_key" {
+		t.Error("Redacted modified the receiver")
+	}
+	if (Device{}).Redacted().SharedAccessKey != "" {
+		t.Error("an unset credential was replaced")
+	}
+	if got := (Device{ProxyURL: "http://user:pw@proxy:3128"}).Redacted().ProxyURL; got != "http://user:xxxxx@proxy:3128" {
+		t.Errorf("proxy_url %q", got)
 	}
 }

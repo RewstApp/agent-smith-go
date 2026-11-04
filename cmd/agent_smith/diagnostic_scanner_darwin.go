@@ -5,7 +5,6 @@ package main
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 )
@@ -21,7 +20,8 @@ func formatServiceName(orgId string) string {
 func fallbackScanAgents(_ string) []agentInfo { return nil }
 
 // queryServiceStatus checks the plist file for installation and launchctl print
-// for running state. Returns (installed, running).
+// (bounded by diagnosticCommandTimeout) for running state. Returns
+// (installed, running).
 func queryServiceStatus(name string) (bool, bool) {
 	plistPath := filepath.Join("/Library/LaunchDaemons", fmt.Sprintf("%s.plist", name))
 	if _, err := os.Stat(plistPath); err != nil {
@@ -30,9 +30,7 @@ func queryServiceStatus(name string) (bool, bool) {
 
 	// "launchctl print system/<name>" outputs a plist-style dict; parse the
 	// "state = running" line — consistent with IsActive() in service_darwin.go.
-	// #nosec G204 - launchctl is a fixed system binary; name comes from internal config
-	out, err := exec.Command("launchctl", "print", fmt.Sprintf("system/%s", name)).
-		CombinedOutput()
+	out, err := diagnosticCommand("launchctl", "print", fmt.Sprintf("system/%s", name))
 	if err != nil {
 		// Plist exists but service is not loaded — installed, stopped
 		return true, false

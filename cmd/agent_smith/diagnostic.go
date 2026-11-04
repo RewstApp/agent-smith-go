@@ -24,6 +24,17 @@ import (
 	"github.com/hashicorp/go-hclog"
 )
 
+// diagOut is where every diagnostic section prints: the console, or the
+// console and a buffer while --diagnostic --bundle captures the sections into
+// the archive (sc-129690).
+var diagOut io.Writer = os.Stdout
+
+// dprintf, dprintln and dprint write to diagOut. A console write that fails
+// has nowhere better to be reported, so the result is discarded here, once.
+func dprintf(format string, a ...any) { _, _ = fmt.Fprintf(diagOut, format, a...) }
+func dprintln(a ...any)               { _, _ = fmt.Fprintln(diagOut, a...) }
+func dprint(a ...any)                 { _, _ = fmt.Fprint(diagOut, a...) }
+
 // tlsDialer abstracts TLS connectivity checks so tests can inject fakes.
 type tlsDialer interface {
 	Dial(host, port string) bool
@@ -59,6 +70,30 @@ type osLogFileOpener struct{}
 // across a rotation.
 var liveLogOutput io.Writer = os.Stdout
 
+const (
+	// diagnosticCommandTimeout bounds every shell-out the diagnostic makes to
+	// the service manager - the installed-agent scan's status queries, the
+	// Windows SCM fallback scan and the bundle's service.txt - so a wedged SCM
+	// or a D-Bus stall fails one query instead of hanging the whole run
+	// (sc-129690), the same bound the host-info and service packages apply.
+	diagnosticCommandTimeout = 30 * time.Second
+	// diagnosticCommandWaitDelay backs the kill up: a descendant that escaped
+	// the kill but still holds the output pipe is abandoned after it.
+	diagnosticCommandWaitDelay = time.Second
+)
+
+// diagnosticCommand runs one service-manager query under
+// diagnosticCommandTimeout and returns its combined output.
+func diagnosticCommand(name string, args ...string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), diagnosticCommandTimeout)
+	defer cancel()
+	// #nosec G204 - fixed service-manager binaries; the arguments come from
+	// the agent's own service naming.
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.WaitDelay = diagnosticCommandWaitDelay
+	return cmd.CombinedOutput()
+}
+
 type agentInfo struct {
 	OrgId       string
 	ConfigFile  string
@@ -69,6 +104,20 @@ type agentInfo struct {
 }
 
 func runDiagnostic(params *diagnosticContext) {
+	if params.Bundle {
+		path, err := runDiagnosticBundle(context.Background(), params, bundleEnv{
+			root:     getAgentDataRoot(),
+			fallback: fallbackScanAgents,
+			dialer:   &defaultTLSDialer{},
+		})
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "Diagnostic bundle failed:", err)
+			os.Exit(1)
+		}
+		dprintln()
+		dprintf("Diagnostic bundle written: %s\n", path)
+		return
+	}
 	runDiagnosticFull(
 		context.Background(),
 		params,
@@ -101,8 +150,8 @@ func runDiagnosticFull(
 	}
 
 	if len(agents) == 0 && params.OrgId == "" {
-		fmt.Println("\n  No installed agents found.")
-		fmt.Println("  Use --org-id <ORG_ID> --diagnostic to diagnose a specific organization.")
+		dprintln("\n  No installed agents found.")
+		dprintln("  Use --org-id <ORG_ID> --diagnostic to diagnose a specific organization.")
 		return
 	}
 
@@ -136,7 +185,7 @@ selectLoop:
 		} else {
 			selected, ok := selectAgent(reader, agents)
 			if !ok {
-				fmt.Println("\n  Exiting diagnostic mode.")
+				dprintln("\n  Exiting diagnostic mode.")
 				return
 			}
 			target = selected
@@ -154,7 +203,7 @@ selectLoop:
 			case "3":
 				runConnectivityTestWith(target, dialer)
 			case "4":
-				runTempDirTest(target)
+				runTempDirTest(target, agent.GetDataDirectory(target.OrgId))
 			case "5":
 				runLiveLogsWith(ctx, target, opener)
 			case "6":
@@ -167,22 +216,22 @@ selectLoop:
 				if hasMultiple {
 					continue selectLoop
 				}
-				fmt.Println("\n  Exiting diagnostic mode.")
+				dprintln("\n  Exiting diagnostic mode.")
 				return
 			default:
-				fmt.Println("\n  Invalid option. Please try again.")
+				dprintln("\n  Invalid option. Please try again.")
 			}
 		}
 	}
 }
 
 func printHeader() {
-	fmt.Println()
-	fmt.Println("  ╔══════════════════════════════════════════════════╗")
-	fmt.Println("  ║         Agent Smith Diagnostic Mode              ║")
-	fmt.Printf("  ║         Version: %-31s ║\n", version.Version)
-	fmt.Printf("  ║         Platform: %-30s ║\n", runtime.GOOS+"/"+runtime.GOARCH)
-	fmt.Println("  ╚══════════════════════════════════════════════════╝")
+	dprintln()
+	dprintln("  ╔══════════════════════════════════════════════════╗")
+	dprintln("  ║         Agent Smith Diagnostic Mode              ║")
+	dprintf("  ║         Version: %-31s ║\n", version.Version)
+	dprintf("  ║         Platform: %-30s ║\n", runtime.GOOS+"/"+runtime.GOARCH)
+	dprintln("  ╚══════════════════════════════════════════════════╝")
 }
 
 func printMenu(target agentInfo, hasMultiple bool) {
@@ -190,21 +239,21 @@ func printMenu(target agentInfo, hasMultiple bool) {
 	if hasMultiple {
 		lastOption = "  │  [0] Back                                        │"
 	}
-	fmt.Println()
-	fmt.Println("  ┌──────────────────────────────────────────────────┐")
-	fmt.Println("  │  Diagnostic Options                              │")
-	fmt.Println("  ├──────────────────────────────────────────────────┤")
-	fmt.Println("  │  [1] Check service status                        │")
-	fmt.Println("  │  [2] Test command execution                      │")
-	fmt.Println("  │  [3] Test MQTT/WebSocket connectivity            │")
-	fmt.Println("  │  [4] Test temp directory write access            │")
-	fmt.Println("  │  [5] View live log data                          │")
-	fmt.Println("  │  [6] Run all checks                              │")
-	fmt.Println("  │  [7] Show host information                       │")
-	fmt.Println("  │  [8] Show fleet health (as reported to the twin) │")
-	fmt.Println(lastOption)
-	fmt.Println("  └──────────────────────────────────────────────────┘")
-	fmt.Printf("  Current agent: %s\n", target.OrgId)
+	dprintln()
+	dprintln("  ┌──────────────────────────────────────────────────┐")
+	dprintln("  │  Diagnostic Options                              │")
+	dprintln("  ├──────────────────────────────────────────────────┤")
+	dprintln("  │  [1] Check service status                        │")
+	dprintln("  │  [2] Test command execution                      │")
+	dprintln("  │  [3] Test MQTT/WebSocket connectivity            │")
+	dprintln("  │  [4] Test temp directory write access            │")
+	dprintln("  │  [5] View live log data                          │")
+	dprintln("  │  [6] Run all checks                              │")
+	dprintln("  │  [7] Show host information                       │")
+	dprintln("  │  [8] Show fleet health (as reported to the twin) │")
+	dprintln(lastOption)
+	dprintln("  └──────────────────────────────────────────────────┘")
+	dprintf("  Current agent: %s\n", target.OrgId)
 }
 
 // prompt reads one choice. When the input has ended (choices piped in have run
@@ -213,23 +262,23 @@ func printMenu(target agentInfo, hasMultiple bool) {
 // "Invalid option", and the menu would print itself in a loop until killed
 // (sc-131253: the e2e suite pipes the menu choices in).
 func prompt(reader *bufio.Reader, message string) string {
-	fmt.Print(message)
+	dprint(message)
 	input, err := reader.ReadString('\n')
 	if err != nil && strings.TrimSpace(input) == "" {
-		fmt.Println()
+		dprintln()
 		return "0"
 	}
 	return strings.TrimSpace(input)
 }
 
 func selectAgent(reader *bufio.Reader, agents []agentInfo) (agentInfo, bool) {
-	fmt.Println("\n  Multiple agents found. Select one to diagnose:")
-	fmt.Println()
+	dprintln("\n  Multiple agents found. Select one to diagnose:")
+	dprintln()
 	for i, a := range agents {
-		fmt.Printf("  [%d] %s\n", i+1, a.OrgId)
+		dprintf("  [%d] %s\n", i+1, a.OrgId)
 	}
-	fmt.Printf("  [0] Exit\n")
-	fmt.Println()
+	dprintf("  [0] Exit\n")
+	dprintln()
 
 	for {
 		choice := prompt(reader, "  Select agent number: ")
@@ -240,7 +289,7 @@ func selectAgent(reader *bufio.Reader, agents []agentInfo) (agentInfo, bool) {
 		if _, err := fmt.Sscanf(choice, "%d", &idx); err == nil && idx >= 1 && idx <= len(agents) {
 			return agents[idx-1], true
 		}
-		fmt.Println("  Invalid selection. Please try again.")
+		dprintln("  Invalid selection. Please try again.")
 	}
 }
 
@@ -328,8 +377,8 @@ func runCommandTest() {
 	printSection("Command Execution Test")
 
 	shell, args := getTestCommand()
-	fmt.Printf("    Shell: %s\n", shell)
-	fmt.Printf("    Command: %s %s\n", shell, strings.Join(args, " "))
+	dprintf("    Shell: %s\n", shell)
+	dprintf("    Command: %s %s\n", shell, strings.Join(args, " "))
 
 	start := time.Now()
 	cmd := exec.Command(shell, args...) // #nosec G204 - diagnostic tool uses known shell commands
@@ -339,13 +388,13 @@ func runCommandTest() {
 	if err != nil {
 		printResult(false, fmt.Sprintf("Command execution failed: %v", err))
 		if len(output) > 0 {
-			fmt.Printf("    Output: %s\n", strings.TrimSpace(string(output)))
+			dprintf("    Output: %s\n", strings.TrimSpace(string(output)))
 		}
 		return
 	}
 
 	printResult(true, fmt.Sprintf("Command executed successfully (%s)", elapsed))
-	fmt.Printf("    Output: %s\n", strings.TrimSpace(string(output)))
+	dprintf("    Output: %s\n", strings.TrimSpace(string(output)))
 }
 
 // ── Check 3: MQTT/WebSocket connectivity ──
@@ -355,7 +404,7 @@ func runConnectivityTestWith(target agentInfo, dialer tlsDialer) {
 
 	if target.Device == nil {
 		printResult(false, "No config loaded - cannot determine MQTT host")
-		fmt.Println("    Ensure the agent has been configured and config.json exists.")
+		dprintln("    Ensure the agent has been configured and config.json exists.")
 		return
 	}
 
@@ -365,9 +414,9 @@ func runConnectivityTestWith(target agentInfo, dialer tlsDialer) {
 		return
 	}
 
-	fmt.Printf("    Host: %s\n", host)
+	dprintf("    Host: %s\n", host)
 	r := checkConnectivity(*target.Device, dialer)
-	fmt.Printf("    Proxy: %s\n", r.proxyLine())
+	dprintf("    Proxy: %s\n", r.proxyLine())
 	if r.proxyErr != nil {
 		printResult(false, fmt.Sprintf("proxy_url is invalid and is ignored: %v", r.proxyErr))
 	}
@@ -381,11 +430,11 @@ func runConnectivityTestWith(target agentInfo, dialer tlsDialer) {
 	}
 	if r.chosen == "" {
 		printResult(false, "No transport reaches the hub")
-		fmt.Println()
-		fmt.Println("    Troubleshooting tips:")
-		fmt.Println("    - Check firewall rules for outbound ports 8883 and 443")
-		fmt.Println("    - Verify DNS resolution for", host)
-		fmt.Println("    - Set proxy_url (--proxy-url on --update) if egress needs a proxy")
+		dprintln()
+		dprintln("    Troubleshooting tips:")
+		dprintln("    - Check firewall rules for outbound ports 8883 and 443")
+		dprintln("    - Verify DNS resolution for", host)
+		dprintln("    - Set proxy_url (--proxy-url on --update) if egress needs a proxy")
 		return
 	}
 	printResult(true, "The agent connects with "+r.chosen)
@@ -434,16 +483,18 @@ func checkConnectivity(device agent.Device, dialer tlsDialer) connectivityResult
 		}
 	}
 
-	fmt.Printf("    Testing MQTT (TLS port 8883, direct)... ")
+	dprintf("    Testing MQTT (TLS port 8883, direct)... ")
 	r.direct8883 = dialer.Dial(host, "8883")
-	fmt.Println(okOrFailed(r.direct8883))
-	fmt.Printf("    Testing WebSocket (port 443, direct)... ")
+	dprintln(okOrFailed(r.direct8883))
+	dprintf("    Testing WebSocket (port 443, direct)... ")
 	r.direct443 = dialer.Dial(host, "443")
-	fmt.Println(okOrFailed(r.direct443))
+	dprintln(okOrFailed(r.direct443))
 	if r.proxy != nil {
-		fmt.Printf("    Testing WebSocket (port 443) through %s... ", utils.DescribeProxy(r.proxy))
+		dprintf("    Testing WebSocket (port 443) through %s... ",
+			utils.DescribeProxy(r.proxy),
+		)
 		r.proxied443 = dialer.DialViaProxy(r.proxy, host, "443")
-		fmt.Println(okOrFailed(r.proxied443))
+		dprintln(okOrFailed(r.proxied443))
 	}
 
 	// The transport the agent would use: the first broker, in the agent's own
@@ -512,13 +563,16 @@ func testTLSConnection(host, port string) bool {
 
 // ── Check 4: Temp directory write test ──
 
-func runTempDirTest(target agentInfo) {
+// runTempDirTest checks the scripts directory is writable and the data
+// directory (dataDir, resolved by the caller so the bundle checks the one it
+// reads from) exists.
+func runTempDirTest(target agentInfo, dataDir string) {
 	printSection("Temp Directory Write Test")
 
 	scriptsDir := agent.GetScriptsDirectory(target.OrgId)
 
 	// Test creating the scripts directory
-	fmt.Printf("    Scripts directory: %s\n", scriptsDir)
+	dprintf("    Scripts directory: %s\n", scriptsDir)
 
 	err := utils.EnsureSecureDir(scriptsDir)
 	if err != nil {
@@ -551,8 +605,7 @@ func runTempDirTest(target agentInfo) {
 	_ = os.Remove(testFile)
 
 	// Also check the data directory
-	dataDir := agent.GetDataDirectory(target.OrgId)
-	fmt.Printf("    Data directory: %s\n", dataDir)
+	dprintf("    Data directory: %s\n", dataDir)
 	if info, err := os.Stat(dataDir); err != nil {
 		printResult(false, fmt.Sprintf("Data directory does not exist: %v", err))
 	} else if !info.IsDir() {
@@ -568,16 +621,14 @@ func runLiveLogsWith(ctx context.Context, target agentInfo, opener logFileOpener
 	printSection("Live Log Viewer")
 
 	logFile := target.LogFile
-	fmt.Printf("    Log file: %s\n", logFile)
-	fmt.Println("    Press Ctrl+C to stop watching.")
-	fmt.Println()
+	dprintf("    Log file: %s\n", logFile)
+	dprintln("    Press Ctrl+C to stop watching.")
+	dprintln()
 
 	rc, err := opener.Open(logFile)
 	if err != nil {
 		printResult(false, fmt.Sprintf("Cannot open log file: %v", err))
-		fmt.Println(
-			"    The agent may not have been started yet, or the log file path is incorrect.",
-		)
+		dprintln("    The agent may not have been started yet, or the log file path is incorrect.")
 		return
 	}
 	defer func() { _ = rc.Close() }()
@@ -694,7 +745,7 @@ func runAllChecksWith(
 	runCheckServiceStatus(params, target)
 	runCommandTest()
 	runConnectivityTestWith(target, dialer)
-	runTempDirTest(target)
+	runTempDirTest(target, agent.GetDataDirectory(target.OrgId))
 	runHostInfo(ctx, params, target)
 	runFleetHealth(target)
 }
@@ -705,8 +756,15 @@ func runAllChecksWith(
 // the device twin (sc-129687), read from the file it leaves beside the
 // journal, so what the machine says can be compared with what Rewst sees.
 func runFleetHealth(target agentInfo) {
-	printSection("Fleet Health")
 	props, err := readHealthFile(target.OrgId)
+	printFleetHealth(props, err, true)
+}
+
+// printFleetHealth prints the Fleet Health section from a health file read
+// (props, err). withOutput false withholds each running command's last output
+// line: the diagnostic bundle carries no command output (sc-129690).
+func printFleetHealth(props *mqtt.ReportedProperties, err error, withOutput bool) {
+	printSection("Fleet Health")
 	if err != nil {
 		printResult(
 			false,
@@ -728,38 +786,48 @@ func runFleetHealth(target agentInfo) {
 			health.LastConnectionError,
 		),
 	)
-	fmt.Printf(
-		"    journal: pending=%d degraded=%t expired_total=%d interrupted_total=%d\n",
+	dprintf("    journal: pending=%d degraded=%t expired_total=%d interrupted_total=%d\n",
 		health.Journal.Pending,
 		health.Journal.Degraded,
 		health.Journal.ExpiredTotal,
 		health.Journal.InterruptedTotal,
 	)
-	fmt.Printf("    spool: entries=%d dropped expired=%d capacity=%d attempts=%d corrupt=%d\n",
-		health.Spool.Entries, health.Spool.DroppedExpired, health.Spool.DroppedCapacity,
-		health.Spool.DroppedAttempts, health.Spool.DroppedCorrupt)
-	fmt.Printf("    commands: executing=%d completed_total=%d timed_out_total=%d failed_total=%d\n",
-		health.Commands.Executing, health.Commands.CompletedTotal, health.Commands.TimedOutTotal,
-		health.Commands.FailedTotal)
+	dprintf("    spool: entries=%d dropped expired=%d capacity=%d attempts=%d corrupt=%d\n",
+		health.Spool.Entries,
+		health.Spool.DroppedExpired,
+		health.Spool.DroppedCapacity,
+		health.Spool.DroppedAttempts,
+		health.Spool.DroppedCorrupt,
+	)
+	dprintf("    commands: executing=%d completed_total=%d timed_out_total=%d failed_total=%d\n",
+		health.Commands.Executing,
+		health.Commands.CompletedTotal,
+		health.Commands.TimedOutTotal,
+		health.Commands.FailedTotal,
+	)
 	if len(health.Plugins) == 0 {
-		fmt.Println("    plugins: none")
+		dprintln("    plugins: none")
 	}
 	for _, p := range health.Plugins {
-		fmt.Printf("    plugin %s: restarts=%d notify_failures=%d notify_timeouts=%d\n",
+		dprintf("    plugin %s: restarts=%d notify_failures=%d notify_timeouts=%d\n",
 			p.Name, p.Restarts, p.NotifyFailures, p.NotifyTimeouts)
 	}
 	if props.Commands == nil || len(props.Commands.InFlight) == 0 {
-		fmt.Println("    in flight: none at the last report")
+		dprintln("    in flight: none at the last report")
 	}
 	for _, c := range inFlightOrNone(props.Commands) {
-		fmt.Printf(
+		last := c.LastOutputLine
+		if !withOutput && last != "" {
+			last = bundleWithheld
+		}
+		dprintf(
 			"    in flight %s: started %s, elapsed %ds, stdout %d B, stderr %d B, last line %q\n",
 			c.PostID,
 			c.StartedAt,
 			c.ElapsedSeconds,
 			c.StdoutBytes,
 			c.StderrBytes,
-			c.LastOutputLine,
+			last,
 		)
 	}
 }
@@ -787,19 +855,21 @@ func runHostInfo(ctx context.Context, params *diagnosticContext, target agentInf
 	}
 
 	printResult(true, "Host information collected")
-	fmt.Printf("      Hostname:                 %s\n", strOrNA(info.HostName))
-	fmt.Printf("      MAC Address:              %s\n", ptrOrNA(info.MacAddress))
-	fmt.Printf("      Operating System:         %s\n", strOrNA(info.OperatingSystem))
-	fmt.Printf("      CPU Model:                %s\n", strOrNA(info.CpuModel))
-	fmt.Printf("      RAM (GB):                 %s\n", strOrNA(info.RamGb))
-	fmt.Printf("      Agent Version:            %s\n", strOrNA(info.AgentVersion))
-	fmt.Printf("      Agent Executable Path:    %s\n", strOrNA(info.AgentExecutablePath))
-	fmt.Printf("      Service Executable Path:  %s\n", strOrNA(info.ServiceExecutablePath))
-	fmt.Printf("      AD Domain:                %s\n", ptrOrNA(info.AdDomain))
-	fmt.Printf("      AD Domain Controller:     %v\n", info.IsAdDomainController)
-	fmt.Printf("      Entra Connect Server:     %v\n", info.IsEntraConnectServer)
-	fmt.Printf("      Entra Domain:             %s\n", ptrOrNA(info.EntraDomain))
-	fmt.Printf("      Org ID:                   %s\n", strOrNA(info.OrgId))
+	dprintf("      Hostname:                 %s\n", strOrNA(info.HostName))
+	dprintf("      MAC Address:              %s\n", ptrOrNA(info.MacAddress))
+	dprintf("      Operating System:         %s\n", strOrNA(info.OperatingSystem))
+	dprintf("      CPU Model:                %s\n", strOrNA(info.CpuModel))
+	dprintf("      RAM (GB):                 %s\n", strOrNA(info.RamGb))
+	dprintf("      Agent Version:            %s\n", strOrNA(info.AgentVersion))
+	dprintf("      Agent Executable Path:    %s\n", strOrNA(info.AgentExecutablePath))
+	dprintf("      Service Executable Path:  %s\n",
+		strOrNA(info.ServiceExecutablePath),
+	)
+	dprintf("      AD Domain:                %s\n", ptrOrNA(info.AdDomain))
+	dprintf("      AD Domain Controller:     %v\n", info.IsAdDomainController)
+	dprintf("      Entra Connect Server:     %v\n", info.IsEntraConnectServer)
+	dprintf("      Entra Domain:             %s\n", ptrOrNA(info.EntraDomain))
+	dprintf("      Org ID:                   %s\n", strOrNA(info.OrgId))
 }
 
 func strOrNA(s string) string {
@@ -819,15 +889,15 @@ func ptrOrNA(s *string) string {
 // ── Formatting helpers ──
 
 func printSection(title string) {
-	fmt.Println()
-	fmt.Printf("  ── %s ──\n", title)
-	fmt.Println()
+	dprintln()
+	dprintf("  ── %s ──\n", title)
+	dprintln()
 }
 
 func printResult(pass bool, message string) {
 	if pass {
-		fmt.Printf("    [PASS] %s\n", message)
+		dprintf("    [PASS] %s\n", message)
 	} else {
-		fmt.Printf("    [FAIL] %s\n", message)
+		dprintf("    [FAIL] %s\n", message)
 	}
 }

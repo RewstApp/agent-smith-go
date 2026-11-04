@@ -6,6 +6,19 @@ import (
 	"github.com/RewstApp/agent-smith-go/internal/utils"
 )
 
+// SecretConfigKeys are the config.json keys whose values are credentials.
+// They are the one list: config mode masks them in the configuration line it
+// logs (Device.Redacted) and the diagnostic bundle replaces them in config.json
+// and scrubs their values from every entry (cmd/agent_smith/bundle.go,
+// sc-129690). A credential field added to Device belongs here and in
+// Redacted; TestSecretConfigKeys_CoverEveryCredentialField refuses a field
+// whose JSON name says credential and is listed in neither.
+var SecretConfigKeys = []string{"shared_access_key", "github_token"}
+
+// RedactedValue replaces a credential wherever the agent writes a
+// configuration for a reader.
+const RedactedValue = "***"
+
 type Device struct {
 	DeviceId             string             `json:"device_id"`
 	RewstOrgId           string             `json:"rewst_org_id"`
@@ -185,6 +198,21 @@ const (
 	// while still guaranteeing every worker is eventually reclaimed.
 	DefaultCommandTimeout = 30 * time.Minute
 )
+
+// Redacted is the device configuration as it may be written to a log: every
+// SecretConfigKeys value that is set replaced by RedactedValue and the proxy
+// URL's credentials masked (utils.RedactURL). The receiver is a copy, so the
+// configuration itself keeps its credentials.
+func (d Device) Redacted() Device {
+	if d.SharedAccessKey != "" {
+		d.SharedAccessKey = RedactedValue
+	}
+	if d.GithubToken != "" {
+		d.GithubToken = RedactedValue
+	}
+	d.ProxyURL = utils.RedactURL(d.ProxyURL)
+	return d
+}
 
 // ResolvedWorkerCount returns the number of command-execution workers to start,
 // honoring the per-device override when set to a positive value (clamped to

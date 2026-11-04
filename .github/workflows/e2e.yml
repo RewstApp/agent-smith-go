@@ -1439,6 +1439,18 @@ jobs:
             [PASS] The agent connects with MQTT over WebSocket (443) through http://agent:xxxxx@127.0.0.1:3128
           ABSENT: s3cret-proxy
 
+      - name: Assert --diagnostic --bundle writes a redacted support archive (sc-129690)
+        timeout-minutes: 5
+        uses: ./.github/actions/it-script
+        with:
+          script: hermetic-assert-bundle
+        env:
+          AGENT_BINARY: ${{ github.workspace }}/dist/${{ matrix.binary }}
+          ORG_ID: ${{ vars.IT_ORG_ID }}
+          LOG_FILE: ${{ matrix.log_file }}
+          BUNDLE_PATH: ${{ runner.temp }}/diagnostic-bundle.zip
+          ABSENT: s3cret-proxy
+
       - name: Dump agent log on failure
         if: failure()
         uses: ./.github/actions/dump-agent-log
