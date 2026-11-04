@@ -1501,7 +1501,7 @@ jobs:
           binary: ${{ matrix.binary }}
           it_binary: ${{ matrix.it_binary }}
           org_id: ${{ vars.IT_ORG_ID }}
-          run: 'TestAutoUpdate|TestSweeps|TestWedgedService|TestUninstall|TestInstall'
+          run: 'TestAutoUpdate|TestReleaseChannels|TestSweeps|TestWedgedService|TestUninstall|TestInstall'
           timeout: 22m
           github_token: ${{ secrets.GITHUB_TOKEN }}
 
