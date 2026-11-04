@@ -185,7 +185,7 @@ func TestReleaseChannels(t *testing.T) {
 	t.Run("BetaFollowsThePrerelease", func(t *testing.T) {
 		updating := h.LogCount("Updating agent")
 		h.Update(h.ITBinary, true, "--release-channel", "beta")
-		cfg := readFile(t, h.ConfigPath())
+		cfg := readTextFile(t, h.ConfigPath())
 		if !strings.Contains(cfg, `"release_channel": "beta"`) {
 			t.Errorf("the config file does not carry the beta channel:\n%s", cfg)
 		}
@@ -206,7 +206,7 @@ func TestReleaseChannels(t *testing.T) {
 		updating := h.LogCount("Updating agent")
 		none := h.LogCount("No updates available")
 		h.Update(h.ITBinary, true, "--release-channel", "stable")
-		cfg := readFile(t, h.ConfigPath())
+		cfg := readTextFile(t, h.ConfigPath())
 		if !strings.Contains(cfg, `"release_channel": "stable"`) {
 			t.Errorf("the config file does not carry the stable channel:\n%s", cfg)
 		}
@@ -223,7 +223,9 @@ func TestReleaseChannels(t *testing.T) {
 	h.Update(h.Binary, false)
 }
 
-func readFile(t *testing.T, path string) string {
+// readTextFile reads a file the harness owns; named apart from the Windows
+// wedge fixture's own readFile.
+func readTextFile(t *testing.T, path string) string {
 	t.Helper()
 	data, err := os.ReadFile(path)
 	if err != nil {
