@@ -14,7 +14,7 @@ Agent Smith runs as a system service on Windows, Linux, and macOS. Installation 
 ### Prerequisites
 
 - A Rewst organization ID
-- Configuration URL and secret from your Rewst platform
+- Configuration URL and secret from your Rewst platform (or your own endpoint: see "Connecting Agent Smith to your workflow or server")
 - Administrative/root privileges for service installation
 
 ### Basic Installation
@@ -50,6 +50,210 @@ Example with optional parameters:
 ```bash
 ./rewst_agent_config --org-id YOUR_ORG_ID --config-url CONFIG_URL --config-secret CONFIG_SECRET --logging-level info --syslog --disable-agent-postback --no-auto-updates --mqtt-qos 1
 ```
+
+## Connecting Agent Smith to your workflow or server
+
+The agent talks to two things you can provide yourself: a **config endpoint**
+it calls once at install, and an **engine** it posts command results to. The
+commands themselves arrive over Azure IoT Hub, which the config endpoint
+points the agent at. Every name below is copied from the code
+(`internal/agent/host.go`, `internal/agent/device.go`,
+`internal/interpreter/message.go`, `internal/interpreter/result.go`), and
+`test/stubconfig` and `test/stubbroker` are working reference
+implementations of the endpoint and the engine - the hermetic e2e suite
+installs and runs real agents against them.
+
+### 1. Install against your endpoint
+
+```bash
+sudo ./rewst_agent_config.linux.bin --org-id YOUR_ORG_ID --config-url https://your.server/configure --config-secret YOUR_SECRET
+```
+
+The agent `POST`s to `--config-url` once, saves the configuration it gets
+back, registers itself as a service and starts. A `408`, `429`, `5xx`, a
+`404` whose body says `Workflow was not found`, or no answer at all is
+retried three times on a jittered backoff; any other non-2xx fails the
+install with the status and a body excerpt (see "Retrying the Config
+Fetch").
+
+### 2. The config request
+
+| | |
+|---|---|
+| Method | `POST` |
+| `Content-Type` | `application/json` |
+| `x-rewst-secret` | the `--config-secret` value |
+| `x-rewst-agent-smith-version` | the agent's version as `MAJOR.MINOR.PATCH` (`1.8.0`; a pre-release suffix is dropped) |
+
+The body is the host's description:
+
+```json
+{
+  "agent_version": "v1.8.0",
+  "agent_executable_path": "/usr/local/bin/rewst_remote_agent/<org>/agent_smith.linux.bin",
+  "service_executable_path": "/usr/local/bin/rewst_remote_agent/<org>/agent_smith.linux.bin",
+  "hostname": "web-01",
+  "mac_address": "00:11:22:33:44:55",
+  "operating_system": "ubuntu 24.04",
+  "cpu_model": "Intel(R) Xeon(R) CPU",
+  "ram_gb": "16",
+  "ad_domain": null,
+  "is_ad_domain_controller": false,
+  "is_entra_connect_server": false,
+  "entra_domain": null,
+  "org_id": "YOUR_ORG_ID"
+}
+```
+
+`mac_address`, `ad_domain` and `entra_domain` are `null` when the host has
+none.
+
+### 3. The config response
+
+Answer `200` with the configuration under one key:
+
+```json
+{
+  "configuration": {
+    "device_id": "web-01-device",
+    "rewst_org_id": "YOUR_ORG_ID",
+    "rewst_engine_host": "engine.your.server",
+    "shared_access_key": "<the device's IoT Hub shared access key, base64>",
+    "azure_iot_hub_host": "your-hub.azure-devices.net"
+  }
+}
+```
+
+| Field | Required | Meaning |
+|---|---|---|
+| `device_id` | yes | the IoT Hub device identity the agent connects as |
+| `rewst_org_id` | yes | the organization; set it to the `--org-id` the agent was installed with |
+| `rewst_engine_host` | yes | the host the agent posts results to (step 6) |
+| `shared_access_key` | yes | the device's IoT Hub shared access key |
+| `azure_iot_hub_host` | yes | the IoT Hub host name |
+| `broker` | no | leave empty: IoT Hub is the only broker the agent speaks to |
+| `plugins` | no | `[{"name": "...", "executable_path": "..."}]` notification plugins; kept as sent |
+| `mqtt_qos` | no | `0` or `1`; kept unless `--mqtt-qos` was given |
+| `logging_level`, `syslog`, `disable_agent_postback`, `disable_auto_updates`, `github_token`, `proxy_url`, `release_channel` and the tuning keys (`command_timeout_seconds`, `worker_count`, `max_output_bytes`, `postback_*`, `log_max_*`, `health_report_interval_seconds`, `command_heartbeat_seconds`, `mqtt_*_timeout_seconds`, `sas_token_lifetime_hours`, `message_queue_size`) | no | **not taken from the endpoint**: at install these are written from the install flags (a tuning key with no flag is left unset, so its documented default applies). Set them with the flags, with `--update`, or later through the device twin |
+
+A `200` whose configuration lacks any of the four required values (what
+the Rewst endpoint answers when its token has expired) is refused with
+`missing required field: device_id` and no retry. The body is read through
+a 10 MiB ceiling. Unknown keys are kept in the saved `config.json`.
+
+### 4. After install
+
+The service connects to `azure_iot_hub_host` over MQTT (8883, or 443 over
+WebSocket through a proxy) as `device_id` with `shared_access_key`, and
+subscribes to `devices/{device_id}/messages/devicebound/#`. Your endpoint's
+job ends at handing out those values; from here the hub carries the
+commands and the engine receives the results. See "How It Works" and
+"Message Delivery Guarantee" for the delivery semantics.
+
+### 5. Command messages (cloud-to-device)
+
+Send a JSON document as the C2D message body:
+
+```json
+{"post_id": "my-run:42", "commands": "<base64 of the UTF-16LE script>"}
+```
+
+| Key | Meaning |
+|---|---|
+| `post_id` | your correlation id; it becomes the path of the result postback (step 6) |
+| `commands` | the script, encoded UTF-16LE and then base64 - the PowerShell `-EncodedCommand` convention. Plain base64 of UTF-8 runs as garbage; plain text fails the decode |
+| `interpreter_override` | `"pwsh"` runs the script with PowerShell 7 (`pwsh`); anything else selects the default - Bash on Linux and macOS, Windows PowerShell (`powershell.exe`) on Windows. A JSON `true`/`false` is accepted but neither selects `pwsh` |
+| `get_installation` | `true` asks for the installation description instead of running a command (below) |
+
+Encoding `commands`:
+
+```powershell
+[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes('echo "hello world"'))
+```
+
+```python
+base64.b64encode('echo "hello world"'.encode("utf-16-le")).decode()
+```
+
+`{"post_id": "my-run:43", "get_installation": true}` posts back the paths
+and the host description instead:
+
+```json
+{
+  "service_executable_path": "...",
+  "agent_executable_path": "...",
+  "config_file_path": "...",
+  "service_manager_path": "...",
+  "tags": { ...the step 2 body... }
+}
+```
+
+### 6. The result postback
+
+| | |
+|---|---|
+| URL | `https://{rewst_engine_host}/webhooks/custom/action/{post_id}`, with every `:` in `post_id` replaced by `/` (`my-run:42` → `.../action/my-run/42`) |
+| Method | `POST` |
+| `Content-Type` | `application/json` |
+| `x-rewst-agent-smith-version` | `MAJOR.MINOR.PATCH` |
+
+```json
+{"error": "", "output": "hello world\n"}
+```
+
+| Field | Present | Meaning |
+|---|---|---|
+| `output`, `error` | always | the command's stdout and stderr |
+| `timed_out` | when `true` | killed at `command_timeout_seconds` |
+| `truncated`, `output_bytes_produced`, `output_bytes_kept` | when truncated | output past `max_output_bytes` was discarded |
+| `interrupted` | when `true` | the agent stopped mid-command and reports it rather than re-running it |
+
+How your engine's answer is read:
+
+| Engine answers | The agent |
+|---|---|
+| `200` | done |
+| `400` with a JSON body whose `error` contains `fulfilled` | done (a duplicate of a result you already have) |
+| `5xx`, or any non-2xx without a JSON `{"error": ...}` body | retries on the postback backoff, then spools the result to disk and re-attempts it on later connections |
+| another `4xx` with a JSON `{"error": "..."}` body | rejected: not retried in line; a spooled entry is abandoned after a bounded number of rejections |
+
+See "Command Result Delivery" for the spool's bounds. `disable_agent_postback`
+turns the postback off entirely.
+
+### 7. A minimal config endpoint
+
+Twenty lines of standard-library Python answer step 2 with step 3:
+
+```python
+import json
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+CONFIG = {"configuration": {
+    "device_id": "web-01-device", "rewst_org_id": "YOUR_ORG_ID",
+    "rewst_engine_host": "engine.your.server",
+    "shared_access_key": "<device key>", "azure_iot_hub_host": "your-hub.azure-devices.net",
+}}
+
+class Configure(BaseHTTPRequestHandler):
+    def do_POST(self):
+        host = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        if self.headers.get("x-rewst-secret") != "YOUR_SECRET":
+            self.send_response(401); self.end_headers(); return
+        print("configuring", host["hostname"], host["org_id"])
+        body = json.dumps(CONFIG).encode()
+        self.send_response(200); self.send_header("Content-Type", "application/json")
+        self.end_headers(); self.wfile.write(body)
+
+HTTPServer(("0.0.0.0", 8080), Configure).serve_forever()
+```
+
+Install with `--config-url http://your.server:8080/configure --config-secret YOUR_SECRET`,
+then send step 5's message to the device through your hub and receive step
+6's postback at `https://engine.your.server/webhooks/custom/action/...`.
+For the whole loop with nothing but the repository, `test/stubconfig` is
+this endpoint and `test/stubbroker` is a hub and engine in one process; the
+`hermetic-*` jobs in `.github/workflows/e2e.yml` show them driving real
+installs.
 
 ## Update
 
