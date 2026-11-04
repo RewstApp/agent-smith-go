@@ -1,13 +1,31 @@
 name: Release
 
-on: workflow_dispatch
+# channel (sc-129692): "stable" (the default) bumps from main and publishes a
+# full release, which every agent on the stable channel takes; "beta" bumps a
+# pre-release ("vX.Y.Z-beta.N", commitizen's pre-release bump under the
+# semver2 scheme in .cz.toml), publishes it as a GitHub pre-release - which
+# releases/latest keeps ignoring, so stable agents never see it - and may run
+# from a branch, so a fix can soak on the beta ring (the Rewst IT org) before
+# the fleet. See the README's "Release channels" section.
+on:
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: "Release channel: stable publishes a full release from main; beta publishes a pre-release"
+        type: choice
+        options: [stable, beta]
+        default: stable
 
 jobs:
   bump:
-    if: github.ref == 'refs/heads/main'
+    if: github.ref == 'refs/heads/main' || inputs.channel == 'beta'
     permissions:
       contents: write
     runs-on: ubuntu-latest
+    # The later jobs build, stamp and publish the tag this job pushed, not
+    # whatever the branch head is by the time they run.
+    outputs:
+      tag: ${{ steps.bump.outputs.tag }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v5
@@ -28,18 +46,37 @@ jobs:
           pipx upgrade commitizen
 
       - name: Bump version and tag
+        id: bump
         run: |
           git config --local user.email "automated_builds@rewst.io"
           git config --local user.name "Rewst GitHub Actions"
-          NEXT_VERSION=$(cz bump --yes --get-next)
+          if [ "${{ inputs.channel }}" = "beta" ]; then
+            # A beta is numbered from the highest tag reachable from HEAD, so a
+            # branch that does not contain main's latest stable release would
+            # produce a beta that orders below it and no beta device would
+            # ever install. Refuse that before the (irreversible) tag push.
+            git fetch --quiet origin main
+            LATEST_STABLE=$(git tag --merged origin/main --list 'v*' | grep -v -- '-' | sort -V | tail -1)
+            if [ -n "$LATEST_STABLE" ] && ! git merge-base --is-ancestor "$LATEST_STABLE" HEAD; then
+              echo "::error::$GITHUB_REF_NAME does not contain main's latest stable release $LATEST_STABLE; a beta cut here would order below it. Merge or rebase main first."
+              exit 1
+            fi
+            NEXT_VERSION=$(cz bump --yes --get-next --prerelease beta)
+          else
+            NEXT_VERSION=$(cz bump --yes --get-next)
+          fi
+          echo "Tagging v$NEXT_VERSION on the ${{ inputs.channel }} channel"
           git tag "v$NEXT_VERSION"
           git push --tags
+          echo "tag=v$NEXT_VERSION" >> "$GITHUB_OUTPUT"
 
   build:
     needs: bump
     permissions:
       contents: read
     uses: ./.github/workflows/build.yml
+    with:
+      ref: ${{ needs.bump.outputs.tag }}
 
   sign:
     needs: build
@@ -54,7 +91,7 @@ jobs:
       ssl_com_environment_name: ${{ secrets.SSL_COM_ENVIRONMENT_NAME }}
 
   release:
-    needs: sign
+    needs: [bump, sign]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -62,7 +99,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v5
         with:
-          ref: ${{ github.ref }}
+          ref: ${{ needs.bump.outputs.tag }}
           fetch-depth: 0
 
       - name: Setup python
@@ -85,7 +122,9 @@ jobs:
         run: |
           VERSION="${{ steps.extract_version.outputs.version }}"
           cz changelog --dry-run > full_changelog.md
-          awk -v ver="## $VERSION" 'p && /^## /{ exit } $0 ~ ver{ p=1 } p' full_changelog.md > release_notes.md
+          # The heading is "## vX.Y.Z (date)": matched as a literal prefix with
+          # its trailing space, so "## v1.8.0" cannot pick up "## v1.8.0-beta.0".
+          awk -v ver="## $VERSION " 'p && /^## /{ exit } index($0, ver) == 1 { p=1 } p' full_changelog.md > release_notes.md
 
       - name: Download windows signed assets
         uses: actions/download-artifact@v8
@@ -108,6 +147,8 @@ jobs:
       - name: Create release and upload files
         shell: pwsh
         run: |
-          gh release create ${{ steps.extract_version.outputs.version }} --title "${{ steps.extract_version.outputs.version }}" --notes-file release_notes.md (Get-Item ./signed/*)
+          $prerelease = @()
+          if ('${{ inputs.channel }}' -eq 'beta') { $prerelease = @('--prerelease') }
+          gh release create ${{ steps.extract_version.outputs.version }} --title "${{ steps.extract_version.outputs.version }}" --notes-file release_notes.md @prerelease (Get-Item ./signed/*)
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

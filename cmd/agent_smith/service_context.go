@@ -117,6 +117,8 @@ type serviceContext struct {
 	lastAttemptAt time.Time
 	publishFailed bool
 	lastFileIDs   []string
+	// lastFileChannel is the release channel the health file last carried.
+	lastFileChannel string
 	// Runtime settings from the device twin (sc-129688): settings is the
 	// device configuration in effect, which the twin can change after
 	// startup; rootLogger is the logger whose level logging_level sets;

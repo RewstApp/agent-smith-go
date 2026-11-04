@@ -413,3 +413,22 @@ func TestSecretConfigKeys_CoverEveryCredentialField(t *testing.T) {
 		t.Errorf("proxy_url %q", got)
 	}
 }
+
+func TestReleaseChannel(t *testing.T) {
+	if got := (Device{}).ResolvedReleaseChannel(); got != ReleaseChannelStable {
+		t.Errorf("empty resolves to %q, want stable", got)
+	}
+	if got := (Device{ReleaseChannel: ReleaseChannelBeta}).ResolvedReleaseChannel(); got != ReleaseChannelBeta {
+		t.Errorf("beta resolves to %q", got)
+	}
+	for _, ok := range []string{ReleaseChannelStable, ReleaseChannelBeta} {
+		if err := ValidateReleaseChannel(ok); err != nil {
+			t.Errorf("%s refused: %v", ok, err)
+		}
+	}
+	for _, bad := range []string{"", "Beta", "nightly", "stable "} {
+		if err := ValidateReleaseChannel(bad); err == nil {
+			t.Errorf("%q accepted", bad)
+		}
+	}
+}

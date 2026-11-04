@@ -80,6 +80,22 @@ func (svc *serviceContext) loadConfig() (agent.Device, error) {
 	return device, nil
 }
 
+// validReleaseChannel is the saved release_channel as the service follows it
+// (sc-129692): a value that is not a channel name would be followed as
+// stable while being reported verbatim in the twin, so it is reported once
+// at start and reset to stable, the way an invalid proxy_url is set aside.
+// An empty value stays empty (ResolvedReleaseChannel reads it as stable).
+func validReleaseChannel(saved string, logger hclog.Logger) string {
+	if saved == "" {
+		return ""
+	}
+	if err := agent.ValidateReleaseChannel(saved); err != nil {
+		logger.Error("Ignoring the configured release_channel; following stable", "error", err)
+		return agent.ReleaseChannelStable
+	}
+	return saved
+}
+
 // loadLog opens the agent's log file for appending through a size-bounded
 // rotating writer. The log used to be a bare append-only *os.File that nothing
 // ever rotated, truncated or swept, so on a long-lived endpoint it grew for the
@@ -194,6 +210,7 @@ func (svc *serviceContext) Execute(
 	// connection cycle, so it is reported and set aside instead.
 	// It is resolved once, here, and handed to everything that dials; this is
 	// the one place an invalid value is handled.
+	device.ReleaseChannel = validReleaseChannel(device.ReleaseChannel, logger)
 	device.ProxyURL = strings.TrimSpace(device.ProxyURL)
 	proxy, err := device.Proxy()
 	if err != nil {
@@ -760,16 +777,16 @@ func (svc *serviceContext) runCycle(
 		)
 	}
 
-	err = mqtt.UpdateReportedProperties(client, mqtt.ReportedProperties{
-		// Tag form ("v1.5.7"), intentionally unlike the bare-number HTTP header and
-		// AGENT_SMITH_VERSION variable: the twin has always carried the release tag
-		// and Rewst-side consumers key on it. See version.Version / version.Number.
-		AgentVersion: version.Version,
-	}, utils.MqttPublishTimeout)
+	base := svc.reportedBase()
+	err = mqtt.UpdateReportedProperties(client, base, utils.MqttPublishTimeout)
 	if err != nil {
 		logger.Warn("Failed to update device twin reported properties", "error", err)
 	} else {
-		logger.Info("Device twin reported properties updated", "agent_version", version.Version)
+		logger.Info(
+			"Device twin reported properties updated",
+			"agent_version", base.AgentVersion,
+			"release_channel", base.ReleaseChannel,
+		)
 	}
 
 	// Raised first during teardown (registered after the MQTT teardown defer so

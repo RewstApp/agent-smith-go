@@ -159,6 +159,52 @@ func TestHealthSnapshot_GathersEveryCounter(t *testing.T) {
 	}
 }
 
+// A twin-driven release channel change rewrites the health file even when
+// the health object itself is unchanged (sc-129692).
+func TestReportHealth_RewritesTheFileWhenTheChannelChanges(t *testing.T) {
+	svc, pub := newHealthTestService(t)
+	notifier := &mockNotifierWrapper{}
+	logger := hclog.NewNullLogger()
+	path := filepath.Join(svc.healthDir(), healthFileName)
+	channelInFile := func() string {
+		t.Helper()
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("health file: %v", err)
+		}
+		var props mqtt.ReportedProperties
+		if err := json.Unmarshal(raw, &props); err != nil {
+			t.Fatalf("health file %s: %v", raw, err)
+		}
+		return props.ReleaseChannel
+	}
+
+	svc.setLiveDevice(agent.Device{ReleaseChannel: agent.ReleaseChannelStable})
+	if !svc.reportHealth(context.Background(), nil, notifier, logger, reportConnected) {
+		t.Fatal("the connected report was not published")
+	}
+	if got := channelInFile(); got != "stable" {
+		t.Errorf("file carries channel %q, want stable", got)
+	}
+	if svc.reportHealth(context.Background(), nil, notifier, logger, reportHealthTick) {
+		t.Error("an unchanged health and channel was published again")
+	}
+
+	svc.setLiveDevice(agent.Device{ReleaseChannel: agent.ReleaseChannelBeta})
+	if !svc.reportHealth(context.Background(), nil, notifier, logger, reportHealthTick) {
+		t.Fatal("the channel change was not reported")
+	}
+	if got := channelInFile(); got != "beta" {
+		t.Errorf("file carries channel %q after the change, want beta", got)
+	}
+	if last := pub.published[pub.count()-1]; last.ReleaseChannel != "beta" {
+		t.Errorf("published channel %q, want beta", last.ReleaseChannel)
+	}
+	if svc.reportHealth(context.Background(), nil, notifier, logger, reportHealthTick) {
+		t.Error("the same channel was reported again")
+	}
+}
+
 func TestHealthSnapshot_WithoutJournalSpoolOrStats(t *testing.T) {
 	svc := &serviceContext{OrgId: "bare", Executor: &funcExecutor{}}
 	h := svc.healthSnapshot(&mockNotifierWrapper{})

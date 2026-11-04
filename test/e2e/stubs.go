@@ -99,6 +99,10 @@ type releaseStub struct {
 	mu          sync.Mutex
 	ok          bool
 	requests    []releaseRequest
+	// prereleases are served by the releases list only (sc-129692), the way
+	// GitHub's releases/latest never answers with a pre-release: the beta
+	// channel sees them, the stable channel does not.
+	prereleases []string
 }
 
 type releaseRequest struct {
@@ -118,25 +122,52 @@ func newReleaseStub(t *testing.T, tag, assetName, assetDigest string) *releaseSt
 		w.Header().Set("Content-Type", "application/octet-stream")
 		_, _ = w.Write([]byte(stubAssetContent))
 	})
-	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+	release := func(id int, tag string, prerelease bool) map[string]any {
+		assets := []map[string]any{}
+		if s.assetName != "" {
+			asset := map[string]any{"id": id, "name": s.assetName, "url": s.srv.URL + "/download"}
+			if s.assetDigest != "" {
+				asset["digest"] = s.assetDigest
+			}
+			assets = append(assets, asset)
+		}
+		return map[string]any{
+			"id": id, "tag_name": tag, "assets": assets, "prerelease": prerelease, "draft": false,
+		}
+	}
+	serving := func(w http.ResponseWriter, r *http.Request) bool {
 		s.mu.Lock()
 		ok := s.ok
 		s.mu.Unlock()
 		s.record(r.URL.Path, ok)
 		if !ok {
 			w.WriteHeader(http.StatusServiceUnavailable)
+		}
+		return ok
+	}
+	// The list the beta channel reads (agent.ReleasesListUrl): the stable
+	// release and every pre-release, newest first like GitHub's.
+	mux.HandleFunc("/releases", func(w http.ResponseWriter, r *http.Request) {
+		if !serving(w, r) {
 			return
 		}
-		assets := []map[string]any{}
-		if s.assetName != "" {
-			asset := map[string]any{"id": 1, "name": s.assetName, "url": s.srv.URL + "/download"}
-			if s.assetDigest != "" {
-				asset["digest"] = s.assetDigest
-			}
-			assets = append(assets, asset)
+		s.mu.Lock()
+		pre := append([]string(nil), s.prereleases...)
+		s.mu.Unlock()
+		list := []map[string]any{}
+		for i, tag := range pre {
+			list = append(list, release(100+i, tag, true))
+		}
+		list = append(list, release(1, s.tag, false))
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(list)
+	})
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if !serving(w, r) {
+			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{"id": 1, "tag_name": s.tag, "assets": assets})
+		_ = json.NewEncoder(w).Encode(release(1, s.tag, false))
 	})
 	s.srv = httptest.NewServer(mux)
 	t.Cleanup(s.srv.Close)
@@ -151,6 +182,25 @@ func (s *releaseStub) record(path string, ok bool) {
 
 // URL is the endpoint to point the agent at.
 func (s *releaseStub) URL() string { return s.srv.URL + "/releases/latest" }
+
+// AddPrerelease publishes tag as a pre-release: in the releases list, never
+// at releases/latest.
+func (s *releaseStub) AddPrerelease(tag string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.prereleases = append(s.prereleases, tag)
+}
+
+// ListRequests is how many times the releases list was read.
+func (s *releaseStub) ListRequests() int {
+	n := 0
+	for _, r := range s.Requests() {
+		if r.Path == "/releases" {
+			n++
+		}
+	}
+	return n
+}
 
 // SetOK flips the stub between serving the release (true) and failing (false).
 func (s *releaseStub) SetOK(ok bool) {

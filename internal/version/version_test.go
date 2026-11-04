@@ -17,7 +17,10 @@ func TestNumberOf_PinsEveryDocumentedCase(t *testing.T) {
 		{"lone prefix falls back", "v", "0.0.0"},
 		{"uppercase prefix", "V1.5.7", "1.5.7"},
 		{"surrounding whitespace dropped", "  v1.5.7\n", "1.5.7"},
-		{"prerelease suffix kept", "v1.5.7-rc1", "1.5.7-rc1"},
+		{"pre-release suffix dropped", "v1.5.7-rc1", "1.5.7"},
+		{"beta tag reports its numeric prefix", "v1.8.0-beta.0", "1.8.0"},
+		{"build metadata dropped", "v1.5.7+build.5", "1.5.7"},
+		{"a bare suffix falls back", "v-beta", "0.0.0"},
 		{"malformed passed through unchanged", "garbage", "garbage"},
 		{"only the first v is a prefix", "vv1", "v1"},
 	}

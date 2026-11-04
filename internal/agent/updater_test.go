@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -10,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -109,6 +111,154 @@ func TestCheck_Success(t *testing.T) {
 
 	if len(result.Assets) != 1 {
 		t.Errorf("expected 1 asset, got %d", len(result.Assets))
+	}
+}
+
+// The beta channel reads the releases list and takes the highest version,
+// pre-releases included and drafts and unparsable tags skipped; the stable
+// channel keeps asking releases/latest and never sees a pre-release
+// (sc-129692).
+func TestCheck_ChannelSelectsTheRelease(t *testing.T) {
+	list := []Release{
+		{Id: 1, TagName: "v1.0.0"},
+		{Id: 2, TagName: "v1.1.0-beta.1", Prerelease: true},
+		{Id: 3, TagName: "v1.1.0-beta.2", Prerelease: true},
+		{Id: 4, TagName: "v9.0.0", Draft: true},
+		{Id: 5, TagName: "nightly-build", Prerelease: true},
+	}
+	var paths []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.RequestURI())
+		switch r.URL.Path {
+		case "/releases/latest":
+			_ = json.NewEncoder(w).Encode(list[0])
+		case "/releases":
+			_ = json.NewEncoder(w).Encode(list)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	latest := server.URL + "/releases/latest"
+
+	device := newTestDevice()
+	device.ReleaseChannel = ReleaseChannelBeta
+	got, err := NewUpdater(hclog.NewNullLogger(), device, latest, "", nil, nil).
+		Check(context.Background())
+	if err != nil || got.TagName != "v1.1.0-beta.2" || !got.Prerelease {
+		t.Errorf("beta: %+v %v", got, err)
+	}
+	if len(paths) != 1 || paths[0] != "/releases?per_page=30" {
+		t.Errorf("beta asked %v, want the releases list", paths)
+	}
+
+	paths = nil
+	device.ReleaseChannel = ""
+	got, err = NewUpdater(hclog.NewNullLogger(), device, latest, "", nil, nil).
+		Check(context.Background())
+	if err != nil || got.TagName != "v1.0.0" {
+		t.Errorf("stable: %+v %v", got, err)
+	}
+	if len(paths) != 1 || paths[0] != "/releases/latest" {
+		t.Errorf("stable asked %v, want releases/latest", paths)
+	}
+
+	// The channel is read live, so a twin change applies to the next check.
+	live := Device{ReleaseChannel: ReleaseChannelBeta}
+	paths = nil
+	got, err = NewUpdater(
+		hclog.NewNullLogger(), device, latest, "", nil, nil,
+		WithLiveDevice(func() Device { return live }),
+	).Check(context.Background())
+	if err != nil || got.TagName != "v1.1.0-beta.2" {
+		t.Errorf("live beta: %+v %v", got, err)
+	}
+}
+
+// The release endpoint's body is bounded like the config fetch and the
+// download: a response past the ceiling is refused, not buffered.
+func TestCheck_OversizedResponseIsRefused(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"tag_name": "v9.0.0", "assets": [], "x": "`))
+		filler := bytes.Repeat([]byte("a"), 64<<10)
+		for written := 0; written <= maxReleaseResponseSize; written += len(filler) {
+			if _, err := w.Write(filler); err != nil {
+				return
+			}
+		}
+		_, _ = w.Write([]byte(`"}`))
+	}))
+	defer server.Close()
+	_, err := NewUpdater(hclog.NewNullLogger(), newTestDevice(), server.URL, "", nil, nil).
+		Check(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "exceeds") {
+		t.Errorf("an oversized response was accepted: %v", err)
+	}
+}
+
+// The update helper is told about the beta channel only: stable is the
+// default the saved file already carries, and a helper older than the flag
+// would refuse it.
+func TestUpdate_ForwardsTheReleaseChannel(t *testing.T) {
+	var got []string
+	device := newTestDevice()
+	device.ReleaseChannel = ReleaseChannelBeta
+	u := NewUpdater(
+		hclog.NewNullLogger(), device, "http://127.0.0.1:9/", "",
+		func(_ string, args []string) error {
+			got = args
+			return nil
+		},
+		nil,
+	)
+	if err := u.Update("installer"); err != nil {
+		t.Fatal(err)
+	}
+	if i := slices.Index(got, "--release-channel"); i < 0 || got[i+1] != ReleaseChannelBeta {
+		t.Errorf("args %v lack --release-channel beta", got)
+	}
+	for _, channel := range []string{"", ReleaseChannelStable} {
+		device.ReleaseChannel = channel
+		if err := u.Update("installer"); err != nil {
+			t.Fatal(err)
+		}
+		if slices.Contains(got, "--release-channel") {
+			t.Errorf("channel %q was forwarded: %v", channel, got)
+		}
+	}
+}
+
+func TestHighestRelease(t *testing.T) {
+	if _, err := highestRelease(nil); err == nil {
+		t.Error("an empty list was accepted")
+	}
+	draftAndJunk := []Release{{TagName: "v1.0.0", Draft: true}, {TagName: "junk"}}
+	if _, err := highestRelease(draftAndJunk); err == nil {
+		t.Error("a list of a draft and an unparsable tag was accepted")
+	}
+	got, err := highestRelease([]Release{
+		{TagName: "v1.7.0-beta.3", Prerelease: true},
+		{TagName: "v1.7.0"},
+		{TagName: "v1.6.9"},
+	})
+	if err != nil || got.TagName != "v1.7.0" {
+		t.Errorf("the full release did not outrank its pre-release: %+v %v", got, err)
+	}
+}
+
+func TestReleasesListUrl(t *testing.T) {
+	cases := map[string]string{
+		"https://api.github.com/repos/rewstapp/agent-smith-go/releases/latest": "https://api.github.com/repos/rewstapp/agent-smith-go/releases?per_page=30",
+		"http://127.0.0.1:9/releases/latest":                                   "http://127.0.0.1:9/releases?per_page=30",
+		"http://127.0.0.1:9/releases/latest/":                                  "http://127.0.0.1:9/releases?per_page=30",
+		"http://127.0.0.1:9/releases/latest?token=x":                           "http://127.0.0.1:9/releases?per_page=30&token=x",
+		"http://127.0.0.1:9/custom":                                            "http://127.0.0.1:9/custom?per_page=30",
+	}
+	for in, want := range cases {
+		if got := ReleasesListUrl(in); got != want {
+			t.Errorf("ReleasesListUrl(%s) = %s, want %s", in, got, want)
+		}
 	}
 }
 
@@ -581,9 +731,106 @@ func TestIsNewerVersion(t *testing.T) {
 			latest:  "v1.0.0",
 			want:    true,
 		},
-		{name: "prerelease suffix ignored", current: "v1.2.3", latest: "v1.2.4-rc.1", want: true},
+		{
+			name:    "prerelease of a newer patch is newer",
+			current: "v1.2.3",
+			latest:  "v1.2.4-rc.1",
+			want:    true,
+		},
 		{name: "malformed current", current: "not-a-version", latest: "v1.2.3", wantErr: true},
 		{name: "malformed latest", current: "v1.2.3", latest: "not-a-version", wantErr: true},
+		// Semantic-versioning precedence for pre-releases (sc-129692): the
+		// beta channel moves from a pre-release to its full release and
+		// between pre-releases, and never back.
+		{
+			name:    "full release after its prerelease",
+			current: "v1.7.0-beta.1",
+			latest:  "v1.7.0",
+			want:    true,
+		},
+		{
+			name:    "prerelease is older than the full release",
+			current: "v1.7.0",
+			latest:  "v1.7.0-beta.1",
+			want:    false,
+		},
+		{
+			name:    "prerelease of the next version is newer",
+			current: "v1.6.1",
+			latest:  "v1.7.0-beta.1",
+			want:    true,
+		},
+		{
+			name:    "later prerelease number",
+			current: "v1.7.0-beta.1",
+			latest:  "v1.7.0-beta.2",
+			want:    true,
+		},
+		{
+			name:    "numbers compare numerically",
+			current: "v1.7.0-beta.9",
+			latest:  "v1.7.0-beta.10",
+			want:    true,
+		},
+		{
+			name:    "earlier prerelease number",
+			current: "v1.7.0-beta.2",
+			latest:  "v1.7.0-beta.1",
+			want:    false,
+		},
+		{name: "same prerelease", current: "v1.7.0-beta.1", latest: "v1.7.0-beta.1", want: false},
+		{
+			name:    "longer identifier list is newer",
+			current: "v1.7.0-beta",
+			latest:  "v1.7.0-beta.1",
+			want:    true,
+		},
+		{
+			name:    "numeric identifier ranks below alphanumeric",
+			current: "v1.7.0-1",
+			latest:  "v1.7.0-beta",
+			want:    true,
+		},
+		{name: "alpha before beta", current: "v1.7.0-alpha.1", latest: "v1.7.0-beta.1", want: true},
+		{name: "build metadata ignored", current: "v1.7.0", latest: "v1.7.0+build.5", want: false},
+		{name: "integration build tag", current: "v0.0.0-it", latest: "v0.0.0-it", want: false},
+		{name: "empty prerelease suffix", current: "v1.7.0", latest: "v1.7.0-", wantErr: true},
+		{
+			name:    "empty prerelease identifier",
+			current: "v1.7.0",
+			latest:  "v1.7.0-beta..1",
+			wantErr: true,
+		},
+		{
+			name:    "leading zero identifier is malformed",
+			current: "v1.7.0",
+			latest:  "v1.7.0-beta.01",
+			wantErr: true,
+		},
+		{
+			name:    "identifier character outside the grammar",
+			current: "v1.7.0",
+			latest:  "v1.7.0-beta_1",
+			wantErr: true,
+		},
+		{
+			name:    "signed numeric component is malformed",
+			current: "v1.7.0",
+			latest:  "v1.+8.0",
+			wantErr: true,
+		},
+		{
+			name:    "long numeric identifiers compare by length",
+			current: "v1.7.0-beta.99999999999999999999",
+			latest:  "v1.7.0-beta.100000000000000000000",
+			want:    true,
+		},
+		{
+			name:    "hyphen inside an identifier",
+			current: "v1.7.0-beta-1",
+			latest:  "v1.7.0-beta-2",
+			want:    true,
+		},
 	}
 
 	for _, tt := range tests {

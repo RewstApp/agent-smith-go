@@ -163,6 +163,25 @@ func TestNewUpdateContext(t *testing.T) {
 	}
 }
 
+// --release-channel on --update replaces the saved channel only when given;
+// an invalid one is refused (sc-129692).
+func TestNewUpdateContext_ReleaseChannel(t *testing.T) {
+	base := []string{"--org-id", "43fb08b0-92cf-462a-924d-0b6be7a43a48", "--update"}
+	ctx, err := newUpdateContext(append(base, "--release-channel", "beta"), nil, nil, nil, nil)
+	if err != nil || !ctx.ReleaseChannelProvided || ctx.ReleaseChannel != "beta" {
+		t.Errorf("beta: %+v %v", ctx, err)
+	}
+	ctx, err = newUpdateContext(base, nil, nil, nil, nil)
+	if err != nil || ctx.ReleaseChannelProvided || ctx.ReleaseChannel != "" {
+		t.Errorf("no flag: %+v %v", ctx, err)
+	}
+	if _, err := newUpdateContext(
+		append(base, "--release-channel", ""), nil, nil, nil, nil,
+	); err == nil || !strings.Contains(err.Error(), "release-channel") {
+		t.Errorf("blank: %v", err)
+	}
+}
+
 // --proxy-url on --update replaces the saved one; an empty or blank value
 // removes it; an invalid one is refused (sc-129691).
 func TestNewUpdateContext_ProxyURL(t *testing.T) {

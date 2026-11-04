@@ -27,6 +27,10 @@ type updateContext struct {
 	// value removes it (sc-129691).
 	ProxyURL         string
 	ProxyURLProvided bool
+	// ReleaseChannel replaces the saved release_channel when
+	// ReleaseChannelProvided (sc-129692); absent, the saved one stays.
+	ReleaseChannel         string
+	ReleaseChannelProvided bool
 
 	Sys    agent.SystemInfoProvider
 	Domain agent.DomainInfoProvider
@@ -65,6 +69,7 @@ func newUpdateFlagSet(params *updateContext) *flag.FlagSet {
 	fs.IntVar(&params.MqttQos, "mqtt-qos", -1, "MQTT subscription QoS level (0 or 1)")
 	bindTuningFlags(fs, &params.Tuning)
 	bindProxyFlag(fs, &params.ProxyURL)
+	bindReleaseChannelFlag(fs, &params.ReleaseChannel, "")
 	fs.StringVar(
 		&params.ServiceUsername,
 		"service-username",
@@ -99,6 +104,12 @@ func newUpdateContext(
 
 	params.Tuning.captureProvided(fs)
 	params.ProxyURLProvided = flagProvided(fs, "proxy-url")
+	params.ReleaseChannelProvided = flagProvided(fs, "release-channel")
+	if params.ReleaseChannelProvided {
+		if err := agent.ValidateReleaseChannel(params.ReleaseChannel); err != nil {
+			return nil, err
+		}
+	}
 
 	if params.OrgId == "" {
 		return nil, fmt.Errorf("missing org-id")

@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"fmt"
 	"time"
 
 	"github.com/RewstApp/agent-smith-go/internal/utils"
@@ -128,6 +129,41 @@ type Device struct {
 	// HTTPS_PROXY / HTTP_PROXY / NO_PROXY from its environment. Credentials in
 	// it are never logged. See utils.ResolveProxy.
 	ProxyURL string `json:"proxy_url,omitempty"`
+	// ReleaseChannel selects which GitHub release the auto-updater follows
+	// (sc-129692): ReleaseChannelStable (the default, and what an empty value
+	// means) follows the repository's latest full release; ReleaseChannelBeta
+	// follows the highest version published, pre-releases included, so a
+	// release can soak on a ring before the fleet takes it. Settable at
+	// install and --update (--release-channel) and through the device twin.
+	ReleaseChannel string `json:"release_channel,omitempty"`
+}
+
+// The auto-update release channels; see Device.ReleaseChannel.
+const (
+	ReleaseChannelStable = "stable"
+	ReleaseChannelBeta   = "beta"
+)
+
+// ResolvedReleaseChannel is the channel in effect: ReleaseChannelStable when
+// the field is empty.
+func (d Device) ResolvedReleaseChannel() string {
+	if d.ReleaseChannel == "" {
+		return ReleaseChannelStable
+	}
+	return d.ReleaseChannel
+}
+
+// ValidateReleaseChannel accepts the two channel names and nothing else; the
+// CLI flag and the twin setting both go through it.
+func ValidateReleaseChannel(channel string) error {
+	switch channel {
+	case ReleaseChannelStable, ReleaseChannelBeta:
+		return nil
+	}
+	return fmt.Errorf(
+		"invalid release-channel %q: must be %s or %s",
+		channel, ReleaseChannelStable, ReleaseChannelBeta,
+	)
 }
 
 // Proxy returns the proxy function every outbound connection uses; see

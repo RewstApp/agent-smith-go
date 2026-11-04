@@ -116,6 +116,9 @@ func NewClientOptions(device agent.Device, proxy utils.ProxyFunc) (*mqtt.ClientO
 
 type ReportedProperties struct {
 	AgentVersion string `json:"agent_version"`
+	// ReleaseChannel is the auto-update channel in effect (sc-129692), so
+	// Rewst can see which ring a device is on; empty omits it (an older agent).
+	ReleaseChannel string `json:"release_channel,omitempty"`
 	// Health is the agent's own view of its state (sc-129687): the command
 	// backlog and the journal's condition, the postback spool and what it has
 	// dropped, the notification plugins' supervision counters, the command
