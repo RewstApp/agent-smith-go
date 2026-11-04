@@ -69,14 +69,14 @@ func (w *boundedWriter) Write(p []byte) (int, error) {
 // but never past limit. Capping the capacity — rather than letting append double
 // past the limit on the write that fills it — is what keeps both the retained
 // bytes and the transient copy made while growing a small constant multiple of
-// the limit. p is always short enough that the total stays within limit.
+// the limit. Write trims p to the room left under limit, so limit always holds
+// the total, and the new capacity is computed from the capacity and the limit
+// alone — never from len(p), so no allocation size is derived from the write
+// (CodeQL go/allocation-size-overflow).
 func (w *boundedWriter) appendLocked(p []byte) {
-	if need := len(w.kept) + len(p); cap(w.kept) < need {
+	if len(p) > cap(w.kept)-len(w.kept) {
 		grown := 2 * cap(w.kept)
-		if grown < need {
-			grown = need
-		}
-		if grown > w.limit {
+		if grown > w.limit || grown-len(w.kept) < len(p) {
 			grown = w.limit
 		}
 		next := make([]byte, len(w.kept), grown)

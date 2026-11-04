@@ -316,7 +316,7 @@ func buildBundle(
 		names = append(names, name)
 	}
 	sort.Strings(names)
-	entries := make([]bundleEntry, 0, len(fixed)+len(logs))
+	var entries []bundleEntry
 	for _, name := range names {
 		entries = append(entries, bundleEntry{name: name, data: scrub(fixed[name], secrets)})
 	}
