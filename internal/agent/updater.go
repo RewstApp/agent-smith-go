@@ -510,10 +510,15 @@ func (u *defaultUpdater) Update(updaterExecutablePath string) error {
 		args = append(args, "--no-auto-updates")
 	}
 
-	// The channel the check ran on reaches the restarted agent even when the
-	// twin's persist of it failed (sc-129692).
-	if device.ReleaseChannel != "" {
-		args = append(args, "--release-channel", device.ReleaseChannel)
+	// The beta channel the check ran on reaches the restarted agent even when
+	// the twin's persist of it failed (sc-129692). Stable is never forwarded:
+	// it is the default, an absent flag leaves the saved channel alone, and
+	// the helper is the downloaded binary - a release older than this flag
+	// (what the live smoke updates an integration build to) would refuse it
+	// with "flag provided but not defined". A beta device only ever moves to
+	// a release that has the flag.
+	if device.ResolvedReleaseChannel() == ReleaseChannelBeta {
+		args = append(args, "--release-channel", ReleaseChannelBeta)
 	}
 
 	u.logger.Debug("Running update command", "path", updaterExecutablePath, "args", args)

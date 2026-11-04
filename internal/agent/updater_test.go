@@ -197,7 +197,9 @@ func TestCheck_OversizedResponseIsRefused(t *testing.T) {
 	}
 }
 
-// The update helper is told the channel the check ran on.
+// The update helper is told about the beta channel only: stable is the
+// default the saved file already carries, and a helper older than the flag
+// would refuse it.
 func TestUpdate_ForwardsTheReleaseChannel(t *testing.T) {
 	var got []string
 	device := newTestDevice()
@@ -216,12 +218,14 @@ func TestUpdate_ForwardsTheReleaseChannel(t *testing.T) {
 	if i := slices.Index(got, "--release-channel"); i < 0 || got[i+1] != ReleaseChannelBeta {
 		t.Errorf("args %v lack --release-channel beta", got)
 	}
-	device.ReleaseChannel = ""
-	if err := u.Update("installer"); err != nil {
-		t.Fatal(err)
-	}
-	if slices.Contains(got, "--release-channel") {
-		t.Errorf("an unset channel was forwarded: %v", got)
+	for _, channel := range []string{"", ReleaseChannelStable} {
+		device.ReleaseChannel = channel
+		if err := u.Update("installer"); err != nil {
+			t.Fatal(err)
+		}
+		if slices.Contains(got, "--release-channel") {
+			t.Errorf("channel %q was forwarded: %v", channel, got)
+		}
 	}
 }
 

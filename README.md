@@ -1494,9 +1494,13 @@ the same build as the fleet once it ships), pre-releases order by their
 identifiers (`beta.1` → `beta.2`, numerically), and nothing ever moves
 backwards. The same digest verification and size ceiling apply on both
 channels, and the release endpoint's body is bounded (4 MiB) like the
-config fetch and the download. The channel the check ran on is passed to
-the `--update` helper (`--release-channel`), so it survives the restart even
-when the twin's write of it to the config file failed, and `health.json` is
+config fetch and the download. A beta channel the check ran on is passed
+to the `--update` helper (`--release-channel beta`), so it survives the
+restart even when the twin's write of it to the config file failed; stable
+is never passed, since it is the default the saved file already carries and
+the helper is the downloaded binary, which may predate the flag (the live
+smoke updates an integration build to the latest published release and
+proved exactly that). `health.json` is
 rewritten when it changes so a support bundle never contradicts its own
 `config.json`. A saved `release_channel` that is neither name is reported
 once at start and followed as `stable`. Because a beta orders above every
