@@ -58,7 +58,9 @@ it calls once at install, and an **engine** it posts command results to. The
 commands themselves arrive over Azure IoT Hub, which the config endpoint
 points the agent at. You need your own hub: IoT Hub is the only broker the
 agent speaks to (the MQTT login, SAS token and topics are IoT Hub's, and it
-dials 8883 and 443 only), so a generic MQTT broker cannot stand in. Every
+dials the hub on 8883 and 443 only, 443 through your proxy when one is set:
+see "Connecting Through an Outbound Proxy"), so a generic MQTT broker cannot
+stand in. Every
 name and rule below is copied from the code (`internal/agent/host.go`, `internal/agent/device.go`,
 `internal/agent/installation.go`, `cmd/agent_smith/config.go`,
 `internal/interpreter/message.go`, `internal/interpreter/base_executor.go`,
@@ -67,15 +69,19 @@ name and rule below is copied from the code (`internal/agent/host.go`, `internal
 you would guess, the rule says so.
 
 The names are Rewst's on every platform: the `x-rewst-secret` and
-`x-rewst-agent-smith-version` headers and the `rewst_org_id` and
-`rewst_engine_host` keys keep those spellings whatever your server is.
+`x-rewst-agent-smith-version` headers, the `rewst_org_id` and
+`rewst_engine_host` keys, the service (`RewstRemoteAgent_<org id>` on
+Windows, `rewst_remote_agent_<org id>` on Linux,
+`io.rewst.remote_agent_<org id>` on macOS) and the `RewstRemoteAgent` /
+`rewst_remote_agent` directories keep those spellings whatever your server
+is.
 
 ### Before you start: a hub and a device
 
 With the Azure CLI and its IoT extension (`az extension add --name azure-iot`):
 
 ```bash
-az iot hub create --resource-group YOUR_RG --name your-hub --sku F1   # free tier, one per subscription
+az iot hub create --resource-group YOUR_RG --name your-hub --sku F1 --partition-count 2   # free tier, one per subscription
 az iot hub device-identity create --hub-name your-hub --device-id web-01-device
 az iot hub device-identity show --hub-name your-hub --device-id web-01-device \
   --query authentication.symmetricKey.primaryKey -o tsv   # shared_access_key
@@ -87,9 +93,8 @@ identity: a second host configured with the same `device_id` disconnects the
 first, and the two keep knocking each other off as each reconnects.
 
 `YOUR_ORG_ID` below stands for a UUID you choose (`uuidgen`); it names the
-installation's directories and service. Any non-empty string installs, but
-`--diagnostic` and `--diagnostic --bundle` find only installations whose org
-id is a UUID unless you pass `--org-id`.
+installation's directories and service. It must be a UUID: install,
+`--update` and `--uninstall` refuse anything else with `invalid org-id`.
 
 ### 1. Install against your endpoint
 
@@ -109,9 +114,11 @@ that point restarts the old binary on the new configuration.
 
 The installed agent updates itself from this repository's GitHub releases
 (`release_channel` picks stable or beta). If you run a build of your own,
-install it with `--no-auto-updates`: otherwise any official release with a
-higher version replaces it at the next update check, and a build without a
-version stamp is `v0.0.0`, so every release outranks it.
+install it with `--no-auto-updates`, and do not set `disable_auto_updates`
+to `false` in the device twin, which turns the updater back on: otherwise any
+official release with a higher version replaces it at the next update check,
+and a build without a version stamp is `v0.0.0`, so every release outranks
+it.
 
 ### 2. The config request
 
@@ -320,10 +327,12 @@ HTTPServer(("0.0.0.0", 8080), Configure).serve_forever()
 The sample speaks plain HTTP for a lab; the secret travels in the clear,
 so put TLS in front of it (and use `https://` in `--config-url`) for
 anything beyond that. It also hands every host the same device, so it
-serves one host: for a fleet, create a device per host (keyed on something
-stable in the request, such as `mac_address`) through IoT Hub's registry
-(the service SDKs or the REST API) and answer with that device's id and
-key. Then send step 5's message to the device through your hub and receive
+serves one host: for a fleet, create a device per host through IoT Hub's
+registry (the service SDKs or the REST API) and answer with that device's id
+and key. Nothing in the request is unique on its own (`hostname` and
+`mac_address` repeat on machines cloned from one image), so key on more than
+one field, or create a new device for every install and retire the stale
+ones. Then send step 5's message to the device through your hub and receive
 step 6's postback at
 `https://engine.your.server/webhooks/custom/action/...`.
 
