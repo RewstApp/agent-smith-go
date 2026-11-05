@@ -56,12 +56,13 @@ Example with optional parameters:
 The agent talks to two things you can provide yourself: a **config endpoint**
 it calls once at install, and an **engine** it posts command results to. The
 commands themselves arrive over Azure IoT Hub, which the config endpoint
-points the agent at. Every name below is copied from the code
+points the agent at. Every name and rule below is copied from the code
 (`internal/agent/host.go`, `internal/agent/device.go`,
-`internal/interpreter/message.go`, `internal/interpreter/result.go`), and
-`test/stubconfig` and `test/stubbroker` are working reference
-implementations of the endpoint and the engine - the hermetic e2e suite
-installs and runs real agents against them.
+`internal/agent/installation.go`, `cmd/agent_smith/config.go`,
+`internal/interpreter/message.go`, `internal/interpreter/base_executor.go`,
+`internal/interpreter/result.go` and `attemptPostback` in
+`cmd/agent_smith/service.go`); where the agent is stricter or looser than
+you would guess, the rule says so.
 
 ### 1. Install against your endpoint
 
@@ -69,12 +70,15 @@ installs and runs real agents against them.
 sudo ./rewst_agent_config.linux.bin --org-id YOUR_ORG_ID --config-url https://your.server/configure --config-secret YOUR_SECRET
 ```
 
-The agent `POST`s to `--config-url` once, saves the configuration it gets
-back, registers itself as a service and starts. A `408`, `429`, `5xx`, a
-`404` whose body says `Workflow was not found`, or no answer at all is
-retried three times on a jittered backoff; any other non-2xx fails the
+The agent `POST`s to `--config-url`, saves the configuration it gets back,
+registers itself as a service and starts. A `408`, `429`, `5xx`, a `404`
+whose body says `Workflow was not found`, or no answer at all is retried on
+a jittered backoff, three attempts in total; any other non-2xx fails the
 install with the status and a body excerpt (see "Retrying the Config
-Fetch").
+Fetch"). On a host that already has the agent, the new configuration is
+written before the old service is stopped, so get the endpoint right
+before reinstalling over a working agent: an install that aborts after
+that point restarts the old binary on the new configuration.
 
 ### 2. The config request
 
@@ -83,18 +87,18 @@ Fetch").
 | Method | `POST` |
 | `Content-Type` | `application/json` |
 | `x-rewst-secret` | the `--config-secret` value |
-| `x-rewst-agent-smith-version` | the agent's version as `MAJOR.MINOR.PATCH` (`1.8.0`; a pre-release suffix is dropped) |
+| `x-rewst-agent-smith-version` | the agent's version as `MAJOR.MINOR.PATCH` (`1.8.0`; a pre-release suffix is dropped). The body's `agent_version` below carries the full tag (`v1.8.0`) |
 
-The body is the host's description:
+The body is the host's description, exactly as the agent builds it:
 
 ```json
 {
   "agent_version": "v1.8.0",
-  "agent_executable_path": "/usr/local/bin/rewst_remote_agent/<org>/agent_smith.linux.bin",
-  "service_executable_path": "/usr/local/bin/rewst_remote_agent/<org>/agent_smith.linux.bin",
+  "agent_executable_path": "/usr/local/bin/rewst_remote_agent/YOUR_ORG_ID/agent_smith.linux.bin",
+  "service_executable_path": "/usr/local/bin/rewst_remote_agent/YOUR_ORG_ID/agent_smith.linux.bin",
   "hostname": "web-01",
-  "mac_address": "00:11:22:33:44:55",
-  "operating_system": "ubuntu 24.04",
+  "mac_address": "001122334455",
+  "operating_system": "ubuntu",
   "cpu_model": "Intel(R) Xeon(R) CPU",
   "ram_gb": "16",
   "ad_domain": null,
@@ -105,8 +109,13 @@ The body is the host's description:
 }
 ```
 
-`mac_address`, `ad_domain` and `entra_domain` are `null` when the host has
-none.
+- `hostname` is lowercased. `mac_address` has no separators and is never
+  `null`: a host with no hardware address fails the install before the
+  request is sent. `operating_system` is the bare platform name
+  (`ubuntu`, `darwin`, the Windows product name), with no version.
+- `ad_domain`, `is_ad_domain_controller`, `is_entra_connect_server` and
+  `entra_domain` are queried on Windows only; on Linux and macOS they are
+  always `null` / `false`, whatever the host is joined to.
 
 ### 3. The config response
 
@@ -124,48 +133,57 @@ Answer `200` with the configuration under one key:
 }
 ```
 
-| Field | Required | Meaning |
+| Field | Checked at install | Meaning |
 |---|---|---|
-| `device_id` | yes | the IoT Hub device identity the agent connects as |
-| `rewst_org_id` | yes | the organization; set it to the `--org-id` the agent was installed with |
-| `rewst_engine_host` | yes | the host the agent posts results to (step 6) |
-| `shared_access_key` | yes | the device's IoT Hub shared access key |
-| `azure_iot_hub_host` | yes | the IoT Hub host name |
+| `device_id` | required | the IoT Hub device identity the agent connects as |
+| `rewst_engine_host` | required | the host the agent posts results to (step 6) |
+| `shared_access_key` | required | the device's IoT Hub shared access key (base64; a malformed key passes the install and fails when the service starts) |
+| `azure_iot_hub_host` | required | the IoT Hub host name |
+| `rewst_org_id` | not checked | **must equal `--org-id`**: it is never validated or compared, but the running service derives the scripts and updates directories, the `get_installation` answer and the `--update` helper's `--org-id` from it, so a mismatch splits the installation across two org ids and the agent never updates |
+| `plugins` | no | `[{"name": "...", "executable_path": "..."}]` notification plugins; paths are not validated, a plugin that cannot launch is a Warn |
+| `mqtt_qos` | no | `0` or `1`, kept unless `--mqtt-qos` was given; `2` passes the install and fails when the service starts |
 | `broker` | no | leave empty: IoT Hub is the only broker the agent speaks to |
-| `plugins` | no | `[{"name": "...", "executable_path": "..."}]` notification plugins; kept as sent |
-| `mqtt_qos` | no | `0` or `1`; kept unless `--mqtt-qos` was given |
-| `logging_level`, `syslog`, `disable_agent_postback`, `disable_auto_updates`, `github_token`, `proxy_url`, `release_channel` and the tuning keys (`command_timeout_seconds`, `worker_count`, `max_output_bytes`, `postback_*`, `log_max_*`, `health_report_interval_seconds`, `command_heartbeat_seconds`, `mqtt_*_timeout_seconds`, `sas_token_lifetime_hours`, `message_queue_size`) | no | **not taken from the endpoint**: at install these are written from the install flags (a tuning key with no flag is left unset, so its documented default applies). Set them with the flags, with `--update`, or later through the device twin |
+| `logging_level`, `syslog`, `disable_agent_postback`, `disable_auto_updates`, `github_token`, `proxy_url`, `release_channel` and the tuning keys (`command_timeout_seconds`, `worker_count`, `max_output_bytes`, `postback_*`, `log_max_*`, `health_report_interval_seconds`, `command_heartbeat_seconds`, `mqtt_*_timeout_seconds`, `sas_token_lifetime_hours`, `message_queue_size`) | no | **not taken from the endpoint**: at install they are written from the install flags (a tuning key with no flag is left unset, so its documented default applies). Set them with the flags or with `--update`; of these, only `logging_level`, `command_timeout_seconds`, `worker_count`, `max_output_bytes`, `postback_max_attempts`, `postback_base_retry_backoff_seconds`, `disable_auto_updates` and `release_channel` can later be changed through the device twin |
 
 A `200` whose configuration lacks any of the four required values (what
-the Rewst endpoint answers when its token has expired) is refused with
-`missing required field: device_id` and no retry. The body is read through
-a 10 MiB ceiling. Unknown keys are kept in the saved `config.json`.
+the Rewst endpoint answers when its token has expired) is refused at once
+with `invalid configuration: missing required field: <the first missing
+one>` and no retry. The body is read through a 10 MiB ceiling. Any key not
+in the table is discarded: the response is decoded into the agent's typed
+configuration and only that is saved as `config.json`.
 
 ### 4. After install
 
-The service connects to `azure_iot_hub_host` over MQTT (8883, or 443 over
-WebSocket through a proxy) as `device_id` with `shared_access_key`, and
-subscribes to `devices/{device_id}/messages/devicebound/#`. Your endpoint's
-job ends at handing out those values; from here the hub carries the
-commands and the engine receives the results. See "How It Works" and
-"Message Delivery Guarantee" for the delivery semantics.
+The service connects to `azure_iot_hub_host` as `device_id` with
+`shared_access_key`: MQTT over TLS on 8883 first, falling back to MQTT over
+WebSocket on 443 when 8883 is blocked; through a proxy the WebSocket is
+tried first (see "Connecting Through an Outbound Proxy"). It subscribes to
+`devices/{device_id}/messages/devicebound/#`. Your endpoint's job ends at
+handing out those values; from here the hub carries the commands and the
+engine receives the results. See "How It Works" and "Message Delivery
+Guarantee" for the delivery semantics.
 
 ### 5. Command messages (cloud-to-device)
 
 Send a JSON document as the C2D message body:
 
 ```json
-{"post_id": "my-run:42", "commands": "<base64 of the UTF-16LE script>"}
+{"post_id": "my-run-42", "commands": "<base64 of the UTF-16LE script>"}
 ```
 
-| Key | Meaning |
-|---|---|
-| `post_id` | your correlation id; it becomes the path of the result postback (step 6) |
-| `commands` | the script, encoded UTF-16LE and then base64 - the PowerShell `-EncodedCommand` convention. Plain base64 of UTF-8 runs as garbage; plain text fails the decode |
-| `interpreter_override` | `"pwsh"` runs the script with PowerShell 7 (`pwsh`); anything else selects the default - Bash on Linux and macOS, Windows PowerShell (`powershell.exe`) on Windows. A JSON `true`/`false` is accepted but neither selects `pwsh` |
-| `get_installation` | `true` asks for the installation description instead of running a command (below) |
+| Key | Type | Meaning |
+|---|---|---|
+| `post_id` | string | **unique per message and URL-path-safe.** It keys the agent's command journal with a one-hour tombstone, so a second message reusing a `post_id` within an hour is acknowledged and never executed, with no postback. It is spliced into the postback URL unescaped (step 6): a `%` not followed by two hex digits makes the result undeliverable and it is dropped, `?` and `#` cut the path. An empty `post_id` runs the command and discards the result |
+| `commands` | string | the script encoded UTF-16LE **without a byte-order mark**, then base64. The agent decodes it and writes it to a file it runs (`-File` for PowerShell, `bash <file>` otherwise): a BOM becomes a stray character at the top of the script, a `#!` line is ignored, and plain base64 of UTF-8 (or any text that happens to be valid base64, such as `hostname`) runs as garbage |
+| `interpreter_override` | string | `"pwsh"` (case-insensitive) runs the script with PowerShell 7; anything else selects the default: Bash on Linux and macOS, Windows PowerShell (`powershell.exe`) on Windows. A JSON `true`/`false` is accepted but neither selects `pwsh` |
+| `get_installation` | bool | `true` asks for the installation description instead (below); when `commands` is also present, the command wins |
+| `type`, `content` | string | accepted and ignored |
 
-Encoding `commands`:
+The types are strict: a body that does not parse into these types
+(`"post_id": 42`, `"get_installation": "true"`) is logged, acknowledged
+and discarded, with no postback.
+
+Encoding `commands` (both forms produce no BOM):
 
 ```powershell
 [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes('echo "hello world"'))
@@ -175,16 +193,16 @@ Encoding `commands`:
 base64.b64encode('echo "hello world"'.encode("utf-16-le")).decode()
 ```
 
-`{"post_id": "my-run:43", "get_installation": true}` posts back the paths
-and the host description instead:
+`{"post_id": "my-run-43", "get_installation": true}` posts back the
+installation's paths and, under `tags`, the step 2 body:
 
 ```json
 {
-  "service_executable_path": "...",
-  "agent_executable_path": "...",
-  "config_file_path": "...",
-  "service_manager_path": "...",
-  "tags": { ...the step 2 body... }
+  "service_executable_path": "/usr/local/bin/rewst_remote_agent/YOUR_ORG_ID/agent_smith.linux.bin",
+  "agent_executable_path": "/usr/local/bin/rewst_remote_agent/YOUR_ORG_ID/agent_smith.linux.bin",
+  "config_file_path": "/etc/rewst_remote_agent/YOUR_ORG_ID/config.json",
+  "service_manager_path": "/usr/local/bin/rewst_remote_agent/YOUR_ORG_ID/agent_smith.linux.bin",
+  "tags": {"agent_version": "v1.8.0", "hostname": "web-01", "org_id": "YOUR_ORG_ID"}
 }
 ```
 
@@ -192,7 +210,7 @@ and the host description instead:
 
 | | |
 |---|---|
-| URL | `https://{rewst_engine_host}/webhooks/custom/action/{post_id}`, with every `:` in `post_id` replaced by `/` (`my-run:42` → `.../action/my-run/42`) |
+| URL | `https://{rewst_engine_host}/webhooks/custom/action/{post_id}`, with every `:` in `post_id` replaced by `/` (`my:run:42` → `.../action/my/run/42`) and nothing escaped |
 | Method | `POST` |
 | `Content-Type` | `application/json` |
 | `x-rewst-agent-smith-version` | `MAJOR.MINOR.PATCH` |
@@ -203,26 +221,31 @@ and the host description instead:
 
 | Field | Present | Meaning |
 |---|---|---|
-| `output`, `error` | always | the command's stdout and stderr |
+| `output` | when the command ran | stdout |
+| `error` | always | stderr when the command ran; otherwise the reason it did not run (`{"error": "illegal base64 data at input byte 4"}`, a failed `get_installation`, `{"error": "noop"}` for a message with neither key). The exit status is logged, never reported, so a script that exits non-zero without writing to stderr looks like success |
 | `timed_out` | when `true` | killed at `command_timeout_seconds` |
 | `truncated`, `output_bytes_produced`, `output_bytes_kept` | when truncated | output past `max_output_bytes` was discarded |
 | `interrupted` | when `true` | the agent stopped mid-command and reports it rather than re-running it |
 
-How your engine's answer is read:
+How your engine's answer is read (`attemptPostback`):
 
 | Engine answers | The agent |
 |---|---|
-| `200` | done |
-| `400` with a JSON body whose `error` contains `fulfilled` | done (a duplicate of a result you already have) |
-| `5xx`, or any non-2xx without a JSON `{"error": ...}` body | retries on the postback backoff, then spools the result to disk and re-attempts it on later connections |
-| another `4xx` with a JSON `{"error": "..."}` body | rejected: not retried in line; a spooled entry is abandoned after a bounded number of rejections |
+| exactly `200` | delivered. **No other 2xx counts**: a `201`, `202` or `204` falls into the rows below |
+| `400` whose body parses as a JSON object whose `error` string contains `fulfilled` (any case) | delivered: a duplicate of a result you already have |
+| any other status whose body parses as a JSON object (an `error` key is optional; if present it must be a string) | **final on the spot**: no in-line retry, nothing spooled, a spooled entry being re-tried is removed. This is how an engine says "stop sending this" |
+| `5xx`, any status with a body that is not a JSON object, or no answer | retried on the postback backoff (`postback_max_attempts`), then spooled to disk and re-attempted on later connections; an entry the engine keeps answering this way is abandoned after a bounded number of attempts |
 
-See "Command Result Delivery" for the spool's bounds. `disable_agent_postback`
-turns the postback off entirely.
+So a `204 No Content` ack is counted as the last row and the result is
+eventually abandoned; answer `200`. See "Command Result Delivery" for the
+spool's bounds. `disable_agent_postback` turns the postback off on Windows
+only; on Linux and macOS the executor always posts back.
 
 ### 7. A minimal config endpoint
 
-Twenty lines of standard-library Python answer step 2 with step 3:
+Twenty-odd lines of standard-library Python answer step 2 with step 3.
+It checks the secret before reading anything and answers a bad request
+without crashing:
 
 ```python
 import json
@@ -236,10 +259,13 @@ CONFIG = {"configuration": {
 
 class Configure(BaseHTTPRequestHandler):
     def do_POST(self):
-        host = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         if self.headers.get("x-rewst-secret") != "YOUR_SECRET":
             self.send_response(401); self.end_headers(); return
-        print("configuring", host["hostname"], host["org_id"])
+        try:
+            host = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
+            print("configuring", host.get("hostname"), host.get("org_id"))
+        except (ValueError, TypeError):
+            self.send_response(400); self.end_headers(); return
         body = json.dumps(CONFIG).encode()
         self.send_response(200); self.send_header("Content-Type", "application/json")
         self.end_headers(); self.wfile.write(body)
@@ -247,13 +273,19 @@ class Configure(BaseHTTPRequestHandler):
 HTTPServer(("0.0.0.0", 8080), Configure).serve_forever()
 ```
 
-Install with `--config-url http://your.server:8080/configure --config-secret YOUR_SECRET`,
-then send step 5's message to the device through your hub and receive step
-6's postback at `https://engine.your.server/webhooks/custom/action/...`.
-For the whole loop with nothing but the repository, `test/stubconfig` is
-this endpoint and `test/stubbroker` is a hub and engine in one process; the
-`hermetic-*` jobs in `.github/workflows/e2e.yml` show them driving real
-installs.
+The sample speaks plain HTTP for a lab; the secret travels in the clear,
+so put TLS in front of it (and use `https://` in `--config-url`) for
+anything beyond that. Then send step 5's message to the device through
+your hub and receive step 6's postback at
+`https://engine.your.server/webhooks/custom/action/...`.
+
+For the whole loop with nothing but the repository, the hermetic e2e jobs
+in `.github/workflows/e2e.yml` run real installs against two fixtures that
+are starting points rather than drop-in servers: `test/stubconfig` (built
+with the `integration` tag; serves a fixed configuration, checks no secret,
+and answers an oversized body unless its mode file says otherwise) and
+`test/stubbroker` (a hub and engine in one process; needs `-host` and
+`-ca-out`, and its CA installed in the host's trust store).
 
 ## Update
 
