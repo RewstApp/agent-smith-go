@@ -56,13 +56,45 @@ Example with optional parameters:
 The agent talks to two things you can provide yourself: a **config endpoint**
 it calls once at install, and an **engine** it posts command results to. The
 commands themselves arrive over Azure IoT Hub, which the config endpoint
-points the agent at. Every name and rule below is copied from the code
-(`internal/agent/host.go`, `internal/agent/device.go`,
+points the agent at. You need your own hub: IoT Hub is the only broker the
+agent speaks to (the MQTT login, SAS token and topics are IoT Hub's, and it
+dials the hub on 8883 and 443 only, 443 through your proxy when one is set:
+see "Connecting Through an Outbound Proxy"), so a generic MQTT broker cannot
+stand in. Every
+name and rule below is copied from the code (`internal/agent/host.go`, `internal/agent/device.go`,
 `internal/agent/installation.go`, `cmd/agent_smith/config.go`,
 `internal/interpreter/message.go`, `internal/interpreter/base_executor.go`,
 `internal/interpreter/result.go` and `attemptPostback` in
 `cmd/agent_smith/service.go`); where the agent is stricter or looser than
 you would guess, the rule says so.
+
+The names are Rewst's on every platform: the `x-rewst-secret` and
+`x-rewst-agent-smith-version` headers, the `rewst_org_id` and
+`rewst_engine_host` keys, the service (`RewstRemoteAgent_<org id>` on
+Windows, `rewst_remote_agent_<org id>` on Linux,
+`io.rewst.remote_agent_<org id>` on macOS) and the `RewstRemoteAgent` /
+`rewst_remote_agent` directories keep those spellings whatever your server
+is.
+
+### Before you start: a hub and a device
+
+With the Azure CLI and its IoT extension (`az extension add --name azure-iot`):
+
+```bash
+az iot hub create --resource-group YOUR_RG --name your-hub --sku F1 --partition-count 2   # free tier, one per subscription
+az iot hub device-identity create --hub-name your-hub --device-id web-01-device
+az iot hub device-identity show --hub-name your-hub --device-id web-01-device \
+  --query authentication.symmetricKey.primaryKey -o tsv   # shared_access_key
+az iot hub show --name your-hub --query properties.hostName -o tsv   # azure_iot_hub_host
+```
+
+Create **one device per host**. IoT Hub keeps one connection per device
+identity: a second host configured with the same `device_id` disconnects the
+first, and the two keep knocking each other off as each reconnects.
+
+`YOUR_ORG_ID` below stands for a UUID you choose (`uuidgen`); it names the
+installation's directories and service. It must be a UUID: install,
+`--update` and `--uninstall` refuse anything else with `invalid org-id`.
 
 ### 1. Install against your endpoint
 
@@ -79,6 +111,14 @@ Fetch"). On a host that already has the agent, the new configuration is
 written before the old service is stopped, so get the endpoint right
 before reinstalling over a working agent: an install that aborts after
 that point restarts the old binary on the new configuration.
+
+The installed agent updates itself from this repository's GitHub releases
+(`release_channel` picks stable or beta). If you run a build of your own,
+install it with `--no-auto-updates`, and do not set `disable_auto_updates`
+to `false` in the device twin, which turns the updater back on: otherwise any
+official release with a higher version replaces it at the next update check,
+and a build without a version stamp is `v0.0.0`, so every release outranks
+it.
 
 ### 2. The config request
 
@@ -136,7 +176,7 @@ Answer `200` with the configuration under one key:
 | Field | Checked at install | Meaning |
 |---|---|---|
 | `device_id` | required | the IoT Hub device identity the agent connects as |
-| `rewst_engine_host` | required | the host the agent posts results to (step 6) |
+| `rewst_engine_host` | required | the host the agent posts results to (step 6): a bare host name, optionally with a port (`engine.your.server:8443`), no scheme or path |
 | `shared_access_key` | required | the device's IoT Hub shared access key (base64; a malformed key passes the install and fails when the service starts) |
 | `azure_iot_hub_host` | required | the IoT Hub host name |
 | `rewst_org_id` | not checked | **must equal `--org-id`**: it is never validated or compared, but the running service derives the scripts and updates directories, the `get_installation` answer and the `--update` helper's `--org-id` from it, so a mismatch splits the installation across two org ids and the agent never updates |
@@ -183,7 +223,7 @@ The types are strict: a body that does not parse into these types
 (`"post_id": 42`, `"get_installation": "true"`) is logged, acknowledged
 and discarded, with no postback.
 
-Encoding `commands` (both forms produce no BOM):
+Encoding `commands` (all three forms produce no BOM):
 
 ```powershell
 [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes('echo "hello world"'))
@@ -191,6 +231,17 @@ Encoding `commands` (both forms produce no BOM):
 
 ```python
 base64.b64encode('echo "hello world"'.encode("utf-16-le")).decode()
+```
+
+```bash
+printf '%s' 'echo "hello world"' | iconv -f UTF-8 -t UTF-16LE | base64 | tr -d '\n'
+```
+
+Sending one from the Azure CLI:
+
+```bash
+az iot device c2d-message send --hub-name your-hub --device-id web-01-device \
+  --data '{"post_id": "my-run-42", "commands": "ZQBjAGgAbwAgACIAaABlAGwAbABvACAAdwBvAHIAbABkACIA"}'
 ```
 
 `{"post_id": "my-run-43", "get_installation": true}` posts back the
@@ -210,7 +261,7 @@ installation's paths and, under `tags`, the step 2 body:
 
 | | |
 |---|---|
-| URL | `https://{rewst_engine_host}/webhooks/custom/action/{post_id}`, with every `:` in `post_id` replaced by `/` (`my:run:42` → `.../action/my/run/42`) and nothing escaped |
+| URL | `https://{rewst_engine_host}/webhooks/custom/action/{post_id}`, with every `:` in `post_id` replaced by `/` (`my:run:42` → `.../action/my/run/42`) and nothing escaped. The scheme and the `/webhooks/custom/action/` path are fixed: serve that path, over HTTPS, with a certificate the host's system trust store accepts (a private CA works once it is installed there; the agent has no option of its own to trust one or to skip verification) |
 | Method | `POST` |
 | `Content-Type` | `application/json` |
 | `x-rewst-agent-smith-version` | `MAJOR.MINOR.PATCH` |
@@ -275,8 +326,14 @@ HTTPServer(("0.0.0.0", 8080), Configure).serve_forever()
 
 The sample speaks plain HTTP for a lab; the secret travels in the clear,
 so put TLS in front of it (and use `https://` in `--config-url`) for
-anything beyond that. Then send step 5's message to the device through
-your hub and receive step 6's postback at
+anything beyond that. It also hands every host the same device, so it
+serves one host: for a fleet, create a device per host through IoT Hub's
+registry (the service SDKs or the REST API) and answer with that device's id
+and key. Nothing in the request is unique on its own (`hostname` and
+`mac_address` repeat on machines cloned from one image), so key on more than
+one field, or create a new device for every install and retire the stale
+ones. Then send step 5's message to the device through your hub and receive
+step 6's postback at
 `https://engine.your.server/webhooks/custom/action/...`.
 
 For the whole loop with nothing but the repository, the hermetic e2e jobs
