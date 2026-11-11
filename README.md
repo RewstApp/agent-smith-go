@@ -37,7 +37,7 @@ rewst_agent_config.win.exe --org-id YOUR_ORG_ID --config-url CONFIG_URL --config
 ### Configuration Options
 
 - `--logging-level`: Set logging verbosity (`info`, `warn`, `error`, `debug`)  
-- `--syslog`: Write logs to system log instead of file (Linux/macOS)
+- `--syslog`: Also forward every log line to the system log (syslog on Linux/macOS, the Application event log on Windows). The log file is always written; see "Bounded, Non-Fatal Syslog Forwarding".
 - `--disable-agent-postback`: Disable agent postback
 - `--no-auto-updates`: Disable auto updates
 - `--release-channel`: the auto-update channel, `stable` (default: full releases only) or `beta` (pre-releases too; see "Release channels" under "Verified, Version-Gated Auto-Updates"). On `--update` the saved channel is kept unless the flag is given.
@@ -1238,7 +1238,7 @@ and `agent.hostCommandTimeoutOverrideStr` — the same mechanism
 `stopTimeoutOverrideStr` uses for the Windows service stop wait, so a wedged
 command can be observed aborting in seconds rather than the production bound.
 
-### Bounded, Non-Fatal Syslog Forwarding (Linux, macOS)
+### Bounded, Non-Fatal Syslog Forwarding
 
 With `use_syslog` enabled, every log line the agent writes is also forwarded to
 the system logger by shelling out to `logger` (`internal/syslog/syslog_unix.go`).
@@ -1274,11 +1274,9 @@ Both are fixed, and the fix has three parts:
 - **The on-disk write always happens.** The syslog forward is best effort and
   its outcome never propagates: `Write` returns the log file write's `(n, err)`,
   so a genuine file error still surfaces to hclog while a syslog failure never
-  costs the log file a line. This matches how the Windows event-log writer has
-  always behaved (event-log errors are ignored, the file write proceeds) and the
-  "counted, not fatal" treatment plugin notify failures get — hclog cannot react
-  to a writer error beyond discarding the line, so surfacing one buys nothing
-  and loses the record.
+  costs the log file a line. This is the "counted, not fatal" treatment plugin
+  notify failures get — hclog cannot react to a writer error beyond discarding
+  the line, so surfacing one buys nothing and loses the record.
 - **A degraded daemon is not paid for on every line.** Bounding one call is not
   enough when `logger` runs once per log line: at 5 seconds each, with hclog
   serializing writers, all agent logging would crawl. After a failed or timed-out
@@ -1297,6 +1295,34 @@ in the log file itself:
 
 Nothing is written in between, so a syslog outage lasting hours cannot flood the
 log file it is, at that point, the only copy of.
+
+**Windows (sc-133002).** The event-log writer (`internal/syslog/syslog_windows.go`)
+now keeps the same contract. Its `Write` had always ignored a failed
+`ReportEvent` and written the file, but its constructor did not: it registered
+the event source up front — read the `EventLog\Application\<service>` registry
+key, install it when missing, `RegisterEventSource` — and returned an error when
+any of the three failed, and the service then exited with `LogFileError` before
+it had logged a single line. That is the signature the Windows `live-lifecycle`
+smoke showed every few runs: after `--update --syslog` the service restarted,
+the log file stayed empty (no "Agent Smith started", no "Subscribed"), the
+commands came back 408 and a re-run passed, with the actual failure recorded
+nowhere. The source is now opened on the first write, and a failure at any of
+the three steps — or a `ReportEvent` that fails through a handle the EventLog
+service no longer honours — is handled exactly like a failed `logger` call: the
+line reaches the file, the error is recorded there once (`event log forwarding
+failed, suppressing it for 1m0s (log lines still reach this file): register
+event source rewst_agent_smith_<org>: ...`), forwarding is suppressed for
+`syslogSuppressWindow`, and the next line after the window retries the
+registration from the start (a failed report drops the handle first, since a
+stale handle cannot recover by being reused). An install refused because the
+key already exists — it appeared between the read and the install, another
+agent process registering the same service — is treated as registered. The
+suppression state machine is one type (`forwardHealth` in
+`internal/syslog/syslog.go`) shared by both writers, with an injectable clock
+because Go's monotonic clock on Windows advances at the clock-interrupt rate
+and a test waiting for a real window to elapse is not deterministic there.
+`runService` additionally logs the error before it returns `LogFileError`, so
+if a syslog writer ever refuses to open again the file says why.
 
 Separately, the severity mapping was wrong on **all three** platforms. Each
 writer matched the level bracket in the formatted line itself, and all three

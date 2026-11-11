@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
-	"sync"
 	"syscall"
 	"time"
 
@@ -26,16 +25,6 @@ const (
 	// milliseconds, and short enough that it needs no -ldflags override the way
 	// the multi-minute service timeouts do.
 	syslogCommandTimeout = 5 * time.Second
-
-	// syslogSuppressWindow is how long forwarding is skipped after a failed or
-	// timed-out `logger` call. Bounding a single call is not enough on its own:
-	// `logger` runs once per log line, so a hung daemon would still cost every
-	// line the full syslogCommandTimeout, and hclog serializes writers - all
-	// logging on the agent would crawl. After a failure the agent stops shelling
-	// out entirely for this window and lets one line through afterwards as a
-	// probe, so a degraded daemon costs at most one timeout per window while the
-	// on-disk log keeps every line at full speed.
-	syslogSuppressWindow = time.Minute
 
 	// syslogWaitDelay bounds how long cmd.Wait may keep waiting once the context
 	// has expired and the process group has been killed. The group kill covers
@@ -134,14 +123,7 @@ type unixSyslog struct {
 	// suppressWindow overrides syslogSuppressWindow when positive. Tests only.
 	suppressWindow time.Duration
 
-	// mu guards the forwarding health state below. Write is called from every
-	// goroutine that logs; hclog serializes its own calls, but nothing
-	// guarantees this writer is only ever reached through one logger.
-	mu       sync.Mutex
-	degraded bool
-	retryAt  time.Time
-	failures int
-	skipped  int
+	health forwardHealth
 }
 
 // Write forwards the line to syslog on a best-effort basis and always writes it
@@ -175,78 +157,20 @@ func (s *unixSyslog) Close() error {
 // suppressed, and returns the diagnostic line - empty unless the health state
 // changed - to record in the log file.
 func (s *unixSyslog) forward(line string) string {
-	if !s.beginForward() {
+	if !s.health.begin() {
 		return ""
 	}
 
 	message := syslogMessage(s.source, extractMessage(line))
 	err := s.runner.Run(priorityForLine(line), s.source, message)
 
-	return s.recordResult(err)
-}
-
-// beginForward reports whether this line should shell out to `logger`. While
-// forwarding is suppressed after a failure it returns false; the first line
-// after the window elapses is allowed through as a probe.
-func (s *unixSyslog) beginForward() bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if s.degraded && time.Now().Before(s.retryAt) {
-		s.skipped++
-		return false
+	if note := s.health.record("syslog forwarding", err, s.resolveSuppressWindow()); note != "" {
+		// Formatted the way hclog formats its own entries so it does not break
+		// tooling that parses the log file.
+		return utils.HclogWarnLine(time.Now(), s.source, note)
 	}
 
-	return true
-}
-
-// recordResult folds the outcome of one `logger` call into the forwarding
-// health state and returns the diagnostic to write to the log file: one line
-// when forwarding starts failing, one when it recovers, and nothing in between
-// so a lasting syslog outage cannot flood the log it is already the only copy
-// of.
-func (s *unixSyslog) recordResult(err error) string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if err == nil {
-		if !s.degraded {
-			return ""
-		}
-
-		note := s.note(fmt.Sprintf(
-			"syslog forwarding recovered after %d failure(s); %d line(s) reached this log only",
-			s.failures, s.skipped,
-		))
-
-		s.degraded = false
-		s.failures = 0
-		s.skipped = 0
-		s.retryAt = time.Time{}
-
-		return note
-	}
-
-	s.failures++
-	s.retryAt = time.Now().Add(s.resolveSuppressWindow())
-
-	if s.degraded {
-		// Already reported; this failed probe only extends the window.
-		return ""
-	}
-
-	s.degraded = true
-
-	return s.note(fmt.Sprintf(
-		"syslog forwarding failed, suppressing it for %s (log lines still reach this file): %v",
-		s.resolveSuppressWindow(), err,
-	))
-}
-
-// note formats a diagnostic the way hclog formats its own entries so it does
-// not break tooling that parses the log file.
-func (s *unixSyslog) note(message string) string {
-	return utils.HclogWarnLine(time.Now(), s.source, message)
+	return ""
 }
 
 func (s *unixSyslog) resolveSuppressWindow() time.Duration {
