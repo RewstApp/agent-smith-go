@@ -189,6 +189,11 @@ func (svc *serviceContext) Execute(
 	if device.UseSyslog {
 		sysLogger, err := syslog.New(svc.Name(), logFile)
 		if err != nil {
+			// Neither platform's writer fails here any more (the Windows one
+			// used to, on any event-source error, and this exit was the only
+			// trace: an empty log file, sc-133002). Should one ever fail
+			// again, say so in the file first.
+			logger.Error("Failed to open the system log; the service cannot start", "error", err)
 			return service.LogFileError
 		}
 		defer func() {
