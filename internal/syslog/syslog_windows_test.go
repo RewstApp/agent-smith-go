@@ -479,7 +479,8 @@ func TestWindowsSyslog_Write_ProbesRegistrationAndReportsRecovery(t *testing.T) 
 			factory.openCalls,
 		)
 	}
-	if len(logger.infoMessages) != 1 || logger.infoMessages[0] != "second" {
+	// The message keeps the line's trailing newline, as it always has.
+	if len(logger.infoMessages) != 1 || logger.infoMessages[0] != "second\n" {
 		t.Errorf("expected the probe line in the event log, got %v", logger.infoMessages)
 	}
 	if !strings.Contains(
@@ -535,7 +536,7 @@ func TestWindowsSyslog_Write_ReportErrorDropsTheHandleAndReregisters(t *testing.
 	if factory.openCalls != 1 {
 		t.Errorf("expected the probe to re-register the source, got %d opens", factory.openCalls)
 	}
-	if len(fresh.errorMessages) != 1 || fresh.errorMessages[0] != "second" {
+	if len(fresh.errorMessages) != 1 || fresh.errorMessages[0] != "second\n" {
 		t.Errorf("expected the probe line through the fresh handle, got %v", fresh.errorMessages)
 	}
 	if !strings.Contains(out.String(), "event log forwarding recovered") {
