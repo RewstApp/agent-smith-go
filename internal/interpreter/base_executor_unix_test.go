@@ -6,10 +6,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -85,6 +88,105 @@ func newBashExecutor() *baseExecutor {
 		BuildExecuteCommandArgs:  func(command string) []string { return []string{"-c", command} },
 		BuildExecuteFileArgs:     func(path string) []string { return []string{path} },
 		FS:                       utils.NewFileSystem(),
+	}
+}
+
+// waitForChildPid polls pidFile until the spawned child has recorded its pid,
+// then returns it. The wait is on the test's own deadline, not the command's
+// timeout budget, for the reason the Windows twin spells out: nothing tears
+// the command down until the test asks, so a slow runner cannot turn
+// "the shell had not written the file yet" into a kill-path failure.
+func waitForChildPid(t *testing.T, pidFile string) int {
+	t.Helper()
+
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		data, err := os.ReadFile(pidFile)
+		if err == nil {
+			if pid, convErr := strconv.Atoi(strings.TrimSpace(string(data))); convErr == nil {
+				return pid
+			}
+			// The file exists but the write is still in flight; keep polling.
+		} else if !os.IsNotExist(err) {
+			t.Fatalf("failed to read child pid file: %v", err)
+		}
+
+		if time.Now().After(deadline) {
+			t.Fatalf("child pid file %s was never written; the child never started", pidFile)
+		}
+		time.Sleep(100 * time.Millisecond) // sleep-ok: poll interval
+	}
+}
+
+// processExists reports whether pid is still in the process table. Signal 0
+// delivers nothing and only checks that the target exists; EPERM would still
+// mean it exists, but every process here runs as the test user.
+func processExists(pid int) bool {
+	err := syscall.Kill(pid, 0)
+	return err == nil || errors.Is(err, syscall.EPERM)
+}
+
+// TestBaseExecutor_ContextCancel_KillsChildProcess is the Unix twin of the
+// Windows test of the same name: it pins configureProcessGroup's group kill.
+// A script that backgrounds a child and then hangs must, once the command's
+// context is torn down, leave that child dead too. Without Setpgid and the
+// negative-pid SIGKILL, cancelling the context would signal only the shell;
+// the child would be reparented, keep running, and - because it inherits the
+// shell's output pipe - keep cmd.Wait blocked until WaitDelay gave up.
+//
+// Cancellation rather than the per-command timeout triggers the teardown, so
+// the shell is guaranteed the time it needs to start the child and record its
+// pid; both funnel through the same cmd.Cancel.
+func TestBaseExecutor_ContextCancel_KillsChildProcess(t *testing.T) {
+	executor := newBashExecutor()
+
+	logger := hclog.NewNullLogger()
+	// Far longer than any deadline this test waits on, so the timeout can never
+	// be the thing that ends the command. Cancellation below is the trigger.
+	timeout := 600
+	device := agent.Device{RewstOrgId: "test-org-unix-child", CommandTimeoutSeconds: &timeout}
+
+	pidFile := filepath.Join(t.TempDir(), "child.pid")
+
+	// A non-interactive bash has no job control, so the backgrounded sleep
+	// stays in the shell's process group - the group the kill targets.
+	script := "sleep 120 & printf %s $! > '" + pidFile + "'; sleep 120"
+	msg := Message{PostId: "test:unix-child", Commands: encodeCommand(script)}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan []byte, 1)
+	go func() {
+		done <- executor.Execute(ctx, &msg, device, logger, nil, nil)
+	}()
+
+	// Wait for the child to exist on the test's own deadline and confirm it is
+	// genuinely running before anything kills it, so a child that never
+	// started cannot pass as a successful teardown.
+	pid := waitForChildPid(t, pidFile)
+	if !processExists(pid) {
+		t.Fatalf("child process %d was not running before cancellation", pid)
+	}
+
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(30 * time.Second):
+		t.Fatal("Execute did not return; command was not killed by cancellation")
+	}
+
+	// SIGKILL to the group is delivered before Execute returns; what remains
+	// is the kernel tearing the child down and init reaping it (it was
+	// reparented when the shell died), after which signal 0 reports ESRCH.
+	// Bounded poll on that observable rather than a fixed sleep.
+	deadline := time.Now().Add(30 * time.Second)
+	for processExists(pid) && time.Now().Before(deadline) {
+		time.Sleep(50 * time.Millisecond) // sleep-ok: poll interval
+	}
+	if processExists(pid) {
+		t.Errorf("child process %d survived the parent's cancellation kill", pid)
 	}
 }
 
