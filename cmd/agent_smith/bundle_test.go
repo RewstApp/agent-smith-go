@@ -190,8 +190,8 @@ func TestRunDiagnosticBundle_ContentsAndRedaction(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got != path {
-		t.Errorf("wrote %s, want %s", got, path)
+	if got.Path != path {
+		t.Errorf("wrote %s, want %s", got.Path, path)
 	}
 	entries := readBundle(t, path)
 
@@ -302,8 +302,11 @@ func TestRunDiagnosticBundle_DefaultPathIsInTheWorkingDirectory(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := filepath.Join(wd, "diagnostic-"+bundleOrg+"-20261103T120000Z.zip")
-	if got != want {
-		t.Errorf("default path %s, want %s", got, want)
+	if got.Path != want {
+		t.Errorf("default path %s, want %s", got.Path, want)
+	}
+	if info, err := os.Stat(got.Path); err != nil || int(info.Size()) != got.Size {
+		t.Errorf("reported %d bytes, file is %v (%v)", got.Size, info, err)
 	}
 	if entries, err := os.ReadDir(dataDir); err == nil {
 		for _, e := range entries {
@@ -312,7 +315,7 @@ func TestRunDiagnosticBundle_DefaultPathIsInTheWorkingDirectory(t *testing.T) {
 			}
 		}
 	}
-	if _, err := os.Stat(got); err != nil {
+	if _, err := os.Stat(got.Path); err != nil {
 		t.Fatal(err)
 	}
 	// The single installed agent is chosen without --org-id.
@@ -583,5 +586,179 @@ func TestScrub_ReplacesRawAndEscapedForms(t *testing.T) {
 	}
 	if !bytes.Contains(scrub([]byte("a short word"), []string{"short"}), []byte("short")) {
 		t.Error("a value below the minimum length was scrubbed from unrelated text")
+	}
+}
+
+// --bundle-path naming a directory writes the default file name inside it
+// (sc-132995).
+func TestRunDiagnosticBundle_DirectoryPathTakesTheDefaultName(t *testing.T) {
+	quiet(t)
+	root, _ := newBundleRoot(t)
+	dir := t.TempDir()
+	got, err := runDiagnosticBundle(
+		context.Background(),
+		bundleTestParams(dir),
+		bundleTestEnv(root),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(dir, "diagnostic-"+bundleOrg+"-20261103T120000Z.zip")
+	if got.Path != want {
+		t.Errorf("path %s, want %s", got.Path, want)
+	}
+	if _, err := os.Stat(want); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// --bundle-path - streams the zip to stdout and every section to the console
+// writer, which the caller has pointed at stderr (sc-132995): nothing but the
+// archive reaches stdout, and nothing is written to disk.
+func TestRunDiagnosticBundle_StdoutCarriesOnlyTheZip(t *testing.T) {
+	var console bytes.Buffer
+	previous := diagOut
+	diagOut = &console
+	t.Cleanup(func() { diagOut = previous })
+	root, _ := newBundleRoot(t)
+	wd := t.TempDir()
+	t.Chdir(wd)
+	var stdout bytes.Buffer
+	env := bundleTestEnv(root)
+	env.stdout = &stdout
+	env.handOver = func(string) (string, error) {
+		t.Error("a streamed bundle has no file to hand over")
+		return "", nil
+	}
+	got, err := runDiagnosticBundle(context.Background(), bundleTestParams(bundleStdoutPath), env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Path != bundleStdoutPath || got.Size != stdout.Len() || got.HandOver != "" {
+		t.Errorf("report %+v for %d bytes on stdout", got, stdout.Len())
+	}
+	if s := got.String(); s != "stdout ("+strconv.Itoa(stdout.Len())+" bytes)" {
+		t.Errorf("closing line %q", s)
+	}
+	zr, err := zip.NewReader(bytes.NewReader(stdout.Bytes()), int64(stdout.Len()))
+	if err != nil {
+		t.Fatalf("stdout is not a zip: %v", err)
+	}
+	names := map[string]bool{}
+	for _, f := range zr.File {
+		names[f.Name] = true
+	}
+	if !names["config.json"] || !names["diagnostic.txt"] {
+		t.Errorf("stdout zip holds %v", names)
+	}
+	if !strings.Contains(console.String(), "Service Status") {
+		t.Errorf("the sections did not reach the console writer: %q", console.String())
+	}
+	if entries, _ := os.ReadDir(wd); len(entries) != 0 {
+		t.Errorf("a streamed bundle wrote %v to disk", entries)
+	}
+}
+
+// The hand-over runs once the file is complete and in place, on its final
+// path, and a failure is reported on the closing line rather than as a failed
+// bundle (sc-132995).
+func TestRunDiagnosticBundle_HandsTheFileOverAfterTheRename(t *testing.T) {
+	quiet(t)
+	root, _ := newBundleRoot(t)
+	path := filepath.Join(t.TempDir(), "bundle.zip")
+	env := bundleTestEnv(root)
+	var handed string
+	env.handOver = func(p string) (string, error) {
+		info, err := os.Stat(p)
+		if err != nil || info.Size() == 0 {
+			t.Errorf("handed over before the file was in place: %v", err)
+		}
+		if _, err := os.Stat(p + ".tmp"); err == nil {
+			t.Error("handed over with the temporary file still there")
+		}
+		handed = p
+		return "owned by uid 1000 gid 1000, the user behind sudo", nil
+	}
+	got, err := runDiagnosticBundle(context.Background(), bundleTestParams(path), env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if handed != path {
+		t.Errorf("handed over %q, want %q", handed, path)
+	}
+	want := path + " (" + strconv.Itoa(got.Size) +
+		" bytes, owned by uid 1000 gid 1000, the user behind sudo)"
+	if got.String() != want {
+		t.Errorf("closing line %q, want %q", got.String(), want)
+	}
+
+	env.handOver = func(string) (string, error) { return "", errors.New("chown: not permitted") }
+	got, err = runDiagnosticBundle(context.Background(), bundleTestParams(path), env)
+	if err != nil {
+		t.Fatalf("a failed hand-over failed the bundle: %v", err)
+	}
+	if !strings.Contains(got.String(), "still owned by this process: chown: not permitted") {
+		t.Errorf("closing line %q does not report the failed hand-over", got.String())
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Errorf("the bundle is gone after a failed hand-over: %v", err)
+	}
+}
+
+// Under sudo the file is chowned to SUDO_UID/SUDO_GID; outside sudo, or with
+// a malformed id, nothing is done (sc-132995).
+func TestSudoHandOver(t *testing.T) {
+	cases := []struct {
+		name     string
+		env      map[string]string
+		wantCall bool
+		uid, gid int
+		want     string
+	}{
+		{
+			name:     "sudo ids",
+			env:      map[string]string{"SUDO_UID": "1001", "SUDO_GID": "1002"},
+			wantCall: true,
+			uid:      1001,
+			gid:      1002,
+			want:     "owned by uid 1001 gid 1002, the user behind sudo",
+		},
+		{
+			name:     "uid only leaves the group alone",
+			env:      map[string]string{"SUDO_UID": " 501 "},
+			wantCall: true,
+			uid:      501,
+			gid:      -1,
+			want:     "owned by uid 501 gid -1, the user behind sudo",
+		},
+		{name: "not under sudo", env: map[string]string{}},
+		{name: "malformed uid", env: map[string]string{"SUDO_UID": "root", "SUDO_GID": "0"}},
+		{name: "negative uid", env: map[string]string{"SUDO_UID": "-1"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			called := false
+			chown := func(path string, uid, gid int) error {
+				called = true
+				if path != "/tmp/b.zip" || uid != tc.uid || gid != tc.gid {
+					t.Errorf("chown(%s, %d, %d)", path, uid, gid)
+				}
+				return nil
+			}
+			getenv := func(k string) string { return tc.env[k] }
+			got, err := sudoHandOver(getenv, chown)("/tmp/b.zip")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if called != tc.wantCall || got != tc.want {
+				t.Errorf("called %v, %q; want %v, %q", called, got, tc.wantCall, tc.want)
+			}
+		})
+	}
+	failing := func(string, int, int) error { return errors.New("operation not permitted") }
+	_, err := sudoHandOver(func(string) string { return "7" }, failing)("/tmp/b.zip")
+	want := "chown to uid 7 gid 7 failed: operation not permitted"
+	if err == nil || !strings.Contains(err.Error(), want) {
+		t.Errorf("chown failure: %v", err)
 	}
 }

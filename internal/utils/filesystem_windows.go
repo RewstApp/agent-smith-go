@@ -213,6 +213,33 @@ func applyOwnerOnlyACL(path string, extraAccount string, recursive bool) error {
 	return nil
 }
 
+// GrantReadAccess grants account read access on the file at path, additively
+// (plain /grant, as applyOwnerOnlyACL grants the service account), leaving the
+// rest of the ACL as it is. The diagnostic bundle hands itself to the console
+// session's user with it (sc-132995): written by an elevated process in a
+// directory whose ACL the standard-user session may not be on, the archive
+// would otherwise need a second step before it could be attached to the
+// support case. account is DOMAIN\user or a *SID; a symlink is refused, since
+// icacls follows it.
+func GrantReadAccess(path string, account string) error {
+	fi, err := os.Lstat(path)
+	if err != nil {
+		return fmt.Errorf("failed to stat %s: %w", path, err)
+	}
+	if fi.Mode()&os.ModeSymlink != 0 || fi.IsDir() {
+		return fmt.Errorf("refusing to use %s: exists and is not a plain file", path)
+	}
+	cmd := exec.Command("icacls", path, "/grant", account+":R")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf(
+			"icacls /grant %s:R failed for %s: %w (output: %s)",
+			account, path, err, strings.TrimSpace(string(output)),
+		)
+	}
+	return nil
+}
+
 // SecureDataDirectoryACL restricts path — the org's data directory, which
 // holds config.json and its Azure IoT Hub SharedAccessKey and GitHub token
 // (sc-108849) — by removing the Everyone / Authenticated Users / Users
