@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -17,19 +16,81 @@ import (
 
 	"github.com/RewstApp/agent-smith-go/internal/agent"
 	"github.com/hashicorp/go-hclog"
+	"golang.org/x/sys/windows"
 )
 
-// processRunning shells out to tasklist to check whether pid is still alive.
-// The command's own worker pool has already been released by the time this
-// runs, so this is a plain, independent check of endpoint state — exactly
-// what a customer noticing "unexplained runaway processes" would look at.
-func processRunning(t *testing.T, pid int) bool {
+// Win32 values x/sys/windows does not name.
+const (
+	// stillActive is the exit code GetExitCodeProcess reports for a process
+	// that has not terminated.
+	stillActive = 259
+	// waitTimeout is WaitForSingleObject's return when the timeout elapsed
+	// before the handle was signalled.
+	waitTimeout = 0x00000102
+)
+
+// childProcess is a handle to the spawned grandchild, held open for the
+// whole test. A process handle pins the kernel object: the pid cannot be
+// reused by an unrelated process while it is open, GetExitCodeProcess answers
+// from the object rather than from the process table, and the handle itself
+// is signalled the moment the process terminates - which is what
+// WaitForSingleObject below waits on.
+//
+// The previous version of this test shelled out to tasklist and looked for the
+// pid's digits anywhere in its output. That depended on how quickly the
+// process table reflected the termination (hence a polling loop and a 5s
+// budget around it) and could be fooled either way: a pid reused by another
+// process read as "survived", and the digits matching a column other than
+// PID (memory usage, session number) read as "running" for a process that
+// was not. Neither can happen through a handle.
+type childProcess struct {
+	handle windows.Handle
+}
+
+// openChild opens the grandchild by pid. OpenProcess succeeding is the
+// observability check: the process exists at this moment and will stay
+// addressable for the rest of the test.
+func openChild(t *testing.T, pid int) *childProcess {
 	t.Helper()
-	out, err := exec.Command("tasklist", "/fi", fmt.Sprintf("PID eq %d", pid)).Output()
+	handle, err := windows.OpenProcess(
+		windows.SYNCHRONIZE|windows.PROCESS_QUERY_LIMITED_INFORMATION,
+		false,
+		uint32(pid),
+	)
 	if err != nil {
-		t.Fatalf("tasklist failed: %v", err)
+		t.Fatalf("OpenProcess(%d) failed; the child is not observable: %v", pid, err)
 	}
-	return strings.Contains(string(out), strconv.Itoa(pid))
+	c := &childProcess{handle: handle}
+	t.Cleanup(func() { _ = windows.CloseHandle(handle) })
+	return c
+}
+
+// running reports whether the process has not yet terminated.
+func (c *childProcess) running(t *testing.T) bool {
+	t.Helper()
+	var code uint32
+	if err := windows.GetExitCodeProcess(c.handle, &code); err != nil {
+		t.Fatalf("GetExitCodeProcess failed: %v", err)
+	}
+	return code == stillActive
+}
+
+// waitExit blocks until the process terminates or timeout elapses and reports
+// whether it terminated. There is no polling and no sleep: the kernel
+// signals the handle on exit.
+func (c *childProcess) waitExit(t *testing.T, timeout time.Duration) bool {
+	t.Helper()
+	event, err := windows.WaitForSingleObject(c.handle, uint32(timeout/time.Millisecond))
+	switch {
+	case err != nil:
+		t.Fatalf("WaitForSingleObject failed: %v", err)
+	case event == windows.WAIT_OBJECT_0:
+		return true
+	case event == waitTimeout:
+		return false
+	}
+	t.Fatalf("WaitForSingleObject returned unexpected event %#x", event)
+	return false
 }
 
 // waitForChildPid polls pidFile until the spawned child has recorded its pid,
@@ -117,12 +178,15 @@ func TestBaseExecutor_ContextCancel_KillsChildProcess(t *testing.T) {
 		done <- executor.Execute(ctx, &msg, device, logger, nil, nil)
 	}()
 
-	// Wait for the child to exist on the test's own deadline, then confirm it is
-	// genuinely running. Asserting it is alive *before* the kill is what stops a
-	// child that never started, or that exited on its own, from being mistaken
-	// for a successful teardown below.
+	// Wait for the child to exist on the test's own deadline, open a handle to
+	// it, and confirm it is genuinely running. Asserting it is alive *before*
+	// the kill is what stops a child that never started, or that exited on its
+	// own, from being mistaken for a successful teardown below; holding the
+	// handle is what makes the after-kill check answer about this process and
+	// no other.
 	pid := waitForChildPid(t, pidFile)
-	if !processRunning(t, pid) {
+	child := openChild(t, pid)
+	if !child.running(t) {
 		t.Fatalf("child process %d was not running before cancellation", pid)
 	}
 
@@ -134,13 +198,12 @@ func TestBaseExecutor_ContextCancel_KillsChildProcess(t *testing.T) {
 		t.Fatal("Execute did not return; command was not killed by cancellation")
 	}
 
-	// Give the job-object teardown a brief moment to complete, then confirm the
-	// child no longer survives.
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) && processRunning(t, pid) {
-		time.Sleep(200 * time.Millisecond) // sleep-ok: poll interval
-	}
-	if processRunning(t, pid) {
+	// The job object's last handle is closed before Execute returns, and
+	// KILL_ON_JOB_CLOSE terminates every process in it at that moment; the
+	// wait here only covers the kernel finishing that termination. It is
+	// generous relative to that, and it ends as soon as the handle is
+	// signalled, so it is not a budget the test spends.
+	if !child.waitExit(t, 30*time.Second) {
 		t.Errorf("child process %d survived the parent's cancellation kill", pid)
 	}
 }
