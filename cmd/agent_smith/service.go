@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -56,6 +57,64 @@ const (
 
 type errorResponse struct {
 	Error string `json:"error"`
+}
+
+// engineThrottled is the error a postback attempt returns when the engine
+// answered that it is overloaded rather than anything about the result: a 429,
+// or a 503 carrying Retry-After (sc-132997). retryAfter is the wait the next
+// attempt honours, already bounded: never below the delay the postback backoff
+// would have waited for that attempt anyway, never above
+// postbackMaxRetryBackoff, and the backoff's own delay when the engine named
+// no time. INC-39353 was the engine throttling under persistence delays while
+// every agent kept retrying on its own schedule; the header is the engine's
+// half of the fix and this is the agent's.
+type engineThrottled struct {
+	status     int
+	retryAfter time.Duration
+	// fromHeader records whether the engine named the wait, for the log line.
+	fromHeader bool
+}
+
+func (e *engineThrottled) Error() string {
+	if e.fromHeader {
+		return fmt.Sprintf(
+			"postback throttled: status %d, engine asked to retry after %s",
+			e.status, e.retryAfter,
+		)
+	}
+	return fmt.Sprintf("postback throttled: status %d (no Retry-After)", e.status)
+}
+
+// RetryAfter implements retryLater for the spool flush.
+func (e *engineThrottled) RetryAfter() time.Duration { return e.retryAfter }
+
+// throttleWait reads a throttling answer: a 429 whatever it carries, or a 503
+// with a Retry-After header that parses. The returned wait is the header's
+// value bounded by the backoff schedule for the attempt that will follow
+// attempt - floored at it so the header can only ever delay a retry, capped at
+// postbackMaxRetryBackoff so a wrong or hostile value cannot hold a command
+// worker for hours - or that schedule's own delay when there is no header.
+func throttleWait(
+	res *http.Response,
+	baseBackoff time.Duration,
+	attempt int,
+) (wait time.Duration, fromHeader, throttled bool) {
+	header, ok := utils.ParseRetryAfter(res.Header.Get("Retry-After"), time.Now())
+	switch res.StatusCode {
+	case http.StatusTooManyRequests:
+	case http.StatusServiceUnavailable:
+		if !ok {
+			return 0, false, false
+		}
+	default:
+		return 0, false, false
+	}
+
+	floor := postbackRetryBackoff(baseBackoff, postbackMaxRetryBackoff, attempt+1)
+	if !ok {
+		return floor, false, true
+	}
+	return utils.BoundRetryAfter(header, floor, postbackMaxRetryBackoff), true, true
 }
 
 func (svc *serviceContext) loadConfig() (agent.Device, error) {
@@ -1465,12 +1524,19 @@ func (svc *serviceContext) sendPostbackWithRetry(
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		if attempt > 1 {
 			backoff := postbackRetryBackoff(baseBackoff, postbackMaxRetryBackoff, attempt)
+			// A throttled answer carries the wait the engine asked for, already
+			// floored at this schedule's delay and capped at its ceiling.
+			var throttled *engineThrottled
+			if errors.As(lastErr, &throttled) {
+				backoff = throttled.retryAfter
+			}
 			logger.Info(
 				"Retrying postback",
 				"post_id", message.PostId,
 				"attempt", attempt,
 				"max_attempts", maxAttempts,
 				"backoff", backoff,
+				"engine_asked", throttled != nil && throttled.fromHeader,
 			)
 			select {
 			case <-ctx.Done():
@@ -1520,11 +1586,19 @@ func (svc *serviceContext) sendPostbackWithRetry(
 		return true
 	}
 
-	if err := svc.spool.enqueue(spoolEntry{
+	entry := spoolEntry{
 		PostId:    message.PostId,
 		Result:    resultBytes,
 		CreatedAt: time.Now(),
-	}); err != nil {
+	}
+	// A budget that ended on a throttle carries the engine's time into the
+	// spool: without it the flush on the next cycle, which can start seconds
+	// later, would knock inside the window the engine just named.
+	var throttled *engineThrottled
+	if errors.As(lastErr, &throttled) {
+		entry.NextAttemptAt = entry.CreatedAt.Add(throttled.retryAfter)
+	}
+	if err := svc.spool.enqueue(entry); err != nil {
 		logger.Error(
 			"Postback result dropped: failed to spool for later delivery",
 			"post_id", message.PostId,
@@ -1561,26 +1635,42 @@ func (svc *serviceContext) flushPostbackSpool(
 	if svc.spool == nil {
 		return
 	}
-	svc.spool.flush(
-		ctx,
-		func(entry spoolEntry) (deliveryOutcome, error) {
-			msg := &interpreter.Message{PostId: entry.PostId}
-			return svc.attemptPostback(ctx, msg, device, entry.Result, logger, 1)
-		},
-		func(entry spoolEntry, err error) {
-			logger.Error(
-				"Postback result abandoned: engine kept rejecting it",
-				"post_id", entry.PostId,
-				"attempts", entry.Attempts,
-				"last_error", entry.LastError,
-			)
-			if notifier != nil {
-				_ = notifier.Notify(
-					fmt.Sprintf("AgentPostbackAbandoned:%s", entry.PostId),
-				) // Best effort notification
-			}
-		},
-	)
+
+	deliver := func(entry spoolEntry) (deliveryOutcome, error) {
+		msg := &interpreter.Message{PostId: entry.PostId}
+		return svc.attemptPostback(ctx, msg, device, entry.Result, logger, 1)
+	}
+	abandon := func(entry spoolEntry, err error) {
+		logger.Error(
+			"Postback result abandoned: engine kept rejecting it",
+			"post_id", entry.PostId,
+			"attempts", entry.Attempts,
+			"last_error", entry.LastError,
+		)
+		if notifier != nil {
+			_ = notifier.Notify(
+				fmt.Sprintf("AgentPostbackAbandoned:%s", entry.PostId),
+			) // Best effort notification
+		}
+	}
+
+	// A flush the engine throttled (429, or 503 with Retry-After; sc-132997)
+	// names the time the next attempt may start. Waiting for it here and
+	// running the flush again keeps the result's delivery inside this cycle - a
+	// cycle lasts until the SAS renewal, hours away - while the wait itself,
+	// bounded by postbackMaxRetryBackoff per answer, guarantees no attempt
+	// lands before the engine's time. The wait ends with the cycle.
+	for {
+		retryAt := svc.spool.flush(ctx, deliver, abandon)
+		if retryAt.IsZero() {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(retryAt.Sub(svc.spool.now())):
+		}
+	}
 }
 
 // attemptPostback performs a single postback attempt and classifies the result
@@ -1659,6 +1749,28 @@ func (svc *serviceContext) attemptPostback(
 			logger.Info("Received response", "data", string(bodyBytes))
 		}
 		return deliveryDone, nil
+	}
+
+	// A throttle is read before the body: it says the engine is overloaded,
+	// nothing about this result, so it is neither the refusal a 429 with a JSON
+	// body used to be read as (the result was dropped on the spot) nor the
+	// rejection a 503 is counted as against a spooled entry. The wait it
+	// carries is honoured by the retry loop and the spool flush (sc-132997).
+	_, baseBackoff := svc.postbackBudget()
+	if wait, fromHeader, throttled := throttleWait(res, baseBackoff, attempt); throttled {
+		logger.Warn(
+			"Postback throttled by the engine (will retry after the wait it asked for)",
+			"post_id", message.PostId,
+			"attempt", attempt,
+			"status_code", res.StatusCode,
+			"retry_after", wait,
+			"engine_asked", fromHeader,
+		)
+		return deliveryThrottled, &engineThrottled{
+			status:     res.StatusCode,
+			retryAfter: wait,
+			fromHeader: fromHeader,
+		}
 	}
 
 	var response errorResponse

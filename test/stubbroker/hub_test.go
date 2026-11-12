@@ -523,6 +523,55 @@ func TestFixture_ScriptedPostbackResponses(t *testing.T) {
 	}
 }
 
+// A scripted answer carries the Retry-After the scenario asked for, and the
+// snapshot stamps every attempt so the scenario can assert the agent waited
+// (sc-132997).
+func TestFixture_ScriptedRetryAfter(t *testing.T) {
+	_, engineURL, postbackBase, clientTLS, h := startFixture(t)
+	hc := &http.Client{Timeout: 5 * time.Second}
+	resp, err := hc.Post(
+		engineURL+"/_control/postback-responses",
+		"application/json",
+		bytes.NewBufferString(`{"post_id":"p7","statuses":[429,503,200],"retry_after":20}`),
+	)
+	if err != nil || resp.StatusCode != 200 {
+		t.Fatalf("script: %v %v", err, resp)
+	}
+	for i, want := range []struct {
+		status     int
+		retryAfter string
+	}{{429, "20"}, {503, "20"}, {200, ""}} {
+		tlsClient := &http.Client{
+			Transport: &http.Transport{TLSClientConfig: clientTLS},
+			Timeout:   5 * time.Second,
+		}
+		r, err := tlsClient.Post(
+			postbackBase+"/webhooks/custom/action/p7",
+			"application/json",
+			bytes.NewBufferString(`{"output":"x"}`),
+		)
+		if err != nil {
+			t.Fatalf("postback %d: %v", i+1, err)
+		}
+		_ = r.Body.Close()
+		if r.StatusCode != want.status || r.Header.Get("Retry-After") != want.retryAfter {
+			t.Errorf(
+				"postback %d: %d Retry-After %q, want %d %q",
+				i+1, r.StatusCode, r.Header.Get("Retry-After"), want.status, want.retryAfter,
+			)
+		}
+	}
+	snap := h.postbackResponses("p7")
+	if snap.Attempts != 3 || len(snap.AttemptsAt) != 3 || snap.RetryAfter != 20 || !snap.Recorded {
+		t.Errorf("snapshot %+v, want 3 stamped attempts, retry_after 20, recorded", snap)
+	}
+	for i := 1; i < len(snap.AttemptsAt); i++ {
+		if snap.AttemptsAt[i].Before(snap.AttemptsAt[i-1]) {
+			t.Errorf("attempts_at out of order: %v", snap.AttemptsAt)
+		}
+	}
+}
+
 // A reported-properties PATCH is kept per device and served back merged, so
 // the harness can read what the agent reports about itself (sc-129687).
 func TestFixture_TwinReportedPropertiesAreStoredAndMerged(t *testing.T) {

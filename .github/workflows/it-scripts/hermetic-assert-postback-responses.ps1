@@ -3,7 +3,10 @@
 # TIMEOUT_SECONDS pass. Env: ENGINE_URL, POST_ID, RECORDED ("true": a result
 # must be recorded; "false": none may be), MIN_ATTEMPTS (optional floor on the
 # postbacks the engine saw, accepted or not), MAX_ATTEMPTS (optional ceiling,
-# checked once the recorded expectation holds), TIMEOUT_SECONDS.
+# checked once the recorded expectation holds), MIN_GAP_SECONDS (optional:
+# every two consecutive attempts must be at least this far apart, the check
+# that no attempt landed inside the Retry-After the engine named, sc-132997),
+# TIMEOUT_SECONDS.
 $deadline = (Get-Date).AddSeconds([int]$env:TIMEOUT_SECONDS)
 $wantRecorded = $env:RECORDED -eq 'true'
 $minAttempts = if ($env:MIN_ATTEMPTS) { [int]$env:MIN_ATTEMPTS } else { 0 }
@@ -35,6 +38,16 @@ if ([int]$snap.attempts -lt $minAttempts) {
 }
 if ($env:MAX_ATTEMPTS -and [int]$snap.attempts -gt [int]$env:MAX_ATTEMPTS) {
   $failures += "the engine saw $($snap.attempts) postback(s), expected at most $($env:MAX_ATTEMPTS)"
+}
+if ($env:MIN_GAP_SECONDS) {
+  $stamps = @($snap.attempts_at | ForEach-Object { [DateTimeOffset]::Parse($_) })
+  Write-Output "attempts at: $(($stamps | ForEach-Object { $_.ToString('HH:mm:ss.fff') }) -join ', ')"
+  for ($i = 1; $i -lt $stamps.Count; $i++) {
+    $gap = ($stamps[$i] - $stamps[$i - 1]).TotalSeconds
+    if ($gap -lt [double]$env:MIN_GAP_SECONDS) {
+      $failures += "attempt $($i + 1) landed $([math]::Round($gap, 1)) s after attempt $i, inside the $($env:MIN_GAP_SECONDS) s the engine asked for"
+    }
+  }
 }
 if ($failures.Count -gt 0) {
   $failures | ForEach-Object { Write-Output "FAIL: $_" }

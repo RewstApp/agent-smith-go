@@ -489,12 +489,13 @@ func journalListing(dir string) []byte {
 
 // spoolListing describes the postback spool: every file with its size and
 // time, and for an entry its post id, when it was spooled and how old it is,
-// its rejection count and the last rejection's time and reason - never the
+// its rejection count, the last rejection's time and reason and the time the
+// engine's last throttle allowed the next attempt (sc-132997) - never the
 // result, whose field the projection leaves undecoded.
 func spoolListing(dir string, now time.Time) []byte {
 	return listing(
 		dir,
-		"post_id\tcreated_at\tage\tattempts\tlast_attempt_at\tlast_error",
+		"post_id\tcreated_at\tage\tattempts\tlast_attempt_at\tnext_attempt_at\tlast_error",
 		func(_ string, raw []byte) string {
 			var e struct {
 				PostId        string    `json:"post_id"`
@@ -502,6 +503,7 @@ func spoolListing(dir string, now time.Time) []byte {
 				Attempts      int       `json:"attempts"`
 				LastError     string    `json:"last_error"`
 				LastAttemptAt time.Time `json:"last_attempt_at"`
+				NextAttemptAt time.Time `json:"next_attempt_at"`
 			}
 			if json.Unmarshal(raw, &e) != nil || e.PostId == "" {
 				return ""
@@ -512,6 +514,7 @@ func spoolListing(dir string, now time.Time) []byte {
 				age(now, e.CreatedAt),
 				strconv.Itoa(e.Attempts),
 				stamp(e.LastAttemptAt),
+				stamp(e.NextAttemptAt),
 				strings.Join(strings.Fields(e.LastError), " "),
 			}, "\t")
 		},

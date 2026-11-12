@@ -106,6 +106,7 @@ func newBundleRoot(t *testing.T) (root, dataDir string) {
 		Attempts:      2,
 		LastError:     "HTTP 422: unprocessable\n(body withheld)",
 		LastAttemptAt: time.Date(2026, 11, 3, 11, 0, 0, 0, time.UTC),
+		NextAttemptAt: time.Date(2026, 11, 3, 11, 2, 0, 0, time.UTC),
 	})
 	// The health file the service leaves beside the journal carries a running
 	// command's last output line: the bundle must withhold it.
@@ -247,7 +248,7 @@ func TestRunDiagnosticBundle_ContentsAndRedaction(t *testing.T) {
 	spool := string(entries["spool.txt"])
 	for _, s := range []string{
 		"spooled-1", "e1.json", "age", "5h0m0s", "last_error", "HTTP 422: unprocessable (body withheld)",
-		"2026-11-03T11:00:00Z",
+		"2026-11-03T11:00:00Z", "next_attempt_at", "2026-11-03T11:02:00Z",
 	} {
 		if !strings.Contains(spool, s) {
 			t.Errorf("spool.txt lacks %q:\n%s", s, spool)

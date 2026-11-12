@@ -180,6 +180,11 @@ type SpoolHealth struct {
 	DroppedCapacity int64 `json:"dropped_capacity"`
 	DroppedAttempts int64 `json:"dropped_attempts"`
 	DroppedCorrupt  int64 `json:"dropped_corrupt"`
+	// NextAttemptAt is the RFC 3339 time before which the spool flush will not
+	// attempt an entry, because the engine answered one with a throttle (429,
+	// or 503 with Retry-After; sc-132997). Absent while no such pause is in
+	// force.
+	NextAttemptAt string `json:"next_attempt_at,omitempty"`
 }
 
 type PluginHealth struct {

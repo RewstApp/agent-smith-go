@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -929,5 +930,75 @@ func TestIsTransientConfigStatus_Classification(t *testing.T) {
 		if got := isTransientConfigStatus(tc.status, []byte(tc.body)); got != tc.want {
 			t.Errorf("status %d body %q: transient=%v, want %v", tc.status, tc.body, got, tc.want)
 		}
+	}
+}
+
+// retryAfterConfigServer answers the first request with status and a
+// Retry-After header, then with a valid configuration.
+func retryAfterConfigServer(t *testing.T, status int, retryAfter string) *httptest.Server {
+	t.Helper()
+	var requests atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if requests.Add(1) == 1 {
+			w.Header().Set("Retry-After", retryAfter)
+			w.WriteHeader(status)
+			_, _ = w.Write([]byte(`{"error":"throttled"}`))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(validConfigResponseBody("test-org")))
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// A 429 or 503 naming a Retry-After is waited for between the schedule's own
+// delay and its 30 s cap, rather than on the agent's clock (sc-132997).
+func TestRunConfig_TransientHonoursRetryAfter(t *testing.T) {
+	cases := []struct {
+		name       string
+		status     int
+		retryAfter string
+		wantMin    time.Duration
+		wantMax    time.Duration
+	}{
+		{
+			name: "429 inside the bounds is honoured exactly", status: http.StatusTooManyRequests,
+			retryAfter: "20", wantMin: 20 * time.Second, wantMax: 20 * time.Second,
+		},
+		{
+			name: "503 above the cap is capped", status: http.StatusServiceUnavailable,
+			retryAfter: "100", wantMin: maxConfigRetryBackoff, wantMax: maxConfigRetryBackoff,
+		},
+		{
+			// JitteredBackoff(5s, 30s, 0) lies within 5s ± 25%.
+			name:       "a header below the schedule is floored at it",
+			status:     http.StatusTooManyRequests,
+			retryAfter: "1",
+			wantMin:    3750 * time.Millisecond,
+			wantMax:    6250 * time.Millisecond,
+		},
+		{
+			name: "a malformed header is ignored", status: http.StatusTooManyRequests,
+			retryAfter: "soon", wantMin: 3750 * time.Millisecond, wantMax: 6250 * time.Millisecond,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := retryAfterConfigServer(t, tc.status, tc.retryAfter)
+			params := newBaseConfigParams(srv.URL)
+			var delays []time.Duration
+			params.retrySleep = recordingSleep(&delays)
+
+			if err := runConfig(params); err != nil {
+				t.Fatalf("expected the second attempt to succeed, got %v", err)
+			}
+			if len(delays) != 1 {
+				t.Fatalf("slept %v, want exactly one delay", delays)
+			}
+			if delays[0] < tc.wantMin || delays[0] > tc.wantMax {
+				t.Errorf("waited %s, want within [%s, %s]", delays[0], tc.wantMin, tc.wantMax)
+			}
+		})
 	}
 }
