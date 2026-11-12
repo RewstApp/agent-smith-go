@@ -105,17 +105,23 @@ type agentInfo struct {
 
 func runDiagnostic(params *diagnosticContext) {
 	if params.Bundle {
-		path, err := runDiagnosticBundle(context.Background(), params, bundleEnv{
+		if params.BundlePath == bundleStdoutPath {
+			// The zip owns stdout: every section and the closing line go
+			// to stderr (sc-132995).
+			diagOut = os.Stderr
+		}
+		report, err := runDiagnosticBundle(context.Background(), params, bundleEnv{
 			root:     getAgentDataRoot(),
 			fallback: fallbackScanAgents,
 			dialer:   &defaultTLSDialer{},
+			stdout:   os.Stdout,
 		})
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "Diagnostic bundle failed:", err)
 			os.Exit(1)
 		}
 		dprintln()
-		dprintf("Diagnostic bundle written: %s\n", path)
+		dprintf("Diagnostic bundle written: %s\n", report)
 		return
 	}
 	runDiagnosticFull(

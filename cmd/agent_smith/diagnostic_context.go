@@ -14,7 +14,8 @@ type diagnosticContext struct {
 	OrgId      string
 	Diagnostic bool
 	// Bundle writes one redacted support archive instead of showing the menu
-	// (sc-129690); BundlePath overrides where it goes.
+	// (sc-129690); BundlePath overrides where it goes: a file, a directory,
+	// or bundleStdoutPath (sc-132995).
 	Bundle     bool
 	BundlePath string
 
@@ -42,7 +43,7 @@ func newDiagnosticFlagSet(params *diagnosticContext) *flag.FlagSet {
 		&params.BundlePath,
 		"bundle-path",
 		"",
-		"With --bundle: where to write the zip (default <data directory>/diagnostic-<org>-<timestamp>.zip)",
+		"With --bundle: where to write the zip: a file, a directory (the default name inside it), or - for stdout with the console output on stderr (default diagnostic-<org>-<timestamp>.zip in the working directory)",
 	)
 	fs.SetOutput(io.Discard)
 	return fs

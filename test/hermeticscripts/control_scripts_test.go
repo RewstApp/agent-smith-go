@@ -12,6 +12,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -622,8 +624,17 @@ func TestAssertBundle_ChecksEntriesAndSecrets(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(config), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	fake := filepath.Join(t.TempDir(), "fake-agent.ps1")
-	script := `param([string]$_org1, [string]$org, [string]$_d, [string]$_b, [string]$_bp, [string]$path)
+	// The fake agent is a script behind a native wrapper, since the helper
+	// launches the stdout form (`--bundle-path -`, sc-132995) as a process
+	// of its own to capture the zip's bytes. The fake plays every form the
+	// helper exercises: a file, `-` (the zip's bytes on stdout, the sections
+	// and the closing line on stderr) and a directory (the default name
+	// inside it), and the closing line names the hand-over the helper
+	// expects on this platform.
+	fakeScript := filepath.Join(t.TempDir(), "fake-agent.ps1")
+	script := `$argv = $env:FAKE_ARGS -split ' '
+$org = $argv[[array]::IndexOf($argv, '--org-id') + 1]
+$path = $argv[[array]::IndexOf($argv, '--bundle-path') + 1]
 if ($org -ne 'org-1') { Write-Output "no agent for org $org is installed under /x; nothing to bundle"; exit 1 }
 $stage = Join-Path ([IO.Path]::GetTempPath()) ([guid]::NewGuid())
 New-Item -ItemType Directory -Path (Join-Path $stage 'logs') | Out-Null
@@ -631,16 +642,36 @@ New-Item -ItemType Directory -Path (Join-Path $stage 'logs') | Out-Null
 foreach ($n in 'host.txt','journal.txt','service.txt','spool.txt','version.txt') { 'x' | Set-Content (Join-Path $stage $n) }
 $env:FAKE_DIAGNOSTIC | Set-Content (Join-Path $stage 'diagnostic.txt')
 'tail' | Set-Content (Join-Path $stage 'logs/rewst_agent.log')
-Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $path
-Write-Output "Diagnostic bundle written: $path"
+$zip = Join-Path ([IO.Path]::GetTempPath()) ([guid]::NewGuid().ToString() + '.zip')
+Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $zip
+if ($path -eq '-') {
+  [Console]::Error.WriteLine('=== Service Status ===')
+  $bytes = [IO.File]::ReadAllBytes($zip)
+  $stdout = [Console]::OpenStandardOutput()
+  $stdout.Write($bytes, 0, $bytes.Length)
+  $stdout.Flush()
+  [Console]::Error.WriteLine("Diagnostic bundle written: stdout ($($bytes.Length) bytes)")
+  exit 0
+}
+if (Test-Path $path -PathType Container) { $path = Join-Path $path "diagnostic-$org-20261112T000000Z.zip" }
+Move-Item $zip $path
+if ($IsWindows) { $handed = "read granted to $env:USERNAME, the console session's user" }
+else { $handed = "owned by uid $env:SUDO_UID gid 20, the user behind sudo" }
+Write-Output "Diagnostic bundle written: $path ($((Get-Item $path).Length) bytes, $handed)"
 `
-	if err := os.WriteFile(fake, []byte(script), 0o600); err != nil {
+	if err := os.WriteFile(fakeScript, []byte(script), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	fake := fakeAgentWrapper(t, fakeScript)
 	bundle := filepath.Join(t.TempDir(), "b.zip")
 	base := []string{
 		"AGENT_BINARY=" + fake, "ORG_ID=org-1", "LOG_FILE=" + logFile,
 		"BUNDLE_PATH=" + bundle, "ABSENT=PROXY-PASS",
+	}
+	if runtime.GOOS != "windows" {
+		// The helper runs under sudo in the job; here the file is the test
+		// user's already, so the sudo user is the test user.
+		base = append(base, "SUDO_UID="+strconv.Itoa(os.Getuid()))
 	}
 	if code, out := run(
 		t,
@@ -668,4 +699,29 @@ Write-Output "Diagnostic bundle written: $path"
 			t.Errorf("a leak (%s) passed: exit %d\n%s", leak, code, out)
 		}
 	}
+}
+
+// fakeAgentWrapper wraps a PowerShell fake of the agent in a native
+// executable - a .cmd file on Windows, a shell script elsewhere - so a helper
+// can launch it as a process the way it launches the real binary. The
+// arguments reach the script whole in FAKE_ARGS: `pwsh -File` would bind
+// `--org-id` as a parameter name.
+func fakeAgentWrapper(t *testing.T, script string) string {
+	t.Helper()
+	pwsh := pwshPath(t)
+	dir := filepath.Dir(script)
+	if runtime.GOOS == "windows" {
+		wrapper := filepath.Join(dir, "fake-agent.cmd")
+		body := "@set FAKE_ARGS=%*\r\n@\"" + pwsh + "\" -NoProfile -File \"" + script + "\"\r\n"
+		if err := os.WriteFile(wrapper, []byte(body), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		return wrapper
+	}
+	wrapper := filepath.Join(dir, "fake-agent")
+	body := "#!/bin/sh\nFAKE_ARGS=\"$*\" exec '" + pwsh + "' -NoProfile -File '" + script + "'\n"
+	if err := os.WriteFile(wrapper, []byte(body), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return wrapper
 }

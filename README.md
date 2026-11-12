@@ -423,9 +423,17 @@ sudo ./rewst_agent_config.linux.bin --org-id YOUR_ORG_ID --diagnostic --bundle
 
 `--diagnostic --bundle` (sc-129690) runs the checks without the menu and
 writes one zip, by default `diagnostic-<org>-<timestamp>.zip` in the working
-directory (`--bundle-path <file>` to choose; not the agent's data directory,
-which is owner-only and never swept), and prints its path. `--org-id` may be
-left out when only one agent is installed. It holds:
+directory (not the agent's data directory, which is owner-only and never
+swept), and prints its path and size. `--bundle-path` chooses where it goes
+(sc-132995): a file, a directory (the default name inside it), or `-`, which
+streams the zip to stdout with every console section and the closing line on
+stderr, so an RMM one-liner can ship it without touching the disk:
+
+```bash
+sudo ./rewst_agent_config.linux.bin --diagnostic --bundle --bundle-path - | curl -T - https://files.example.com/case-1234.zip
+```
+
+`--org-id` may be left out when only one agent is installed. It holds:
 
 | Entry | Contents |
 |---|---|
@@ -438,6 +446,20 @@ left out when only one agent is installed. It holds:
 | `diagnostic.txt` | The console output of the other checks: a `config.json` that is JSON but does not load as the agent's configuration (reported first, with the parse error), service status, command execution, connectivity, temp directory and fleet health |
 | `health.json` | The fleet-health report the service last published, when there is one, with each running command's `last_output_line` replaced by `(withheld from the bundle)` - the Fleet Health section withholds it the same way, so the bundle never carries command output |
 | `version.txt` | The agent version the service reports, and the bundling tool's version and platform |
+
+The bundle must be written elevated, and it is handed to whoever asked for
+it (sc-132995) once the atomic rename has completed, so a failure can never
+leave a partial file with the wrong owner: under `sudo` on Linux and macOS the
+file is `chown`ed to `SUDO_UID`/`SUDO_GID`, the user who typed the command,
+who could otherwise not attach a root-owned `0600` file to the support case
+without a second `chown`; on Windows the console session's user is granted
+read access on the file through `icacls` (`utils.GrantReadAccess`), since an
+elevated prompt writes a file a standard-user session may not be able to
+open, and with no one at the console (a headless RMM run) the process's own
+account is named instead. The closing `Diagnostic bundle written:` line
+states the owner or the grant, or why the hand-over was not done; a hand-over
+that fails is reported on that line rather than failing the bundle, which is
+there for whoever can read it.
 
 Redaction is not only the config file: the secret values found in the config
 file - the shared access key, the GitHub token and the proxy credential (a
@@ -465,8 +487,14 @@ fails one query instead of hanging the bundle before it writes anything.
 **Proven end to end by** `hermetic-proxy`, whose agent holds both a shared
 access key and a proxy password: the job writes a bundle, checks every entry
 is present and `config.json` is redacted, asserts neither secret appears
-anywhere in it, and asks for a bundle of an org that is not installed, which
-must fail clearly and leave no file.
+anywhere in it, asserts the file was handed over (the helper runs under
+`sudo` on Linux and macOS, so the file must be owned by `SUDO_UID`; on
+Windows the runner's user must hold a read grant), streams a second bundle
+through `--bundle-path -` and checks the zip on stdout carries the same
+entries while stderr carries the sections and the closing line, writes a
+third into a directory and checks the default name inside it, and asks for a
+bundle of an org that is not installed, which must fail clearly and leave no
+file.
 
 ### Example output
 
