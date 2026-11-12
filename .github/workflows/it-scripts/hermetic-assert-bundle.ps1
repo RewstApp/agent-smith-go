@@ -100,7 +100,10 @@ $out = & $env:AGENT_BINARY --org-id $env:ORG_ID --diagnostic --bundle --bundle-p
 if ($LASTEXITCODE -ne 0) { Write-Output $out; Write-Error "--bundle-path <directory> exited $LASTEXITCODE"; exit 1 }
 $inDir = @(Get-ChildItem -File $dirTarget -Filter "diagnostic-$($env:ORG_ID)-*.zip")
 if ($inDir.Count -ne 1) { Write-Output $out; Write-Error "expected one diagnostic-<org>-<timestamp>.zip in $dirTarget, found $($inDir.Count)"; exit 1 }
-if (-not $out.Contains("Diagnostic bundle written: $($inDir[0].FullName)")) { Write-Output $out; Write-Error "the file inside the directory was not printed"; exit 1 }
+# Compared in the form the directory was passed in: on Windows the agent prints
+# the path it was given, which may be an 8.3 short name where FullName is not.
+$expected = Join-Path $dirTarget $inDir[0].Name
+if (-not $out.Contains("Diagnostic bundle written: $expected")) { Write-Output $out; Write-Error "the file inside the directory was not printed as $expected"; exit 1 }
 Write-Output "--bundle-path <directory> wrote $($inDir[0].Name) inside it"
 
 $missingOrg = [guid]::NewGuid().ToString()
