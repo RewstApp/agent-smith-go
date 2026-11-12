@@ -284,6 +284,7 @@ How your engine's answer is read (`attemptPostback`):
 |---|---|
 | exactly `200` | delivered. **No other 2xx counts**: a `201`, `202` or `204` falls into the rows below |
 | `400` whose body parses as a JSON object whose `error` string contains `fulfilled` (any case) | delivered: a duplicate of a result you already have |
+| `429` (any body), or `503` with a `Retry-After` header | **throttled** (sc-132997): retried after the time the header names, floored at the backoff the attempt would have waited anyway and capped at 64 s (the backoff ceiling), or after the backoff itself without a header; then spooled, with the wait carried into the spool. A throttle is read as the engine being busy, never as a rejection of the result: it is not counted against a spooled entry's attempts, and a `429` with a JSON body used to fall into the row above and drop the result on the spot |
 | any other status whose body parses as a JSON object (an `error` key is optional; if present it must be a string) | **final on the spot**: no in-line retry, nothing spooled, a spooled entry being re-tried is removed. This is how an engine says "stop sending this" |
 | `5xx`, any status with a body that is not a JSON object, or no answer | retried on the postback backoff (`postback_max_attempts`), then spooled to disk and re-attempted on later connections; an entry the engine keeps answering this way is abandoned after a bounded number of attempts |
 
@@ -431,7 +432,7 @@ left out when only one agent is installed. It holds:
 | `config.json` | The configuration with `shared_access_key` and `github_token` (`agent.SecretConfigKeys`, the one list of credential fields) replaced by `***` and the proxy URL's credentials masked |
 | `logs/` | The last 2 MiB of the log and of every rotated copy, each starting at a line boundary (a cut inside a line drops that partial line; a tail with no line boundary at all is kept whole) |
 | `journal.txt` | The command journal's files - name, size, modification time, and for each entry its key, `received_at`, `started_at` (or a tombstone's `completed_at`) - never a command |
-| `spool.txt` | The postback spool's files - name, size, modification time, and for each entry its post id, `created_at`, age, attempts, `last_attempt_at` and `last_error` (why the engine kept rejecting it) - never a result |
+| `spool.txt` | The postback spool's files - name, size, modification time, and for each entry its post id, `created_at`, age, attempts, `last_attempt_at`, `next_attempt_at` (the time the engine's last throttle allowed the next attempt, sc-132997) and `last_error` (why the engine kept rejecting it) - never a result |
 | `service.txt` | The service manager's own output (`systemctl status`/`show`, `launchctl print`, or `sc queryex`/`qc`), each query bounded by 30 seconds |
 | `host.txt` | The host information section |
 | `diagnostic.txt` | The console output of the other checks: a `config.json` that is JSON but does not load as the agent's configuration (reported first, with the parse error), service status, command execution, connectivity, temp directory and fleet health |
@@ -937,6 +938,27 @@ wholesale outage however often the agent reconnects. It never delays the pass-ov
 itself — a rejected entry is skipped on every flush regardless; only the counting
 is spaced.
 
+#### Honouring `Retry-After`
+
+When the engine is throttling - a `429`, or a `503` carrying a `Retry-After`
+header - it is saying nothing about the result and everything about its own
+load, and since sc-132997 the agent reads it that way. The header's value
+(seconds or an HTTP date) is honoured on the next in-line attempt, floored at
+the delay the backoff would have waited anyway and capped at the 64 s backoff
+ceiling so a wrong or hostile value cannot hold a command worker for hours; a
+`429` without the header waits the backoff. A budget that ends on a throttle
+spools the result **with the engine's time on it**, and a flush that is
+throttled stops without charging the entry an attempt (it is "the engine is
+busy", not "the engine rejected this"), records the time on the entry and in
+the health object (`spool.next_attempt_at`), waits it out and runs again
+within the same connection cycle - so the result is delivered as soon as the
+engine allows rather than on the next cycle, hours away, while no attempt
+lands before the time it named, across reconnects and restarts alike. Before
+this, the postback path never read the header: the fleet kept knocking on its
+own jittered schedule through INC-39353 (2026-10-22, the engine throttling
+under persistence delays), and a `429` with a JSON body was read as a final
+refusal and the result dropped on the spot.
+
 Drop reasons are counted separately (`expired`, `capacity`, `attempts_exhausted`,
 `corrupt`) so a spool shedding entries under pressure is distinguishable in
 diagnostics from one abandoning a result the engine refuses. Spool entry files
@@ -966,7 +988,7 @@ existing configurations are unaffected. Example snippet:
 }
 ```
 
-**Proven end to end by** the `hermetic-postback-spool` e2e job (sc-126322): the stand-in engine's answers are scripted per `post_id` through `/_control/postback-responses`. A result the engine answers 5xx exhausts its in-line attempts, is spooled, and is delivered on a later connection cycle once the engine accepts it; a result the engine keeps rejecting is passed over each cycle while the entry spooled behind it is delivered, and is abandoned after its bounded attempts with `reason=attempts_exhausted` and the engine never having recorded it. The integration build spaces counted rejections one second apart instead of ten minutes (`spoolAttemptIntervalOverrideStr`) so the abandonment is observed within the job.
+**Proven end to end by** the `hermetic-postback-spool` e2e job (sc-126322): the stand-in engine's answers are scripted per `post_id` through `/_control/postback-responses`. A result the engine answers 5xx exhausts its in-line attempts, is spooled, and is delivered on a later connection cycle once the engine accepts it; a result the engine keeps rejecting is passed over each cycle while the entry spooled behind it is delivered, and is abandoned after its bounded attempts with `reason=attempts_exhausted` and the engine never having recorded it. The integration build spaces counted rejections one second apart instead of ten minutes (`spoolAttemptIntervalOverrideStr`) so the abandonment is observed within the job. The same job proves `Retry-After` (sc-132997): the engine answers a result `429` with `Retry-After: 20` three times - both in-line attempts and the first flush attempt - before accepting it, and the stand-in's record of when each attempt arrived must show every one at least 20 s after the one before.
 
 ### Staying Connected (SAS token renewal)
 
@@ -1492,7 +1514,10 @@ stated here rather than papered over by persisting them. `journal.pending` is
 the number of accepted commands not yet finished, `journal.degraded` is true
 while the journal is failing writes (the once-per-transition Error in the log),
 `spool.entries` is the number of results waiting for the engine and the
-`dropped_*` counters are the spool's documented drop reasons, `plugins` mirrors
+`dropped_*` counters are the spool's documented drop reasons (and
+`spool.next_attempt_at`, present only while the engine's last throttle holds
+the flush, is the time before which it will not try again, sc-132997),
+`plugins` mirrors
 the supervision counters per configured plugin, `commands.completed_total`
 counts commands that ran to their own end whatever their exit code,
 `commands.timed_out_total` those killed at the per-command deadline,
@@ -1858,7 +1883,7 @@ channel is saved in the config file and logged on each check.
 
 ### Retrying the Config Fetch
 
-The install-time `POST` to `--config-url` is answered by a Rewst workflow behind the engine's front door, and a fraction of requests come back with the engine's own ceiling (`408`), a gateway error (`5xx`), a rate limit (`429`) or a transient routing `404` whose body says `Workflow was not found`; a fresh attempt a few seconds later succeeds. Config mode now classifies the answer: those, and a request that never completed (connection refused, DNS, the request timeout), are **transient** and retried on a jittered exponential backoff (`utils.JitteredBackoff`) starting at 5 seconds and capped at 30, three attempts in total; any other non-2xx is a **refusal** (wrong trigger URL, wrong secret, bad payload) and fails immediately with the status and a body excerpt in the error. Each retry is an `Info` line naming the attempt and the reason, and an exhausted transient says so: `failed to fetch configuration: status 408 (transient; gave up after 3 attempts)`. Before sc-118306 the first transient answer failed the install outright, which in the integration suite was the largest single source of red runs and for a technician was an install that fails once and works on the second try. The budget is adjustable with `--config-max-attempts` and `--config-base-retry-backoff-seconds`.
+The install-time `POST` to `--config-url` is answered by a Rewst workflow behind the engine's front door, and a fraction of requests come back with the engine's own ceiling (`408`), a gateway error (`5xx`), a rate limit (`429`) or a transient routing `404` whose body says `Workflow was not found`; a fresh attempt a few seconds later succeeds. Config mode now classifies the answer: those, and a request that never completed (connection refused, DNS, the request timeout), are **transient** and retried on a jittered exponential backoff (`utils.JitteredBackoff`) starting at 5 seconds and capped at 30, three attempts in total; any other non-2xx is a **refusal** (wrong trigger URL, wrong secret, bad payload) and fails immediately with the status and a body excerpt in the error. Each retry is an `Info` line naming the attempt and the reason, and an exhausted transient says so: `failed to fetch configuration: status 408 (transient; gave up after 3 attempts)`. A `429` or `503` that names a `Retry-After` is waited for (sc-132997): the header's value, floored at the delay the schedule would have waited anyway and capped at the schedule's 30 s ceiling, in place of the jittered backoff for that attempt. Before sc-118306 the first transient answer failed the install outright, which in the integration suite was the largest single source of red runs and for a technician was an install that fails once and works on the second try. The budget is adjustable with `--config-max-attempts` and `--config-base-retry-backoff-seconds`.
 
 **Proven end to end by** `TestInstall/FailsFastWhenTheConfigLacksADeviceID` in `test/e2e` (sc-126322): the in-process config endpoint answers 200 with a configuration that has no `device_id` - what the Rewst endpoint returns when its integration token has expired or the IoT Hub daily quota is exhausted - and the install must refuse it with `missing required field: device_id` after a single request, without a retry backoff, leaving no service registered and no files behind.
 

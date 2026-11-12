@@ -399,6 +399,10 @@ const (
 type configFetchError struct {
 	err       error
 	transient bool
+	// retryAfter is the wait a 429 or 503 answer named through Retry-After,
+	// zero when it named none (sc-132997). fetchConfigurationWithRetry honours
+	// it between the floor of its own schedule and maxConfigRetryBackoff.
+	retryAfter time.Duration
 }
 
 func (e *configFetchError) Error() string { return e.err.Error() }
@@ -458,12 +462,18 @@ func fetchConfigurationWithRetry(
 			return nil, err
 		}
 		delay := utils.JitteredBackoff(base, maxConfigRetryBackoff, attempt-1)
+		if fe.retryAfter > 0 {
+			// The engine said when to come back: wait at least that long, within
+			// the schedule's ceiling, rather than knock on the agent's own clock.
+			delay = utils.BoundRetryAfter(fe.retryAfter, delay, maxConfigRetryBackoff)
+		}
 		logger.Info(
 			"Config endpoint answered transiently; retrying",
 			"attempt", attempt,
 			"of", attempts,
 			"error", err.Error(),
 			"retry_in", delay,
+			"engine_asked", fe.retryAfter > 0,
 		)
 		sleep(delay)
 	}
@@ -518,10 +528,15 @@ func fetchConfigurationOnce(
 
 	if res.StatusCode < 200 || res.StatusCode > 299 {
 		if isTransientConfigStatus(res.StatusCode, bodyBytes) {
-			return nil, &configFetchError{
+			fe := &configFetchError{
 				err:       fmt.Errorf("failed to fetch configuration: status %d", res.StatusCode),
 				transient: true,
 			}
+			if res.StatusCode == http.StatusTooManyRequests ||
+				res.StatusCode == http.StatusServiceUnavailable {
+				fe.retryAfter, _ = utils.ParseRetryAfter(res.Header.Get("Retry-After"), time.Now())
+			}
+			return nil, fe
 		}
 		excerpt := strings.TrimSpace(string(bodyBytes))
 		if len(excerpt) > configErrorBodyExcerpt {

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -721,4 +722,221 @@ func TestSpool_SpacedRejectionsStillExhaustTheBudget(t *testing.T) {
 	if n := countSpoolFiles(t, s.dir); n != 0 {
 		t.Errorf("expected the entry removed, %d files remain", n)
 	}
+}
+
+// throttleError is the error a throttled delivery returns in these tests: it
+// carries the wait the way engineThrottled does for the flush.
+type throttleError struct{ after time.Duration }
+
+func (e *throttleError) Error() string { return "postback throttled: status 429" }
+
+func (e *throttleError) RetryAfter() time.Duration { return e.after }
+
+// A throttle (429, or 503 with Retry-After) is not this entry's fault: it is
+// not counted against the attempt budget, the flush stops at it and records
+// the time the engine allowed the next attempt - on the entry, in the health
+// object and as the value it returns - and a flush inside that window
+// attempts nothing (sc-132997).
+func TestSpool_ThrottleIsNotCountedAndPausesTheFlush(t *testing.T) {
+	s := newTestSpoolWithAttempts(t, 10, time.Hour, 2)
+	clock := time.Now()
+	s.now = func() time.Time { return clock }
+
+	for _, id := range []string{"first", "behind"} {
+		if err := s.enqueue(
+			spoolEntry{PostId: id, Result: []byte(id), CreatedAt: clock},
+		); err != nil {
+			t.Fatalf("enqueue %s: %v", id, err)
+		}
+		time.Sleep(time.Millisecond) // sleep-ok: distinct CreatedAt/filenames; ordering, not timing
+	}
+
+	attempted := []string{}
+	throttle := true
+	deliver := func(e spoolEntry) (deliveryOutcome, error) {
+		attempted = append(attempted, e.PostId)
+		if throttle {
+			return deliveryThrottled, &throttleError{after: 30 * time.Second}
+		}
+		return deliveryDone, nil
+	}
+	onAbandon := func(e spoolEntry, err error) {
+		t.Errorf("entry %s abandoned on a throttle", e.PostId)
+	}
+
+	retryAt := s.flush(context.Background(), deliver, onAbandon)
+	if want := clock.Add(30 * time.Second); !retryAt.Equal(want) {
+		t.Errorf("flush returned %s, want the engine's time %s", retryAt, want)
+	}
+	if len(attempted) != 1 || attempted[0] != "first" {
+		t.Errorf(
+			"attempted %v, want only the first entry: the engine asked the whole agent to back off",
+			attempted,
+		)
+	}
+	if n := countSpoolFiles(t, s.dir); n != 2 {
+		t.Errorf("expected both entries kept, %d remain", n)
+	}
+
+	// Persisted on the entry, not counted against it.
+	entries := readSpoolEntries(t, s.dir)
+	if entries[0].Attempts != 0 || !entries[0].LastAttemptAt.IsZero() {
+		t.Errorf("throttle was counted as a rejection: %+v", entries[0])
+	}
+	if !entries[0].NextAttemptAt.Equal(clock.Add(30 * time.Second)) {
+		t.Errorf(
+			"next_attempt_at = %s, want %s",
+			entries[0].NextAttemptAt,
+			clock.Add(30*time.Second),
+		)
+	}
+	if h := s.health(); h.NextAttemptAt != clock.Add(30*time.Second).UTC().Format(time.RFC3339) {
+		t.Errorf("health next_attempt_at = %q", h.NextAttemptAt)
+	}
+
+	// Inside the window a flush attempts nothing and returns the same time.
+	clock = clock.Add(10 * time.Second)
+	if again := s.flush(context.Background(), deliver, onAbandon); !again.Equal(retryAt) {
+		t.Errorf("flush inside the window returned %s, want %s", again, retryAt)
+	}
+	if len(attempted) != 1 {
+		t.Errorf("a flush inside the window attempted %v", attempted[1:])
+	}
+
+	// Once it has passed, everything is delivered and the pause is gone.
+	clock = clock.Add(30 * time.Second)
+	throttle = false
+	if done := s.flush(context.Background(), deliver, onAbandon); !done.IsZero() {
+		t.Errorf("flush after the window returned %s, want zero", done)
+	}
+	if len(attempted) != 3 {
+		t.Errorf("attempted %v, want both entries after the window", attempted)
+	}
+	if n := countSpoolFiles(t, s.dir); n != 0 {
+		t.Errorf("expected the spool emptied, %d remain", n)
+	}
+	if h := s.health(); h.NextAttemptAt != "" {
+		t.Errorf("health still reports next_attempt_at %q after the window", h.NextAttemptAt)
+	}
+	if got := s.droppedTotal.Load(); got != 0 {
+		t.Errorf("a throttle must drop nothing, got %d drops", got)
+	}
+}
+
+// The recorded time survives a restart: a new process reads it off the entry
+// and does not attempt it (or anything behind it) before the engine's time.
+func TestSpool_ThrottleSurvivesRestart(t *testing.T) {
+	s := newTestSpool(t, 10, time.Hour)
+	clock := time.Now()
+	s.now = func() time.Time { return clock }
+	if err := s.enqueue(
+		spoolEntry{PostId: "first", Result: []byte("x"), CreatedAt: clock},
+	); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	s.flush(context.Background(), func(e spoolEntry) (deliveryOutcome, error) {
+		return deliveryThrottled, &throttleError{after: time.Minute}
+	}, nil)
+
+	// A new spool over the same directory: the in-memory pause is gone.
+	restarted := newPostbackSpool(
+		s.dir,
+		10,
+		time.Hour,
+		defaultSpoolMaxAttempts,
+		hclog.NewNullLogger(),
+	)
+	restarted.now = func() time.Time { return clock.Add(20 * time.Second) }
+	attempted := 0
+	retryAt := restarted.flush(context.Background(), func(e spoolEntry) (deliveryOutcome, error) {
+		attempted++
+		return deliveryDone, nil
+	}, nil)
+	if attempted != 0 {
+		t.Errorf(
+			"the restarted agent attempted the entry %d time(s) inside the engine's window",
+			attempted,
+		)
+	}
+	if want := clock.Add(time.Minute); !retryAt.Equal(want) {
+		t.Errorf("flush returned %s, want the recorded %s", retryAt, want)
+	}
+	if h := restarted.health(); h.NextAttemptAt == "" {
+		t.Error("the recovered pause is not reported in the health object")
+	}
+
+	// After the window the entry is delivered and the cleared field persisted
+	// is moot: the file is gone.
+	restarted.now = func() time.Time { return clock.Add(2 * time.Minute) }
+	if again := restarted.flush(context.Background(), func(e spoolEntry) (deliveryOutcome, error) {
+		attempted++
+		if !e.NextAttemptAt.IsZero() {
+			t.Errorf("entry handed to deliver still carries next_attempt_at %s", e.NextAttemptAt)
+		}
+		return deliveryDone, nil
+	}, nil); !again.IsZero() || attempted != 1 {
+		t.Errorf("after the window: flush returned %s, attempted %d", again, attempted)
+	}
+}
+
+// A rejection after a throttle clears the recorded time on the persisted
+// entry, so a stale next_attempt_at never outlives the attempt it bounded.
+func TestSpool_RejectionAfterThrottleClearsNextAttempt(t *testing.T) {
+	s := newTestSpool(t, 10, time.Hour)
+	clock := time.Now()
+	s.now = func() time.Time { return clock }
+	if err := s.enqueue(
+		spoolEntry{PostId: "first", Result: []byte("x"), CreatedAt: clock},
+	); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	s.flush(context.Background(), func(e spoolEntry) (deliveryOutcome, error) {
+		return deliveryThrottled, &throttleError{after: time.Second}
+	}, nil)
+	clock = clock.Add(2 * time.Second)
+	s.flush(context.Background(), func(e spoolEntry) (deliveryOutcome, error) {
+		return deliveryRetryEntry, fmt.Errorf("postback failed: status 503: ")
+	}, nil)
+
+	entries := readSpoolEntries(t, s.dir)
+	if len(entries) != 1 {
+		t.Fatalf("expected the rejected entry kept, got %d", len(entries))
+	}
+	if !entries[0].NextAttemptAt.IsZero() {
+		t.Errorf(
+			"next_attempt_at %s persisted past the attempt it bounded",
+			entries[0].NextAttemptAt,
+		)
+	}
+	if entries[0].Attempts != 1 {
+		t.Errorf(
+			"the rejection after the throttle was not counted: attempts = %d",
+			entries[0].Attempts,
+		)
+	}
+}
+
+// readSpoolEntries decodes every entry file oldest-first.
+func readSpoolEntries(t *testing.T, dir string) []spoolEntry {
+	t.Helper()
+	names, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read spool dir: %v", err)
+	}
+	var entries []spoolEntry
+	for _, de := range names {
+		if filepath.Ext(de.Name()) != spoolFileSuffix {
+			continue
+		}
+		raw, err := os.ReadFile(filepath.Join(dir, de.Name()))
+		if err != nil {
+			t.Fatalf("read %s: %v", de.Name(), err)
+		}
+		var e spoolEntry
+		if err := json.Unmarshal(raw, &e); err != nil {
+			t.Fatalf("decode %s: %v", de.Name(), err)
+		}
+		entries = append(entries, e)
+	}
+	return entries
 }

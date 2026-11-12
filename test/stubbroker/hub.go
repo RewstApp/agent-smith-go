@@ -131,6 +131,12 @@ type hub struct {
 	// postback the engine saw for a post_id, accepted or not (sc-126322).
 	responseScripts map[string][]int
 	attempts        map[string]int
+	// retryAfter is the Retry-After (seconds) every scripted non-200 answer
+	// for a post_id carries, and attemptsAt is when each of its postbacks
+	// arrived, so a scenario can assert no attempt landed inside the window
+	// the engine named (sc-132997).
+	retryAfter map[string]int
+	attemptsAt map[string][]time.Time
 }
 
 func newHub(postbackBase string, engineTimeout time.Duration) *hub {
@@ -142,6 +148,8 @@ func newHub(postbackBase string, engineTimeout time.Duration) *hub {
 		engineTimeout:   engineTimeout,
 		responseScripts: map[string][]int{},
 		attempts:        map[string]int{},
+		retryAfter:      map[string]int{},
+		attemptsAt:      map[string][]time.Time{},
 	}
 }
 
@@ -530,37 +538,47 @@ func (h *hub) allPostbacks() []*postback {
 
 // scriptResponses replaces the statuses the engine answers postID's next
 // postbacks with. A 200 in the list, or running out of list, means the normal
-// path (record once, 400 "fulfilled" for a duplicate).
-func (h *hub) scriptResponses(postID string, statuses []int) {
+// path (record once, 400 "fulfilled" for a duplicate). retryAfter, when
+// positive, is the Retry-After (seconds) every scripted non-200 answer
+// carries (sc-132997).
+func (h *hub) scriptResponses(postID string, statuses []int, retryAfter int) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.responseScripts[postID] = append([]int(nil), statuses...)
-	log.Printf("engine: postbacks for %s scripted as %v", postID, statuses)
+	h.retryAfter[postID] = retryAfter
+	log.Printf(
+		"engine: postbacks for %s scripted as %v (Retry-After %d)",
+		postID, statuses, retryAfter,
+	)
 }
 
 // nextScriptedStatus counts a postback attempt for postID and pops the next
-// scripted status, or 0 when the normal path applies.
-func (h *hub) nextScriptedStatus(postID string) int {
+// scripted status, or 0 when the normal path applies, with the Retry-After
+// (seconds) the answer carries, 0 for none.
+func (h *hub) nextScriptedStatus(postID string) (int, int) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.attempts[postID]++
+	h.attemptsAt[postID] = append(h.attemptsAt[postID], time.Now())
 	script := h.responseScripts[postID]
 	if len(script) == 0 {
-		return 0
+		return 0, 0
 	}
 	status := script[0]
 	h.responseScripts[postID] = script[1:]
 	if status == http.StatusOK {
-		return 0
+		return 0, 0
 	}
-	return status
+	return status, h.retryAfter[postID]
 }
 
 type postbackResponsesSnapshot struct {
-	PostID    string `json:"post_id"`
-	Attempts  int    `json:"attempts"`
-	Remaining []int  `json:"remaining"`
-	Recorded  bool   `json:"recorded"`
+	PostID     string      `json:"post_id"`
+	Attempts   int         `json:"attempts"`
+	Remaining  []int       `json:"remaining"`
+	Recorded   bool        `json:"recorded"`
+	RetryAfter int         `json:"retry_after"`
+	AttemptsAt []time.Time `json:"attempts_at"`
 }
 
 func (h *hub) postbackResponses(postID string) postbackResponsesSnapshot {
@@ -568,10 +586,12 @@ func (h *hub) postbackResponses(postID string) postbackResponsesSnapshot {
 	defer h.mu.Unlock()
 	_, recorded := h.postbacks[postID]
 	return postbackResponsesSnapshot{
-		PostID:    postID,
-		Attempts:  h.attempts[postID],
-		Remaining: append([]int{}, h.responseScripts[postID]...),
-		Recorded:  recorded,
+		PostID:     postID,
+		Attempts:   h.attempts[postID],
+		Remaining:  append([]int{}, h.responseScripts[postID]...),
+		Recorded:   recorded,
+		RetryAfter: h.retryAfter[postID],
+		AttemptsAt: append([]time.Time{}, h.attemptsAt[postID]...),
 	}
 }
 
@@ -663,9 +683,17 @@ func (h *hub) handleTrigger(w http.ResponseWriter, r *http.Request) {
 func (h *hub) handlePostback(w http.ResponseWriter, r *http.Request) {
 	postID := strings.TrimPrefix(r.URL.Path, "/webhooks/custom/action/")
 	body, _ := io.ReadAll(io.LimitReader(r.Body, 32<<20))
-	if status := h.nextScriptedStatus(postID); status != 0 {
-		log.Printf("engine: postback for %s -> %d (scripted)", postID, status)
+	if status, retryAfter := h.nextScriptedStatus(postID); status != 0 {
+		log.Printf(
+			"engine: postback for %s -> %d (scripted, Retry-After %d)",
+			postID,
+			status,
+			retryAfter,
+		)
 		w.Header().Set("Content-Type", "application/json")
+		if retryAfter > 0 {
+			w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
+		}
 		w.WriteHeader(status)
 		_, _ = fmt.Fprintf(w, `{"error":"scripted %d"}`, status)
 		return
@@ -783,22 +811,25 @@ func (h *hub) handleDevice(w http.ResponseWriter, r *http.Request) {
 }
 
 // handlePostbackResponses scripts the engine's answers to a post_id's
-// postbacks (POST {post_id, statuses:[503,503,200]}) and reports what the
-// engine has seen for one (GET ?post_id=...): attempts, the statuses still
+// postbacks (POST {post_id, statuses:[503,503,200], retry_after:20} - the
+// optional retry_after is the Retry-After, in seconds, every scripted non-200
+// answer carries, sc-132997) and reports what the engine has seen for one
+// (GET ?post_id=...): attempts and when each arrived, the statuses still
 // scripted, and whether a result was recorded.
 func (h *hub) handlePostbackResponses(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	switch r.Method {
 	case http.MethodPost:
 		var req struct {
-			PostID   string `json:"post_id"`
-			Statuses []int  `json:"statuses"`
+			PostID     string `json:"post_id"`
+			Statuses   []int  `json:"statuses"`
+			RetryAfter int    `json:"retry_after"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.PostID == "" {
 			http.Error(w, `{"error":"post_id and statuses are required"}`, http.StatusBadRequest)
 			return
 		}
-		h.scriptResponses(req.PostID, req.Statuses)
+		h.scriptResponses(req.PostID, req.Statuses, req.RetryAfter)
 		_ = json.NewEncoder(w).Encode(h.postbackResponses(req.PostID))
 	default:
 		postID := r.URL.Query().Get("post_id")

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"path"
@@ -771,6 +772,7 @@ func TestAttemptPostback_ClassifiesOutcomes(t *testing.T) {
 		name    string
 		status  int
 		body    string
+		header  string // Retry-After, when set
 		want    deliveryOutcome
 		wantErr bool
 	}{
@@ -779,6 +781,36 @@ func TestAttemptPostback_ClassifiesOutcomes(t *testing.T) {
 			status: http.StatusOK,
 			body:   "",
 			want:   deliveryDone,
+		},
+		{
+			name:    "429 is a throttle whatever its body, never a refusal of the result",
+			status:  http.StatusTooManyRequests,
+			body:    `{"error":"rate limited"}`,
+			want:    deliveryThrottled,
+			wantErr: true,
+		},
+		{
+			name:    "503 with Retry-After is a throttle",
+			status:  http.StatusServiceUnavailable,
+			body:    `{"error":"busy"}`,
+			header:  "30",
+			want:    deliveryThrottled,
+			wantErr: true,
+		},
+		{
+			name:    "503 without Retry-After is still a rejection of this entry",
+			status:  http.StatusServiceUnavailable,
+			body:    `{"error":"busy"}`,
+			want:    deliveryRetryEntry,
+			wantErr: true,
+		},
+		{
+			name:    "Retry-After on a 500 is ignored: only 429 and 503 are throttles",
+			status:  http.StatusInternalServerError,
+			body:    `{"error":"boom"}`,
+			header:  "30",
+			want:    deliveryRetryEntry,
+			wantErr: true,
 		},
 		{
 			name:   "already fulfilled",
@@ -812,6 +844,9 @@ func TestAttemptPostback_ClassifiesOutcomes(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			handler := func(w http.ResponseWriter, r *http.Request) {
+				if tc.header != "" {
+					w.Header().Set("Retry-After", tc.header)
+				}
 				w.WriteHeader(tc.status)
 				if tc.body != "" {
 					_, _ = w.Write([]byte(tc.body))
@@ -904,4 +939,318 @@ func TestFlushPostbackSpool_StopsEarlyWhenEngineUnreachable(t *testing.T) {
 	if got := svc.spool.droppedTotal.Load(); got != 0 {
 		t.Errorf("an outage must drop nothing, got %d drops", got)
 	}
+}
+
+// throttledServer answers each postback with the scripted status and
+// Retry-After, then 200, stamping when every request arrived.
+type throttledServer struct {
+	*httptest.Server
+	mu       sync.Mutex
+	arrivals []time.Time
+	answers  []throttledAnswer
+}
+
+type throttledAnswer struct {
+	status     int
+	retryAfter string
+}
+
+func newThrottledServer(t *testing.T, answers ...throttledAnswer) *throttledServer {
+	t.Helper()
+	s := &throttledServer{answers: answers}
+	s.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		s.mu.Lock()
+		i := len(s.arrivals)
+		s.arrivals = append(s.arrivals, time.Now())
+		s.mu.Unlock()
+		if i < len(s.answers) {
+			if s.answers[i].retryAfter != "" {
+				w.Header().Set("Retry-After", s.answers[i].retryAfter)
+			}
+			w.WriteHeader(s.answers[i].status)
+			_, _ = w.Write([]byte(`{"error":"scripted"}`))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(s.Close)
+	return s
+}
+
+func (s *throttledServer) seen() []time.Time {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]time.Time(nil), s.arrivals...)
+}
+
+// The wait a throttle carries is the header's value, floored at the backoff
+// the attempt would have waited anyway and capped at the backoff ceiling; a
+// 429 without the header waits the backoff itself (sc-132997).
+func TestAttemptPostback_ThrottleWaitIsBounded(t *testing.T) {
+	cases := []struct {
+		name       string
+		status     int
+		header     string
+		wantMin    time.Duration
+		wantMax    time.Duration
+		fromHeader bool
+	}{
+		{
+			name:       "header inside the bounds is honoured exactly",
+			status:     http.StatusTooManyRequests,
+			header:     "20",
+			wantMin:    20 * time.Second,
+			wantMax:    20 * time.Second,
+			fromHeader: true,
+		},
+		{
+			name:       "header above the ceiling is capped at it",
+			status:     http.StatusTooManyRequests,
+			header:     "100000",
+			wantMin:    postbackMaxRetryBackoff,
+			wantMax:    postbackMaxRetryBackoff,
+			fromHeader: true,
+		},
+		{
+			name:   "header of zero is floored at the backoff",
+			status: http.StatusTooManyRequests,
+			header: "0",
+			// The first retry slot: the base (1 ms in these tests) with jitter.
+			wantMin:    time.Millisecond * 3 / 4,
+			wantMax:    time.Millisecond * 5 / 4,
+			fromHeader: true,
+		},
+		{
+			name:       "http date is honoured",
+			status:     http.StatusServiceUnavailable,
+			header:     time.Now().Add(45 * time.Second).UTC().Format(http.TimeFormat),
+			wantMin:    43 * time.Second,
+			wantMax:    45 * time.Second,
+			fromHeader: true,
+		},
+		{
+			name:       "429 without a header waits the backoff",
+			status:     http.StatusTooManyRequests,
+			wantMin:    time.Millisecond * 3 / 4,
+			wantMax:    time.Millisecond * 5 / 4,
+			fromHeader: false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := newThrottledServer(t, throttledAnswer{status: tc.status, retryAfter: tc.header})
+			svc := newProcessMessageSvc(&mockExecutor{}, &http.Client{
+				Transport: &schemeRewriteTransport{scheme: "http"},
+			})
+			device := deviceWithEngine(srv.Listener.Addr().String())
+
+			got, err := svc.attemptPostback(
+				context.Background(), &interpreter.Message{PostId: "id:1"}, device,
+				[]byte(`{}`), hclog.NewNullLogger(), 1,
+			)
+			if got != deliveryThrottled {
+				t.Fatalf("outcome = %v, want deliveryThrottled", got)
+			}
+			var throttled *engineThrottled
+			if !errors.As(err, &throttled) {
+				t.Fatalf("error %v does not carry the throttle", err)
+			}
+			if throttled.retryAfter < tc.wantMin || throttled.retryAfter > tc.wantMax {
+				t.Errorf(
+					"retryAfter = %s, want within [%s, %s]",
+					throttled.retryAfter,
+					tc.wantMin,
+					tc.wantMax,
+				)
+			}
+			if throttled.fromHeader != tc.fromHeader {
+				t.Errorf("fromHeader = %v, want %v", throttled.fromHeader, tc.fromHeader)
+			}
+			if throttled.status != tc.status {
+				t.Errorf("status = %d, want %d", throttled.status, tc.status)
+			}
+		})
+	}
+}
+
+// A 429 with Retry-After holds the in-line retry for the time the engine
+// asked, not the agent's own millisecond schedule: the second attempt must not
+// land inside the window, and the result is delivered by it (sc-132997).
+func TestProcessMessage_PostbackHonoursRetryAfterInLine(t *testing.T) {
+	srv := newThrottledServer(
+		t,
+		throttledAnswer{status: http.StatusTooManyRequests, retryAfter: "1"},
+	)
+	svc := newProcessMessageSvc(&mockExecutor{result: []byte(`{}`)}, &http.Client{
+		Transport: &schemeRewriteTransport{scheme: "http"},
+	})
+	device := deviceWithEngine(srv.Listener.Addr().String())
+
+	svc.processMessage(
+		postbackPayload("echo hi", "id:throttled"),
+		context.Background(), device, hclog.NewNullLogger(), &mockNotifierWrapper{},
+	)
+
+	seen := srv.seen()
+	if len(seen) != 2 {
+		t.Fatalf("expected the throttled attempt and one delivery, saw %d requests", len(seen))
+	}
+	if gap := seen[1].Sub(seen[0]); gap < time.Second {
+		t.Errorf(
+			"second attempt landed %s after the first, inside the 1 s the engine asked for",
+			gap,
+		)
+	}
+}
+
+// A throttled spool flush waits the engine's time inside the same cycle and
+// runs again, so the result is delivered without waiting for the next
+// connection; the throttle is not counted against the entry (sc-132997).
+func TestFlushPostbackSpool_ThrottledFlushResumesAfterTheWait(t *testing.T) {
+	// A Retry-After of zero floors at the test backoff (1 ms), so the re-run
+	// is near-immediate and the test is not timing-sensitive.
+	srv := newThrottledServer(
+		t,
+		throttledAnswer{status: http.StatusTooManyRequests, retryAfter: "0"},
+	)
+	svc := newProcessMessageSvc(&mockExecutor{result: []byte(`{}`)}, &http.Client{
+		Transport: &schemeRewriteTransport{scheme: "http"},
+	})
+	svc.spool = newPostbackSpool(
+		t.TempDir(), 10, time.Hour, defaultSpoolMaxAttempts, hclog.NewNullLogger(),
+	)
+	if err := svc.spool.enqueue(spoolEntry{
+		PostId: "id:throttled", Result: []byte(`{}`), CreatedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+
+	device := deviceWithEngine(srv.Listener.Addr().String())
+	svc.flushPostbackSpool(context.Background(), device, hclog.NewNullLogger(), nil)
+
+	if n := len(srv.seen()); n != 2 {
+		t.Errorf("expected the throttled attempt and one delivery within the flush, saw %d", n)
+	}
+	if n := countSpoolFiles(t, svc.spool.dir); n != 0 {
+		t.Errorf("expected the entry delivered, %d remain", n)
+	}
+	if got := svc.spool.droppedTotal.Load(); got != 0 {
+		t.Errorf("a throttle must drop nothing, got %d drops", got)
+	}
+	if h := svc.spool.health(); h.NextAttemptAt != "" {
+		t.Errorf(
+			"no pause should remain once the flush ran to the end, got next_attempt_at %q",
+			h.NextAttemptAt,
+		)
+	}
+}
+
+// The cycle ending during the wait ends the flush: the entry stays spooled
+// for the next cycle rather than the wait outliving its context.
+func TestFlushPostbackSpool_ThrottledWaitEndsWithTheCycle(t *testing.T) {
+	srv := newThrottledServer(
+		t,
+		throttledAnswer{status: http.StatusTooManyRequests, retryAfter: "60"},
+	)
+	svc := newProcessMessageSvc(&mockExecutor{result: []byte(`{}`)}, &http.Client{
+		Transport: &schemeRewriteTransport{scheme: "http"},
+	})
+	svc.spool = newPostbackSpool(
+		t.TempDir(), 10, time.Hour, defaultSpoolMaxAttempts, hclog.NewNullLogger(),
+	)
+	if err := svc.spool.enqueue(spoolEntry{
+		PostId: "id:throttled", Result: []byte(`{}`), CreatedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		svc.flushPostbackSpool(
+			ctx,
+			deviceWithEngine(srv.Listener.Addr().String()),
+			hclog.NewNullLogger(),
+			nil,
+		)
+	}()
+
+	// The throttled attempt lands first; then the flush is waiting.
+	deadline := time.Now().Add(5 * time.Second)
+	for len(srv.seen()) == 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond) // sleep-ok: poll interval
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the flush kept waiting after its cycle ended")
+	}
+
+	if n := len(srv.seen()); n != 1 {
+		t.Errorf("expected only the throttled attempt, saw %d requests", n)
+	}
+	if n := countSpoolFiles(t, svc.spool.dir); n != 1 {
+		t.Errorf("expected the entry kept for the next cycle, %d remain", n)
+	}
+	if h := svc.spool.health(); h.NextAttemptAt == "" {
+		t.Error("expected the pause reported in the health object while it is in force")
+	}
+}
+
+// A budget that ends on a throttle spools the result with the engine's time
+// on it, and the spool is paused at once, so the flush on a cycle that starts
+// seconds later does not knock inside the window (sc-132997).
+func TestProcessMessage_ThrottledExhaustionSpoolsWithTheEnginesTime(t *testing.T) {
+	srv := newThrottledServer(
+		t,
+		throttledAnswer{status: http.StatusTooManyRequests, retryAfter: "30"},
+	)
+	svc := newProcessMessageSvc(&mockExecutor{result: []byte(`{}`)}, &http.Client{
+		Transport: &schemeRewriteTransport{scheme: "http"},
+	})
+	svc.PostbackMaxAttempts = 1 // the one attempt is the throttled one
+	svc.spool = newPostbackSpool(
+		t.TempDir(), 10, time.Hour, defaultSpoolMaxAttempts, hclog.NewNullLogger(),
+	)
+	device := deviceWithEngine(srv.Listener.Addr().String())
+
+	before := time.Now()
+	svc.processMessage(
+		postbackPayload("echo hi", "id:throttled"),
+		context.Background(), device, hclog.NewNullLogger(), &mockNotifierWrapper{},
+	)
+
+	entries := readSpoolEntries(t, svc.spool.dir)
+	if len(entries) != 1 {
+		t.Fatalf("expected the result spooled, got %d entries", len(entries))
+	}
+	want := before.Add(30 * time.Second)
+	if entries[0].NextAttemptAt.Before(want) ||
+		entries[0].NextAttemptAt.After(want.Add(5*time.Second)) {
+		t.Errorf("next_attempt_at = %s, want about %s", entries[0].NextAttemptAt, want)
+	}
+	if h := svc.spool.health(); h.NextAttemptAt == "" {
+		t.Error("the pause is not reported in the health object right after the spooling")
+	}
+
+	// The flush that follows attempts nothing before the time.
+	svc.flushPostbackSpool(
+		contextWithTimeout(t, 200*time.Millisecond),
+		device,
+		hclog.NewNullLogger(),
+		nil,
+	)
+	if n := len(srv.seen()); n != 1 {
+		t.Errorf("the flush attempted the entry inside the window: %d requests", n)
+	}
+}
+
+func contextWithTimeout(t *testing.T, d time.Duration) context.Context {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), d)
+	t.Cleanup(cancel)
+	return ctx
 }

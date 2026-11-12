@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -110,7 +111,22 @@ const (
 	// error, or a connection that broke while the response was being read. The
 	// flush stops, because attempting the rest would only repeat the failure.
 	deliveryUnreachable
+	// deliveryThrottled means the engine answered that it is overloaded - a 429,
+	// or a 503 carrying Retry-After - and, through the error's RetryAfter, when
+	// to come back (sc-132997). Like deliveryUnreachable it says nothing about
+	// this entry: the flush stops without charging an attempt, and nothing
+	// behind the entry is tried either, since the engine asked the whole agent
+	// to back off. Unlike deliveryUnreachable the engine named a time, which
+	// the flush records so no attempt lands before it.
+	deliveryThrottled
 )
+
+// retryLater is implemented by the error a deliveryThrottled attempt returns:
+// how long the engine asked the agent to wait before the next attempt,
+// already bounded by the postback backoff's floor and ceiling.
+type retryLater interface {
+	RetryAfter() time.Duration
+}
 
 // spoolEntry is the durable record of a command result whose postback could not
 // be delivered in-line. It carries everything needed to rebuild and retry the
@@ -134,6 +150,13 @@ type spoolEntry struct {
 	// out attempts (see minAttemptInterval). Zero on an entry that has never been
 	// rejected, including one written by an older agent.
 	LastAttemptAt time.Time `json:"last_attempt_at,omitempty"`
+	// NextAttemptAt is the earliest time the engine allowed the next attempt
+	// when it answered this entry with a throttle (429, or 503 with
+	// Retry-After; sc-132997). It is persisted on the entry, rather than kept
+	// only in memory, so a restart inside the window does not knock on the
+	// engine before it, and so the support bundle's spool.txt can show it.
+	// Zero once the entry has been attempted again.
+	NextAttemptAt time.Time `json:"next_attempt_at,omitempty"`
 }
 
 // postbackSpool is a bounded, file-backed queue of command results whose
@@ -161,6 +184,12 @@ type postbackSpool struct {
 
 	mu  sync.Mutex
 	seq uint64
+	// pausedUntil is the earliest time a flush may attempt an entry after the
+	// engine throttled one (sc-132997); zero when no pause is in force. Guarded
+	// by mu. It is the in-memory twin of the throttled entry's NextAttemptAt:
+	// the entry carries it across a restart, this field answers the health
+	// object and the next flush without rereading the directory.
+	pausedUntil time.Time
 
 	// droppedTotal counts every spool entry discarded without being delivered,
 	// for whatever reason. The per-reason counters below break that total down:
@@ -226,14 +255,42 @@ func newPostbackSpool(
 func (s *postbackSpool) health() mqtt.SpoolHealth {
 	s.mu.Lock()
 	entries := len(s.listLocked())
+	pausedUntil := s.pausedUntil
 	s.mu.Unlock()
-	return mqtt.SpoolHealth{
+
+	h := mqtt.SpoolHealth{
 		Entries:         entries,
 		DroppedExpired:  s.droppedExpired.Load(),
 		DroppedCapacity: s.droppedCapacity.Load(),
 		DroppedAttempts: s.droppedAttempts.Load(),
 		DroppedCorrupt:  s.droppedCorrupt.Load(),
 	}
+	if s.now().Before(pausedUntil) {
+		h.NextAttemptAt = pausedUntil.UTC().Format(time.RFC3339)
+	}
+	return h
+}
+
+// pause records that no entry may be attempted before until, keeping the
+// later of it and any pause already in force, and returns the time in force.
+func (s *postbackSpool) pause(until time.Time) time.Time {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if until.After(s.pausedUntil) {
+		s.pausedUntil = until
+	}
+	return s.pausedUntil
+}
+
+// pausedUntilNow returns the pause in force, or the zero time once it has
+// elapsed.
+func (s *postbackSpool) pausedUntilNow() time.Time {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.now().Before(s.pausedUntil) {
+		return s.pausedUntil
+	}
+	return time.Time{}
 }
 
 func (s *postbackSpool) countDrop(reason string) int64 {
@@ -266,6 +323,13 @@ func (s *postbackSpool) enqueue(entry spoolEntry) error {
 	// Drop expired entries first, then evict oldest until there is room for one
 	// more (target maxEntries-1 so the new write lands at the cap).
 	s.pruneLocked(s.maxEntries - 1)
+
+	// An entry spooled straight off a throttle brings the engine's time with
+	// it (sc-132997); the pause takes effect now rather than when a flush
+	// first reads the entry, so the health object reports it at once.
+	if entry.NextAttemptAt.After(s.pausedUntil) && s.now().Before(entry.NextAttemptAt) {
+		s.pausedUntil = entry.NextAttemptAt
+	}
 
 	data, err := json.Marshal(entry)
 	if err != nil {
@@ -371,19 +435,39 @@ func (s *postbackSpool) drop(name, reason string, extra ...any) {
 // pinned the queue, was retried forever with no attempt bound, and the healthy
 // results behind it were eventually aged out and reported as merely stale.
 //
+// deliveryThrottled stops the flush like deliveryUnreachable does, and charges
+// nothing either, but the engine named when to come back (sc-132997): that
+// time is recorded on the entry and as the spool's pause, and returned so the
+// caller can run the flush again once it has passed rather than wait for the
+// next connection cycle. A flush that starts inside a pause - the caller's
+// own re-run never does, but a reconnect or a restart can - returns the pause
+// without attempting anything, so no request lands before the engine's time.
+//
+// The returned time is the earliest the next flush may start, or zero when
+// this one ran to the end of the spool or stopped for a reason that names no
+// time (an unreachable engine, a cancelled context).
+//
 // onAbandon may be nil. Flushing stops promptly when ctx is cancelled so it
 // never delays teardown.
 func (s *postbackSpool) flush(
 	ctx context.Context,
 	deliver func(spoolEntry) (deliveryOutcome, error),
 	onAbandon func(entry spoolEntry, err error),
-) {
+) time.Time {
+	if until := s.pausedUntilNow(); !until.IsZero() {
+		s.logger.Info(
+			"Postback spool flush deferred: the engine asked to retry later",
+			"next_attempt_at", until.UTC().Format(time.RFC3339),
+		)
+		return until
+	}
+
 	s.mu.Lock()
 	names := s.listLocked()
 	s.mu.Unlock()
 
 	if len(names) == 0 {
-		return
+		return time.Time{}
 	}
 
 	// Age is decided on the clock evidence, so a clock stepped forward at boot
@@ -397,7 +481,7 @@ func (s *postbackSpool) flush(
 	rejected := 0
 	for _, name := range names {
 		if ctx.Err() != nil {
-			return
+			return time.Time{}
 		}
 
 		path := filepath.Join(s.dir, name)
@@ -423,6 +507,22 @@ func (s *postbackSpool) flush(
 			continue
 		}
 
+		// A throttle recorded by a previous process (the in-memory pause did
+		// not survive the restart) is honoured from the entry itself.
+		if !entry.NextAttemptAt.IsZero() && s.now().Before(entry.NextAttemptAt) {
+			until := s.pause(entry.NextAttemptAt)
+			s.logger.Info(
+				"Postback spool flush deferred: the engine asked to retry later",
+				"post_id", entry.PostId,
+				"next_attempt_at", until.UTC().Format(time.RFC3339),
+				"delivered", delivered,
+			)
+			return until
+		}
+		// Once attempted again the recorded time has served its purpose; the
+		// outcomes below that rewrite the entry persist the cleared field.
+		entry.NextAttemptAt = time.Time{}
+
 		outcome, derr := deliver(entry)
 		switch outcome {
 		case deliveryDone:
@@ -440,7 +540,30 @@ func (s *postbackSpool) flush(
 				"delivered", delivered,
 				"error", derr,
 			)
-			return
+			return time.Time{}
+
+		case deliveryThrottled:
+			// The engine is up but asked the agent to back off, and said for how
+			// long. Not this entry's fault either, so no attempt is charged; the
+			// time is recorded on the entry and as the pause, and returned so the
+			// caller re-runs the flush once it has passed.
+			var later retryLater
+			after := time.Duration(0)
+			if errors.As(derr, &later) {
+				after = later.RetryAfter()
+			}
+			entry.NextAttemptAt = s.now().Add(after)
+			s.recordAttempt(name, entry)
+			until := s.pause(entry.NextAttemptAt)
+			s.logger.Info(
+				"Postback spool flush paused: the engine asked to retry later",
+				"post_id", entry.PostId,
+				"retry_after", after,
+				"next_attempt_at", until.UTC().Format(time.RFC3339),
+				"delivered", delivered,
+				"error", derr,
+			)
+			return until
 
 		case deliveryRetryEntry:
 			rejected++
@@ -486,6 +609,7 @@ func (s *postbackSpool) flush(
 			"abandoned", abandoned,
 		)
 	}
+	return time.Time{}
 }
 
 // recordAttempt persists an entry whose delivery was rejected, so its attempt
