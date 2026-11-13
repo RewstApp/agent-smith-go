@@ -9,10 +9,6 @@ import (
 	"strings"
 )
 
-func getAgentDataRoot() string {
-	return filepath.Join("/Library", "Application Support", "rewst_remote_agent")
-}
-
 func formatServiceName(orgId string) string {
 	return fmt.Sprintf("io.rewst.remote_agent_%s", orgId)
 }

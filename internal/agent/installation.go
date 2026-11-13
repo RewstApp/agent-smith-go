@@ -27,6 +27,16 @@ func SetScriptsDirectoryOverrideForTesting(fn func(orgId string) string) {
 	scriptsDirOverride = fn
 }
 
+// ConfigFileName and LogFileName are the names of the configuration and the
+// log file inside an org's data directory (GetDataDirectory). The diagnostic
+// builds the paths of an agent it found under GetDataRoot from them rather
+// than from GetDataDirectory, so what it lists and what it reads are one
+// directory (sc-133000).
+const (
+	ConfigFileName = "config.json"
+	LogFileName    = "rewst_agent.log"
+)
+
 type PathsData struct {
 	ServiceExecutablePath string    `json:"service_executable_path"`
 	AgentExecutablePath   string    `json:"agent_executable_path"`

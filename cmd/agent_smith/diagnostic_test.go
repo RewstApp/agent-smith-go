@@ -9,12 +9,14 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/RewstApp/agent-smith-go/internal/agent"
+	"github.com/RewstApp/agent-smith-go/internal/mqtt"
 )
 
 // ── test doubles ─────────────────────────────────────────────────────────────
@@ -169,6 +171,40 @@ func TestScanAgentsFrom_ValidConfig(t *testing.T) {
 	}
 	if a.Device.DeviceId != "device-abc" {
 		t.Errorf("expected DeviceId 'device-abc', got %q", a.Device.DeviceId)
+	}
+	// The paths are under the root it was scanned from, not under
+	// agent.GetDataDirectory (sc-133000).
+	if a.DataDir != orgDir {
+		t.Errorf("DataDir = %q, want %q", a.DataDir, orgDir)
+	}
+	if want := filepath.Join(orgDir, "config.json"); a.ConfigFile != want {
+		t.Errorf("ConfigFile = %q, want %q", a.ConfigFile, want)
+	}
+	if want := filepath.Join(orgDir, "rewst_agent.log"); a.LogFile != want {
+		t.Errorf("LogFile = %q, want %q", a.LogFile, want)
+	}
+}
+
+// The scan reads the root the agent package derives every org's data
+// directory from, so what the menu lists and what the service writes are one
+// directory. On Windows that holds with PROGRAMDATA missing from the
+// environment too: both fall back to C:\ProgramData instead of the scan
+// listing the agent there and the checks reading a relative path (sc-133000).
+func TestGetAgentDataRoot_IsWhereTheAgentPackagePutsTheDataDirectory(t *testing.T) {
+	const orgId = "43fb08b0-92cf-462a-924d-0b6be7a43a48"
+	if got, want := getAgentDataRoot(), filepath.Dir(agent.GetDataDirectory(orgId)); got != want {
+		t.Errorf("getAgentDataRoot() = %q, want %q", got, want)
+	}
+	if runtime.GOOS != "windows" {
+		return
+	}
+	t.Setenv("PROGRAMDATA", "")
+	if got, want := getAgentDataRoot(), `C:\ProgramData\RewstRemoteAgent`; got != want {
+		t.Errorf("getAgentDataRoot() without PROGRAMDATA = %q, want %q", got, want)
+	}
+	got, want := agent.GetDataDirectory(orgId), filepath.Join(getAgentDataRoot(), orgId)
+	if got != want {
+		t.Errorf("agent.GetDataDirectory without PROGRAMDATA = %q, want %q", got, want)
 	}
 }
 
@@ -370,8 +406,11 @@ func TestTestTLSConnection_InvalidHost(t *testing.T) {
 // ── runTempDirTest ────────────────────────────────────────────────────────────
 
 func TestRunTempDirTest_MissingDataDir(t *testing.T) {
-	target := agentInfo{OrgId: "diag-test-" + t.Name()}
-	runTempDirTest(target, agent.GetDataDirectory(target.OrgId))
+	target := agentInfo{
+		OrgId:   "diag-test-" + t.Name(),
+		DataDir: filepath.Join(t.TempDir(), "missing"),
+	}
+	runTempDirTest(target)
 	_ = os.RemoveAll(agent.GetScriptsDirectory(target.OrgId))
 }
 
@@ -879,6 +918,124 @@ func TestRunDiagnosticWith_AgentSelectionFromScan(t *testing.T) {
 		root,
 		nil,
 	)
+}
+
+// installAgentUnder writes an installed agent's files for orgId under root:
+// its config.json, a fleet-health file and a log, and returns its directory.
+func installAgentUnder(t *testing.T, root, orgId string) string {
+	t.Helper()
+	orgDir := filepath.Join(root, orgId)
+	if err := os.MkdirAll(orgDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	config, _ := json.Marshal(agent.Device{DeviceId: orgId, RewstOrgId: orgId})
+	health, _ := json.Marshal(mqtt.ReportedProperties{
+		Health: &mqtt.Health{ReportedAt: "2026-11-13T09:00:00Z", UptimeSeconds: 42},
+	})
+	for name, data := range map[string][]byte{
+		"config.json":     config,
+		healthFileName:    health,
+		"rewst_agent.log": []byte("the scanned agent's log line\n"),
+	} {
+		if err := os.WriteFile(filepath.Join(orgDir, name), data, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return orgDir
+}
+
+// captureDiagnostic sends the diagnostic's sections and the live log viewer
+// to buffers for the test's lifetime.
+func captureDiagnostic(t *testing.T) (sections, liveLog *strings.Builder) {
+	t.Helper()
+	sections, liveLog = &strings.Builder{}, &strings.Builder{}
+	prevOut, prevLog := diagOut, liveLogOutput
+	diagOut, liveLogOutput = sections, liveLog
+	t.Cleanup(func() { diagOut, liveLogOutput = prevOut, prevLog })
+	return sections, liveLog
+}
+
+// The directory check, the live log viewer and Fleet Health read the agent
+// the menu scanned, from the directory it was found in: before sc-133000
+// they resolved agent.GetDataDirectory(orgId), which can be a different
+// directory (on Windows a relative path when PROGRAMDATA is unset), so the
+// menu listed an agent and then reported "No fleet-health report yet" for
+// it.
+func TestRunDiagnosticFull_ChecksReadTheAgentTheMenuScanned(t *testing.T) {
+	const orgId = "43fb08b0-92cf-462a-924d-0b6be7a43a48"
+	root := t.TempDir()
+	orgDir := installAgentUnder(t, root, orgId)
+	scripts := t.TempDir()
+	agent.SetScriptsDirectoryOverrideForTesting(func(string) string { return scripts })
+	t.Cleanup(func() { agent.SetScriptsDirectoryOverrideForTesting(nil) })
+	sections, liveLog := captureDiagnostic(t)
+
+	// A context that is already done: the live log viewer prints what the
+	// file holds and returns instead of tailing it.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	runDiagnosticFull(
+		ctx,
+		&diagnosticContext{
+			ServiceManager: &mockServiceManager{openService: &mockService{isActive: true}},
+		},
+		strings.NewReader("4\n5\n8\n0\n"),
+		&mockTLSDialer{},
+		&osLogFileOpener{},
+		root,
+		nil,
+	)
+
+	out := sections.String()
+	for _, want := range []string{
+		"Data directory: " + orgDir + "\n",
+		"Data directory exists",
+		"Log file: " + filepath.Join(orgDir, "rewst_agent.log") + "\n",
+		"Reported at 2026-11-13T09:00:00Z, up 42s",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the diagnostic did not print %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "No fleet-health report yet") {
+		t.Errorf("Fleet Health did not read the scanned agent's health file:\n%s", out)
+	}
+	if !strings.Contains(liveLog.String(), "the scanned agent's log line") {
+		t.Errorf("the live log viewer did not read the scanned agent's log:\n%s", liveLog.String())
+	}
+}
+
+// An org named with --org-id that the scan did not find is still resolved
+// under the scanned root, so the checks say which directory is missing
+// rather than probing a different one.
+func TestRunDiagnosticFull_OrgIdNotFoundResolvesUnderTheRoot(t *testing.T) {
+	const orgId = "53f5b9c3-a168-4fa4-b155-e2dca1d1d40a"
+	root := t.TempDir()
+	scripts := t.TempDir()
+	agent.SetScriptsDirectoryOverrideForTesting(func(string) string { return scripts })
+	t.Cleanup(func() { agent.SetScriptsDirectoryOverrideForTesting(nil) })
+	sections, _ := captureDiagnostic(t)
+
+	runDiagnosticFull(
+		context.Background(),
+		newDiagnosticParams(orgId),
+		strings.NewReader("4\n8\n0\n"),
+		&mockTLSDialer{},
+		&mockLogFileOpener{},
+		root,
+		nil,
+	)
+
+	out := sections.String()
+	for _, want := range []string{
+		"Data directory: " + filepath.Join(root, orgId) + "\n",
+		"Data directory does not exist",
+		"No fleet-health report yet",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the diagnostic did not print %q:\n%s", want, out)
+		}
+	}
 }
 
 // ── runAllChecksWith ──────────────────────────────────────────────────────────

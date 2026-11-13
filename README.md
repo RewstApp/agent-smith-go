@@ -412,6 +412,25 @@ Once launched, the menu guides you through the following checks:
 | **5** | Opens the agent log file and tails it in real time. Press Ctrl+C to stop |
 | **6** | Runs checks 1–4 in sequence |
 
+Every check reads the agent the menu listed from the directory it was found
+in (sc-133000): the scan walks the data root - `/etc/rewst_remote_agent`,
+`/Library/Application Support/rewst_remote_agent`,
+`%PROGRAMDATA%\RewstRemoteAgent` - and each agent's data directory, config
+and log are the ones under it, which the directory check, the live log
+viewer, Fleet Health and the bundle then use. Before this the menu scanned
+one root and the checks resolved the data directory again through the
+installer's path helpers, which on Windows build it from `PROGRAMDATA` with
+no fallback: in a service or scheduled-task environment without the
+variable the scan listed the agent under `C:\ProgramData` while Fleet Health
+looked for `health.json` under a relative `RewstRemoteAgent\<org>` beside
+the working directory and reported "No fleet-health report yet" for an
+agent that had one. The path helpers now fall back to `C:\ProgramData` the
+way the scan always did, so the service, the installer and the diagnostic
+name one directory whether or not the variable is set; installing still
+refuses a missing `PROGRAMDATA`. An `--org-id` the scan did not find is
+resolved under the same root, so the directory check names the directory
+that is missing rather than probing a different one.
+
 ### Collecting a support bundle
 
 When opening a support case, ask for a bundle rather than for the config

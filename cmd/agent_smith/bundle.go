@@ -114,14 +114,14 @@ func runDiagnosticBundle(
 	if err != nil {
 		return bundleReport{}, err
 	}
-	dataDir := filepath.Join(env.root, target.OrgId)
+	dataDir := target.DataDir
 	if _, err := os.ReadDir(dataDir); err != nil {
 		return bundleReport{}, fmt.Errorf(
 			"cannot read the agent's data directory %s (run --diagnostic --bundle elevated): %w",
 			dataDir, err,
 		)
 	}
-	configBytes, err := os.ReadFile(filepath.Join(dataDir, "config.json"))
+	configBytes, err := os.ReadFile(target.ConfigFile)
 	if err != nil {
 		return bundleReport{}, fmt.Errorf("cannot read the agent's configuration: %w", err)
 	}
@@ -167,12 +167,12 @@ func runDiagnosticBundle(
 		runCheckServiceStatus(params, target)
 		runCommandTest()
 		runConnectivityTestWith(target, env.dialer)
-		runTempDirTest(target, dataDir)
+		runTempDirTest(target)
 		props, err := readHealthFileFrom(dataDir)
 		printFleetHealth(props, err, false)
 	})
 
-	logs := logFiles(filepath.Join(dataDir, filepath.Base(agent.GetLogFilePath(target.OrgId))))
+	logs := logFiles(target.LogFile)
 	data, err := buildBundle(fixed, logs, secrets, now)
 	if err != nil {
 		return bundleReport{}, err
@@ -287,11 +287,12 @@ func bundleTarget(orgId string, env bundleEnv) (agentInfo, error) {
 				return a, nil
 			}
 		}
-		_, err := os.Stat(filepath.Join(env.root, orgId, "config.json"))
+		info := agentInfoIn(env.root, orgId)
+		_, err := os.Stat(info.ConfigFile)
 		if err == nil || errors.Is(err, os.ErrPermission) {
 			// Readable or not, the org's directory is there; an unreadable one
 			// is reported by the caller's own read of it.
-			return agentInfo{OrgId: orgId, ServiceName: formatServiceName(orgId)}, nil
+			return info, nil
 		}
 		return agentInfo{}, fmt.Errorf(
 			"no agent for org %s is installed under %s; nothing to bundle", orgId, env.root,

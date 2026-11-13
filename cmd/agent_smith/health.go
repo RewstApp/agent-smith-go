@@ -375,12 +375,9 @@ func (svc *serviceContext) writeHealthFile(props *mqtt.ReportedProperties, logge
 	}
 }
 
-// readHealthFile loads the reported properties the service last published for
-// the org (health and running commands), for --diagnostic.
-func readHealthFile(orgId string) (*mqtt.ReportedProperties, error) {
-	return readHealthFileFrom(agent.GetDataDirectory(orgId))
-}
-
+// readHealthFileFrom loads the reported properties the service last
+// published (health and running commands) from the org's data directory dir,
+// for --diagnostic and the bundle.
 func readHealthFileFrom(dir string) (*mqtt.ReportedProperties, error) {
 	data, err := utils.NewFileSystem().ReadFile(filepath.Join(dir, healthFileName))
 	if err != nil {

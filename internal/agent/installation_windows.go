@@ -39,12 +39,31 @@ func GetProgramDirectory(orgId string) string {
 	return filepath.Join(programFilesDir, fmt.Sprintf("RewstRemoteAgent/%s", orgId))
 }
 
-func GetDataDirectory(orgId string) string {
-	// Get program data directory
-	programDataDir := os.Getenv("PROGRAMDATA")
+// defaultProgramData is where PROGRAMDATA points on every supported Windows
+// installation; it stands in when the variable is missing from the
+// environment (a stripped service environment, a scheduled task) so the
+// path is the installed one rather than a relative `RewstRemoteAgent\...`
+// under the working directory.
+const defaultProgramData = `C:\ProgramData`
 
-	// Build the program directory based on organization id
-	return filepath.Join(programDataDir, fmt.Sprintf("RewstRemoteAgent/%s", orgId))
+// GetDataRoot is the directory every org's data directory lives under:
+// `%PROGRAMDATA%\RewstRemoteAgent`. The service, the installer and the
+// diagnostic's installed-agent scan all resolve it here, so a missing
+// PROGRAMDATA cannot make the scan list an agent under C:\ProgramData and
+// the rest of the diagnostic read a relative path (sc-133000).
+// ValidateInstallationEnvironment still refuses an install without the
+// variable; the fallback is for the paths, not a licence to install.
+func GetDataRoot() string {
+	programDataDir := os.Getenv("PROGRAMDATA")
+	if programDataDir == "" {
+		programDataDir = defaultProgramData
+	}
+	return filepath.Join(programDataDir, "RewstRemoteAgent")
+}
+
+func GetDataDirectory(orgId string) string {
+	// Build the data directory based on organization id
+	return filepath.Join(GetDataRoot(), orgId)
 }
 
 // GetScriptsDirectory returns the directory command scripts are written to
@@ -96,11 +115,11 @@ func GetServiceManagerPath(orgId string) string {
 }
 
 func GetConfigFilePath(orgId string) string {
-	return filepath.Join(GetDataDirectory(orgId), "config.json")
+	return filepath.Join(GetDataDirectory(orgId), ConfigFileName)
 }
 
 func GetLogFilePath(orgId string) string {
-	return filepath.Join(GetDataDirectory(orgId), "rewst_agent.log")
+	return filepath.Join(GetDataDirectory(orgId), LogFileName)
 }
 
 func GetServiceName(orgId string) string {

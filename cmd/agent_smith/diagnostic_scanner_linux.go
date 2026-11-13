@@ -4,13 +4,8 @@ package main
 
 import (
 	"fmt"
-	"path/filepath"
 	"strings"
 )
-
-func getAgentDataRoot() string {
-	return filepath.Join("/etc", "rewst_remote_agent")
-}
 
 func formatServiceName(orgId string) string {
 	return fmt.Sprintf("rewst_remote_agent_%s", orgId)
