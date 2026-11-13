@@ -80,6 +80,31 @@ func TestGetDataDirectory(t *testing.T) {
 	}
 }
 
+// With PROGRAMDATA missing from the environment the data directory is still
+// the installed one under C:\ProgramData, the root the diagnostic scans, not
+// a relative RewstRemoteAgent\<org> under the working directory (sc-133000).
+func TestGetDataDirectory_WithoutProgramDataFallsBackToTheInstalledRoot(t *testing.T) {
+	setEnvVars(t)
+	t.Setenv("PROGRAMDATA", "")
+
+	orgId := "org123"
+	if got, want := GetDataRoot(), `C:\ProgramData\RewstRemoteAgent`; got != want {
+		t.Errorf("GetDataRoot() = %q, want %q", got, want)
+	}
+	expected := filepath.Join(`C:\ProgramData`, "RewstRemoteAgent", orgId)
+	if got := GetDataDirectory(orgId); got != expected {
+		t.Errorf("GetDataDirectory(%q) = %q, want %q", orgId, got, expected)
+	}
+	if got := GetConfigFilePath(orgId); got != filepath.Join(expected, "config.json") {
+		t.Errorf("GetConfigFilePath(%q) = %q, want it under %q", orgId, got, expected)
+	}
+	// The install still refuses to proceed without the variable: the
+	// fallback is for the paths of an existing installation.
+	if err := ValidateInstallationEnvironment(); err == nil {
+		t.Error("ValidateInstallationEnvironment accepted a missing PROGRAMDATA")
+	}
+}
+
 func TestGetScriptsDirectory(t *testing.T) {
 	setEnvVars(t)
 

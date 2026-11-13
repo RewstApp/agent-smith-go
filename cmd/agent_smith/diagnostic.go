@@ -95,12 +95,40 @@ func diagnosticCommand(name string, args ...string) ([]byte, error) {
 }
 
 type agentInfo struct {
-	OrgId       string
+	OrgId string
+	// DataDir is the org's data directory under the root the agent was
+	// scanned from, and ConfigFile and LogFile are inside it. Every check
+	// that reads the agent's files (the directory check, the live log
+	// viewer, Fleet Health, the bundle) resolves through these rather than
+	// through agent.GetDataDirectory, so the agent the menu listed is the
+	// one they read (sc-133000).
+	DataDir     string
 	ConfigFile  string
 	LogFile     string
 	ServiceName string
 	IsRunning   bool
 	Device      *agent.Device
+}
+
+// agentInfoIn describes the org's agent under root, whether or not it is
+// installed there: the paths are where its files are if it is.
+func agentInfoIn(root, orgId string) agentInfo {
+	dataDir := filepath.Join(root, orgId)
+	return agentInfo{
+		OrgId:       orgId,
+		DataDir:     dataDir,
+		ConfigFile:  filepath.Join(dataDir, agent.ConfigFileName),
+		LogFile:     filepath.Join(dataDir, agent.LogFileName),
+		ServiceName: formatServiceName(orgId),
+	}
+}
+
+// getAgentDataRoot is the directory the installed agents are scanned from:
+// the same root the service and the installer derive each org's data
+// directory from, so the scan cannot list an agent the checks then read from
+// somewhere else (sc-133000).
+func getAgentDataRoot() string {
+	return agent.GetDataRoot()
 }
 
 func runDiagnostic(params *diagnosticContext) {
@@ -171,12 +199,7 @@ func runDiagnosticFull(
 			}
 		}
 		if !found {
-			agents = append(agents, agentInfo{
-				OrgId:       params.OrgId,
-				ConfigFile:  agent.GetConfigFilePath(params.OrgId),
-				LogFile:     agent.GetLogFilePath(params.OrgId),
-				ServiceName: formatServiceName(params.OrgId),
-			})
+			agents = append(agents, agentInfoIn(agentRoot, params.OrgId))
 		}
 	}
 
@@ -209,7 +232,7 @@ selectLoop:
 			case "3":
 				runConnectivityTestWith(target, dialer)
 			case "4":
-				runTempDirTest(target, agent.GetDataDirectory(target.OrgId))
+				runTempDirTest(target)
 			case "5":
 				runLiveLogsWith(ctx, target, opener)
 			case "6":
@@ -325,22 +348,15 @@ func scanAgentsFrom(root string) []agentInfo {
 			continue
 		}
 
-		configPath := filepath.Join(root, orgId, "config.json")
+		info := agentInfoIn(root, orgId)
 
 		// Verify this is an agent directory by checking for config.json
-		if _, err := os.Stat(configPath); err != nil {
+		if _, err := os.Stat(info.ConfigFile); err != nil {
 			continue
 		}
 
-		info := agentInfo{
-			OrgId:       orgId,
-			ConfigFile:  agent.GetConfigFilePath(orgId),
-			LogFile:     agent.GetLogFilePath(orgId),
-			ServiceName: formatServiceName(orgId),
-		}
-
 		// Try to load config
-		configBytes, err := os.ReadFile(configPath)
+		configBytes, err := os.ReadFile(info.ConfigFile)
 		if err == nil {
 			var device agent.Device
 			if json.Unmarshal(configBytes, &device) == nil {
@@ -569,11 +585,12 @@ func testTLSConnection(host, port string) bool {
 
 // ── Check 4: Temp directory write test ──
 
-// runTempDirTest checks the scripts directory is writable and the data
-// directory (dataDir, resolved by the caller so the bundle checks the one it
-// reads from) exists.
-func runTempDirTest(target agentInfo, dataDir string) {
+// runTempDirTest checks the scripts directory is writable and the agent's
+// data directory (target.DataDir: the one it was scanned from, which the
+// bundle reads from) exists.
+func runTempDirTest(target agentInfo) {
 	printSection("Temp Directory Write Test")
+	dataDir := target.DataDir
 
 	scriptsDir := agent.GetScriptsDirectory(target.OrgId)
 
@@ -751,7 +768,7 @@ func runAllChecksWith(
 	runCheckServiceStatus(params, target)
 	runCommandTest()
 	runConnectivityTestWith(target, dialer)
-	runTempDirTest(target, agent.GetDataDirectory(target.OrgId))
+	runTempDirTest(target)
 	runHostInfo(ctx, params, target)
 	runFleetHealth(target)
 }
@@ -760,9 +777,10 @@ func runAllChecksWith(
 
 // runFleetHealth prints the fleet-health object the service last published to
 // the device twin (sc-129687), read from the file it leaves beside the
-// journal, so what the machine says can be compared with what Rewst sees.
+// journal in the directory the agent was scanned from, so what the machine
+// says can be compared with what Rewst sees.
 func runFleetHealth(target agentInfo) {
-	props, err := readHealthFile(target.OrgId)
+	props, err := readHealthFileFrom(target.DataDir)
 	printFleetHealth(props, err, true)
 }
 

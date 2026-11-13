@@ -21,12 +21,16 @@ func GetProgramDirectory(orgId string) string {
 	return filepath.Join(programFilesDir, fmt.Sprintf("rewst_remote_agent/%s", orgId))
 }
 
-func GetDataDirectory(orgId string) string {
-	// Get program data directory
-	programDataDir := "/Library/Application Support"
+// GetDataRoot is the directory every org's data directory lives under. The
+// diagnostic's installed-agent scan reads it, so the scan and the per-org
+// paths cannot disagree (sc-133000).
+func GetDataRoot() string {
+	return filepath.Join("/Library", "Application Support", "rewst_remote_agent")
+}
 
-	// Build the program directory based on organization id
-	return filepath.Join(programDataDir, fmt.Sprintf("rewst_remote_agent/%s", orgId))
+func GetDataDirectory(orgId string) string {
+	// Build the data directory based on organization id
+	return filepath.Join(GetDataRoot(), orgId)
 }
 
 // GetScriptsDirectory returns the directory command scripts are written to
@@ -67,11 +71,11 @@ func GetServiceManagerPath(orgId string) string {
 }
 
 func GetConfigFilePath(orgId string) string {
-	return filepath.Join(GetDataDirectory(orgId), "config.json")
+	return filepath.Join(GetDataDirectory(orgId), ConfigFileName)
 }
 
 func GetLogFilePath(orgId string) string {
-	return filepath.Join(GetDataDirectory(orgId), "rewst_agent.log")
+	return filepath.Join(GetDataDirectory(orgId), LogFileName)
 }
 
 func GetServiceName(orgId string) string {

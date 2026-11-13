@@ -6,19 +6,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/RewstApp/agent-smith-go/internal/agent"
 )
-
-func getAgentDataRoot() string {
-	programData := os.Getenv("PROGRAMDATA")
-	if programData == "" {
-		programData = `C:\ProgramData`
-	}
-	return filepath.Join(programData, "RewstRemoteAgent")
-}
 
 func formatServiceName(orgId string) string {
 	return fmt.Sprintf("RewstRemoteAgent_%s", orgId)
@@ -26,9 +17,11 @@ func formatServiceName(orgId string) string {
 
 // fallbackScanAgents queries the Windows SCM for services named
 // RewstRemoteAgent_{uuid} and builds agentInfo entries from them.
-// This handles the case where the data-directory scan finds nothing
-// (e.g. when PROGRAMDATA was unset during installation or the directory
-// cannot be read in the current process context).
+// This handles the case where the data-directory scan finds nothing (the
+// directory cannot be read in the current process context, or the agent was
+// installed under a PROGRAMDATA that differs from this process's); the
+// entries' paths are still under root, the one place the rest of the
+// diagnostic reads from.
 func fallbackScanAgents(root string) []agentInfo {
 	out, err := diagnosticCommand(
 		"sc", "query", "type=", "service", "state=", "all", "bufsize=", "65536",
@@ -56,15 +49,8 @@ func fallbackScanAgents(root string) []agentInfo {
 		}
 		seen[orgId] = true
 
-		info := agentInfo{
-			OrgId:       orgId,
-			ConfigFile:  agent.GetConfigFilePath(orgId),
-			LogFile:     agent.GetLogFilePath(orgId),
-			ServiceName: formatServiceName(orgId),
-		}
-
-		configPath := filepath.Join(root, orgId, "config.json")
-		if configBytes, err := os.ReadFile(configPath); err == nil {
+		info := agentInfoIn(root, orgId)
+		if configBytes, err := os.ReadFile(info.ConfigFile); err == nil {
 			var device agent.Device
 			if json.Unmarshal(configBytes, &device) == nil {
 				info.Device = &device
