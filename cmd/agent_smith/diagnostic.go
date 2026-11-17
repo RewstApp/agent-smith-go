@@ -5,9 +5,11 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
@@ -41,6 +43,11 @@ type tlsDialer interface {
 	// DialViaProxy opens a TLS connection to host:port through an HTTP proxy
 	// with CONNECT, the way the agent's WebSocket transport does (sc-129691).
 	DialViaProxy(proxy *url.URL, host, port string) bool
+	// Head sends an HTTPS HEAD to rawURL, through proxy when it is not nil,
+	// the way the postback client would, and returns the status the server
+	// answered with. An error is a transport failure: any answer, a 4xx
+	// included, proves the path is open (sc-132998).
+	Head(proxy *url.URL, rawURL string) (int, error)
 }
 
 type defaultTLSDialer struct{}
@@ -51,6 +58,10 @@ func (d *defaultTLSDialer) Dial(host, port string) bool {
 
 func (d *defaultTLSDialer) DialViaProxy(proxy *url.URL, host, port string) bool {
 	return testTLSConnectionViaProxy(proxy, host, port)
+}
+
+func (d *defaultTLSDialer) Head(proxy *url.URL, rawURL string) (int, error) {
+	return headRequest(proxy, rawURL)
 }
 
 // logFileOpener abstracts os.Open so tests can inject an in-memory reader.
@@ -231,6 +242,7 @@ selectLoop:
 				runCommandTest()
 			case "3":
 				runConnectivityTestWith(target, dialer)
+				runEngineTestWith(target, dialer, time.Now())
 			case "4":
 				runTempDirTest(target)
 			case "5":
@@ -274,7 +286,7 @@ func printMenu(target agentInfo, hasMultiple bool) {
 	dprintln("  ├──────────────────────────────────────────────────┤")
 	dprintln("  │  [1] Check service status                        │")
 	dprintln("  │  [2] Test command execution                      │")
-	dprintln("  │  [3] Test MQTT/WebSocket connectivity            │")
+	dprintln("  │  [3] Test hub and engine connectivity            │")
 	dprintln("  │  [4] Test temp directory write access            │")
 	dprintln("  │  [5] View live log data                          │")
 	dprintln("  │  [6] Run all checks                              │")
@@ -553,6 +565,214 @@ func okOrFailed(ok bool) string {
 	return "FAILED"
 }
 
+// ── Check 3b: Engine connectivity ──
+
+// enginePingPath is the postback path the engine check sends a HEAD to: a
+// post id no workflow issues, so the engine answers (a 4xx is expected) and
+// records nothing.
+const enginePingPath = "/webhooks/custom/action/diagnostic"
+
+// runEngineTestWith checks the agent can reach rewst_engine_host, where every
+// command result is posted back (sc-132998): a hub-only firewall rule lets the
+// commands in and every result spool, the exact case a technician runs the
+// diagnostic for, and the hub check alone passed it. The spool's size is
+// printed beside the result so "unreachable" and "results piling up" appear
+// together.
+func runEngineTestWith(target agentInfo, dialer tlsDialer, now time.Time) {
+	printSection("Engine Connectivity")
+
+	if target.Device == nil {
+		printResult(false, "No config loaded - cannot determine the engine host")
+		dprintln("    Ensure the agent has been configured and config.json exists.")
+		return
+	}
+	if strings.TrimSpace(target.Device.RewstEngineHost) == "" {
+		printResult(false, "Rewst engine host not configured")
+		return
+	}
+
+	dprintf("    Host: %s\n", target.Device.RewstEngineHost)
+	r := checkEngine(*target.Device, dialer)
+	dprintf("    Proxy: %s\n", r.proxyLine())
+	if r.proxyErr != nil {
+		printResult(false, fmt.Sprintf("proxy_url is invalid and is ignored: %v", r.proxyErr))
+	}
+	printResult(r.direct, fmt.Sprintf("TLS connection to %s (direct)", r.hostPort))
+	if r.proxy != nil {
+		printResult(r.proxied, fmt.Sprintf("TLS connection to %s through the proxy", r.hostPort))
+	}
+	if r.headErr != nil {
+		printResult(
+			false,
+			fmt.Sprintf("Engine unreachable at %s %s: %v", r.pingURL, r.via, r.headErr),
+		)
+	} else {
+		printResult(
+			true,
+			fmt.Sprintf("Engine answers HTTP %d at %s %s", r.status, r.pingURL, r.via),
+		)
+	}
+	spool := filepath.Join(target.DataDir, "postback_spool")
+	waiting, summary := spoolSummary(spool, now)
+	printResult(!waiting, "Postback spool: "+summary)
+	if r.headErr == nil {
+		return
+	}
+	dprintln()
+	dprintln("    Troubleshooting tips:")
+	dprintln("    - Every command result is posted to this host; until it is reachable they spool")
+	dprintln("    - Check firewall and proxy rules for outbound HTTPS to", r.hostPort)
+	dprintln("    - Verify DNS resolution for", r.host)
+	dprintln("    - Set proxy_url (--proxy-url on --update) if egress needs a proxy")
+}
+
+// engineResult is what the engine check found: the proxy in effect, each
+// path's handshake, and the HEAD's answer over the path the agent would use.
+type engineResult struct {
+	host     string
+	hostPort string
+	pingURL  string
+	proxy    *url.URL
+	proxyErr error
+	source   string
+	direct   bool
+	proxied  bool
+	// via names the path the HEAD took: "(direct)" or "through <proxy>".
+	via     string
+	status  int
+	headErr error
+}
+
+func (r engineResult) proxyLine() string {
+	if r.proxy == nil {
+		return "none"
+	}
+	return fmt.Sprintf("%s (from %s)", utils.DescribeProxy(r.proxy), r.source)
+}
+
+// checkEngine resolves the proxy the way the postback client does (the
+// explicit proxy_url, else this shell's environment), tests a TLS handshake
+// to the engine directly and through the proxy, then sends a HEAD along the
+// path the agent would use. rewst_engine_host may carry a port (the e2e
+// fixture serves on 8443); the agent's own postback URL is https on it.
+func checkEngine(device agent.Device, dialer tlsDialer) engineResult {
+	r := engineResult{host: strings.TrimSpace(device.RewstEngineHost)}
+	r.hostPort = r.host
+	port := "443"
+	if h, p, err := net.SplitHostPort(r.host); err == nil {
+		r.host, port = h, p
+	} else {
+		r.hostPort = net.JoinHostPort(r.host, port)
+	}
+	r.pingURL = "https://" + device.RewstEngineHost + enginePingPath
+
+	explicit := strings.TrimSpace(device.ProxyURL)
+	proxy, err := utils.ResolveProxy(explicit)
+	if err != nil {
+		r.proxyErr = err
+		explicit = ""
+		proxy, _ = utils.ResolveProxy("")
+	}
+	if target, err := url.Parse(r.pingURL); err == nil {
+		r.proxy = utils.ProxyFor(proxy, target)
+	}
+	if r.proxy != nil {
+		r.source = "the environment of this shell"
+		if explicit != "" {
+			r.source = "proxy_url"
+		}
+	}
+
+	dprintf("    Testing HTTPS (port %s, direct)... ", port)
+	r.direct = dialer.Dial(r.host, port)
+	dprintln(okOrFailed(r.direct))
+	r.via = "(direct)"
+	if r.proxy != nil {
+		dprintf("    Testing HTTPS (port %s) through %s... ", port, utils.DescribeProxy(r.proxy))
+		r.proxied = dialer.DialViaProxy(r.proxy, r.host, port)
+		dprintln(okOrFailed(r.proxied))
+		r.via = "through " + utils.DescribeProxy(r.proxy)
+	}
+	dprintf("    Testing HEAD %s %s... ", r.pingURL, r.via)
+	r.status, r.headErr = dialer.Head(r.proxy, r.pingURL)
+	if r.headErr != nil {
+		dprintln("FAILED")
+	} else {
+		dprintf("HTTP %d\n", r.status)
+	}
+	return r
+}
+
+// spoolSummary describes the postback spool at dir: how many results are
+// waiting and how old the oldest is. waiting is true when any result is.
+func spoolSummary(dir string, now time.Time) (waiting bool, summary string) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return false, "empty (nothing has ever spooled)"
+		}
+		return false, fmt.Sprintf("%s cannot be read: %v", dir, err)
+	}
+	count := 0
+	var oldest time.Time
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		raw, err := os.ReadFile(filepath.Join(dir, entry.Name()))
+		if err != nil {
+			continue
+		}
+		var e struct {
+			PostId    string    `json:"post_id"`
+			CreatedAt time.Time `json:"created_at"`
+		}
+		if json.Unmarshal(raw, &e) != nil || e.PostId == "" {
+			continue
+		}
+		count++
+		if oldest.IsZero() || e.CreatedAt.Before(oldest) {
+			oldest = e.CreatedAt
+		}
+	}
+	if count == 0 {
+		return false, "empty"
+	}
+	return true, fmt.Sprintf(
+		"%d result(s) waiting to be posted back, the oldest for %s (%s)",
+		count, age(now, oldest), dir,
+	)
+}
+
+// headRequest sends one HEAD to rawURL through proxy (nil for direct) with
+// the agent's own proxy transport, without following a redirect, and returns
+// the status answered. Any answer proves the path is open; only a transport
+// failure is an error.
+func headRequest(proxy *url.URL, rawURL string) (int, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	transport := utils.ProxyTransport(func(*http.Request) (*url.URL, error) {
+		return proxy, nil
+	})
+	defer transport.CloseIdleConnections()
+	client := &http.Client{
+		Transport: transport,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodHead, rawURL, nil)
+	if err != nil {
+		return 0, err
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return 0, err
+	}
+	_ = resp.Body.Close()
+	return resp.StatusCode, nil
+}
+
 // testTLSConnectionViaProxy opens the agent's CONNECT tunnel through proxy to
 // host:port (utils.DialTunnel) and completes a TLS handshake inside it.
 func testTLSConnectionViaProxy(proxy *url.URL, host, port string) bool {
@@ -768,6 +988,7 @@ func runAllChecksWith(
 	runCheckServiceStatus(params, target)
 	runCommandTest()
 	runConnectivityTestWith(target, dialer)
+	runEngineTestWith(target, dialer, time.Now())
 	runTempDirTest(target)
 	runHostInfo(ctx, params, target)
 	runFleetHealth(target)

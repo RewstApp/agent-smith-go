@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -27,6 +29,10 @@ type mockTLSDialer struct {
 	// direct and viaProxy, when set, answer per port and for the proxy.
 	direct   map[string]bool
 	viaProxy *bool
+	// headStatus and headErr answer Head; a zero status with no error
+	// answers 404, the engine's answer to a post id it does not know.
+	headStatus int
+	headErr    error
 }
 
 func (m *mockTLSDialer) Dial(host, port string) bool {
@@ -43,6 +49,21 @@ func (m *mockTLSDialer) DialViaProxy(proxy *url.URL, host, port string) bool {
 		return *m.viaProxy
 	}
 	return m.result
+}
+
+func (m *mockTLSDialer) Head(proxy *url.URL, rawURL string) (int, error) {
+	call := "HEAD " + rawURL
+	if proxy != nil {
+		call = "HEAD via " + proxy.Redacted() + " " + rawURL
+	}
+	m.calls = append(m.calls, call)
+	if m.headErr != nil {
+		return 0, m.headErr
+	}
+	if m.headStatus == 0 {
+		return 404, nil
+	}
+	return m.headStatus, nil
 }
 
 type mockLogFileOpener struct {
@@ -383,6 +404,234 @@ func TestCheckConnectivity_ProxyFromTheEnvironment(t *testing.T) {
 	}
 	if r.chosen != "MQTT over WebSocket (443) through http://envproxy:9" {
 		t.Errorf("chosen %q", r.chosen)
+	}
+}
+
+// ── runEngineTestWith / checkEngine (sc-132998) ──────────────────────────────
+
+func TestRunEngineTest_NoConfigAndEmptyHost(t *testing.T) {
+	sections, _ := captureDiagnostic(t)
+	runEngineTestWith(agentInfo{OrgId: "org-1"}, &mockTLSDialer{}, time.Now())
+	runEngineTestWith(
+		agentInfo{OrgId: "org-1", Device: &agent.Device{RewstEngineHost: " "}},
+		&mockTLSDialer{},
+		time.Now(),
+	)
+	out := sections.String()
+	for _, want := range []string{
+		"[FAIL] No config loaded - cannot determine the engine host",
+		"[FAIL] Rewst engine host not configured",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in:\n%s", want, out)
+		}
+	}
+}
+
+// The engine host is reached directly: one handshake, then a HEAD along the
+// same path, and a 4xx from the engine is an answer, not a failure.
+func TestCheckEngine_ReachableDirectly(t *testing.T) {
+	clearProxyEnv(t)
+	dialer := &mockTLSDialer{result: true, headStatus: 404}
+	r := checkEngine(agent.Device{RewstEngineHost: "engine.rewst.io"}, dialer)
+	if r.proxy != nil || r.proxyLine() != "none" {
+		t.Errorf("proxy %v", r.proxy)
+	}
+	if !r.direct || r.headErr != nil || r.status != 404 || r.via != "(direct)" {
+		t.Errorf("result %+v", r)
+	}
+	if r.hostPort != "engine.rewst.io:443" {
+		t.Errorf("hostPort %q", r.hostPort)
+	}
+	want := []string{
+		"engine.rewst.io:443",
+		"HEAD https://engine.rewst.io/webhooks/custom/action/diagnostic",
+	}
+	if strings.Join(dialer.calls, "|") != strings.Join(want, "|") {
+		t.Errorf("calls %v", dialer.calls)
+	}
+}
+
+// Direct egress is blocked and the proxy is the way out: the HEAD goes
+// through the proxy, named with its password masked.
+func TestCheckEngine_BlockedDirectOpenThroughTheProxy(t *testing.T) {
+	clearProxyEnv(t)
+	yes := true
+	dialer := &mockTLSDialer{direct: map[string]bool{}, viaProxy: &yes, headStatus: 405}
+	r := checkEngine(agent.Device{
+		RewstEngineHost: "127.0.0.1:8443",
+		ProxyURL:        "http://agent:s3cret@proxy.corp:3128",
+	}, dialer)
+	if r.proxyLine() != "http://agent:xxxxx@proxy.corp:3128 (from proxy_url)" {
+		t.Errorf("proxy line %q", r.proxyLine())
+	}
+	if r.direct || !r.proxied || r.headErr != nil || r.status != 405 {
+		t.Errorf("result %+v", r)
+	}
+	if r.via != "through http://agent:xxxxx@proxy.corp:3128" {
+		t.Errorf("via %q", r.via)
+	}
+	want := []string{
+		"127.0.0.1:8443",
+		"via http://agent:xxxxx@proxy.corp:3128 127.0.0.1:8443",
+		"HEAD via http://agent:xxxxx@proxy.corp:3128 https://127.0.0.1:8443/webhooks/custom/action/diagnostic",
+	}
+	if strings.Join(dialer.calls, "|") != strings.Join(want, "|") {
+		t.Errorf("calls %v", dialer.calls)
+	}
+}
+
+// Neither path reaches the engine: the section fails with the transport
+// error and names the spool, so "unreachable" and "results piling up" are
+// read together.
+func TestRunEngineTest_BlockedBothWithResultsSpooled(t *testing.T) {
+	clearProxyEnv(t)
+	no := false
+	dialer := &mockTLSDialer{
+		direct:   map[string]bool{},
+		viaProxy: &no,
+		headErr:  errors.New("dial tcp: connection refused"),
+	}
+	dataDir := t.TempDir()
+	spool := filepath.Join(dataDir, "postback_spool")
+	if err := os.MkdirAll(spool, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 11, 17, 12, 0, 0, 0, time.UTC)
+	for name, created := range map[string]time.Time{
+		"a.json": now.Add(-90 * time.Minute),
+		"b.json": now.Add(-5 * time.Minute),
+	} {
+		entry, _ := json.Marshal(spoolEntry{PostId: name, Result: []byte("{}"), CreatedAt: created})
+		if err := os.WriteFile(filepath.Join(spool, name), entry, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	sections, _ := captureDiagnostic(t)
+	runEngineTestWith(agentInfo{
+		OrgId:   "org-1",
+		DataDir: dataDir,
+		Device: &agent.Device{
+			RewstEngineHost: "engine.rewst.io",
+			ProxyURL:        "http://proxy.corp:3128",
+		},
+	}, dialer, now)
+	out := sections.String()
+	for _, want := range []string{
+		"Proxy: http://proxy.corp:3128 (from proxy_url)",
+		"[FAIL] TLS connection to engine.rewst.io:443 (direct)",
+		"[FAIL] TLS connection to engine.rewst.io:443 through the proxy",
+		"[FAIL] Engine unreachable at https://engine.rewst.io/webhooks/custom/action/diagnostic " +
+			"through http://proxy.corp:3128: dial tcp: connection refused",
+		"[FAIL] Postback spool: 2 result(s) waiting to be posted back, the oldest for 1h30m0s (" + spool + ")",
+		"Troubleshooting tips:",
+		"outbound HTTPS to engine.rewst.io:443",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in:\n%s", want, out)
+		}
+	}
+}
+
+// A reachable engine with nothing spooled is the healthy picture.
+func TestRunEngineTest_ReachableWithAnEmptySpool(t *testing.T) {
+	clearProxyEnv(t)
+	sections, _ := captureDiagnostic(t)
+	runEngineTestWith(agentInfo{
+		OrgId:   "org-1",
+		DataDir: t.TempDir(),
+		Device:  &agent.Device{RewstEngineHost: "engine.rewst.io"},
+	}, &mockTLSDialer{result: true}, time.Now())
+	out := sections.String()
+	for _, want := range []string{
+		"Testing HEAD https://engine.rewst.io/webhooks/custom/action/diagnostic (direct)... HTTP 404",
+		"[PASS] Engine answers HTTP 404 at https://engine.rewst.io/webhooks/custom/action/diagnostic (direct)",
+		"[PASS] Postback spool: empty (nothing has ever spooled)",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "Troubleshooting") {
+		t.Errorf("tips printed for a reachable engine:\n%s", out)
+	}
+}
+
+// An invalid proxy_url is reported and the check runs without it, as the
+// service would.
+func TestCheckEngine_InvalidProxyURLIsReportedAndIgnored(t *testing.T) {
+	clearProxyEnv(t)
+	r := checkEngine(
+		agent.Device{RewstEngineHost: "engine.rewst.io", ProxyURL: "socks5://p:1080"},
+		&mockTLSDialer{result: true},
+	)
+	if r.proxyErr == nil || r.proxy != nil || r.headErr != nil {
+		t.Errorf("result %+v", r)
+	}
+}
+
+func TestSpoolSummary(t *testing.T) {
+	now := time.Date(2026, 11, 17, 12, 0, 0, 0, time.UTC)
+	if waiting, s := spoolSummary(filepath.Join(t.TempDir(), "none"), now); waiting ||
+		s != "empty (nothing has ever spooled)" {
+		t.Errorf("missing dir: %v %q", waiting, s)
+	}
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "junk"), []byte("not an entry"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if waiting, s := spoolSummary(dir, now); waiting || s != "empty" {
+		t.Errorf("no entries: %v %q", waiting, s)
+	}
+	entry, _ := json.Marshal(spoolEntry{PostId: "p", CreatedAt: now.Add(-42 * time.Second)})
+	if err := os.WriteFile(filepath.Join(dir, "p.json"), entry, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	waiting, s := spoolSummary(dir, now)
+	if !waiting || s != "1 result(s) waiting to be posted back, the oldest for 42s ("+dir+")" {
+		t.Errorf("one entry: %v %q", waiting, s)
+	}
+}
+
+// headRequest returns whatever the server answers, a redirect included,
+// without following it, and a transport failure as an error; through a
+// proxy the request goes to the proxy.
+func TestHeadRequest(t *testing.T) {
+	var method string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		method = r.Method
+		switch r.URL.Path {
+		case "/redirect":
+			http.Redirect(w, r, "/elsewhere", http.StatusFound)
+		default:
+			w.WriteHeader(http.StatusMethodNotAllowed)
+		}
+	}))
+	defer server.Close()
+	status, err := headRequest(nil, server.URL+"/webhooks/custom/action/diagnostic")
+	if err != nil || status != 405 || method != http.MethodHead {
+		t.Errorf("direct: %d %v (method %q)", status, err, method)
+	}
+	if status, err := headRequest(nil, server.URL+"/redirect"); err != nil || status != 302 {
+		t.Errorf("redirect: %d %v", status, err)
+	}
+
+	proxyHits := 0
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		proxyHits++
+		w.WriteHeader(http.StatusProxyAuthRequired)
+	}))
+	defer proxy.Close()
+	proxyURL, _ := url.Parse(proxy.URL)
+	if status, err := headRequest(proxyURL, server.URL+"/x"); err != nil || status != 407 ||
+		proxyHits != 1 {
+		t.Errorf("via proxy: %d %v (proxy hits %d)", status, err, proxyHits)
+	}
+
+	closed := httptest.NewServer(http.NotFoundHandler())
+	closed.Close()
+	if _, err := headRequest(nil, closed.URL); err == nil {
+		t.Error("a closed server did not fail the HEAD")
 	}
 }
 

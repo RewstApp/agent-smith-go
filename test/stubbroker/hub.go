@@ -682,6 +682,13 @@ func (h *hub) handleTrigger(w http.ResponseWriter, r *http.Request) {
 // handlePostback is the agent's /webhooks/custom/action/{post_id}.
 func (h *hub) handlePostback(w http.ResponseWriter, r *http.Request) {
 	postID := strings.TrimPrefix(r.URL.Path, "/webhooks/custom/action/")
+	if r.Method == http.MethodHead {
+		// --diagnostic's engine check (sc-132998) proves the path is open
+		// with a HEAD; it is answered without recording a postback.
+		log.Printf("engine: HEAD for %s -> 405", postID)
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
 	body, _ := io.ReadAll(io.LimitReader(r.Body, 32<<20))
 	if status, retryAfter := h.nextScriptedStatus(postID); status != 0 {
 		log.Printf(

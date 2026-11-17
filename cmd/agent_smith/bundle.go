@@ -167,6 +167,7 @@ func runDiagnosticBundle(
 		runCheckServiceStatus(params, target)
 		runCommandTest()
 		runConnectivityTestWith(target, env.dialer)
+		runEngineTestWith(target, env.dialer, now)
 		runTempDirTest(target)
 		props, err := readHealthFileFrom(dataDir)
 		printFleetHealth(props, err, false)
