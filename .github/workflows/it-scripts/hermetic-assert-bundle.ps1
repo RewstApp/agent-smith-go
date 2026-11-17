@@ -9,8 +9,18 @@
 # must write the default name inside it. Then ask for a bundle of an org that
 # is not installed: it must fail with a clear message and leave no file.
 # Env: AGENT_BINARY, ORG_ID, LOG_FILE, BUNDLE_PATH, ABSENT (newline-separated).
+#
+# Two modes check one guarantee each on the file form alone (sc-133003):
+#   EXPECT_WITHHELD=<line>: a command is running and <line> is its last output
+#     line. It must appear in no entry, and every in-flight entry in the
+#     bundle's health.json must carry "(withheld from the bundle)" in its place.
+#   CORRUPT_CONFIG_FIELD=<field>: <field> is set to a string in the installed
+#     config.json for the run (restored byte for byte afterwards, whatever
+#     happens), and diagnostic.txt must open with a Configuration section that
+#     names it, before the Service Status section.
 $ErrorActionPreference = 'Stop'
-$config = Get-Content (Join-Path (Split-Path $env:LOG_FILE -Parent) 'config.json') -Raw | ConvertFrom-Json
+$configPath = Join-Path (Split-Path $env:LOG_FILE -Parent) 'config.json'
+$config = Get-Content $configPath -Raw | ConvertFrom-Json
 $secrets = @($config.shared_access_key) + @(($env:ABSENT -split "`r?`n") | Where-Object { $_ })
 $secrets = @($secrets | Where-Object { $_ })
 if ($secrets.Count -lt 1) { Write-Error "no secret to look for"; exit 1 }
@@ -35,19 +45,62 @@ function Assert-Bundle([string]$path, [string]$label) {
     foreach ($secret in $secrets) {
       if ($text.Contains($secret)) { Write-Error "$($file.Name) in the $label contains a secret"; exit 1 }
     }
+    if ($env:EXPECT_WITHHELD -and $text.Contains($env:EXPECT_WITHHELD)) {
+      Write-Error "$($file.Name) in the $label carries the running command's output line"; exit 1
+    }
+  }
+  if ($env:EXPECT_WITHHELD) {
+    $healthPath = Join-Path $dir 'health.json'
+    if (-not (Test-Path $healthPath)) { Write-Error "the $label has no health.json"; exit 1 }
+    $healthText = [IO.File]::ReadAllText($healthPath)
+    $inFlight = @(($healthText | ConvertFrom-Json).commands.in_flight)
+    if ($inFlight.Count -lt 1) { Write-Output $healthText; Write-Error "the $label's health.json lists no running command"; exit 1 }
+    $withheld = @($inFlight | Where-Object { $_.last_output_line -eq '(withheld from the bundle)' })
+    if ($withheld.Count -ne $inFlight.Count) {
+      Write-Output $healthText; Write-Error "the $label's health.json does not withhold every running command's last output line"; exit 1
+    }
+    Write-Output "the $label withholds the running command's output line: $($inFlight.Count) in-flight entr(ies) carry the marker"
+  }
+  if ($env:CORRUPT_CONFIG_FIELD) {
+    $diag = [IO.File]::ReadAllText((Join-Path $dir 'diagnostic.txt'))
+    $section = $diag.IndexOf('Configuration')
+    $service = $diag.IndexOf('Service Status')
+    if ($section -lt 0 -or ($service -ge 0 -and $section -gt $service)) {
+      Write-Output $diag; Write-Error "diagnostic.txt in the $label does not open with the Configuration section"; exit 1
+    }
+    if (-not $diag.Contains('config.json does not load as the agent') -or -not $diag.Contains($env:CORRUPT_CONFIG_FIELD)) {
+      Write-Output $diag; Write-Error "diagnostic.txt in the $label does not report $($env:CORRUPT_CONFIG_FIELD) as the field that does not load"; exit 1
+    }
+    Write-Output "the $label's diagnostic.txt opens with the Configuration section naming $($env:CORRUPT_CONFIG_FIELD)"
   }
   Remove-Item -Recurse -Force $dir
 }
 
-Remove-Item -Force -ErrorAction SilentlyContinue $env:BUNDLE_PATH
-$global:LASTEXITCODE = 0
-$out = & $env:AGENT_BINARY --org-id $env:ORG_ID --diagnostic --bundle --bundle-path $env:BUNDLE_PATH 2>&1 | Out-String
-if ($LASTEXITCODE -ne 0) { Write-Output $out; Write-Error "--diagnostic --bundle exited $LASTEXITCODE"; exit 1 }
-if (-not $out.Contains("Diagnostic bundle written: $($env:BUNDLE_PATH)")) {
-  Write-Output $out; Write-Error "the bundle path was not printed"; exit 1
+$original = $null
+if ($env:CORRUPT_CONFIG_FIELD) {
+  $original = [IO.File]::ReadAllBytes($configPath)
+  $doc = Get-Content $configPath -Raw | ConvertFrom-Json
+  $doc | Add-Member -NotePropertyName $env:CORRUPT_CONFIG_FIELD -NotePropertyValue 'many' -Force
+  Set-Content -Path $configPath -Value ($doc | ConvertTo-Json -Depth 10) -NoNewline
+  Write-Output "set $($env:CORRUPT_CONFIG_FIELD) to a string in $configPath for this run"
 }
-Assert-Bundle $env:BUNDLE_PATH 'bundle'
-Write-Output "the bundle carries every entry and none of $($secrets.Count) secret value(s)"
+try {
+  Remove-Item -Force -ErrorAction SilentlyContinue $env:BUNDLE_PATH
+  $global:LASTEXITCODE = 0
+  $out = & $env:AGENT_BINARY --org-id $env:ORG_ID --diagnostic --bundle --bundle-path $env:BUNDLE_PATH 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { Write-Output $out; Write-Error "--diagnostic --bundle exited $LASTEXITCODE"; exit 1 }
+  if (-not $out.Contains("Diagnostic bundle written: $($env:BUNDLE_PATH)")) {
+    Write-Output $out; Write-Error "the bundle path was not printed"; exit 1
+  }
+  Assert-Bundle $env:BUNDLE_PATH 'bundle'
+  Write-Output "the bundle carries every entry and none of $($secrets.Count) secret value(s)"
+} finally {
+  if ($null -ne $original) {
+    [IO.File]::WriteAllBytes($configPath, $original)
+    Write-Output "restored $configPath"
+  }
+}
+if ($env:EXPECT_WITHHELD -or $env:CORRUPT_CONFIG_FIELD) { exit 0 }
 
 # The hand-over (sc-132995).
 $written = ($out -split "`r?`n" | Where-Object { $_ -like 'Diagnostic bundle written:*' }) -join ''

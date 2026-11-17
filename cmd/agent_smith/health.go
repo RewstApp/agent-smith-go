@@ -222,16 +222,22 @@ func (svc *serviceContext) reportHealth(
 	if ctx.Err() != nil {
 		return false
 	}
-	ids := postIDs(progress)
+	ids, lines := postIDs(progress), lastLines(progress)
 	svc.healthMu.Lock()
 	// The file carries the channel too, so a twin-driven channel change
-	// rewrites it even when the health object is unchanged (sc-129692).
+	// rewrites it even when the health object is unchanged (sc-129692), and
+	// a running command's last output line moving rewrites it as well
+	// (sc-133003): --diagnostic's Fleet Health and the bundle read the file,
+	// and the bundle's proof that it withholds that line needs the file to
+	// hold the line the twin was sent.
 	fileChanged := reason == reportConnected || !health.Same(svc.lastHealth) ||
-		!slices.Equal(ids, svc.lastFileIDs) || props.ReleaseChannel != svc.lastFileChannel
+		!slices.Equal(ids, svc.lastFileIDs) || !slices.Equal(lines, svc.lastFileLines) ||
+		props.ReleaseChannel != svc.lastFileChannel
 	svc.lastHealth = health
 	svc.lastInFlight = inFlight
 	if fileChanged {
 		svc.lastFileIDs = ids
+		svc.lastFileLines = lines
 		svc.lastFileChannel = props.ReleaseChannel
 	}
 	svc.healthMu.Unlock()
@@ -259,6 +265,15 @@ func postIDs(p *mqtt.CommandsProgress) []string {
 		ids = append(ids, c.PostID)
 	}
 	return ids
+}
+
+// lastLines is each running command's last output line, in the list's order.
+func lastLines(p *mqtt.CommandsProgress) []string {
+	lines := make([]string, 0, len(p.InFlight))
+	for _, c := range p.InFlight {
+		lines = append(lines, c.LastOutputLine)
+	}
+	return lines
 }
 
 func inFlightOrNone(p *mqtt.CommandsProgress) []mqtt.CommandProgress {

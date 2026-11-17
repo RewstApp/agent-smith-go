@@ -1210,6 +1210,18 @@ jobs:
           MIN: "2097152"
           TIMEOUT_SECONDS: "60"
 
+      - name: Assert the bundle withholds the running command's last output line (sc-133003)
+        timeout-minutes: 5
+        uses: ./.github/actions/it-script
+        with:
+          script: hermetic-assert-bundle
+        env:
+          AGENT_BINARY: ${{ github.workspace }}/dist/${{ matrix.binary }}
+          ORG_ID: ${{ vars.IT_ORG_ID }}
+          LOG_FILE: ${{ matrix.log_file }}
+          BUNDLE_PATH: ${{ runner.temp }}/diagnostic-bundle-running.zip
+          EXPECT_WITHHELD: "progress: past the ceiling"
+
       - name: Baseline "Subscribed to messages" before the restart
         id: bl_sub
         uses: ./.github/actions/capture-log-count
@@ -1521,6 +1533,19 @@ jobs:
           ORG_ID: ${{ vars.IT_ORG_ID }}
           LOG_FILE: ${{ matrix.log_file }}
           BUNDLE_PATH: ${{ runner.temp }}/diagnostic-bundle.zip
+          ABSENT: s3cret-proxy
+
+      - name: Assert the bundle reports a config.json that does not load as the agent's configuration (sc-133003)
+        timeout-minutes: 5
+        uses: ./.github/actions/it-script
+        with:
+          script: hermetic-assert-bundle
+        env:
+          AGENT_BINARY: ${{ github.workspace }}/dist/${{ matrix.binary }}
+          ORG_ID: ${{ vars.IT_ORG_ID }}
+          LOG_FILE: ${{ matrix.log_file }}
+          BUNDLE_PATH: ${{ runner.temp }}/diagnostic-bundle-bad-config.zip
+          CORRUPT_CONFIG_FIELD: worker_count
           ABSENT: s3cret-proxy
 
       - name: Dump agent log on failure

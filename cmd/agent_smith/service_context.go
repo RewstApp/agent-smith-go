@@ -110,13 +110,15 @@ type serviceContext struct {
 	// whether the last publish listed running commands, so a kick with nothing
 	// running publishes only when there is a list to clear; lastAttemptAt and
 	// publishFailed space publishes out and hold kicks after a failure until a
-	// tick succeeds; lastFileIDs is the running set the health file last
-	// recorded, so the file is rewritten on change rather than every heartbeat.
+	// tick succeeds; lastFileIDs and lastFileLines are the running set and
+	// its last output lines the health file last recorded, so the file is
+	// rewritten on change rather than every heartbeat.
 	healthKick    chan struct{}
 	lastInFlight  bool
 	lastAttemptAt time.Time
 	publishFailed bool
 	lastFileIDs   []string
+	lastFileLines []string
 	// lastFileChannel is the release channel the health file last carried.
 	lastFileChannel string
 	// Runtime settings from the device twin (sc-129688): settings is the

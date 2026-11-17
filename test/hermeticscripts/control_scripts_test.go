@@ -640,7 +640,15 @@ $stage = Join-Path ([IO.Path]::GetTempPath()) ([guid]::NewGuid())
 New-Item -ItemType Directory -Path (Join-Path $stage 'logs') | Out-Null
 '{"shared_access_key": "***"}' | Set-Content (Join-Path $stage 'config.json')
 foreach ($n in 'host.txt','journal.txt','service.txt','spool.txt','version.txt') { 'x' | Set-Content (Join-Path $stage $n) }
-$env:FAKE_DIAGNOSTIC | Set-Content (Join-Path $stage 'diagnostic.txt')
+$diag = $env:FAKE_DIAGNOSTIC
+$installed = Get-Content (Join-Path (Split-Path $env:LOG_FILE -Parent) 'config.json') -Raw | ConvertFrom-Json
+if ($installed.worker_count -is [string] -and -not $env:FAKE_NO_CONFIG_SECTION) {
+  $nl = [string][char]10
+  $diag = "  -- Configuration --" + $nl + "    [FAIL] config.json does not load as the agent's configuration: json: cannot unmarshal string into Go struct field Device.worker_count of type int" + $nl + "  -- Service Status --" + $nl + $diag
+}
+$diag | Set-Content (Join-Path $stage 'diagnostic.txt')
+$line = if ($null -ne $env:FAKE_HEALTH_LINE) { $env:FAKE_HEALTH_LINE } else { '(withheld from the bundle)' }
+(@{ commands = @{ in_flight = @(@{ post_id = 'progress-1'; last_output_line = $line }) } } | ConvertTo-Json -Depth 5) | Set-Content (Join-Path $stage 'health.json')
 'tail' | Set-Content (Join-Path $stage 'logs/rewst_agent.log')
 $zip = Join-Path ([IO.Path]::GetTempPath()) ([guid]::NewGuid().ToString() + '.zip')
 Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $zip
@@ -698,6 +706,49 @@ Write-Output "Diagnostic bundle written: $path ($((Get-Item $path).Length) bytes
 		if code == 0 || !strings.Contains(out, "contains a secret") {
 			t.Errorf("a leak (%s) passed: exit %d\n%s", leak, code, out)
 		}
+	}
+
+	// EXPECT_WITHHELD (sc-133003): the running command's line must appear
+	// nowhere and health.json must carry the marker in its place.
+	withheld := append(base, "EXPECT_WITHHELD=progress: past the ceiling")
+	if code, out := run(
+		t, "hermetic-assert-bundle.ps1", append(withheld, "FAKE_DIAGNOSTIC=all clean")...,
+	); code != 0 || !strings.Contains(out, "carry the marker") {
+		t.Errorf("a withholding bundle failed: exit %d\n%s", code, out)
+	}
+	if code, out := run(
+		t, "hermetic-assert-bundle.ps1",
+		append(withheld, "FAKE_DIAGNOSTIC=last line progress: past the ceiling")...,
+	); code == 0 || !strings.Contains(out, "carries the running command's output line") {
+		t.Errorf("a bundle carrying the line passed: exit %d\n%s", code, out)
+	}
+	if code, out := run(
+		t, "hermetic-assert-bundle.ps1",
+		append(withheld, "FAKE_DIAGNOSTIC=all clean", "FAKE_HEALTH_LINE=")...,
+	); code == 0 || !strings.Contains(out, "does not withhold") {
+		t.Errorf("a health.json without the marker passed: exit %d\n%s", code, out)
+	}
+
+	// CORRUPT_CONFIG_FIELD (sc-133003): the installed config is corrupted
+	// for the run, diagnostic.txt must open with the Configuration section
+	// naming the field, and the file is restored byte for byte either way.
+	corrupt := append(base, "CORRUPT_CONFIG_FIELD=worker_count", "FAKE_DIAGNOSTIC=all clean")
+	if code, out := run(t, "hermetic-assert-bundle.ps1", corrupt...); code != 0 ||
+		!strings.Contains(out, "opens with the Configuration section naming worker_count") {
+		t.Errorf("a bundle of a corrupted config failed: exit %d\n%s", code, out)
+	}
+	if got, _ := os.ReadFile(filepath.Join(dir, "config.json")); string(got) != config {
+		t.Errorf("the config was not restored after a passing run: %s", got)
+	}
+	if code, out := run(
+		t, "hermetic-assert-bundle.ps1", append(corrupt, "FAKE_NO_CONFIG_SECTION=1")...,
+	); code == 0 || !strings.Contains(out, "does not open with the Configuration section") {
+		t.Errorf(
+			"a diagnostic.txt without the Configuration section passed: exit %d\n%s", code, out,
+		)
+	}
+	if got, _ := os.ReadFile(filepath.Join(dir, "config.json")); string(got) != config {
+		t.Errorf("the config was not restored after a failing run: %s", got)
 	}
 }
 

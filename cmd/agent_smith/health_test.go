@@ -531,7 +531,8 @@ func TestReportHealth_KickPublishesOnlyTheClearingUpdate(t *testing.T) {
 }
 
 // The health file is for --diagnostic and is rewritten only when the health
-// object or the set of running commands changed, not on every heartbeat.
+// object, the set of running commands or a running command's last output
+// line changed (sc-133003), not on every heartbeat.
 func TestReportHealth_WritesTheFileOnlyOnChange(t *testing.T) {
 	svc, _ := newHealthTestService(t)
 	exec := &progressExecutor{}
@@ -553,6 +554,25 @@ func TestReportHealth_WritesTheFileOnlyOnChange(t *testing.T) {
 	if string(after) != string(before) {
 		t.Error("a heartbeat with the same running set rewrote the health file")
 	}
+	// The command's last output line moved: the file must follow, since the
+	// bundle withholds that line from the file it copies.
+	exec.set(interpreter.Progress{
+		PostID:         "hold-1",
+		StartedAt:      time.Now().Add(-time.Minute),
+		LastOutputLine: "progress: past the ceiling",
+	})
+	svc.reportHealth(ctx, nil, notifier, logger, reportHeartbeat)
+	if got, err := readHealthFileFrom(svc.healthDir()); err != nil ||
+		len(got.Commands.InFlight) != 1 ||
+		got.Commands.InFlight[0].LastOutputLine != "progress: past the ceiling" {
+		t.Errorf("health file after the last line moved: %+v %v", got, err)
+	}
+	moved, _ := os.ReadFile(path)
+	svc.reportHealth(ctx, nil, notifier, logger, reportHeartbeat)
+	if still, _ := os.ReadFile(path); string(still) != string(moved) {
+		t.Error("a heartbeat with the same last line rewrote the health file")
+	}
+	before = moved
 	exec.set()
 	svc.reportHealth(ctx, nil, notifier, logger, reportFinished)
 	cleared, _ := os.ReadFile(path)
