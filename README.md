@@ -396,7 +396,7 @@ Once launched, the menu guides you through the following checks:
 ```
 [1] Scan installed agents and check status
 [2] Test command execution
-[3] Test MQTT/WebSocket connectivity
+[3] Test hub and engine connectivity
 [4] Test temp directory write access
 [5] View live log data
 [6] Run all checks
@@ -407,7 +407,7 @@ Once launched, the menu guides you through the following checks:
 |--------|---------------|
 | **1** | Lists all installed agents with running/stopped status and config details (device ID, IoT Hub, engine host, log level) |
 | **2** | Runs a test command using the platform shell (PowerShell on Windows, Bash on Linux/macOS) and confirms execution succeeds |
-| **3** | Attempts TLS connections to the agent's IoT Hub on port 8883 (MQTT) and port 443 (WebSocket). Prints troubleshooting tips if both fail |
+| **3** | Attempts TLS connections to the agent's IoT Hub on port 8883 (MQTT) and port 443 (WebSocket), directly and through the proxy in effect, and names the transport the agent would use; then checks the Rewst engine host every command result is posted back to with a TLS handshake and an HTTPS `HEAD`, and shows how many results are waiting in the postback spool (sc-132998). Prints troubleshooting tips for whichever is unreachable |
 | **4** | Creates a test file in the scripts temp directory and reads it back to confirm write access |
 | **5** | Opens the agent log file and tails it in real time. Press Ctrl+C to stop |
 | **6** | Runs checks 1–4 in sequence |
@@ -542,6 +542,16 @@ file.
     [PASS] MQTT TLS connection to abc123.azure-devices.net:8883
     Testing WebSocket (port 443)... OK
     [PASS] WebSocket connection to abc123.azure-devices.net:443
+
+  ── Engine Connectivity ──
+
+    Host: engine.rewst.io
+    Proxy: none
+    Testing HTTPS (port 443, direct)... OK
+    [PASS] TLS connection to engine.rewst.io:443 (direct)
+    Testing HEAD https://engine.rewst.io/webhooks/custom/action/diagnostic (direct)... HTTP 404
+    [PASS] Engine answers HTTP 404 at https://engine.rewst.io/webhooks/custom/action/diagnostic (direct)
+    [PASS] Postback spool: empty
 ```
 
 ## Uninstallation
@@ -1718,6 +1728,21 @@ same tunnel code the agent uses - and names the transport the agent would use,
 read from the agent's own broker order. The diagnostic bundle masks the proxy
 credentials the same way (see "Collecting a support bundle").
 
+The same menu option then checks the engine (sc-132998). The hub check alone
+passed an endpoint whose firewall allows the hub but blocks `*.rewst.io`:
+commands arrive and run, and every result spools - the exact case a
+technician runs the diagnostic for. The "Engine Connectivity" section
+resolves the proxy the way the postback client does, tests a TLS handshake
+to `rewst_engine_host` (port 443 unless the host names one) directly and
+through the proxy, then sends an HTTPS `HEAD` to
+`/webhooks/custom/action/diagnostic` along the path the agent would use: any
+HTTP answer, a 4xx included, proves the path is open through whatever
+inspects it, and only a transport failure fails the check, with the error
+and the usual tips. Beside the result it prints the postback spool: empty,
+or how many results are waiting and for how long, so "engine unreachable"
+and "results piling up" are read together. The section is captured into the
+bundle's `diagnostic.txt` like the others.
+
 **Proven end to end by** `hermetic-proxy`: the stub broker refuses direct MQTT
 on 8883 - at the broker, since Windows Firewall does not filter loopback - so
 the only way in is its WebSocket endpoint through the fixture's authenticated
@@ -1725,7 +1750,9 @@ HTTP proxy. The agent is installed with `--proxy-url
 http://agent:s3cret-proxy@127.0.0.1:3128`; the job asserts it subscribes over
 the WebSocket through the proxy, that the proxy carried the config fetch, the
 MQTT tunnel and the result postback, that the password never reaches the log,
-and that `--diagnostic` names the proxy and the transport that worked.
+and that `--diagnostic` names the proxy and the transport that worked, and
+reaches the stand-in engine through the proxy (its `HEAD` answered 405, with
+no postback recorded).
 
 ### Runtime Settings from the Device Twin
 

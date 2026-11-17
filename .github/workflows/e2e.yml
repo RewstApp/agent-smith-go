@@ -1491,7 +1491,7 @@ jobs:
           MIN: "1"
           TIMEOUT_SECONDS: "30"
 
-      - name: Assert --diagnostic names the proxy and the transport that works
+      - name: Assert --diagnostic names the proxy and the transport that works, and reaches the engine through it (sc-132998)
         timeout-minutes: 5
         uses: ./.github/actions/it-script
         with:
@@ -1505,6 +1505,10 @@ jobs:
             [FAIL] MQTT TLS connection to 127.0.0.1:8883 (direct)
             [PASS] WebSocket connection to 127.0.0.1:443 through the proxy
             [PASS] The agent connects with MQTT over WebSocket (443) through http://agent:xxxxx@127.0.0.1:3128
+            ── Engine Connectivity ──
+            [PASS] TLS connection to 127.0.0.1:8443 through the proxy
+            [PASS] Engine answers HTTP 405 at https://127.0.0.1:8443/webhooks/custom/action/diagnostic through http://agent:xxxxx@127.0.0.1:3128
+            [PASS] Postback spool: empty
           ABSENT: s3cret-proxy
 
       - name: Assert --diagnostic --bundle writes a redacted support archive (sc-129690)
