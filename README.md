@@ -511,7 +511,10 @@ anywhere in it, asserts the file was handed over (the helper runs under
 Windows the runner's user must hold a read grant), streams a second bundle
 through `--bundle-path -` and checks the zip on stdout carries the same
 entries while stderr carries the sections and the closing line, writes a
-third into a directory and checks the default name inside it, and asks for a
+third into a directory and checks the default name inside it, then sets
+`worker_count` to a string in the installed `config.json` for one more bundle
+and checks `diagnostic.txt` opens with a Configuration section naming it
+(sc-133003; the file is restored byte for byte), and asks for a
 bundle of an org that is not installed, which must fail clearly and leave no
 file.
 
@@ -1597,8 +1600,9 @@ bounded wait, and a failure is a Warn: the twin is informational and can never
 affect command handling. The service also leaves the last object it published
 in `<data directory>/health.json`, which `--diagnostic` shows under "Fleet
 Health" so what the machine says can be compared with what Rewst sees; the
-file is rewritten only when the health object or the set of running commands
-changed, not on every heartbeat.
+file is rewritten only when the health object, the set of running commands or
+a running command's last output line changed (sc-133003), not on every
+heartbeat.
 
 The PATCH is published at QoS 0 and the agent does not subscribe to the
 hub's `$iothub/twin/res/#` responses, so a PATCH the hub rejects (a throttled
