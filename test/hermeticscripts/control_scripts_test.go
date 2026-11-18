@@ -714,16 +714,14 @@ Write-Output "Diagnostic bundle written: $path ($((Get-Item $path).Length) bytes
 	// The service manager's account (sc-132999): service.txt must name the
 	// service without an error and the Service Status section must report
 	// it running, in every mode.
+	const noAccount = "does not carry the service manager's account"
+	const notRunning = "does not report the service running"
 	for _, tc := range []struct{ env, want string }{
-		{"FAKE_SERVICE_TEXT=service svc-org-1 is not registered: no such service" + "\n",
-			"does not carry the service manager's account"},
-		{"FAKE_SERVICE_TEXT=$ stub print system/svc-org-1\n(error: SCM wedged)\n",
-			"does not carry the service manager's account"},
-		{"FAKE_SERVICE_TEXT=\n", "does not carry the service manager's account"},
-		{"FAKE_STATUS=[FAIL] org-1 - STOPPED: inactive (dead) (svc-org-1)",
-			"does not report the service running"},
-		{"FAKE_STATUS=[FAIL] Service not found (svc-org-1): no such service",
-			"does not report the service running"},
+		{"FAKE_SERVICE_TEXT=service svc-org-1 is not registered: no such service\n", noAccount},
+		{"FAKE_SERVICE_TEXT=$ stub print system/svc-org-1\n(error: SCM wedged)\n", noAccount},
+		{"FAKE_SERVICE_TEXT=\n", noAccount},
+		{"FAKE_STATUS=[FAIL] org-1 - STOPPED: inactive (dead) (svc-org-1)", notRunning},
+		{"FAKE_STATUS=[FAIL] Service not found (svc-org-1): no such service", notRunning},
 	} {
 		code, out := run(
 			t, "hermetic-assert-bundle.ps1", append(base, "FAKE_DIAGNOSTIC=all clean", tc.env)...,
