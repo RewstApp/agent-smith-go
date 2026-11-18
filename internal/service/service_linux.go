@@ -6,7 +6,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -41,7 +40,11 @@ func resolveSystemctlTimeout() time.Duration {
 }
 
 type systemCtl interface {
+	// Run runs systemctl for its effect: a failure's error is the output.
 	Run(args ...string) error
+	// Output runs systemctl under ctx for what it prints; a non-zero exit
+	// returns the output with exec's error.
+	Output(ctx context.Context, args ...string) ([]byte, error)
 	ServiceConfigFilePath(name string) string
 }
 
@@ -53,28 +56,19 @@ type defaultSystemCtl struct {
 }
 
 func (s *defaultSystemCtl) Run(args ...string) error {
+	out, err := s.Output(context.Background(), args...)
+	if err != nil {
+		return runFailure(out, err)
+	}
+	return nil
+}
+
+func (s *defaultSystemCtl) Output(ctx context.Context, args ...string) ([]byte, error) {
 	binary := s.binary
 	if binary == "" {
 		binary = "systemctl"
 	}
-
-	timeout := resolveSystemctlTimeout()
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-
-	cmd := exec.CommandContext(ctx, binary, args...)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		if ctx.Err() == context.DeadlineExceeded {
-			return fmt.Errorf(
-				"systemctl %s timed out after %s: %s",
-				strings.Join(args, " "), timeout, out,
-			)
-		}
-		return fmt.Errorf("%s", out)
-	}
-
-	return nil
+	return runOutput(ctx, "systemctl", binary, resolveSystemctlTimeout(), args...)
 }
 
 func (s *defaultSystemCtl) ServiceConfigFilePath(name string) string {
@@ -109,7 +103,67 @@ func (linuxSvc *linuxService) Delete() error {
 }
 
 func (linuxSvc *linuxService) IsActive() bool {
-	return linuxSvc.system.Run("is-active", linuxSvc.name) == nil
+	status, err := linuxSvc.Status(context.Background())
+	return err == nil && status.State == StateRunning
+}
+
+// Status reads the unit's LoadState, ActiveState and SubState in one
+// `systemctl show` (sc-132999): active is running, activating, deactivating
+// and reloading are pending, inactive and failed are stopped, and a unit
+// systemd has never heard of is an error rather than a stopped service, since
+// `show` answers for any name.
+func (linuxSvc *linuxService) Status(ctx context.Context) (Status, error) {
+	out, err := linuxSvc.system.Output(
+		ctx, "show", linuxSvc.name,
+		"--property=LoadState,ActiveState,SubState", "--no-pager",
+	)
+	if err != nil {
+		return Status{}, fmt.Errorf("systemctl show %s: %w", linuxSvc.name, err)
+	}
+	props := parseUnitProperties(out)
+	if props["LoadState"] == "not-found" {
+		return Status{}, fmt.Errorf("unit %s is not loaded (LoadState=not-found)", linuxSvc.name)
+	}
+	active, sub := props["ActiveState"], props["SubState"]
+	raw := active
+	if sub != "" {
+		raw = fmt.Sprintf("%s (%s)", active, sub)
+	}
+	return Status{State: unitState(active), Raw: raw}, nil
+}
+
+// Describe records `systemctl status` and `systemctl show` for the unit.
+func (linuxSvc *linuxService) Describe(ctx context.Context) (string, error) {
+	return describeWith(ctx, "systemctl", linuxSvc.system.Output, [][]string{
+		{"status", linuxSvc.name, "--no-pager", "--full"},
+		{"show", linuxSvc.name, "--no-pager"},
+	})
+}
+
+// parseUnitProperties reads `systemctl show`'s Key=Value lines.
+func parseUnitProperties(out []byte) map[string]string {
+	props := map[string]string{}
+	for line := range strings.SplitSeq(string(out), "\n") {
+		key, value, ok := strings.Cut(strings.TrimSpace(line), "=")
+		if ok {
+			props[key] = value
+		}
+	}
+	return props
+}
+
+// unitState classifies systemd's ActiveState.
+func unitState(active string) State {
+	switch active {
+	case "active":
+		return StateRunning
+	case "inactive", "failed":
+		return StateStopped
+	case "activating", "deactivating", "reloading", "refreshing":
+		return StatePending
+	default:
+		return StateUnknown
+	}
 }
 
 type defaultServiceManager struct {

@@ -639,12 +639,15 @@ if ($org -ne 'org-1') { Write-Output "no agent for org $org is installed under /
 $stage = Join-Path ([IO.Path]::GetTempPath()) ([guid]::NewGuid())
 New-Item -ItemType Directory -Path (Join-Path $stage 'logs') | Out-Null
 '{"shared_access_key": "***"}' | Set-Content (Join-Path $stage 'config.json')
-foreach ($n in 'host.txt','journal.txt','service.txt','spool.txt','version.txt') { 'x' | Set-Content (Join-Path $stage $n) }
-$diag = $env:FAKE_DIAGNOSTIC
+foreach ($n in 'host.txt','journal.txt','spool.txt','version.txt') { 'x' | Set-Content (Join-Path $stage $n) }
+$nl = [string][char]10
+$service = if ($null -ne $env:FAKE_SERVICE_TEXT) { $env:FAKE_SERVICE_TEXT } else { '$ stub print system/svc-org-1' + $nl + 'state = running' + $nl }
+$service | Set-Content (Join-Path $stage 'service.txt')
+$status = if ($env:FAKE_STATUS) { $env:FAKE_STATUS } else { '[PASS] org-1 - RUNNING (svc-org-1)' }
+$diag = "  -- Service Status --" + $nl + "    " + $status + $nl + $env:FAKE_DIAGNOSTIC
 $installed = Get-Content (Join-Path (Split-Path $env:LOG_FILE -Parent) 'config.json') -Raw | ConvertFrom-Json
 if ($installed.worker_count -is [string] -and -not $env:FAKE_NO_CONFIG_SECTION) {
-  $nl = [string][char]10
-  $diag = "  -- Configuration --" + $nl + "    [FAIL] config.json does not load as the agent's configuration: json: cannot unmarshal string into Go struct field Device.worker_count of type int" + $nl + "  -- Service Status --" + $nl + $diag
+  $diag = "  -- Configuration --" + $nl + "    [FAIL] config.json does not load as the agent's configuration: json: cannot unmarshal string into Go struct field Device.worker_count of type int" + $nl + $diag
 }
 $diag | Set-Content (Join-Path $stage 'diagnostic.txt')
 $line = if ($null -ne $env:FAKE_HEALTH_LINE) { $env:FAKE_HEALTH_LINE } else { '(withheld from the bundle)' }
@@ -706,6 +709,33 @@ Write-Output "Diagnostic bundle written: $path ($((Get-Item $path).Length) bytes
 		if code == 0 || !strings.Contains(out, "contains a secret") {
 			t.Errorf("a leak (%s) passed: exit %d\n%s", leak, code, out)
 		}
+	}
+
+	// The service manager's account (sc-132999): service.txt must name the
+	// service without an error and the Service Status section must report
+	// it running, in every mode.
+	for _, tc := range []struct{ env, want string }{
+		{"FAKE_SERVICE_TEXT=service svc-org-1 is not registered: no such service" + "\n",
+			"does not carry the service manager's account"},
+		{"FAKE_SERVICE_TEXT=$ stub print system/svc-org-1\n(error: SCM wedged)\n",
+			"does not carry the service manager's account"},
+		{"FAKE_SERVICE_TEXT=\n", "does not carry the service manager's account"},
+		{"FAKE_STATUS=[FAIL] org-1 - STOPPED: inactive (dead) (svc-org-1)",
+			"does not report the service running"},
+		{"FAKE_STATUS=[FAIL] Service not found (svc-org-1): no such service",
+			"does not report the service running"},
+	} {
+		code, out := run(
+			t, "hermetic-assert-bundle.ps1", append(base, "FAKE_DIAGNOSTIC=all clean", tc.env)...,
+		)
+		if code == 0 || !strings.Contains(out, tc.want) {
+			t.Errorf("%s passed or failed for another reason: exit %d\n%s", tc.env, code, out)
+		}
+	}
+	if code, out := run(
+		t, "hermetic-assert-bundle.ps1", append(base, "FAKE_DIAGNOSTIC=all clean")...,
+	); code != 0 || !strings.Contains(out, "both come from the service manager: running") {
+		t.Errorf("the service manager's account was not reported: exit %d\n%s", code, out)
 	}
 
 	// EXPECT_WITHHELD (sc-133003): the running command's line must appear

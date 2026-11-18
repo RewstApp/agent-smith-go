@@ -21,6 +21,7 @@ import (
 
 	"github.com/RewstApp/agent-smith-go/internal/agent"
 	"github.com/RewstApp/agent-smith-go/internal/mqtt"
+	"github.com/RewstApp/agent-smith-go/internal/service"
 	"github.com/RewstApp/agent-smith-go/internal/utils"
 	"github.com/RewstApp/agent-smith-go/internal/version"
 	"github.com/hashicorp/go-hclog"
@@ -81,29 +82,63 @@ type osLogFileOpener struct{}
 // across a rotation.
 var liveLogOutput io.Writer = os.Stdout
 
-const (
-	// diagnosticCommandTimeout bounds every shell-out the diagnostic makes to
-	// the service manager - the installed-agent scan's status queries, the
-	// Windows SCM fallback scan and the bundle's service.txt - so a wedged SCM
-	// or a D-Bus stall fails one query instead of hanging the whole run
-	// (sc-129690), the same bound the host-info and service packages apply.
-	diagnosticCommandTimeout = 30 * time.Second
-	// diagnosticCommandWaitDelay backs the kill up: a descendant that escaped
-	// the kill but still holds the output pipe is abandoned after it.
-	diagnosticCommandWaitDelay = time.Second
-)
+// diagnosticQueryTimeout bounds each query the diagnostic makes to the
+// service manager - the installed-agent scan, the Windows SCM fallback scan,
+// the Service Status check and the bundle's service.txt. Since sc-132999 they
+// all go through the service package's Status and Describe, which bound
+// their own shell-outs at the install paths' five minutes; that is longer
+// than an interactive check or a bundle should wait, so the diagnostic passes
+// this deadline in the context and a wedged SCM or a D-Bus stall fails one
+// query instead of hanging the run (sc-129690).
+const diagnosticQueryTimeout = 30 * time.Second
 
-// diagnosticCommand runs one service-manager query under
-// diagnosticCommandTimeout and returns its combined output.
-func diagnosticCommand(name string, args ...string) ([]byte, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), diagnosticCommandTimeout)
+// queryService opens the agent's service and asks the service manager for its
+// state, under diagnosticQueryTimeout. An error means the service is not
+// registered or the manager did not answer.
+func queryService(
+	ctx context.Context,
+	mgr service.ServiceManager,
+	name string,
+) (service.Status, error) {
+	svc, err := mgr.Open(name)
+	if err != nil {
+		return service.Status{}, err
+	}
+	defer func() { _ = svc.Close() }()
+	ctx, cancel := context.WithTimeout(ctx, diagnosticQueryTimeout)
 	defer cancel()
-	// #nosec G204 - fixed service-manager binaries; the arguments come from
-	// the agent's own service naming.
-	cmd := exec.CommandContext(ctx, name, args...)
-	cmd.WaitDelay = diagnosticCommandWaitDelay
-	return cmd.CombinedOutput()
+	return svc.Status(ctx)
 }
+
+// serviceRunning is whether the service manager reports the agent's service
+// running; a service it cannot find or answer for is not.
+func serviceRunning(ctx context.Context, mgr service.ServiceManager, name string) bool {
+	status, err := queryService(ctx, mgr, name)
+	return err == nil && status.State == service.StateRunning
+}
+
+// describeService is the service manager's own account of the agent's
+// service for the bundle's service.txt (sc-129690): what Describe renders, or
+// why there is none.
+func describeService(ctx context.Context, mgr service.ServiceManager, name string) string {
+	svc, err := mgr.Open(name)
+	if err != nil {
+		return fmt.Sprintf("service %s is not registered: %v\n", name, err)
+	}
+	defer func() { _ = svc.Close() }()
+	ctx, cancel := context.WithTimeout(ctx, diagnosticQueryTimeout)
+	defer cancel()
+	text, err := svc.Describe(ctx)
+	if err != nil {
+		return fmt.Sprintf("%s(error: %v)\n", text, err)
+	}
+	return text
+}
+
+// agentFallbackScan is how a platform finds installed agents when the data
+// root lists none: the Windows SCM scan (fallbackScanAgents), nothing
+// elsewhere.
+type agentFallbackScan func(context.Context, string, service.ServiceManager) []agentInfo
 
 type agentInfo struct {
 	OrgId string
@@ -181,7 +216,7 @@ func runDiagnosticFull(
 	dialer tlsDialer,
 	opener logFileOpener,
 	agentRoot string,
-	fallback func(string) []agentInfo,
+	fallback agentFallbackScan,
 ) {
 	reader := bufio.NewReader(input)
 
@@ -189,9 +224,9 @@ func runDiagnosticFull(
 
 	// Scan for installed agents; fall back to platform-specific discovery
 	// (e.g. Windows SCM) if the data-directory scan returns nothing.
-	agents := scanAgentsFrom(agentRoot)
+	agents := scanAgentsFrom(ctx, agentRoot, params.ServiceManager)
 	if len(agents) == 0 && fallback != nil {
-		agents = fallback(agentRoot)
+		agents = fallback(ctx, agentRoot, params.ServiceManager)
 	}
 
 	if len(agents) == 0 && params.OrgId == "" {
@@ -237,7 +272,7 @@ selectLoop:
 
 			switch strings.TrimSpace(choice) {
 			case "1":
-				runCheckServiceStatus(params, target)
+				runCheckServiceStatus(ctx, params, target)
 			case "2":
 				runCommandTest()
 			case "3":
@@ -342,8 +377,11 @@ func isValidOrgId(s string) bool {
 	return uuidRE.MatchString(s)
 }
 
-// scanAgentsFrom is the testable core of scanAgents.
-func scanAgentsFrom(root string) []agentInfo {
+// scanAgentsFrom lists the agents installed under root: every directory
+// named by an org id that holds a config.json, with whether the service
+// manager reports its service running (sc-132999: the same answer the
+// Service Status check gives, from the same query).
+func scanAgentsFrom(ctx context.Context, root string, mgr service.ServiceManager) []agentInfo {
 	entries, err := os.ReadDir(root)
 	if err != nil {
 		return nil
@@ -376,8 +414,7 @@ func scanAgentsFrom(root string) []agentInfo {
 			}
 		}
 
-		// Check service status via platform-native query
-		_, info.IsRunning = queryServiceStatus(info.ServiceName)
+		info.IsRunning = serviceRunning(ctx, mgr, info.ServiceName)
 
 		agents = append(agents, info)
 	}
@@ -387,22 +424,26 @@ func scanAgentsFrom(root string) []agentInfo {
 
 // ── Check 1: Service status for the selected agent ──
 
-func runCheckServiceStatus(params *diagnosticContext, target agentInfo) {
+func runCheckServiceStatus(ctx context.Context, params *diagnosticContext, target agentInfo) {
 	printSection("Service Status")
 
-	svc, err := params.ServiceManager.Open(target.ServiceName)
+	status, err := queryService(ctx, params.ServiceManager, target.ServiceName)
 	if err != nil {
-		printResult(false, fmt.Sprintf("Service not found (%s)", target.ServiceName))
+		printResult(false, fmt.Sprintf("Service not found (%s): %v", target.ServiceName, err))
 		return
 	}
-	running := svc.IsActive()
-	_ = svc.Close()
 
-	status := "STOPPED"
-	if running {
-		status = "RUNNING"
+	state := strings.ToUpper(status.State.String())
+	if status.Raw != "" && !strings.EqualFold(status.Raw, status.State.String()) {
+		// The manager's own words when they say more than the
+		// classification: systemd's "active (running)", the SCM's
+		// "StopPending".
+		state += ": " + status.Raw
 	}
-	printResult(running, fmt.Sprintf("%s - %s (%s)", target.OrgId, status, target.ServiceName))
+	printResult(
+		status.State == service.StateRunning,
+		fmt.Sprintf("%s - %s (%s)", target.OrgId, state, target.ServiceName),
+	)
 }
 
 // ── Check 2: Command execution test ──
@@ -985,7 +1026,7 @@ func runAllChecksWith(
 	target agentInfo,
 	dialer tlsDialer,
 ) {
-	runCheckServiceStatus(params, target)
+	runCheckServiceStatus(ctx, params, target)
 	runCommandTest()
 	runConnectivityTestWith(target, dialer)
 	runEngineTestWith(target, dialer, time.Now())

@@ -3,29 +3,36 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
 
 	"github.com/RewstApp/agent-smith-go/internal/agent"
+	"github.com/RewstApp/agent-smith-go/internal/service"
 )
 
 func formatServiceName(orgId string) string {
 	return fmt.Sprintf("RewstRemoteAgent_%s", orgId)
 }
 
-// fallbackScanAgents queries the Windows SCM for services named
-// RewstRemoteAgent_{uuid} and builds agentInfo entries from them.
-// This handles the case where the data-directory scan finds nothing (the
+// fallbackScanAgents asks the Windows SCM for services named
+// RewstRemoteAgent_{uuid} and builds agentInfo entries from them. This
+// handles the case where the data-directory scan finds nothing (the
 // directory cannot be read in the current process context, or the agent was
 // installed under a PROGRAMDATA that differs from this process's); the
 // entries' paths are still under root, the one place the rest of the
-// diagnostic reads from.
-func fallbackScanAgents(root string) []agentInfo {
-	out, err := diagnosticCommand(
-		"sc", "query", "type=", "service", "state=", "all", "bufsize=", "65536",
-	)
+// diagnostic reads from. The names come from the service manager's own
+// enumeration (service.ServiceLister) and each service's state from the
+// same query every other check uses (sc-132999); before that this parsed
+// `sc query` on its own.
+func fallbackScanAgents(ctx context.Context, root string, mgr service.ServiceManager) []agentInfo {
+	lister, ok := mgr.(service.ServiceLister)
+	if !ok {
+		return nil
+	}
+	names, err := lister.ListServices()
 	if err != nil {
 		return nil
 	}
@@ -34,12 +41,7 @@ func fallbackScanAgents(root string) []agentInfo {
 	seen := make(map[string]bool)
 	var agents []agentInfo
 
-	for _, line := range strings.Split(string(out), "\n") {
-		line = strings.TrimSpace(line)
-		if !strings.HasPrefix(line, "SERVICE_NAME: ") {
-			continue
-		}
-		svcName := strings.TrimSpace(strings.TrimPrefix(line, "SERVICE_NAME: "))
+	for _, svcName := range names {
 		if !strings.HasPrefix(svcName, svcPrefix) {
 			continue
 		}
@@ -57,20 +59,8 @@ func fallbackScanAgents(root string) []agentInfo {
 			}
 		}
 
-		_, info.IsRunning = queryServiceStatus(info.ServiceName)
+		info.IsRunning = serviceRunning(ctx, mgr, info.ServiceName)
 		agents = append(agents, info)
 	}
 	return agents
-}
-
-// queryServiceStatus queries the Windows SCM via sc.exe, bounded by
-// diagnosticCommandTimeout. Returns (installed, running).
-func queryServiceStatus(name string) (bool, bool) {
-	out, err := diagnosticCommand("sc", "query", name)
-	if err != nil {
-		return false, false
-	}
-	output := string(out)
-	// Service exists; check whether it is running
-	return true, strings.Contains(output, "RUNNING")
 }

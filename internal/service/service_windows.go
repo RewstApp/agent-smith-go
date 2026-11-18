@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"strings"
 	"sync"
 	"time"
 
@@ -83,6 +84,7 @@ type windowsServiceHandle interface {
 	Start(args ...string) error
 	Control(c svc.Cmd) (svc.Status, error)
 	Query() (svc.Status, error)
+	Config() (mgr.Config, error)
 	Delete() error
 }
 
@@ -214,12 +216,146 @@ func (winSvc *windowsService) Delete() error {
 }
 
 func (winSvc *windowsService) IsActive() bool {
-	status, err := winSvc.handle.Query()
-	if err != nil {
-		return false
-	}
+	status, err := winSvc.Status(context.Background())
+	return err == nil && status.State == StateRunning
+}
 
-	return status.State == svc.Running
+// Status is the SCM's current state for the service (sc-132999). The query
+// is an RPC with no deadline of its own, so it runs under ctx through
+// within: a wedged SCM fails the caller's bound rather than hanging it.
+func (winSvc *windowsService) Status(ctx context.Context) (Status, error) {
+	status, err := within(ctx, "query "+winSvc.name, winSvc.handle.Query)
+	if err != nil {
+		return Status{}, err
+	}
+	return Status{State: serviceState(status.State), Raw: serviceStateName(status.State)}, nil
+}
+
+// Describe renders what `sc queryex` and `sc qc` would show for the service -
+// its status and its registration - from the same handle the agent manages it
+// through, so the diagnostic bundle's service.txt no longer shells out to
+// sc.exe for a second opinion (sc-132999). The configured password is never
+// read.
+func (winSvc *windowsService) Describe(ctx context.Context) (string, error) {
+	status, err := within(ctx, "query "+winSvc.name, winSvc.handle.Query)
+	if err != nil {
+		return "", err
+	}
+	config, err := within(ctx, "query the configuration of "+winSvc.name, winSvc.handle.Config)
+	if err != nil {
+		return "", err
+	}
+	var buf strings.Builder
+	w := func(key string, value any) {
+		_, _ = fmt.Fprintf(&buf, "  %-20s %v\n", key+":", value)
+	}
+	_, _ = fmt.Fprintf(&buf, "SERVICE_NAME: %s\n", winSvc.name)
+	w("STATE", serviceStateName(status.State))
+	w("PID", status.ProcessId)
+	w("WIN32_EXIT_CODE", status.Win32ExitCode)
+	w("SERVICE_EXIT_CODE", status.ServiceSpecificExitCode)
+	w("CHECKPOINT", status.CheckPoint)
+	w("WAIT_HINT", status.WaitHint)
+	w("ACCEPTS", acceptedNames(status.Accepts))
+	w("DISPLAY_NAME", config.DisplayName)
+	w("DESCRIPTION", config.Description)
+	w("TYPE", config.ServiceType)
+	w("START_TYPE", startTypeName(config.StartType, config.DelayedAutoStart))
+	w("ERROR_CONTROL", config.ErrorControl)
+	w("BINARY_PATH_NAME", config.BinaryPathName)
+	w("LOAD_ORDER_GROUP", config.LoadOrderGroup)
+	w("TAG", config.TagId)
+	w("DEPENDENCIES", strings.Join(config.Dependencies, ", "))
+	w("SERVICE_START_NAME", config.ServiceStartName)
+	return buf.String(), nil
+}
+
+// serviceState classifies an SCM state.
+func serviceState(state svc.State) State {
+	switch state {
+	case svc.Running:
+		return StateRunning
+	case svc.Stopped:
+		return StateStopped
+	case svc.StartPending, svc.StopPending, svc.ContinuePending, svc.PausePending:
+		return StatePending
+	case svc.Paused:
+		return StatePaused
+	default:
+		return StateUnknown
+	}
+}
+
+// acceptedNames names the controls a service status says it accepts.
+func acceptedNames(accepts svc.Accepted) string {
+	var names []string
+	for _, candidate := range []struct {
+		flag svc.Accepted
+		name string
+	}{
+		{svc.AcceptStop, "stop"},
+		{svc.AcceptShutdown, "shutdown"},
+		{svc.AcceptPauseAndContinue, "pause-continue"},
+		{svc.AcceptParamChange, "param-change"},
+		{svc.AcceptNetBindChange, "netbind-change"},
+		{svc.AcceptHardwareProfileChange, "hardware-profile-change"},
+		{svc.AcceptPowerEvent, "power-event"},
+		{svc.AcceptSessionChange, "session-change"},
+		{svc.AcceptPreShutdown, "pre-shutdown"},
+	} {
+		if accepts&candidate.flag != 0 {
+			names = append(names, candidate.name)
+		}
+	}
+	if len(names) == 0 {
+		return "(none)"
+	}
+	return strings.Join(names, ", ")
+}
+
+// startTypeName renders a service's start type as `sc qc` would.
+func startTypeName(startType uint32, delayed bool) string {
+	var name string
+	switch startType {
+	case mgr.StartAutomatic:
+		name = "AUTO_START"
+		if delayed {
+			name += " (DELAYED)"
+		}
+	case mgr.StartManual:
+		name = "DEMAND_START"
+	case mgr.StartDisabled:
+		name = "DISABLED"
+	default:
+		name = fmt.Sprintf("Unknown(%d)", startType)
+	}
+	return fmt.Sprintf("%d %s", startType, name)
+}
+
+// within runs call under ctx. The SCM's RPCs accept no deadline, so a call
+// that outlives ctx is abandoned - its goroutine ends when the SCM finally
+// answers - and the caller gets ctx's error naming what was asked. A ctx that
+// cannot end runs the call inline.
+func within[T any](ctx context.Context, what string, call func() (T, error)) (T, error) {
+	if ctx.Done() == nil {
+		return call()
+	}
+	type answer struct {
+		value T
+		err   error
+	}
+	done := make(chan answer, 1)
+	go func() {
+		value, err := call()
+		done <- answer{value, err}
+	}()
+	select {
+	case a := <-done:
+		return a.value, a.err
+	case <-ctx.Done():
+		var zero T
+		return zero, fmt.Errorf("service manager did not %s: %w", what, ctx.Err())
+	}
 }
 
 // Substitute for mgr.Mgr
@@ -227,6 +363,7 @@ type windowsServiceManager interface {
 	Disconnect() error
 	CreateService(name string, exepath string, c mgr.Config, args ...string) (*mgr.Service, error)
 	OpenService(name string) (*mgr.Service, error)
+	ListServices() ([]string, error)
 }
 
 type windowsServiceManagerFactory interface {
@@ -297,6 +434,17 @@ func (s *defaultServiceManager) Open(name string) (Service, error) {
 		handle: svc,
 		name:   name,
 	}, nil
+}
+
+// ListServices names every service registered with the SCM (ServiceLister).
+func (s *defaultServiceManager) ListServices() ([]string, error) {
+	svcMgr, err := s.factory.Connect()
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = svcMgr.Disconnect() }() // Cleanup - error can be ignored
+
+	return svcMgr.ListServices()
 }
 
 func NewServiceManager() ServiceManager {

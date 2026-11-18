@@ -6,7 +6,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -41,7 +40,12 @@ func resolveLaunchctlTimeout() time.Duration {
 }
 
 type launchCtl interface {
+	// Run runs launchctl and returns its output; a failure's error is the
+	// output.
 	Run(args ...string) ([]byte, error)
+	// Output runs launchctl under ctx; a non-zero exit returns the output
+	// with exec's error.
+	Output(ctx context.Context, args ...string) ([]byte, error)
 	PlistFilePath(name string) string
 }
 
@@ -53,28 +57,19 @@ type defaultLaunchCtl struct {
 }
 
 func (d *defaultLaunchCtl) Run(args ...string) ([]byte, error) {
+	out, err := d.Output(context.Background(), args...)
+	if err != nil {
+		return nil, runFailure(out, err)
+	}
+	return out, nil
+}
+
+func (d *defaultLaunchCtl) Output(ctx context.Context, args ...string) ([]byte, error) {
 	binary := d.binary
 	if binary == "" {
 		binary = "launchctl"
 	}
-
-	timeout := resolveLaunchctlTimeout()
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-
-	cmd := exec.CommandContext(ctx, binary, args...)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		if ctx.Err() == context.DeadlineExceeded {
-			return nil, fmt.Errorf(
-				"launchctl %s timed out after %s: %s",
-				strings.Join(args, " "), timeout, out,
-			)
-		}
-		return nil, fmt.Errorf("%s", out)
-	}
-
-	return out, nil
+	return runOutput(ctx, "launchctl", binary, resolveLaunchctlTimeout(), args...)
 }
 
 func (d *defaultLaunchCtl) PlistFilePath(name string) string {
@@ -125,31 +120,44 @@ func (svc *darwinService) Delete() error {
 }
 
 func (svc *darwinService) IsActive() bool {
-	out, err := svc.system.Run("print", fmt.Sprintf("system/%s", svc.name))
+	status, err := svc.Status(context.Background())
+	return err == nil && status.State == StateRunning
+}
+
+// Status reads the `state = ...` line of `launchctl print` (sc-132999): a
+// job launchd has not loaded fails the print and is an error, `running` is
+// running, any other state launchd names is stopped, and a print with no
+// state line is unknown.
+func (svc *darwinService) Status(ctx context.Context) (Status, error) {
+	out, err := svc.system.Output(ctx, "print", svc.target())
 	if err != nil {
-		return false
+		return Status{}, fmt.Errorf("launchctl print %s: %w", svc.target(), err)
 	}
-
-	// Find the line that contains state name
 	for line := range strings.SplitSeq(string(out), "\n") {
-		pair := strings.Split(strings.TrimSpace(line), "=")
-		if len(pair) != 2 {
+		key, value, ok := strings.Cut(strings.TrimSpace(line), "=")
+		if !ok || strings.TrimSpace(key) != "state" {
 			continue
 		}
-
-		name := strings.TrimSpace(pair[0])
-		if name != "state" {
-			continue
+		raw := strings.TrimSpace(value)
+		state := StateStopped
+		if raw == "running" {
+			state = StateRunning
 		}
-
-		value := strings.TrimSpace(pair[1])
-		if value == "running" {
-			return true
-		}
+		return Status{State: state, Raw: raw}, nil
 	}
+	return Status{State: StateUnknown}, nil
+}
 
-	// State parameter is not found, assume service is not active
-	return false
+// Describe records `launchctl print` for the job.
+func (svc *darwinService) Describe(ctx context.Context) (string, error) {
+	return describeWith(ctx, "launchctl", svc.system.Output, [][]string{
+		{"print", svc.target()},
+	})
+}
+
+// target is the job's launchctl name in the system domain.
+func (svc *darwinService) target() string {
+	return fmt.Sprintf("system/%s", svc.name)
 }
 
 type defaultServiceManager struct {

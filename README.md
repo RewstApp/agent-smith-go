@@ -460,7 +460,7 @@ sudo ./rewst_agent_config.linux.bin --diagnostic --bundle --bundle-path - | curl
 | `logs/` | The last 2 MiB of the log and of every rotated copy, each starting at a line boundary (a cut inside a line drops that partial line; a tail with no line boundary at all is kept whole) |
 | `journal.txt` | The command journal's files - name, size, modification time, and for each entry its key, `received_at`, `started_at` (or a tombstone's `completed_at`) - never a command |
 | `spool.txt` | The postback spool's files - name, size, modification time, and for each entry its post id, `created_at`, age, attempts, `last_attempt_at`, `next_attempt_at` (the time the engine's last throttle allowed the next attempt, sc-132997) and `last_error` (why the engine kept rejecting it) - never a result |
-| `service.txt` | The service manager's own output (`systemctl status`/`show`, `launchctl print`, or `sc queryex`/`qc`), each query bounded by 30 seconds |
+| `service.txt` | The service manager's own account of the service, rendered by the service package's `Describe` (sc-132999): `systemctl status` and `show` on Linux, `launchctl print` on macOS, and on Windows the SCM's status and registration read through the same handle the agent manages the service with (what `sc queryex` and `sc qc` show, never the configured password); bounded by 30 seconds |
 | `host.txt` | The host information section |
 | `diagnostic.txt` | The console output of the other checks: a `config.json` that is JSON but does not load as the agent's configuration (reported first, with the parse error), service status, command execution, connectivity, temp directory and fleet health |
 | `health.json` | The fleet-health report the service last published, when there is one, with each running command's `last_output_line` replaced by `(withheld from the bundle)` - the Fleet Health section withholds it the same way, so the bundle never carries command output |
@@ -498,10 +498,13 @@ Windows), so the service's rotation is never blocked by the bundle. Run it
 elevated: the data directory is owner-only, and a directory the command
 cannot read, a missing agent or several agents without `--org-id` each fail
 with a message saying so and a non-zero exit, without writing a file. Every
-shell-out the diagnostic makes to the service manager - the installed-agent
-scan's status queries and the Windows SCM fallback scan as well as
-`service.txt` - is bounded by 30 seconds, so a wedged SCM or a D-Bus stall
-fails one query instead of hanging the bundle before it writes anything.
+question the diagnostic asks the service manager - the installed-agent scan,
+the Windows SCM fallback scan, the Service Status check and `service.txt` -
+goes through the service package's `Status` and `Describe` (sc-132999, see
+"Bounded Service and Host-Info Shell-Outs") under a 30-second deadline, so a
+wedged SCM or a D-Bus stall fails one query instead of hanging the bundle
+before it writes anything, and the diagnostic cannot disagree with the
+install, update and uninstall paths about whether the service is running.
 
 **Proven end to end by** `hermetic-proxy`, whose agent holds both a shared
 access key and a proxy password: the job writes a bundle, checks every entry
@@ -516,7 +519,10 @@ third into a directory and checks the default name inside it, then sets
 and checks `diagnostic.txt` opens with a Configuration section naming it
 (sc-133003; the file is restored byte for byte), and asks for a
 bundle of an org that is not installed, which must fail clearly and leave no
-file.
+file. Every bundle it checks (and the one `hermetic-fleet-health` writes
+under a running command) must also carry the service manager's account of
+the service: `service.txt` names it without an error and the Service Status
+section reports it `RUNNING` (sc-132999), on all three platforms.
 
 ### Example output
 
@@ -1281,6 +1287,35 @@ from that command — an install/update/uninstall aborts without writing or
 deleting anything, and host-info gathering logs the field as unavailable
 (`NewHostInfo` already warns per-field and continues) rather than blocking the
 rest of the flow.
+
+**One service-manager query path (sc-132999).** `--diagnostic` used to ask
+the service manager its own way: the installed-agent scan parsed `systemctl
+show`, `launchctl print` or `sc query` itself, the Windows SCM fallback scan
+parsed `sc query type= service state= all`, and the bundle's `service.txt`
+ran `systemctl status`/`show`, `launchctl print` or `sc queryex`/`qc` - three
+copies of the argument lists, the parsing and the bounds beside the service
+package's own, so a fix to one (a timeout, the `WaitDelay` that abandons a
+descendant holding the pipe, a new `launchctl` output format) had to be made
+three times, and the menu's RUNNING/STOPPED marker could disagree with the
+`IsActive` the install paths trust. The service package now answers every
+question once: `Service.Status(ctx)` returns the state classified
+(`running`, `stopped`, `pending`, `paused`, `unknown`) with the manager's own
+words beside it (systemd's `ActiveState (SubState)`, launchd's state line,
+the SCM's state name), `Service.Describe(ctx)` returns the manager's verbose
+account (what `service.txt` holds), `IsActive` is `Status` on every platform,
+and the Windows manager implements `service.ServiceLister` for the fallback
+scan's enumeration through the SCM API rather than `sc.exe`. Every `launchctl`
+and `systemctl` call runs through one helper that applies the platform's
+timeout, the caller's context deadline and the `WaitDelay`; the Windows
+queries are SCM RPCs with no deadline of their own, so `Status` and
+`Describe` run them under the caller's context and abandon one that outlives
+it with an error naming the query. The diagnostic passes a 30-second
+deadline (`diagnosticQueryTimeout`) to each of its queries, since an
+interactive check or a bundle should not wait the install paths' five
+minutes, and its Service Status line now shows the manager's words when they
+say more than the classification (`RUNNING: active (running)`,
+`PENDING: StopPending`). `cmd/agent_smith/diagnostic_scanner_*.go` and the
+former `bundle_service_*.go` carry no exec code any more.
 
 `IsEntraConnectServer` is the one host-info field that shells out more than
 once: it probes four candidate service names in sequence. Each probe was

@@ -3,6 +3,7 @@
 package service
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -18,6 +19,10 @@ type mockSystemCtl struct {
 	runErrOnCmd    string // if set, only fail when args[0] matches
 	runErr         error
 	configFilePath string
+	// output is what Output prints; outputErr fails it. Output records its
+	// calls in runCalls as well.
+	output    []byte
+	outputErr error
 }
 
 func (m *mockSystemCtl) Run(args ...string) error {
@@ -29,6 +34,11 @@ func (m *mockSystemCtl) Run(args ...string) error {
 		return nil
 	}
 	return m.runErr
+}
+
+func (m *mockSystemCtl) Output(_ context.Context, args ...string) ([]byte, error) {
+	m.runCalls = append(m.runCalls, args)
+	return m.output, m.outputErr
 }
 
 func (m *mockSystemCtl) ServiceConfigFilePath(name string) string {
@@ -202,20 +212,167 @@ func TestLinuxService_Delete_RemoveError(t *testing.T) {
 }
 
 func TestLinuxService_IsActive_Active(t *testing.T) {
-	mock := &mockSystemCtl{}
+	mock := &mockSystemCtl{
+		output: []byte("LoadState=loaded\nActiveState=active\nSubState=running\n"),
+	}
 	svc := &linuxService{name: "test-svc", system: mock}
 
 	if !svc.IsActive() {
-		t.Error("expected IsActive to return true when Run succeeds")
+		t.Error("expected IsActive to return true when the unit is active")
+	}
+	want := []string{"show", "test-svc", "--property=LoadState,ActiveState,SubState", "--no-pager"}
+	if len(mock.runCalls) != 1 || strings.Join(mock.runCalls[0], " ") != strings.Join(want, " ") {
+		t.Errorf("IsActive ran %v, want %v", mock.runCalls, want)
 	}
 }
 
 func TestLinuxService_IsActive_Inactive(t *testing.T) {
-	mock := &mockSystemCtl{runErr: errors.New("inactive")}
+	mock := &mockSystemCtl{
+		output: []byte("LoadState=loaded\nActiveState=inactive\nSubState=dead\n"),
+	}
 	svc := &linuxService{name: "test-svc", system: mock}
 
 	if svc.IsActive() {
-		t.Error("expected IsActive to return false when Run fails")
+		t.Error("expected IsActive to return false when the unit is inactive")
+	}
+}
+
+func TestLinuxService_IsActive_QueryFails(t *testing.T) {
+	mock := &mockSystemCtl{outputErr: errors.New("dbus stalled")}
+	svc := &linuxService{name: "test-svc", system: mock}
+
+	if svc.IsActive() {
+		t.Error("expected IsActive to return false when Output fails")
+	}
+}
+
+// Status (sc-132999)
+
+func TestLinuxService_Status_ClassifiesActiveState(t *testing.T) {
+	cases := []struct {
+		active, sub string
+		want        State
+		raw         string
+	}{
+		{"active", "running", StateRunning, "active (running)"},
+		{"inactive", "dead", StateStopped, "inactive (dead)"},
+		{"failed", "failed", StateStopped, "failed (failed)"},
+		{"activating", "auto-restart", StatePending, "activating (auto-restart)"},
+		{"deactivating", "stop-sigterm", StatePending, "deactivating (stop-sigterm)"},
+		{"reloading", "", StatePending, "reloading"},
+		{"maintenance", "", StateUnknown, "maintenance"},
+	}
+	for _, tc := range cases {
+		out := "LoadState=loaded\nActiveState=" + tc.active + "\n"
+		if tc.sub != "" {
+			out += "SubState=" + tc.sub + "\n"
+		}
+		svc := &linuxService{name: "test-svc", system: &mockSystemCtl{output: []byte(out)}}
+		got, err := svc.Status(context.Background())
+		if err != nil {
+			t.Fatalf("%s: %v", tc.active, err)
+		}
+		if got.State != tc.want || got.Raw != tc.raw {
+			t.Errorf("ActiveState=%s SubState=%s: got %v %q, want %v %q",
+				tc.active, tc.sub, got.State, got.Raw, tc.want, tc.raw)
+		}
+	}
+}
+
+func TestLinuxService_Status_UnknownUnitIsAnError(t *testing.T) {
+	mock := &mockSystemCtl{
+		output: []byte("LoadState=not-found\nActiveState=inactive\nSubState=dead\n"),
+	}
+	svc := &linuxService{name: "test-svc", system: mock}
+
+	_, err := svc.Status(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "not-found") {
+		t.Errorf("want an error naming LoadState=not-found, got %v", err)
+	}
+}
+
+func TestLinuxService_Status_QueryError(t *testing.T) {
+	mock := &mockSystemCtl{outputErr: errors.New("dbus stalled")}
+	svc := &linuxService{name: "test-svc", system: mock}
+
+	_, err := svc.Status(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "dbus stalled") {
+		t.Errorf("want the query's error, got %v", err)
+	}
+}
+
+// Describe (sc-132999)
+
+func TestLinuxService_Describe_RecordsStatusAndShow(t *testing.T) {
+	mock := &mockSystemCtl{output: []byte("stub unit output\n")}
+	svc := &linuxService{name: "test-svc", system: mock}
+
+	got, err := svc.Describe(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "$ systemctl status test-svc --no-pager --full\nstub unit output\n\n" +
+		"$ systemctl show test-svc --no-pager\nstub unit output\n\n"
+	if got != want {
+		t.Errorf("Describe =\n%q\nwant\n%q", got, want)
+	}
+}
+
+func TestLinuxService_Describe_KeepsAFailedQuerysOutput(t *testing.T) {
+	// A stopped unit's `systemctl status` exits 3 with the output the support
+	// case wants: the exit is recorded beside it, never in place of it.
+	mock := &mockSystemCtl{
+		output:    []byte("inactive (dead)\n"),
+		outputErr: errors.New("exit status 3"),
+	}
+	svc := &linuxService{name: "test-svc", system: mock}
+
+	got, err := svc.Describe(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got, "inactive (dead)\n(exit: exit status 3)\n") {
+		t.Errorf("Describe did not keep the output with its exit:\n%s", got)
+	}
+}
+
+func TestLinuxService_Describe_TimeoutIsAnError(t *testing.T) {
+	mock := &mockSystemCtl{output: []byte("partial"), outputErr: context.DeadlineExceeded}
+	svc := &linuxService{name: "test-svc", system: mock}
+
+	got, err := svc.Describe(context.Background())
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("want the deadline error, got %v", err)
+	}
+	if !strings.Contains(got, "partial") {
+		t.Errorf("want what the query printed before the deadline, got %q", got)
+	}
+}
+
+func TestDefaultSystemCtl_Output_CallerDeadlineBoundsTheCommand(t *testing.T) {
+	s := &defaultSystemCtl{binary: "/bin/sleep"}
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	_, err := s.Output(ctx, "30")
+	if time.Since(start) > 5*time.Second {
+		t.Errorf("Output ran %v past the caller's 200ms deadline", time.Since(start))
+	}
+	if !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "timed out") {
+		t.Errorf("want a timeout error wrapping the deadline, got %v", err)
+	}
+}
+
+func TestDefaultSystemCtl_Output_NonZeroExitKeepsTheOutput(t *testing.T) {
+	s := &defaultSystemCtl{binary: "/bin/sh"}
+
+	out, err := s.Output(context.Background(), "-c", "echo printed; exit 3")
+	if err == nil || !strings.Contains(err.Error(), "exit status 3") {
+		t.Errorf("want exec's exit error, got %v", err)
+	}
+	if !strings.Contains(string(out), "printed") {
+		t.Errorf("want the output with the error, got %q", out)
 	}
 }
 

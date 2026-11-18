@@ -3,6 +3,7 @@
 package service
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -33,6 +34,10 @@ func (m *mockLaunchCtl) Run(args ...string) ([]byte, error) {
 		return nil, m.runErr
 	}
 	return m.runOutput, nil
+}
+
+func (m *mockLaunchCtl) Output(_ context.Context, args ...string) ([]byte, error) {
+	return m.Run(args...)
 }
 
 func (m *mockLaunchCtl) PlistFilePath(name string) string {
@@ -309,6 +314,106 @@ func TestDarwinService_IsActive_NoStateLine(t *testing.T) {
 
 	if svc.IsActive() {
 		t.Error("expected IsActive to return false when state line is absent")
+	}
+}
+
+// Status and Describe (sc-132999)
+
+func TestDarwinService_Status_ClassifiesTheStateLine(t *testing.T) {
+	cases := []struct {
+		out  string
+		want State
+		raw  string
+	}{
+		{"{\n\tstate = running\n\tpid = 1234\n}", StateRunning, "running"},
+		{"{\n\tstate = waiting\n}", StateStopped, "waiting"},
+		{"{\n\tstate = spawn scheduled\n}", StateStopped, "spawn scheduled"},
+		{"{\n\tpid = 1234\n}", StateUnknown, ""},
+	}
+	for _, tc := range cases {
+		mock := &mockLaunchCtl{runOutput: []byte(tc.out)}
+		svc := &darwinService{name: "test-svc", system: mock}
+		got, err := svc.Status(context.Background())
+		if err != nil {
+			t.Fatalf("%q: %v", tc.out, err)
+		}
+		if got.State != tc.want || got.Raw != tc.raw {
+			t.Errorf("%q: got %v %q, want %v %q", tc.out, got.State, got.Raw, tc.want, tc.raw)
+		}
+		if len(mock.runCalls) != 1 ||
+			strings.Join(mock.runCalls[0], " ") != "print system/test-svc" {
+			t.Errorf("Status ran %v, want print system/test-svc", mock.runCalls)
+		}
+	}
+}
+
+func TestDarwinService_Status_UnloadedJobIsAnError(t *testing.T) {
+	mock := &mockLaunchCtl{runErr: errors.New("Could not find service")}
+	svc := &darwinService{name: "test-svc", system: mock}
+
+	_, err := svc.Status(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "Could not find service") {
+		t.Errorf("want launchctl's error, got %v", err)
+	}
+}
+
+func TestDarwinService_Describe_RecordsPrint(t *testing.T) {
+	mock := &mockLaunchCtl{runOutput: []byte("{\n\tstate = running\n}\n")}
+	svc := &darwinService{name: "test-svc", system: mock}
+
+	got, err := svc.Describe(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "$ launchctl print system/test-svc\n{\n\tstate = running\n}\n\n"
+	if got != want {
+		t.Errorf("Describe =\n%q\nwant\n%q", got, want)
+	}
+}
+
+func TestDarwinService_Describe_KeepsAFailedPrintsOutput(t *testing.T) {
+	mock := &mockLaunchCtl{
+		runOutput: []byte("Could not find service\n"),
+		runErr:    errors.New("exit status 113"),
+	}
+	svc := &darwinService{name: "test-svc", system: mock}
+
+	got, err := svc.Describe(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The mock answers an error with nil output, as the real Run does; the
+	// exit is still recorded under the command line.
+	if !strings.Contains(got, "$ launchctl print system/test-svc\n") ||
+		!strings.Contains(got, "(exit: exit status 113)") {
+		t.Errorf("Describe did not record the failed print:\n%s", got)
+	}
+}
+
+func TestDefaultLaunchCtl_Output_CallerDeadlineBoundsTheCommand(t *testing.T) {
+	d := &defaultLaunchCtl{binary: "/bin/sleep"}
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	_, err := d.Output(ctx, "30")
+	if time.Since(start) > 5*time.Second {
+		t.Errorf("Output ran %v past the caller's 200ms deadline", time.Since(start))
+	}
+	if !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "timed out") {
+		t.Errorf("want a timeout error wrapping the deadline, got %v", err)
+	}
+}
+
+func TestDefaultLaunchCtl_Output_NonZeroExitKeepsTheOutput(t *testing.T) {
+	d := &defaultLaunchCtl{binary: "/bin/sh"}
+
+	out, err := d.Output(context.Background(), "-c", "echo printed; exit 113")
+	if err == nil || !strings.Contains(err.Error(), "exit status 113") {
+		t.Errorf("want exec's exit error, got %v", err)
+	}
+	if !strings.Contains(string(out), "printed") {
+		t.Errorf("want the output with the error, got %q", out)
 	}
 }
 
