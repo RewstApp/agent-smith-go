@@ -129,21 +129,21 @@ func bundleTestEnv(root string) bundleEnv {
 		root:   root,
 		dialer: &mockTLSDialer{},
 		now:    func() time.Time { return time.Date(2026, 11, 3, 12, 0, 0, 0, time.UTC) },
-		serviceStatus: func(_ context.Context, argv []string) string {
-			return "stub status for " + strings.Join(argv, " ")
-		},
 	}
 }
 
 func bundleTestParams(path string) *diagnosticContext {
 	return &diagnosticContext{
-		OrgId:          bundleOrg,
-		Diagnostic:     true,
-		Bundle:         true,
-		BundlePath:     path,
-		ServiceManager: &mockServiceManager{openService: &mockService{isActive: true}},
-		Sys:            &mockSystemInfoProvider{hostname: "host", hostPlatform: "linux"},
-		Domain:         &mockDomainInfoProvider{},
+		OrgId:      bundleOrg,
+		Diagnostic: true,
+		Bundle:     true,
+		BundlePath: path,
+		ServiceManager: &mockServiceManager{openService: &mockService{
+			isActive: true,
+			describe: "$ stub status for the service\nrunning\n",
+		}},
+		Sys:    &mockSystemInfoProvider{hostname: "host", hostPlatform: "linux"},
+		Domain: &mockDomainInfoProvider{},
 	}
 }
 
@@ -274,8 +274,10 @@ func TestRunDiagnosticBundle_ContentsAndRedaction(t *testing.T) {
 			t.Errorf("diagnostic.txt lacks %q:\n%s", s, entries["diagnostic.txt"])
 		}
 	}
-	if !bytes.Contains(entries["service.txt"], []byte("stub status for")) {
-		t.Errorf("service.txt %s", entries["service.txt"])
+	// service.txt is what the service package's Describe renders (sc-132999),
+	// not a second set of shell-outs.
+	if string(entries["service.txt"]) != "$ stub status for the service\nrunning\n" {
+		t.Errorf("service.txt %q", entries["service.txt"])
 	}
 	if !bytes.Contains(entries["version.txt"], []byte(runtime.GOOS)) {
 		t.Errorf("version.txt %s", entries["version.txt"])
@@ -287,6 +289,43 @@ func TestRunDiagnosticBundle_ContentsAndRedaction(t *testing.T) {
 	}
 	if !bytes.Contains(entries["host.txt"], []byte("Host Information")) {
 		t.Errorf("host.txt %s", entries["host.txt"])
+	}
+}
+
+// A service the manager cannot describe still gets a service.txt saying why:
+// not registered, or the manager's error after what it did render.
+func TestRunDiagnosticBundle_ServiceTextReportsTheManagersFailure(t *testing.T) {
+	quiet(t)
+	root, _ := newBundleRoot(t)
+	cases := []struct {
+		name string
+		mgr  *mockServiceManager
+		want string
+	}{
+		{
+			"not registered",
+			&mockServiceManager{openErr: errors.New("no such service")},
+			"service " + formatServiceName(bundleOrg) + " is not registered: no such service\n",
+		},
+		{
+			"describe fails",
+			&mockServiceManager{openService: &mockService{
+				describe: "partial\n", describeErr: errors.New("SCM wedged"),
+			}},
+			"partial\n(error: SCM wedged)\n",
+		},
+	}
+	for _, tc := range cases {
+		path := filepath.Join(t.TempDir(), "bundle.zip")
+		params := bundleTestParams(path)
+		params.ServiceManager = tc.mgr
+		_, err := runDiagnosticBundle(context.Background(), params, bundleTestEnv(root))
+		if err != nil {
+			t.Fatalf("%s: %v", tc.name, err)
+		}
+		if got := string(readBundle(t, path)["service.txt"]); got != tc.want {
+			t.Errorf("%s: service.txt %q, want %q", tc.name, got, tc.want)
+		}
 	}
 }
 

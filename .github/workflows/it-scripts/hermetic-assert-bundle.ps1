@@ -18,6 +18,11 @@
 #     config.json for the run (restored byte for byte afterwards, whatever
 #     happens), and diagnostic.txt must open with a Configuration section that
 #     names it, before the Service Status section.
+# In every mode the service manager's account of the service must be there
+# (sc-132999): service.txt names the service without an error, and the
+# Service Status section reports it RUNNING - both come from the service
+# package's one query path now, so a platform whose Status or Describe reads
+# the manager wrong fails here.
 $ErrorActionPreference = 'Stop'
 $configPath = Join-Path (Split-Path $env:LOG_FILE -Parent) 'config.json'
 $config = Get-Content $configPath -Raw | ConvertFrom-Json
@@ -49,6 +54,15 @@ function Assert-Bundle([string]$path, [string]$label) {
       Write-Error "$($file.Name) in the $label carries the running command's output line"; exit 1
     }
   }
+  $serviceText = [IO.File]::ReadAllText((Join-Path $dir 'service.txt'))
+  if (-not $serviceText.Contains($env:ORG_ID) -or $serviceText.Contains('is not registered') -or $serviceText.Contains('(error:')) {
+    Write-Output $serviceText; Write-Error "service.txt in the $label does not carry the service manager's account of the agent's service"; exit 1
+  }
+  $diagText = [IO.File]::ReadAllText((Join-Path $dir 'diagnostic.txt'))
+  if (-not $diagText.Contains("[PASS] $($env:ORG_ID) - RUNNING")) {
+    Write-Output $diagText; Write-Error "diagnostic.txt in the $label does not report the service running"; exit 1
+  }
+  Write-Output "the $label's service.txt and Service Status both come from the service manager: running"
   if ($env:EXPECT_WITHHELD) {
     $healthPath = Join-Path $dir 'health.json'
     if (-not (Test-Path $healthPath)) { Write-Error "the $label has no health.json"; exit 1 }

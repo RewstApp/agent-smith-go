@@ -10,7 +10,6 @@ import (
 	"io"
 	"net/url"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -55,11 +54,9 @@ const (
 // bundleEnv is what writing a bundle depends on, injectable for tests.
 type bundleEnv struct {
 	root     string
-	fallback func(string) []agentInfo
+	fallback agentFallbackScan
 	dialer   tlsDialer
 	now      func() time.Time
-	// serviceStatus runs a service-manager query; nil runs it for real.
-	serviceStatus func(ctx context.Context, argv []string) string
 	// stdout receives the zip for --bundle-path -; nil is the process's.
 	stdout io.Writer
 	// handOver gives the written file to the user who asked for it
@@ -101,16 +98,13 @@ func runDiagnosticBundle(
 	if env.now == nil {
 		env.now = time.Now
 	}
-	if env.serviceStatus == nil {
-		env.serviceStatus = runServiceManagerCommand
-	}
 	if env.stdout == nil {
 		env.stdout = os.Stdout
 	}
 	if env.handOver == nil {
 		env.handOver = defaultBundleHandOver
 	}
-	target, err := bundleTarget(params.OrgId, env)
+	target, err := bundleTarget(ctx, params, env)
 	if err != nil {
 		return bundleReport{}, err
 	}
@@ -149,7 +143,7 @@ func runDiagnosticBundle(
 			agentVersionFrom(dataDir), version.Version, runtime.GOOS, runtime.GOARCH,
 			now.Format(time.RFC3339),
 		)),
-		"service.txt": serviceStatusText(ctx, target.ServiceName, env.serviceStatus),
+		"service.txt": []byte(describeService(ctx, params.ServiceManager, target.ServiceName)),
 		"journal.txt": journalListing(filepath.Join(dataDir, "command_journal")),
 		"spool.txt":   spoolListing(filepath.Join(dataDir, "postback_spool"), now),
 	}
@@ -164,7 +158,7 @@ func runDiagnosticBundle(
 				"config.json does not load as the agent's configuration: %v", configErr,
 			))
 		}
-		runCheckServiceStatus(params, target)
+		runCheckServiceStatus(ctx, params, target)
 		runCommandTest()
 		runConnectivityTestWith(target, env.dialer)
 		runEngineTestWith(target, env.dialer, now)
@@ -268,7 +262,12 @@ func sudoInvoker(getenv func(string) string) (uid, gid int, ok bool) {
 
 // bundleTarget is the agent to bundle: the one --org-id names, or the only one
 // installed.
-func bundleTarget(orgId string, env bundleEnv) (agentInfo, error) {
+func bundleTarget(
+	ctx context.Context,
+	params *diagnosticContext,
+	env bundleEnv,
+) (agentInfo, error) {
+	orgId := params.OrgId
 	// A directory this process cannot read is reported as that, not as "no
 	// agent": the data root and each org's directory are owner-only, so a
 	// bundle run without elevation would otherwise be told nothing is there.
@@ -278,9 +277,9 @@ func bundleTarget(orgId string, env bundleEnv) (agentInfo, error) {
 			env.root, err,
 		)
 	}
-	agents := scanAgentsFrom(env.root)
+	agents := scanAgentsFrom(ctx, env.root, params.ServiceManager)
 	if len(agents) == 0 && env.fallback != nil {
-		agents = env.fallback(env.root)
+		agents = env.fallback(ctx, env.root, params.ServiceManager)
 	}
 	if orgId != "" {
 		for _, a := range agents {
@@ -682,35 +681,6 @@ func agentVersionFrom(dataDir string) string {
 		return "unknown (no health report yet)"
 	}
 	return props.AgentVersion
-}
-
-// serviceStatusText runs each service-manager query and records its output.
-func serviceStatusText(
-	ctx context.Context,
-	name string,
-	run func(ctx context.Context, argv []string) string,
-) []byte {
-	var buf bytes.Buffer
-	for _, argv := range serviceManagerCommands(name) {
-		_, _ = fmt.Fprintf(&buf, "$ %s\n%s\n", strings.Join(argv, " "), run(ctx, argv))
-	}
-	return buf.Bytes()
-}
-
-// runServiceManagerCommand runs one service-manager query under the
-// diagnostic's shell-out bound (diagnosticCommandTimeout).
-func runServiceManagerCommand(ctx context.Context, argv []string) string {
-	ctx, cancel := context.WithTimeout(ctx, diagnosticCommandTimeout)
-	defer cancel()
-	// #nosec G204 - fixed service-manager binaries; the name comes from the
-	// agent's own service naming.
-	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
-	cmd.WaitDelay = diagnosticCommandWaitDelay
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Sprintf("%s(exit: %v)", out, err)
-	}
-	return string(out)
 }
 
 // captureSections runs the diagnostic sections with their output going to the

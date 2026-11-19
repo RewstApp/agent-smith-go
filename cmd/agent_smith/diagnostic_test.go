@@ -19,6 +19,7 @@ import (
 
 	"github.com/RewstApp/agent-smith-go/internal/agent"
 	"github.com/RewstApp/agent-smith-go/internal/mqtt"
+	"github.com/RewstApp/agent-smith-go/internal/service"
 )
 
 // ── test doubles ─────────────────────────────────────────────────────────────
@@ -108,8 +109,14 @@ func TestIsValidOrgId(t *testing.T) {
 
 // ── scanAgentsFrom ────────────────────────────────────────────────────────────
 
+// scanTestManager is a service manager that knows no service, so a scan's
+// entries are found by their directories alone and none is running.
+func scanTestManager() *mockServiceManager {
+	return &mockServiceManager{openErr: errors.New("no such service")}
+}
+
 func TestScanAgentsFrom_NonExistentRoot(t *testing.T) {
-	agents := scanAgentsFrom("/does/not/exist/ever")
+	agents := scanAgentsFrom(context.Background(), "/does/not/exist/ever", scanTestManager())
 	if agents != nil {
 		t.Errorf("expected nil for missing root, got %v", agents)
 	}
@@ -117,7 +124,7 @@ func TestScanAgentsFrom_NonExistentRoot(t *testing.T) {
 
 func TestScanAgentsFrom_EmptyRoot(t *testing.T) {
 	root := t.TempDir()
-	agents := scanAgentsFrom(root)
+	agents := scanAgentsFrom(context.Background(), root, scanTestManager())
 	if len(agents) != 0 {
 		t.Errorf("expected 0 agents, got %d", len(agents))
 	}
@@ -135,7 +142,7 @@ func TestScanAgentsFrom_SkipsSyslogSuffixedEntries(t *testing.T) {
 		_ = os.WriteFile(filepath.Join(orgDir, "config.json"), data, 0o644)
 	}
 
-	agents := scanAgentsFrom(root)
+	agents := scanAgentsFrom(context.Background(), root, scanTestManager())
 	if len(agents) != 1 {
 		t.Fatalf("expected 1 agent (syslog entry filtered), got %d", len(agents))
 	}
@@ -148,7 +155,7 @@ func TestScanAgentsFrom_SkipsEntriesWithoutConfig(t *testing.T) {
 	root := t.TempDir()
 	_ = os.MkdirAll(filepath.Join(root, "org-no-config"), 0o755)
 
-	agents := scanAgentsFrom(root)
+	agents := scanAgentsFrom(context.Background(), root, scanTestManager())
 	if len(agents) != 0 {
 		t.Errorf("expected 0 agents (no config.json), got %d", len(agents))
 	}
@@ -158,7 +165,7 @@ func TestScanAgentsFrom_SkipsFiles(t *testing.T) {
 	root := t.TempDir()
 	_ = os.WriteFile(filepath.Join(root, "somefile.json"), []byte("{}"), 0o644)
 
-	agents := scanAgentsFrom(root)
+	agents := scanAgentsFrom(context.Background(), root, scanTestManager())
 	if len(agents) != 0 {
 		t.Errorf("expected 0 agents (root-level files ignored), got %d", len(agents))
 	}
@@ -178,7 +185,7 @@ func TestScanAgentsFrom_ValidConfig(t *testing.T) {
 	data, _ := json.Marshal(device)
 	_ = os.WriteFile(filepath.Join(orgDir, "config.json"), data, 0o644)
 
-	agents := scanAgentsFrom(root)
+	agents := scanAgentsFrom(context.Background(), root, scanTestManager())
 	if len(agents) != 1 {
 		t.Fatalf("expected 1 agent, got %d", len(agents))
 	}
@@ -236,7 +243,7 @@ func TestScanAgentsFrom_InvalidConfigJSON(t *testing.T) {
 	_ = os.MkdirAll(orgDir, 0o755)
 	_ = os.WriteFile(filepath.Join(orgDir, "config.json"), []byte("not-json"), 0o644)
 
-	agents := scanAgentsFrom(root)
+	agents := scanAgentsFrom(context.Background(), root, scanTestManager())
 	if len(agents) != 1 {
 		t.Fatalf("expected 1 agent entry (even with bad JSON), got %d", len(agents))
 	}
@@ -259,33 +266,146 @@ func TestScanAgentsFrom_MultipleOrgs(t *testing.T) {
 	}
 	_ = os.MkdirAll(filepath.Join(root, "org-no-config"), 0o755)
 
-	agents := scanAgentsFrom(root)
+	agents := scanAgentsFrom(context.Background(), root, scanTestManager())
 	if len(agents) != 3 {
 		t.Errorf("expected 3 agents, got %d", len(agents))
 	}
 }
 
+// The scan asks the service manager whether each agent's service is running,
+// the same query the Service Status check makes (sc-132999): before that it
+// parsed its own `systemctl show`, `launchctl print` or `sc query`, and the
+// menu's RUNNING/STOPPED marker could disagree with the check beneath it.
+func TestScanAgentsFrom_MarksRunningFromTheServiceManager(t *testing.T) {
+	root := t.TempDir()
+	orgId := "43fb08b0-92cf-462a-924d-0b6be7a43a48"
+	installAgentUnder(t, root, orgId)
+
+	running := scanAgentsFrom(context.Background(), root,
+		&mockServiceManager{openService: &mockService{isActive: true}})
+	if len(running) != 1 || !running[0].IsRunning {
+		t.Errorf("a service the manager reports running: got %+v", running)
+	}
+	stopped := scanAgentsFrom(context.Background(), root,
+		&mockServiceManager{openService: &mockService{isActive: false}})
+	if len(stopped) != 1 || stopped[0].IsRunning {
+		t.Errorf("a service the manager reports stopped: got %+v", stopped)
+	}
+	unanswered := scanAgentsFrom(context.Background(), root,
+		&mockServiceManager{openService: &mockService{statusErr: errors.New("SCM wedged")}})
+	if len(unanswered) != 1 || unanswered[0].IsRunning {
+		t.Errorf("a service the manager cannot answer for is listed and not running: got %+v",
+			unanswered)
+	}
+}
+
 // ── runCheckServiceStatus ─────────────────────────────────────────────────────
+
+// The Service Status line carries the service manager's own state beside the
+// classification when it says more (sc-132999), and a service the manager
+// cannot answer for is a failed check naming why.
+func TestRunCheckServiceStatus_PrintsTheManagersState(t *testing.T) {
+	cases := []struct {
+		name string
+		svc  *mockService
+		want string
+		pass bool
+	}{
+		{
+			"running",
+			&mockService{status: &service.Status{State: service.StateRunning, Raw: "Running"}},
+			"[PASS] org-1 - RUNNING (svc-1)",
+			true,
+		},
+		{
+			"systemd's words",
+			&mockService{status: &service.Status{
+				State: service.StateRunning, Raw: "active (running)",
+			}},
+			"[PASS] org-1 - RUNNING: active (running) (svc-1)",
+			true,
+		},
+		{
+			"pending",
+			&mockService{status: &service.Status{State: service.StatePending, Raw: "StopPending"}},
+			"[FAIL] org-1 - PENDING: StopPending (svc-1)",
+			false,
+		},
+		{
+			"stopped",
+			&mockService{status: &service.Status{
+				State: service.StateStopped, Raw: "inactive (dead)",
+			}},
+			"[FAIL] org-1 - STOPPED: inactive (dead) (svc-1)",
+			false,
+		},
+		{
+			"unanswered",
+			&mockService{statusErr: errors.New("service manager did not query svc-1")},
+			"[FAIL] Service not found (svc-1): service manager did not query svc-1",
+			false,
+		},
+	}
+	for _, tc := range cases {
+		sections, _ := captureDiagnostic(t)
+		params := &diagnosticContext{ServiceManager: &mockServiceManager{openService: tc.svc}}
+		runCheckServiceStatus(
+			context.Background(), params, agentInfo{OrgId: "org-1", ServiceName: "svc-1"},
+		)
+		if !strings.Contains(sections.String(), tc.want) {
+			t.Errorf("%s: want %q in:\n%s", tc.name, tc.want, sections.String())
+		}
+	}
+}
+
+func TestRunCheckServiceStatus_BoundsTheQuery(t *testing.T) {
+	sections, _ := captureDiagnostic(t)
+	var deadline time.Duration
+	svc := &mockService{statusFunc: func(ctx context.Context) (service.Status, error) {
+		if d, ok := ctx.Deadline(); ok {
+			deadline = time.Until(d)
+		}
+		return service.Status{State: service.StateRunning}, nil
+	}}
+	params := &diagnosticContext{ServiceManager: &mockServiceManager{openService: svc}}
+	runCheckServiceStatus(
+		context.Background(), params, agentInfo{OrgId: "org-1", ServiceName: "svc-1"},
+	)
+	if deadline <= 0 || deadline > diagnosticQueryTimeout {
+		t.Errorf(
+			"the query ran under a %v deadline, want at most %v", deadline, diagnosticQueryTimeout,
+		)
+	}
+	if !strings.Contains(sections.String(), "[PASS] org-1 - RUNNING (svc-1)") {
+		t.Errorf("got:\n%s", sections.String())
+	}
+}
 
 func TestRunCheckServiceStatus_ServiceOpenFails(t *testing.T) {
 	params := &diagnosticContext{
 		ServiceManager: &mockServiceManager{openErr: errors.New("not found")},
 	}
-	runCheckServiceStatus(params, agentInfo{OrgId: "org-1", ServiceName: "svc-1"})
+	runCheckServiceStatus(
+		context.Background(), params, agentInfo{OrgId: "org-1", ServiceName: "svc-1"},
+	)
 }
 
 func TestRunCheckServiceStatus_RunningService(t *testing.T) {
 	params := &diagnosticContext{
 		ServiceManager: &mockServiceManager{openService: &mockService{isActive: true}},
 	}
-	runCheckServiceStatus(params, agentInfo{OrgId: "org-1", ServiceName: "svc-1"})
+	runCheckServiceStatus(
+		context.Background(), params, agentInfo{OrgId: "org-1", ServiceName: "svc-1"},
+	)
 }
 
 func TestRunCheckServiceStatus_StoppedService(t *testing.T) {
 	params := &diagnosticContext{
 		ServiceManager: &mockServiceManager{openService: &mockService{isActive: false}},
 	}
-	runCheckServiceStatus(params, agentInfo{OrgId: "org-1", ServiceName: "svc-1"})
+	runCheckServiceStatus(
+		context.Background(), params, agentInfo{OrgId: "org-1", ServiceName: "svc-1"},
+	)
 }
 
 // ── runConnectivityTestWith ───────────────────────────────────────────────────

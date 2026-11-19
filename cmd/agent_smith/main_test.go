@@ -156,6 +156,14 @@ type mockService struct {
 	// change from one observation to the next, as a service that is still
 	// shutting down does.
 	isActiveFunc func() bool
+	// status, when set, is what Status answers instead of deriving it from
+	// IsActive; statusErr fails it. describe is Describe's text; describeErr
+	// fails it.
+	status      *service.Status
+	statusErr   error
+	statusFunc  func(ctx context.Context) (service.Status, error)
+	describe    string
+	describeErr error
 
 	stopCalled   bool
 	deleteCalled bool
@@ -191,14 +199,41 @@ func (m *mockService) Start() error {
 
 func (m *mockService) Close() error { return nil }
 
+func (m *mockService) Status(ctx context.Context) (service.Status, error) {
+	if m.statusFunc != nil {
+		return m.statusFunc(ctx)
+	}
+	if m.statusErr != nil {
+		return service.Status{}, m.statusErr
+	}
+	if m.status != nil {
+		return *m.status, nil
+	}
+	if m.IsActive() {
+		return service.Status{State: service.StateRunning, Raw: "running"}, nil
+	}
+	return service.Status{State: service.StateStopped, Raw: "stopped"}, nil
+}
+
+func (m *mockService) Describe(context.Context) (string, error) {
+	return m.describe, m.describeErr
+}
+
 type mockServiceManager struct {
 	openErr       error
 	openService   service.Service
 	createErr     error
 	createService service.Service
+	// services is what ListServices names; listErr fails it.
+	services []string
+	listErr  error
 
 	openCalls   int
 	createCalls []service.AgentParams
+}
+
+func (m *mockServiceManager) ListServices() ([]string, error) {
+	return m.services, m.listErr
 }
 
 func (m *mockServiceManager) Open(name string) (service.Service, error) {

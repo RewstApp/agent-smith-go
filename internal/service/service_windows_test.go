@@ -3,6 +3,7 @@
 package service
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"testing"
@@ -45,6 +46,12 @@ type mockWindowsServiceHandle struct {
 	// specific call by its zero-based index.
 	queryHook    func(callIdx int) error
 	queryCallIdx int
+	// config is what Config answers; configErr fails it.
+	config    mgr.Config
+	configErr error
+	// queryBlock, when set, makes Query wait on it before answering, as a
+	// wedged SCM would.
+	queryBlock <-chan struct{}
 
 	closeCalled   bool
 	startCalled   bool
@@ -72,7 +79,14 @@ func (m *mockWindowsServiceHandle) Control(c svc.Cmd) (svc.Status, error) {
 	return m.controlStatus, m.controlErr
 }
 
+func (m *mockWindowsServiceHandle) Config() (mgr.Config, error) {
+	return m.config, m.configErr
+}
+
 func (m *mockWindowsServiceHandle) Query() (svc.Status, error) {
+	if m.queryBlock != nil {
+		<-m.queryBlock
+	}
 	if m.queryErr != nil {
 		return svc.Status{}, m.queryErr
 	}
@@ -100,6 +114,8 @@ type mockWindowsServiceManager struct {
 	createErr    error
 	openErr      error
 	disconnected bool
+	services     []string
+	listErr      error
 
 	lastCreateConfig mgr.Config
 	createCalled     bool
@@ -122,6 +138,10 @@ func (m *mockWindowsServiceManager) CreateService(
 
 func (m *mockWindowsServiceManager) OpenService(name string) (*mgr.Service, error) {
 	return nil, m.openErr
+}
+
+func (m *mockWindowsServiceManager) ListServices() ([]string, error) {
+	return m.services, m.listErr
 }
 
 // mockWindowsServiceManagerFactory
@@ -528,6 +548,154 @@ func TestWindowsService_IsActive_QueryError(t *testing.T) {
 
 	if s.IsActive() {
 		t.Error("expected IsActive to return false on query error")
+	}
+}
+
+// Status and Describe (sc-132999)
+
+func TestWindowsService_Status_ClassifiesTheSCMState(t *testing.T) {
+	cases := []struct {
+		state svc.State
+		want  State
+		raw   string
+	}{
+		{svc.Running, StateRunning, "Running"},
+		{svc.Stopped, StateStopped, "Stopped"},
+		{svc.StartPending, StatePending, "StartPending"},
+		{svc.StopPending, StatePending, "StopPending"},
+		{svc.Paused, StatePaused, "Paused"},
+		{svc.State(99), StateUnknown, "Unknown(99)"},
+	}
+	for _, tc := range cases {
+		handle := &mockWindowsServiceHandle{queryStatuses: []svc.Status{{State: tc.state}}}
+		s := &windowsService{handle: handle, name: "svc"}
+		got, err := s.Status(context.Background())
+		if err != nil {
+			t.Fatalf("%v: %v", tc.state, err)
+		}
+		if got.State != tc.want || got.Raw != tc.raw {
+			t.Errorf("%v: got %v %q, want %v %q", tc.state, got.State, got.Raw, tc.want, tc.raw)
+		}
+	}
+}
+
+func TestWindowsService_Status_QueryError(t *testing.T) {
+	handle := &mockWindowsServiceHandle{queryErr: errors.New("query failed")}
+	s := &windowsService{handle: handle, name: "svc"}
+
+	if _, err := s.Status(context.Background()); err == nil ||
+		!strings.Contains(err.Error(), "query failed") {
+		t.Errorf("want the query's error, got %v", err)
+	}
+}
+
+func TestWindowsService_Status_WedgedSCMFailsTheCallersDeadline(t *testing.T) {
+	block := make(chan struct{})
+	defer close(block)
+	handle := &mockWindowsServiceHandle{queryBlock: block}
+	s := &windowsService{handle: handle, name: "svc"}
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	_, err := s.Status(ctx)
+	if time.Since(start) > 5*time.Second {
+		t.Errorf("Status waited %v on a query that never answered", time.Since(start))
+	}
+	if !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "query svc") {
+		t.Errorf("want the deadline error naming the query, got %v", err)
+	}
+}
+
+func TestWindowsService_Describe_RendersStatusAndConfig(t *testing.T) {
+	handle := &mockWindowsServiceHandle{
+		queryStatuses: []svc.Status{{
+			State:     svc.Running,
+			Accepts:   svc.AcceptStop | svc.AcceptShutdown,
+			ProcessId: 4321,
+		}},
+		config: mgr.Config{
+			ServiceType:      0x10,
+			StartType:        mgr.StartAutomatic,
+			DelayedAutoStart: true,
+			ErrorControl:     mgr.ErrorNormal,
+			BinaryPathName:   `C:\Program Files\RewstRemoteAgent\org\rewst_remote_agent.win.exe --org-id org`,
+			Dependencies:     []string{"Tcpip", "Dnscache"},
+			ServiceStartName: "LocalSystem",
+			DisplayName:      "RewstRemoteAgent_org",
+			Description:      "Rewst Remote Agent for Org org",
+			Password:         "never-shown",
+		},
+	}
+	s := &windowsService{handle: handle, name: "RewstRemoteAgent_org"}
+
+	got, err := s.Describe(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"SERVICE_NAME: RewstRemoteAgent_org\n",
+		"STATE:               Running\n",
+		"PID:                 4321\n",
+		"ACCEPTS:             stop, shutdown\n",
+		"START_TYPE:          2 AUTO_START (DELAYED)\n",
+		"BINARY_PATH_NAME:    C:\\Program Files\\RewstRemoteAgent\\org\\rewst_remote_agent.win.exe --org-id org\n",
+		"DEPENDENCIES:        Tcpip, Dnscache\n",
+		"SERVICE_START_NAME:  LocalSystem\n",
+		"DESCRIPTION:         Rewst Remote Agent for Org org\n",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("Describe lacks %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "never-shown") {
+		t.Errorf("Describe rendered the configured password:\n%s", got)
+	}
+}
+
+func TestWindowsService_Describe_ConfigError(t *testing.T) {
+	handle := &mockWindowsServiceHandle{
+		queryStatuses: []svc.Status{{State: svc.Stopped}},
+		configErr:     errors.New("access denied"),
+	}
+	s := &windowsService{handle: handle, name: "svc"}
+
+	if _, err := s.Describe(context.Background()); err == nil ||
+		!strings.Contains(err.Error(), "access denied") {
+		t.Errorf("want the configuration query's error, got %v", err)
+	}
+}
+
+func TestStartTypeName(t *testing.T) {
+	cases := map[string]string{
+		startTypeName(mgr.StartAutomatic, false): "2 AUTO_START",
+		startTypeName(mgr.StartAutomatic, true):  "2 AUTO_START (DELAYED)",
+		startTypeName(mgr.StartManual, false):    "3 DEMAND_START",
+		startTypeName(mgr.StartDisabled, false):  "4 DISABLED",
+		startTypeName(7, false):                  "7 Unknown(7)",
+	}
+	for got, want := range cases {
+		if got != want {
+			t.Errorf("got %q, want %q", got, want)
+		}
+	}
+}
+
+func TestDefaultServiceManager_ListServices(t *testing.T) {
+	manager := &mockWindowsServiceManager{services: []string{"A", "RewstRemoteAgent_x"}}
+	factory := &mockWindowsServiceManagerFactory{manager: manager}
+	sm := &defaultServiceManager{factory: factory}
+
+	var lister ServiceLister = sm
+	got, err := lister.ListServices()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(got, ",") != "A,RewstRemoteAgent_x" {
+		t.Errorf("ListServices = %v", got)
+	}
+	if !manager.disconnected {
+		t.Error("ListServices did not disconnect from the SCM")
 	}
 }
 
