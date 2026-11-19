@@ -165,6 +165,24 @@ type Health struct {
 	Spool               SpoolHealth    `json:"spool"`
 	Plugins             []PluginHealth `json:"plugins"`
 	Commands            CommandHealth  `json:"commands"`
+	// Process is what the agent process itself costs the endpoint
+	// (sc-132992). Same ignores it, as it ignores the clock fields: it moves
+	// on every sample, so it rides along on the next publish something else
+	// causes instead of causing one. nil omits it (an older agent, or a health
+	// file written by one).
+	Process *ProcessHealth `json:"process,omitempty"`
+}
+
+// ProcessHealth is the agent process's own resource usage at the time of the
+// report. A field whose query failed is zero; open_files is reported on Linux
+// and macOS and handles on Windows, the other omitted.
+type ProcessHealth struct {
+	RSSBytes   uint64  `json:"rss_bytes"`
+	CPUSeconds float64 `json:"cpu_seconds"`
+	Goroutines int     `json:"goroutines"`
+	Threads    int32   `json:"threads"`
+	OpenFiles  int32   `json:"open_files,omitempty"`
+	Handles    int32   `json:"handles,omitempty"`
 }
 
 type JournalHealth struct {
@@ -206,8 +224,9 @@ type CommandHealth struct {
 }
 
 // Same reports whether two health objects describe the same state once the
-// fields that change on every tick (the report time and the uptime) are set
-// aside, so the reporter publishes on change and not on the clock.
+// fields that change on every tick (the report time, the uptime and the
+// process's resource usage) are set aside, so the reporter publishes on
+// change and not on the clock.
 func (h *Health) Same(other *Health) bool {
 	if h == nil || other == nil {
 		return h == other

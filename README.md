@@ -1600,7 +1600,8 @@ reports a `health` object, assembled from the counters it already keeps:
   "journal":  { "pending": 0, "degraded": false, "expired_total": 0, "interrupted_total": 0 },
   "spool":    { "entries": 0, "dropped_expired": 0, "dropped_capacity": 0, "dropped_attempts": 0, "dropped_corrupt": 0 },
   "plugins":  [ { "name": "teams", "restarts": 0, "notify_failures": 0, "notify_timeouts": 0 } ],
-  "commands": { "executing": 0, "completed_total": 12, "timed_out_total": 0, "failed_total": 0 }
+  "commands": { "executing": 0, "completed_total": 12, "timed_out_total": 0, "failed_total": 0 },
+  "process":  { "rss_bytes": 31457280, "cpu_seconds": 41.27, "goroutines": 38, "threads": 14, "open_files": 19 }
 }
 ```
 
@@ -1623,6 +1624,34 @@ none since start). A command cut short by the service stopping is counted by
 none of the three: the journal replay reports it to the engine as
 `interrupted`, and counting it as completed here would have the twin
 contradict that (sc-130762).
+
+`process` (sc-132992) is what the agent process itself costs the endpoint at
+the time of the report, so a leak shows as a number climbing in Rewst before
+a customer reports a slow machine:
+
+| Field | Meaning |
+|---|---|
+| `rss_bytes` | Resident memory (the working set on Windows) |
+| `cpu_seconds` | User plus system CPU time since the process started, to the hundredth of a second |
+| `goroutines` | Goroutines running in the agent: a supervisor or writer that leaks one per event shows here first |
+| `threads` | Operating-system threads |
+| `open_files` | Open file descriptors, Linux and macOS only (counted from `/dev/fd`) |
+| `handles` | Open handles, Windows only (`GetProcessHandleCount`) |
+
+The values are sampled with every report, under the same 30-second bound as
+the host-info queries (`hostCommandTimeout`), shared by all of them and
+abandoning a query that does not answer in time, so a stalled sample cannot
+hold the health loop. A query that fails or overruns leaves its field zero and
+logs one Debug line, and never stops the publish. Unlike the counters above,
+`process` never causes a publish on its own: it moves on every sample, so it
+is set aside with the clock fields when the reporter decides whether anything
+changed, and rides along on the next publish something else causes (a counter
+moving, a reconnect, a command's heartbeat). On an idle agent the twin can
+therefore show the usage from the last such publish; the `reported_at` beside
+it says when that was. `--diagnostic`'s Fleet Health section prints it as
+`process: rss_bytes=... cpu_seconds=... goroutines=... threads=...
+open_files=...` (or `handles=`), and the support bundle carries it in both
+`diagnostic.txt` and `health.json`.
 
 The object is published after every successful subscribe and then re-checked
 every `health_report_interval_seconds` (default 60; `--health-report-interval-seconds`
@@ -1657,9 +1686,10 @@ the abandonment. `hermetic-fleet-health` (sc-131253) asserts the command
 counters - two quick commands make `commands.completed_total` 2, a command
 killed by a timeout lowered through the twin makes `commands.timed_out_total`
 1 and leaves `completed_total` at 2 - that `journal.interrupted_total` is 1
-after the service was restarted under a running command, and that
-`--diagnostic`'s Fleet Health section, run with its menu piped in, shows the
-same counters and no command in flight.
+after the service was restarted under a running command, that
+`health.process.rss_bytes` is at least 4 MiB on every platform (sc-132992), and
+that `--diagnostic`'s Fleet Health section, run with its menu piped in, shows
+the same counters, the process line and no command in flight.
 
 #### Progress heartbeats for running commands
 

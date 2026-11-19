@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"io"
@@ -105,6 +106,9 @@ type serviceContext struct {
 	publishHealth       func(client mqtt.Client, props mqtt.ReportedProperties) error
 	// healthFileDir overrides where the health file is written; tests only.
 	healthFileDir string
+	// sampleProcess reads the process's resource usage for the health
+	// object (sc-132992); nil is agent.SampleProcessUsage. Tests only.
+	sampleProcess func(context.Context) (agent.ProcessUsage, error)
 	// Progress heartbeats (sc-129689): healthKick wakes the twin reporter when
 	// a command finishes so the list clears at once; lastInFlight records
 	// whether the last publish listed running commands, so a kick with nothing

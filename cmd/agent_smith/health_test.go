@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -131,7 +132,7 @@ func TestHealthSnapshot_GathersEveryCounter(t *testing.T) {
 		},
 	}}
 
-	h := svc.healthSnapshot(notifier)
+	h := svc.healthSnapshot(context.Background(), notifier, hclog.NewNullLogger())
 
 	if h.UptimeSeconds < 89 || h.UptimeSeconds > 95 {
 		t.Errorf("uptime %d, want ~90", h.UptimeSeconds)
@@ -207,7 +208,7 @@ func TestReportHealth_RewritesTheFileWhenTheChannelChanges(t *testing.T) {
 
 func TestHealthSnapshot_WithoutJournalSpoolOrStats(t *testing.T) {
 	svc := &serviceContext{OrgId: "bare", Executor: &funcExecutor{}}
-	h := svc.healthSnapshot(&mockNotifierWrapper{})
+	h := svc.healthSnapshot(context.Background(), &mockNotifierWrapper{}, hclog.NewNullLogger())
 	if h.Journal != (mqtt.JournalHealth{}) || h.Spool != (mqtt.SpoolHealth{}) ||
 		h.Commands != (mqtt.CommandHealth{}) {
 		t.Errorf("bare snapshot carries counters: %+v", h)
@@ -366,6 +367,16 @@ func TestHealthSame_IgnoresTheClockFields(t *testing.T) {
 	if !a.Same(b) {
 		t.Error("objects differing only in time were not the same")
 	}
+	// The process's resource usage moves on every sample and is set aside
+	// with the clock (sc-132992), present, absent or changed.
+	a.Process = &mqtt.ProcessHealth{RSSBytes: 1 << 20, Goroutines: 10}
+	if !a.Same(b) || !b.Same(a) {
+		t.Error("a process object on one side only read as a change")
+	}
+	b.Process = &mqtt.ProcessHealth{RSSBytes: 9 << 20, Goroutines: 400, CPUSeconds: 12.5}
+	if !a.Same(b) {
+		t.Error("changed process usage read as a change")
+	}
 	b.Journal.Degraded = true
 	if a.Same(b) {
 		t.Error("a changed counter read as the same")
@@ -373,6 +384,90 @@ func TestHealthSame_IgnoresTheClockFields(t *testing.T) {
 	c := &mqtt.Health{Plugins: []mqtt.PluginHealth{{Name: "x"}}}
 	if a.Same(c) || c.Same(nil) {
 		t.Error("plugin and nil differences were not detected")
+	}
+}
+
+// The snapshot carries the agent process's own usage (sc-132992), sampled
+// from the real process when nothing is injected.
+func TestHealthSnapshot_CarriesTheProcessUsage(t *testing.T) {
+	svc := &serviceContext{OrgId: "process", Executor: &funcExecutor{}}
+	h := svc.healthSnapshot(context.Background(), &mockNotifierWrapper{}, hclog.NewNullLogger())
+	p := h.Process
+	if p == nil {
+		t.Fatal("the snapshot carries no process object")
+	}
+	if p.RSSBytes < 1<<20 || p.Goroutines < 1 || p.Threads < 1 || p.OpenFiles+p.Handles < 1 {
+		t.Errorf("process %+v, want every field the platform supports positive", p)
+	}
+	raw, err := json.Marshal(h)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{
+		`"process":{`, `"rss_bytes":`, `"cpu_seconds":`, `"goroutines":`, `"threads":`,
+	} {
+		if !strings.Contains(string(raw), key) {
+			t.Errorf("the health JSON lacks %s: %s", key, raw)
+		}
+	}
+}
+
+// A sample that fails or overruns leaves its fields zero, says so in one Debug
+// line, and never costs the publish it rides on.
+func TestReportHealth_PublishesWhenTheProcessSampleFails(t *testing.T) {
+	svc, pub := newHealthTestService(t)
+	svc.sampleProcess = func(context.Context) (agent.ProcessUsage, error) {
+		return agent.ProcessUsage{Goroutines: 12},
+			errors.New("resident memory query timed out after 30s: context deadline exceeded")
+	}
+	var logged strings.Builder
+	logger := hclog.New(&hclog.LoggerOptions{Output: &logged, Level: hclog.Debug})
+
+	published := svc.reportHealth(
+		context.Background(), nil, &mockNotifierWrapper{}, logger, reportConnected,
+	)
+	if !published {
+		t.Fatal("a failed process sample stopped the publish")
+	}
+	got := pub.published[pub.count()-1].Health.Process
+	if got == nil || got.RSSBytes != 0 || got.Goroutines != 12 {
+		t.Errorf("published process %+v, want the fields that were read and zero for the rest", got)
+	}
+	if !strings.Contains(logged.String(), "[DEBUG]") ||
+		!strings.Contains(logged.String(), "Process resource usage partly unavailable") ||
+		!strings.Contains(logged.String(), "resident memory query timed out") {
+		t.Errorf("want one Debug line naming the failed query, got:\n%s", logged.String())
+	}
+	if strings.Contains(logged.String(), "[WARN]") || strings.Contains(logged.String(), "[ERROR]") {
+		t.Errorf("a failed sample was logged above Debug:\n%s", logged.String())
+	}
+}
+
+// Usage moving between ticks causes no publish on its own: it rides along on
+// the next one something else causes (sc-132992).
+func TestReportHealth_ProcessUsageAloneDoesNotPublish(t *testing.T) {
+	svc, pub := newHealthTestService(t)
+	rss := uint64(1 << 20)
+	svc.sampleProcess = func(context.Context) (agent.ProcessUsage, error) {
+		rss += 1 << 20
+		return agent.ProcessUsage{RSSBytes: rss, Goroutines: int(rss >> 20)}, nil
+	}
+	notifier := &mockNotifierWrapper{}
+	logger := hclog.NewNullLogger()
+	if !svc.reportHealth(context.Background(), nil, notifier, logger, reportConnected) {
+		t.Fatal("the connected report was not published")
+	}
+	for range 3 {
+		if svc.reportHealth(context.Background(), nil, notifier, logger, reportHealthTick) {
+			t.Fatal("a tick published only because the process usage moved")
+		}
+	}
+	svc.executing.Store(1)
+	if !svc.reportHealth(context.Background(), nil, notifier, logger, reportHealthTick) {
+		t.Fatal("a real change was not published")
+	}
+	if got := pub.published[pub.count()-1].Health.Process.RSSBytes; got != 6<<20 {
+		t.Errorf("the change carried rss %d, want the latest sample %d", got, 6<<20)
 	}
 }
 

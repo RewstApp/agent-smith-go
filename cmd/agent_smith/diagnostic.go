@@ -1091,6 +1091,21 @@ func printFleetHealth(props *mqtt.ReportedProperties, err error, withOutput bool
 		health.Commands.TimedOutTotal,
 		health.Commands.FailedTotal,
 	)
+	if p := health.Process; p != nil {
+		// What the agent process costs the endpoint (sc-132992), as of the
+		// last report: open_files on Linux and macOS, handles on Windows.
+		descriptors := fmt.Sprintf("open_files=%d", p.OpenFiles)
+		if p.Handles != 0 {
+			descriptors = fmt.Sprintf("handles=%d", p.Handles)
+		}
+		dprintf(
+			"    process: rss_bytes=%d (%.1f MiB) cpu_seconds=%.2f goroutines=%d threads=%d %s\n",
+			p.RSSBytes, float64(p.RSSBytes)/(1<<20), p.CPUSeconds, p.Goroutines, p.Threads,
+			descriptors,
+		)
+	} else {
+		dprintln("    process: not in this report (written by an agent that does not sample it)")
+	}
 	if len(health.Plugins) == 0 {
 		dprintln("    plugins: none")
 	}
