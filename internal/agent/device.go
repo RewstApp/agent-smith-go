@@ -136,6 +136,23 @@ type Device struct {
 	// release can soak on a ring before the fleet takes it. Settable at
 	// install and --update (--release-channel) and through the device twin.
 	ReleaseChannel string `json:"release_channel,omitempty"`
+	// UpdateWindow limits when an auto-update may restart the agent
+	// (sc-132993): "HH:MM-HH:MM" in the endpoint's local time, crossing
+	// midnight allowed; empty means any time. Outside it the updater still
+	// checks and reports a newer release, and waits for the window to open
+	// before downloading it. Settable at install and --update
+	// (--update-window) and through the device twin.
+	UpdateWindow string `json:"update_window,omitempty"`
+}
+
+// ResolvedUpdateWindow is the window in effect; a value that does not parse
+// is any time (the service reports it once at start and clears it).
+func (d Device) ResolvedUpdateWindow() UpdateWindow {
+	w, err := ParseUpdateWindow(d.UpdateWindow)
+	if err != nil {
+		return UpdateWindow{}
+	}
+	return w
 }
 
 // The auto-update release channels; see Device.ReleaseChannel.

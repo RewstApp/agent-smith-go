@@ -74,7 +74,41 @@ func (svc *serviceContext) healthSnapshot(
 		}
 	}
 	h.Process = svc.processHealth(ctx, logger)
+	h.Update = svc.updateHealth()
 	return h
+}
+
+// recordUpdateStatus keeps what the auto-updater last learned (sc-132993); it
+// rides on the next health report, and a change to it is a change the
+// reporter publishes.
+func (svc *serviceContext) recordUpdateStatus(status agent.UpdateStatus) {
+	svc.updateStatusMu.Lock()
+	defer svc.updateStatusMu.Unlock()
+	svc.updateStatus = &status
+}
+
+// updateHealth is the health object's update section: the last check's
+// outcome and the window in effect, nil while there is neither.
+func (svc *serviceContext) updateHealth() *mqtt.UpdateHealth {
+	window := svc.currentDevice().ResolvedUpdateWindow().String()
+	svc.updateStatusMu.Lock()
+	status := svc.updateStatus
+	svc.updateStatusMu.Unlock()
+	if status == nil && window == "" {
+		return nil
+	}
+	u := &mqtt.UpdateHealth{Window: window}
+	if status != nil {
+		u.Available = status.Available
+		u.Version = status.Version
+		if !status.CheckedAt.IsZero() {
+			u.CheckedAt = status.CheckedAt.UTC().Format(time.RFC3339)
+		}
+		if !status.WindowOpensAt.IsZero() {
+			u.WindowOpensAt = status.WindowOpensAt.Format(time.RFC3339)
+		}
+	}
+	return u
 }
 
 // processHealth samples the agent process's own resource usage (sc-132992)

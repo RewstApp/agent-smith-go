@@ -171,6 +171,34 @@ type Health struct {
 	// causes instead of causing one. nil omits it (an older agent, or a health
 	// file written by one).
 	Process *ProcessHealth `json:"process,omitempty"`
+	// Update is what the auto-updater last learned (sc-132993): whether the
+	// release its channel points at is newer, which one, the update window in
+	// effect and, while it waits for that window, when it opens. nil until a
+	// check has run and no window is set.
+	Update *UpdateHealth `json:"update,omitempty"`
+}
+
+// UpdateHealth is the auto-updater's view for the fleet-health object.
+type UpdateHealth struct {
+	Available bool   `json:"available"`
+	Version   string `json:"version,omitempty"`
+	Window    string `json:"window,omitempty"`
+	// WindowOpensAt (RFC 3339) is present only while a newer release waits
+	// for the window.
+	WindowOpensAt string `json:"window_opens_at,omitempty"`
+	// CheckedAt (RFC 3339) is when the last check answered; absent before
+	// the first. Same sets it aside like the other clock fields.
+	CheckedAt string `json:"checked_at,omitempty"`
+}
+
+// sameUpdate compares two update objects without their check time.
+func sameUpdate(a, b *UpdateHealth) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	x, y := *a, *b
+	x.CheckedAt, y.CheckedAt = "", ""
+	return x == y
 }
 
 // ProcessHealth is the agent process's own resource usage at the time of the
@@ -236,6 +264,7 @@ func (h *Health) Same(other *Health) bool {
 		h.Journal != other.Journal ||
 		h.Spool != other.Spool ||
 		h.Commands != other.Commands ||
+		!sameUpdate(h.Update, other.Update) ||
 		len(h.Plugins) != len(other.Plugins) {
 		return false
 	}

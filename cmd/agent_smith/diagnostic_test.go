@@ -1544,3 +1544,36 @@ func TestPrintFleetHealth_ShowsTheProcessUsage(t *testing.T) {
 		}
 	}
 }
+
+// Fleet Health shows the auto-updater's last finding (sc-132993).
+func TestPrintUpdateHealth(t *testing.T) {
+	cases := []struct {
+		update *mqtt.UpdateHealth
+		want   string
+	}{
+		{nil, "update: not checked yet, no update window"},
+		{
+			&mqtt.UpdateHealth{Window: "02:00-04:00"},
+			`update: available=false window="02:00-04:00" (not checked yet)`,
+		},
+		{
+			&mqtt.UpdateHealth{CheckedAt: "2026-11-20T10:00:00Z"},
+			`update: available=false window="any time" checked_at=2026-11-20T10:00:00Z`,
+		},
+		{
+			&mqtt.UpdateHealth{
+				Available: true, Version: "v1.11.0", Window: "02:00-04:00",
+				WindowOpensAt: "2026-11-21T02:00:00+08:00", CheckedAt: "2026-11-20T10:00:00Z",
+			},
+			`update: available=true version=v1.11.0 window="02:00-04:00" ` +
+				"waiting until 2026-11-21T02:00:00+08:00 checked_at=2026-11-20T10:00:00Z",
+		},
+	}
+	for _, tc := range cases {
+		sections, _ := captureDiagnostic(t)
+		printUpdateHealth(tc.update)
+		if !strings.Contains(sections.String(), tc.want) {
+			t.Errorf("want %q in:\n%s", tc.want, sections.String())
+		}
+	}
+}

@@ -182,6 +182,32 @@ func TestNewUpdateContext_ReleaseChannel(t *testing.T) {
 	}
 }
 
+// --update-window on --update replaces the saved window only when given, in
+// its canonical form; an empty value clears it to any time; an invalid one
+// is refused (sc-132993).
+func TestNewUpdateContext_UpdateWindow(t *testing.T) {
+	base := []string{"--org-id", "43fb08b0-92cf-462a-924d-0b6be7a43a48", "--update"}
+	ctx, err := newUpdateContext(
+		append(base, "--update-window", "02:00 -03:30"), nil, nil, nil, nil,
+	)
+	if err != nil || !ctx.UpdateWindowProvided || ctx.UpdateWindow != "02:00-03:30" {
+		t.Errorf("given: %+v %v", ctx, err)
+	}
+	ctx, err = newUpdateContext(base, nil, nil, nil, nil)
+	if err != nil || ctx.UpdateWindowProvided {
+		t.Errorf("no flag: %+v %v", ctx, err)
+	}
+	ctx, err = newUpdateContext(append(base, "--update-window", ""), nil, nil, nil, nil)
+	if err != nil || !ctx.UpdateWindowProvided || ctx.UpdateWindow != "" {
+		t.Errorf("cleared: %+v %v", ctx, err)
+	}
+	if _, err := newUpdateContext(
+		append(base, "--update-window", "02:00-02:00"), nil, nil, nil, nil,
+	); err == nil || !strings.Contains(err.Error(), "update-window") {
+		t.Errorf("same start and end: %v", err)
+	}
+}
+
 // --proxy-url on --update replaces the saved one; an empty or blank value
 // removes it; an invalid one is refused (sc-129691).
 func TestNewUpdateContext_ProxyURL(t *testing.T) {

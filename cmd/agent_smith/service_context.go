@@ -106,6 +106,14 @@ type serviceContext struct {
 	publishHealth       func(client mqtt.Client, props mqtt.ReportedProperties) error
 	// healthFileDir overrides where the health file is written; tests only.
 	healthFileDir string
+	// updateWake ends the auto-updater's wait for its update window when the
+	// twin changes the settings that decide it (sc-132993); buffered, never
+	// blocks the settings path. nil before the service starts.
+	updateWake chan struct{}
+	// updateStatus is what the auto-updater last reported, for the health
+	// object (sc-132993); nil until the first check answers.
+	updateStatusMu sync.Mutex
+	updateStatus   *agent.UpdateStatus
 	// sampleProcess reads the process's resource usage for the health
 	// object (sc-132992); nil is agent.SampleProcessUsage. Tests only.
 	sampleProcess func(context.Context) (agent.ProcessUsage, error)

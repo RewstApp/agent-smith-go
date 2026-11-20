@@ -155,6 +155,20 @@ func validReleaseChannel(saved string, logger hclog.Logger) string {
 	return saved
 }
 
+// validUpdateWindow is the saved update_window as the service honours it
+// (sc-132993): a value that does not parse would be read as any time while
+// being reported verbatim, so it is reported once at start and cleared, the
+// way an invalid release_channel is reset. A valid one is kept in its
+// canonical form.
+func validUpdateWindow(saved string, logger hclog.Logger) string {
+	w, err := agent.ParseUpdateWindow(saved)
+	if err != nil {
+		logger.Error("Ignoring the configured update_window; updating at any time", "error", err)
+		return ""
+	}
+	return w.String()
+}
+
 // loadLog opens the agent's log file for appending through a size-bounded
 // rotating writer. The log used to be a bare append-only *os.File that nothing
 // ever rotated, truncated or swept, so on a long-lived endpoint it grew for the
@@ -275,6 +289,7 @@ func (svc *serviceContext) Execute(
 	// It is resolved once, here, and handed to everything that dials; this is
 	// the one place an invalid value is handled.
 	device.ReleaseChannel = validReleaseChannel(device.ReleaseChannel, logger)
+	device.UpdateWindow = validUpdateWindow(device.UpdateWindow, logger)
 	device.ProxyURL = strings.TrimSpace(device.ProxyURL)
 	proxy, err := device.Proxy()
 	if err != nil {
@@ -373,7 +388,9 @@ func (svc *serviceContext) Execute(
 	}, "scope", "clock_heartbeat")
 
 	// The auto-updater runs while disable_auto_updates is false; the device
-	// twin can turn it off and on again at run time (sc-129688).
+	// twin can turn it off and on again at run time (sc-129688), and change
+	// the update window it waits for (sc-132993).
+	svc.updateWake = make(chan struct{}, 1)
 	svc.autoUpdate = newAutoUpdateControl(func() *agent.AutoUpdateRunner {
 		updater := agent.NewUpdater(
 			logger,
@@ -400,6 +417,8 @@ func (svc *serviceContext) Execute(
 			svc, // the updater waits for in-flight commands before restarting us
 			agent.WithLiveDevice(svc.currentDevice),
 			agent.WithProxy(svc.proxy),
+			agent.WithUpdateStatus(svc.recordUpdateStatus),
+			agent.WithSettingsWake(svc.updateWake),
 		)
 		return agent.NewAutoUpdateRunner(
 			logger,

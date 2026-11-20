@@ -471,6 +471,68 @@ func TestReportHealth_ProcessUsageAloneDoesNotPublish(t *testing.T) {
 	}
 }
 
+// The update section (sc-132993) is absent until a check has run or a window
+// is set, carries the window in effect, and while a newer release waits for
+// the window says when it opens.
+func TestUpdateHealth(t *testing.T) {
+	svc := &serviceContext{}
+	if svc.updateHealth() != nil {
+		t.Error("an unchecked agent with no window reported an update section")
+	}
+	svc.setLiveDevice(agent.Device{UpdateWindow: "02:00-04:00"})
+	if u := svc.updateHealth(); u == nil || u.Window != "02:00-04:00" || u.Available ||
+		u.CheckedAt != "" {
+		t.Errorf("window only: %+v", u)
+	}
+	opens := time.Date(2026, 11, 21, 2, 0, 0, 0, time.FixedZone("UTC+8", 8*3600))
+	svc.recordUpdateStatus(agent.UpdateStatus{
+		CheckedAt:     time.Date(2026, 11, 20, 10, 0, 0, 0, time.UTC),
+		Available:     true,
+		Version:       "v1.11.0",
+		WindowOpensAt: opens,
+	})
+	want := mqtt.UpdateHealth{
+		Available:     true,
+		Version:       "v1.11.0",
+		Window:        "02:00-04:00",
+		WindowOpensAt: "2026-11-21T02:00:00+08:00",
+		CheckedAt:     "2026-11-20T10:00:00Z",
+	}
+	if u := svc.updateHealth(); u == nil || *u != want {
+		t.Errorf("waiting: %+v, want %+v", u, want)
+	}
+}
+
+// A newer release appearing is a change the reporter publishes; the check
+// time moving on its own is not (sc-132993).
+func TestReportHealth_PublishesWhenAnUpdateBecomesAvailable(t *testing.T) {
+	svc, pub := newHealthTestService(t)
+	svc.sampleProcess = func(context.Context) (agent.ProcessUsage, error) {
+		return agent.ProcessUsage{}, nil
+	}
+	notifier := &mockNotifierWrapper{}
+	logger := hclog.NewNullLogger()
+	checked := time.Date(2026, 11, 20, 10, 0, 0, 0, time.UTC)
+	svc.recordUpdateStatus(agent.UpdateStatus{CheckedAt: checked})
+	if !svc.reportHealth(context.Background(), nil, notifier, logger, reportConnected) {
+		t.Fatal("the connected report was not published")
+	}
+	svc.recordUpdateStatus(agent.UpdateStatus{CheckedAt: checked.Add(48 * time.Hour)})
+	if svc.reportHealth(context.Background(), nil, notifier, logger, reportHealthTick) {
+		t.Error("a later check with the same outcome was published")
+	}
+	svc.recordUpdateStatus(agent.UpdateStatus{
+		CheckedAt: checked.Add(96 * time.Hour), Available: true, Version: "v1.11.0",
+	})
+	if !svc.reportHealth(context.Background(), nil, notifier, logger, reportHealthTick) {
+		t.Fatal("a newer release becoming available was not published")
+	}
+	got := pub.published[pub.count()-1].Health.Update
+	if got == nil || !got.Available || got.Version != "v1.11.0" {
+		t.Errorf("published update %+v", got)
+	}
+}
+
 func TestReportHealth_DoesNothingOnceTheCycleEnded(t *testing.T) {
 	svc, pub := newHealthTestService(t)
 	ctx, cancel := context.WithCancel(context.Background())

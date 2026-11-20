@@ -135,6 +135,74 @@ func TestReadDesired_ReleaseChannel(t *testing.T) {
 	}
 }
 
+// update_window is a twin setting (sc-132993): a window is applied in its
+// canonical form, "" clears it to any time, anything else is rejected with
+// the window in effect kept.
+func TestReadDesired_UpdateWindow(t *testing.T) {
+	svc, _ := newSettingsTestService(t, settingsTestConfig)
+	update, err := svc.readDesired(
+		[]byte(`{"$version": 3, "update_window": "22:00 - 04:00"}`), false,
+	)
+	if err != nil || update == nil || update.acks["update_window"].Status != settingApplied ||
+		update.device.UpdateWindow != "22:00-04:00" {
+		t.Fatalf("window: %+v %v", update, err)
+	}
+	if got := string(update.changed["update_window"]); got != `"22:00-04:00"` {
+		t.Errorf("persisted value %s", got)
+	}
+	for _, bad := range []string{`"25:00-01:00"`, `"03:00-03:00"`, `4`} {
+		update, err = svc.readDesired([]byte(`{"$version": 4, "update_window": `+bad+`}`), false)
+		if err != nil || update == nil || update.acks["update_window"].Status != settingRejected ||
+			update.device.UpdateWindow != "" || len(update.changed) != 0 {
+			t.Errorf("%s: %+v %v", bad, update, err)
+		}
+		if !strings.Contains(update.acks["update_window"].Detail, "update-window") {
+			t.Errorf("%s: detail %q", bad, update.acks["update_window"].Detail)
+		}
+	}
+}
+
+// Applying a window or channel change wakes an updater waiting for its window
+// so it checks again at once; other settings do not (sc-132993).
+func TestApplyDesired_WindowAndChannelChangesWakeTheUpdater(t *testing.T) {
+	svc, _ := newSettingsTestService(t, settingsTestConfig)
+	svc.updateWake = make(chan struct{}, 1)
+	woken := func() bool {
+		select {
+		case <-svc.updateWake:
+			return true
+		default:
+			return false
+		}
+	}
+	logger := hclog.NewNullLogger()
+
+	svc.applyDesired([]byte(`{"$version": 1, "logging_level": "debug"}`), false, logger)
+	if woken() {
+		t.Error("a logging change woke the updater")
+	}
+	svc.applyDesired([]byte(`{"$version": 2, "update_window": "01:00-02:00"}`), false, logger)
+	if !woken() {
+		t.Error("a window change did not wake the updater")
+	}
+	if got := svc.currentDevice().UpdateWindow; got != "01:00-02:00" {
+		t.Errorf("window in effect %q", got)
+	}
+	cfg, _ := os.ReadFile(svc.ConfigFile)
+	if !strings.Contains(string(cfg), `"update_window": "01:00-02:00"`) {
+		t.Errorf("the window was not persisted:\n%s", cfg)
+	}
+	svc.applyDesired([]byte(`{"$version": 3, "release_channel": "beta"}`), false, logger)
+	if !woken() {
+		t.Error("a channel change did not wake the updater")
+	}
+	// The same window again changes nothing and wakes nothing.
+	svc.applyDesired([]byte(`{"$version": 4, "update_window": "01:00-02:00"}`), false, logger)
+	if woken() {
+		t.Error("an unchanged window woke the updater")
+	}
+}
+
 func TestReadDesired_ClearedAndUnchangedAndUnsupportedCap(t *testing.T) {
 	svc, _ := newSettingsTestService(t, settingsTestConfig)
 	doc := map[string]any{"$version": 2, "command_timeout_seconds": 120, "logging_level": nil}

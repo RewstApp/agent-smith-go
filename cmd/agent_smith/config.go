@@ -93,6 +93,7 @@ func runConfig(params *configContext) error {
 	response.Configuration.GithubToken = params.GithubToken
 	response.Configuration.ProxyURL = params.ProxyURL
 	response.Configuration.ReleaseChannel = params.ReleaseChannel
+	response.Configuration.UpdateWindow = params.UpdateWindow
 
 	if params.MqttQos != -1 {
 		qos := byte(params.MqttQos)
