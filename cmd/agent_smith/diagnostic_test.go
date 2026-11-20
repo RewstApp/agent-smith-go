@@ -1503,3 +1503,44 @@ func TestRunDiagnosticWith_Option7_HostInfo(t *testing.T) {
 	params.Domain = &mockDomainInfoProvider{}
 	runDiag(t, params, "7\n0\n", &mockTLSDialer{}, &mockLogFileOpener{})
 }
+
+// Fleet Health shows what the agent process cost at the last report
+// (sc-132992): the descriptor count under its platform's name, and a plain
+// line for a report written by an agent that did not sample it.
+func TestPrintFleetHealth_ShowsTheProcessUsage(t *testing.T) {
+	cases := []struct {
+		name    string
+		process *mqtt.ProcessHealth
+		want    string
+	}{
+		{
+			"unix",
+			&mqtt.ProcessHealth{
+				RSSBytes: 52428800, CPUSeconds: 3.5, Goroutines: 41, Threads: 12, OpenFiles: 17,
+			},
+			"process: rss_bytes=52428800 (50.0 MiB) cpu_seconds=3.50 goroutines=41 threads=12 " +
+				"open_files=17",
+		},
+		{
+			"windows",
+			&mqtt.ProcessHealth{RSSBytes: 1 << 20, Goroutines: 9, Threads: 8, Handles: 230},
+			"process: rss_bytes=1048576 (1.0 MiB) cpu_seconds=0.00 goroutines=9 threads=8 " +
+				"handles=230",
+		},
+		{
+			"older agent",
+			nil,
+			"process: not in this report (written by an agent that does not sample it)",
+		},
+	}
+	for _, tc := range cases {
+		sections, _ := captureDiagnostic(t)
+		props := &mqtt.ReportedProperties{Health: &mqtt.Health{
+			ReportedAt: "2026-11-19T12:00:00Z", Process: tc.process,
+		}}
+		printFleetHealth(props, nil, false)
+		if !strings.Contains(sections.String(), tc.want) {
+			t.Errorf("%s: want %q in:\n%s", tc.name, tc.want, sections.String())
+		}
+	}
+}

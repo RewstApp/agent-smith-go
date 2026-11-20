@@ -1300,6 +1300,18 @@ jobs:
           EXPECTED: "2"
           TIMEOUT_SECONDS: "60"
 
+      - name: Assert the twin reports the agent process's own resident memory (sc-132992)
+        timeout-minutes: 5
+        uses: ./.github/actions/it-script
+        with:
+          script: hermetic-assert-twin
+        env:
+          ENGINE_URL: ${{ steps.setup.outputs.engine_url }}
+          DEVICE_ID: ${{ steps.setup.outputs.device_id }}
+          PROPERTY: health.process.rss_bytes
+          MIN: "4194304"
+          TIMEOUT_SECONDS: "60"
+
       - name: Lower the command timeout to 3 s through the twin
         timeout-minutes: 5
         uses: ./.github/actions/it-script
@@ -1372,6 +1384,7 @@ jobs:
             interrupted_total=1
             completed_total=2 timed_out_total=1
             in flight: none at the last report
+            process: rss_bytes=
 
       - name: Dump agent log on failure
         if: failure()

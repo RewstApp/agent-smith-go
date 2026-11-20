@@ -26,7 +26,11 @@ const healthFileName = "health.json"
 // the spool's size and drops, the executors' outcomes, the plugins'
 // supervision counters and the connection. Every counter is since process
 // start.
-func (svc *serviceContext) healthSnapshot(notifier plugins.NotifierWrapper) *mqtt.Health {
+func (svc *serviceContext) healthSnapshot(
+	ctx context.Context,
+	notifier plugins.NotifierWrapper,
+	logger hclog.Logger,
+) *mqtt.Health {
 	now := time.Now()
 	h := &mqtt.Health{
 		ReportedAt:          now.UTC().Format(time.RFC3339),
@@ -69,7 +73,34 @@ func (svc *serviceContext) healthSnapshot(notifier plugins.NotifierWrapper) *mqt
 			})
 		}
 	}
+	h.Process = svc.processHealth(ctx, logger)
 	return h
+}
+
+// processHealth samples the agent process's own resource usage (sc-132992)
+// under the host-query bound. A query that fails or overruns leaves its field
+// zero with one Debug line: the report is informational, and a slow sample
+// must never cost the publish it rides on.
+func (svc *serviceContext) processHealth(
+	ctx context.Context,
+	logger hclog.Logger,
+) *mqtt.ProcessHealth {
+	sample := svc.sampleProcess
+	if sample == nil {
+		sample = agent.SampleProcessUsage
+	}
+	usage, err := sample(ctx)
+	if err != nil {
+		logger.Debug("Process resource usage partly unavailable", "error", err)
+	}
+	return &mqtt.ProcessHealth{
+		RSSBytes:   usage.RSSBytes,
+		CPUSeconds: usage.CPUSeconds,
+		Goroutines: usage.Goroutines,
+		Threads:    usage.Threads,
+		OpenFiles:  usage.OpenFiles,
+		Handles:    usage.Handles,
+	}
 }
 
 // progressSnapshot gathers the running commands' heartbeats (sc-129689) from
@@ -189,7 +220,7 @@ func (svc *serviceContext) reportHealth(
 			return false
 		}
 	}
-	health := svc.healthSnapshot(notifier)
+	health := svc.healthSnapshot(ctx, notifier, logger)
 	props := svc.reportedBase()
 	props.Health = health
 	props.Commands = progress
