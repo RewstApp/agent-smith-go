@@ -318,6 +318,30 @@ func TestNewConfigContext_ReleaseChannel(t *testing.T) {
 	}
 }
 
+// --update-window at install is empty (any time) by default, saved in its
+// canonical form, and refused when it does not parse (sc-132993).
+func TestNewConfigContext_UpdateWindow(t *testing.T) {
+	args := []string{
+		"--org-id", "43fb08b0-92cf-462a-924d-0b6be7a43a48",
+		"--config-url", "https://example.com/config", "--config-secret", "s",
+	}
+	ctx, err := newConfigContext(args, nil, nil, nil, nil)
+	if err != nil || ctx.UpdateWindow != "" {
+		t.Errorf("default: %+v %v", ctx, err)
+	}
+	ctx, err = newConfigContext(
+		append(args, "--update-window", " 22:00 - 04:00 "), nil, nil, nil, nil,
+	)
+	if err != nil || ctx.UpdateWindow != "22:00-04:00" {
+		t.Errorf("crossing midnight: %+v %v", ctx, err)
+	}
+	if _, err := newConfigContext(
+		append(args, "--update-window", "25:00-04:00"), nil, nil, nil, nil,
+	); err == nil || !strings.Contains(err.Error(), "update-window") {
+		t.Errorf("invalid: %v", err)
+	}
+}
+
 // A blank --proxy-url at install is unset; an invalid one is refused.
 func TestNewConfigContext_ProxyURL(t *testing.T) {
 	args := []string{

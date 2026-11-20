@@ -130,6 +130,24 @@ var runtimeSettings = map[string]runtimeSetting{
 		get: func(d agent.Device) any { return d.ResolvedReleaseChannel() },
 		set: func(d *agent.Device, v any) { d.ReleaseChannel = v.(string) },
 	},
+	// Applies at once: a change wakes an updater waiting for its window
+	// (svc.wakeUpdater) and is read on every check (sc-132993). "" is any
+	// time; the value is stored as written canonically ("02:00-04:00").
+	"update_window": {
+		parse: func(raw json.RawMessage) (any, error) {
+			var text string
+			if err := json.Unmarshal(raw, &text); err != nil {
+				return nil, errors.New("invalid update-window: must be a string")
+			}
+			w, err := agent.ParseUpdateWindow(text)
+			if err != nil {
+				return nil, err
+			}
+			return w.String(), nil
+		},
+		get: func(d agent.Device) any { return d.ResolvedUpdateWindow().String() },
+		set: func(d *agent.Device, v any) { d.UpdateWindow = v.(string) },
+	},
 }
 
 // intSetting is a positive-integer setting validated like its CLI flag.
@@ -418,6 +436,9 @@ func (svc *serviceContext) applyDesired(
 	if slices.Contains(changed, "worker_count") {
 		svc.requestReconfigure()
 	}
+	if slices.Contains(changed, "update_window") || slices.Contains(changed, "release_channel") {
+		svc.wakeUpdater()
+	}
 	logger.Info(
 		"Applied runtime settings from the device twin",
 		"settings", changed,
@@ -449,6 +470,19 @@ func (svc *serviceContext) persistSettings(changed map[string]json.RawMessage) e
 		return err
 	}
 	return utils.WriteFileAtomic(utils.NewFileSystem(), svc.ConfigFile, out, utils.SecureFileMode)
+}
+
+// wakeUpdater ends an auto-updater's wait for its update window so it checks
+// again under the settings now in effect (sc-132993). Never blocks; a wake
+// with nothing waiting is discarded by the next wait.
+func (svc *serviceContext) wakeUpdater() {
+	if svc.updateWake == nil {
+		return
+	}
+	select {
+	case svc.updateWake <- struct{}{}:
+	default:
+	}
 }
 
 // requestReconfigure asks the connection cycle to end at its next safe point

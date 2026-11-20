@@ -31,6 +31,11 @@ type updateContext struct {
 	// ReleaseChannelProvided (sc-129692); absent, the saved one stays.
 	ReleaseChannel         string
 	ReleaseChannelProvided bool
+	// UpdateWindow replaces the saved update_window when
+	// UpdateWindowProvided (sc-132993); an empty value clears it to any
+	// time, and absent, the saved one stays.
+	UpdateWindow         string
+	UpdateWindowProvided bool
 
 	Sys    agent.SystemInfoProvider
 	Domain agent.DomainInfoProvider
@@ -70,6 +75,7 @@ func newUpdateFlagSet(params *updateContext) *flag.FlagSet {
 	bindTuningFlags(fs, &params.Tuning)
 	bindProxyFlag(fs, &params.ProxyURL)
 	bindReleaseChannelFlag(fs, &params.ReleaseChannel, "")
+	bindUpdateWindowFlag(fs, &params.UpdateWindow)
 	fs.StringVar(
 		&params.ServiceUsername,
 		"service-username",
@@ -109,6 +115,14 @@ func newUpdateContext(
 		if err := agent.ValidateReleaseChannel(params.ReleaseChannel); err != nil {
 			return nil, err
 		}
+	}
+	params.UpdateWindowProvided = flagProvided(fs, "update-window")
+	if params.UpdateWindowProvided {
+		window, err := agent.ParseUpdateWindow(params.UpdateWindow)
+		if err != nil {
+			return nil, err
+		}
+		params.UpdateWindow = window.String()
 	}
 
 	if params.OrgId == "" {
