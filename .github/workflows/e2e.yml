@@ -2683,7 +2683,7 @@ jobs:
         uses: ./.github/actions/run-agent
         with:
           binary: ${{ matrix.binary }}
-          args: --update --org-id ${{ vars.IT_ORG_ID }} --command-timeout-seconds 5 --github-token ${{ secrets.GITHUB_TOKEN }}
+          args: --update --org-id ${{ vars.IT_ORG_ID }} --command-timeout-seconds 20 --github-token ${{ secrets.GITHUB_TOKEN }}
 
       - name: Wait for fresh subscription after timeout update
         timeout-minutes: 6
@@ -2817,7 +2817,7 @@ jobs:
       #
       # The release binary is installed first with the per-command timeout raised
       # well past the floods' runtime, because the earlier timeout scenario left a
-      # 5s deadline in the config that would kill these commands mid-write, and
+      # short (20s) deadline in the config that would kill these commands mid-write, and
       # the SAS scenario left the IT binary running with a 90s token lifetime
       # whose reconnect would cancel them. --logging-level is deliberately not
       # passed: it resets to the default (Info), which keeps the Warn under test
@@ -3101,7 +3101,7 @@ jobs:
       #
       # The release binary is installed first with the per-command timeout raised
       # well past the floods' runtime, because the earlier timeout scenario left a
-      # 5s deadline in the config that would kill these commands mid-write, and
+      # short (20s) deadline in the config that would kill these commands mid-write, and
       # the SAS scenario left the IT binary running with a 90s token lifetime
       # whose reconnect would cancel them. --logging-level is deliberately not
       # passed: it resets to the default (Info), which keeps the Warn under test

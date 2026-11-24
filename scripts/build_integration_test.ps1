@@ -26,11 +26,16 @@
 #   (see test/e2e's SetReleaseURL) so the retry schedule can be driven by
 #   an endpoint that fails on demand. Released builds leave this empty and never
 #   look for the file, so their update source stays fixed at build time
-# - defaultCommandTimeoutOverrideStr overridden to 5s, so the "hung command
+# - defaultCommandTimeoutOverrideStr overridden to 20s, so the "hung command
 #   killed by the default per-command timeout" scenario (sc-108852) can be
 #   exercised in seconds instead of the production 30 minutes. It only replaces
 #   the fallback used when command_timeout_seconds is left unconfigured; it
-#   never applies once a device explicitly configures the field.
+#   never applies once a device explicitly configures the field. It was 5s
+#   until sc-138191: every command the suite sends to this build without a
+#   timeout of its own ran under it, and on a slow Windows runner the
+#   success scenario - the engine's self-posting typed-PowerShell script -
+#   could take longer than that and be killed (runs 41858451017, 44742334484).
+#   20s still kills the hanging scenario, which sleeps 30s.
 # - launchctlTimeoutOverrideStr (macOS) and systemctlTimeoutOverrideStr (Linux)
 #   overridden to 5s, and hostCommandTimeoutOverrideStr overridden to 5s, so a
 #   wedged launchctl/systemctl/sc/dsregcmd/WMI call (sc-108855) or system-info
@@ -60,7 +65,7 @@ $sasTokenLifetimeFlag = "-X github.com/RewstApp/agent-smith-go/internal/agent.sa
 $stopTimeoutFlag = "-X github.com/RewstApp/agent-smith-go/internal/service.stopTimeoutOverrideStr=25s"
 $exitTimeoutFlag = "-X main.exitTimeoutOverrideStr=25s"
 $releaseUrlOverrideFlag = "-X github.com/RewstApp/agent-smith-go/internal/agent.releaseUrlOverrideFileStr=release_url_override"
-$defaultCommandTimeoutFlag = "-X github.com/RewstApp/agent-smith-go/internal/agent.defaultCommandTimeoutOverrideStr=5s"
+$defaultCommandTimeoutFlag = "-X github.com/RewstApp/agent-smith-go/internal/agent.defaultCommandTimeoutOverrideStr=20s"
 $launchctlTimeoutFlag = "-X github.com/RewstApp/agent-smith-go/internal/service.launchctlTimeoutOverrideStr=5s"
 $systemctlTimeoutFlag = "-X github.com/RewstApp/agent-smith-go/internal/service.systemctlTimeoutOverrideStr=5s"
 $hostCommandTimeoutFlag = "-X github.com/RewstApp/agent-smith-go/internal/agent.hostCommandTimeoutOverrideStr=5s"
