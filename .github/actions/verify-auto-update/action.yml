@@ -11,9 +11,9 @@ inputs:
     description: "Path to the agent log file"
     required: true
   wait_seconds:
-    description: "Seconds to sleep before reading the log"
+    description: "Longest to wait, polling every 2 s, for the agent to start on a version other than the integration build; it passes as soon as it has (sc-138191)"
     required: false
-    default: "15"
+    default: "180"
   it_version:
     description: "Version token expected to be absent from the last 'Agent Smith started' line"
     required: false
