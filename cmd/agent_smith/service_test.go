@@ -109,6 +109,19 @@ func TestValidReleaseChannel(t *testing.T) {
 	}
 }
 
+// A saved update_window that does not parse is cleared to any time at
+// service start; a valid one is kept in its canonical form (sc-132993).
+func TestValidUpdateWindow(t *testing.T) {
+	for saved, want := range map[string]string{
+		"": "", "02:00-04:00": "02:00-04:00", " 22:00 - 01:00": "22:00-01:00",
+		"nightly": "", "04:00-04:00": "",
+	} {
+		if got := validUpdateWindow(saved, hclog.NewNullLogger()); got != want {
+			t.Errorf("saved %q: honoured %q, want %q", saved, got, want)
+		}
+	}
+}
+
 // TestLoadConfig_MqttQos tests QoS validation in loadConfig
 func TestLoadConfig_MqttQos(t *testing.T) {
 	qos := func(v byte) *byte { return &v }

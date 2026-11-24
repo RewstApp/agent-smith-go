@@ -264,6 +264,9 @@ type configContext struct {
 	// ReleaseChannel is the auto-update channel saved into the config file
 	// (sc-129692): stable (the default) or beta.
 	ReleaseChannel string
+	// UpdateWindow is the auto-update window saved into the config file
+	// (sc-132993), canonical "HH:MM-HH:MM"; empty is any time.
+	UpdateWindow string
 
 	// ConfigMaxAttempts and ConfigBaseRetryBackoffSeconds bound the retry of the
 	// install-time config fetch on a transient endpoint answer (sc-118306).
@@ -328,6 +331,7 @@ func newConfigFlagSet(params *configContext) *flag.FlagSet {
 	bindTuningFlags(fs, &params.Tuning)
 	bindProxyFlag(fs, &params.ProxyURL)
 	bindReleaseChannelFlag(fs, &params.ReleaseChannel, agent.ReleaseChannelStable)
+	bindUpdateWindowFlag(fs, &params.UpdateWindow)
 	fs.StringVar(
 		&params.ServiceUsername,
 		"service-username",
@@ -394,6 +398,12 @@ func newConfigContext(
 		return nil, err
 	}
 
+	window, err := agent.ParseUpdateWindow(params.UpdateWindow)
+	if err != nil {
+		return nil, err
+	}
+	params.UpdateWindow = window.String()
+
 	if params.ServicePassword != "" && params.ServiceUsername == "" {
 		return nil, fmt.Errorf("service-password requires service-username")
 	}
@@ -428,6 +438,18 @@ func bindReleaseChannelFlag(fs *flag.FlagSet, target *string, value string) {
 			"Auto-update release channel: %s (full releases) or %s (pre-releases too)",
 			agent.ReleaseChannelStable, agent.ReleaseChannelBeta,
 		),
+	)
+}
+
+// bindUpdateWindowFlag registers --update-window, shared by config and update
+// modes (sc-132993).
+func bindUpdateWindowFlag(fs *flag.FlagSet, target *string) {
+	fs.StringVar(
+		target,
+		"update-window",
+		"",
+		"Local time of day auto-updates may restart the agent, HH:MM-HH:MM "+
+			"(may cross midnight, e.g. 22:00-04:00); empty means any time",
 	)
 }
 

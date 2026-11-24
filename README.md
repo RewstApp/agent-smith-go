@@ -41,6 +41,7 @@ rewst_agent_config.win.exe --org-id YOUR_ORG_ID --config-url CONFIG_URL --config
 - `--disable-agent-postback`: Disable agent postback
 - `--no-auto-updates`: Disable auto updates
 - `--release-channel`: the auto-update channel, `stable` (default: full releases only) or `beta` (pre-releases too; see "Release channels" under "Verified, Version-Gated Auto-Updates"). On `--update` the saved channel is kept unless the flag is given.
+- `--update-window`: the local time of day an auto-update may restart the agent, `HH:MM-HH:MM` (it may cross midnight, e.g. `22:00-04:00`); empty, the default, means any time. See "Auto-Update Maintenance Window". On `--update` the saved window is kept unless the flag is given, and `--update-window ""` clears it.
 - `--mqtt-qos`: MQTT subscription QoS level (`0` = at-most-once, `1` = at-least-once). Defaults to `1` when omitted. Azure IoT Hub does not support QoS 2.
 - `--health-report-interval-seconds`: how often a changed fleet-health object is re-published to the device twin (default `60`; see "Fleet Health in the Device Twin").
 - `--command-heartbeat-seconds`: how often a running command's progress is published to the device twin (default `30`; see "Progress heartbeats for running commands").
@@ -1601,7 +1602,9 @@ reports a `health` object, assembled from the counters it already keeps:
   "spool":    { "entries": 0, "dropped_expired": 0, "dropped_capacity": 0, "dropped_attempts": 0, "dropped_corrupt": 0 },
   "plugins":  [ { "name": "teams", "restarts": 0, "notify_failures": 0, "notify_timeouts": 0 } ],
   "commands": { "executing": 0, "completed_total": 12, "timed_out_total": 0, "failed_total": 0 },
-  "process":  { "rss_bytes": 31457280, "cpu_seconds": 41.27, "goroutines": 38, "threads": 14, "open_files": 19 }
+  "process":  { "rss_bytes": 31457280, "cpu_seconds": 41.27, "goroutines": 38, "threads": 14, "open_files": 19 },
+  "update":   { "available": true, "version": "v1.11.0", "window": "22:00-04:00",
+                "window_opens_at": "2026-11-20T22:00:00+08:00", "checked_at": "2026-11-20T06:12:09Z" }
 }
 ```
 
@@ -1652,6 +1655,17 @@ it says when that was. `--diagnostic`'s Fleet Health section prints it as
 `process: rss_bytes=... cpu_seconds=... goroutines=... threads=...
 open_files=...` (or `handles=`), and the support bundle carries it in both
 `diagnostic.txt` and `health.json`.
+
+`update` (sc-132993) is what the auto-updater last learned. `available` says
+whether the release its channel points at is newer than the agent, and
+`version` names that release. `window` is the update window in effect, and
+`window_opens_at` is present only while a newer release waits for the window.
+`checked_at` is when the last check answered. The object is absent until a
+check has run and no window is set. A newer release appearing, or the wait
+starting or ending, is a change the reporter publishes; `checked_at` moving
+alone is not, like the other clock fields. See "Auto-Update Maintenance
+Window". `--diagnostic`'s Fleet Health prints it as `update: available=...
+version=... window="..." waiting until ... checked_at=...`.
 
 The object is published after every successful subscribe and then re-checked
 every `health_report_interval_seconds` (default 60; `--health-report-interval-seconds`
@@ -1841,7 +1855,8 @@ these settings from the device twin's **desired properties**:
 | `postback_base_retry_backoff_seconds` | `--postback-base-retry-backoff-seconds` (positive integer) | from the next postback |
 | `worker_count` | `--worker-count` (positive integer, at most 256) | at the next safe point (below) |
 | `disable_auto_updates` | `--no-auto-updates` (`true`/`false`) | at once: the auto-updater stops or starts |
-| `release_channel` | `--release-channel` (`stable`, `beta`) | from the next update check |
+| `release_channel` | `--release-channel` (`stable`, `beta`) | from the next update check; ends a wait for the update window |
+| `update_window` | `--update-window` (`HH:MM-HH:MM`, or `""` for any time) | at once: an updater waiting for the window checks again under the new one (sc-132993) |
 
 On every connection the agent subscribes to
 `$iothub/twin/PATCH/properties/desired/#` and the twin response topic
@@ -2097,6 +2112,64 @@ launches the `--update` helper:
   life. A helper that fails to start, or an updater stopped mid-wait, lifts the
   hold at once.
 
+### Auto-Update Maintenance Window
+
+An update restarts the agent's service whenever the check lands on a newer
+release and no command is executing (see "Updating Only Between Commands"). On
+an MSP's customer endpoints that is a restart during business hours, and the
+only lever was `disable_auto_updates`, all or nothing and turned back on by
+hand. Since sc-132993 an `update_window` limits when the restart may happen:
+
+```json
+"update_window": "22:00-04:00"
+```
+
+The window is `HH:MM-HH:MM` on a 24-hour clock in the endpoint's **local**
+time, from the start up to but not including the end. It may cross midnight,
+as above. Empty, the default, means any time. A window that starts and ends at
+the same minute is refused rather than guessed at; leave it empty for any
+time. It is set at install and on `--update` with `--update-window`, and
+through the device twin as `update_window` (see "Runtime Settings from the
+Device Twin"). A saved value that does not parse is reported once at service
+start as an Error and ignored, so the agent updates at any time rather than
+never.
+
+The window gates the download and the restart, not the check. The check still
+runs on its schedule, every 48 hours by default. When it finds a newer release
+outside the window, the agent:
+
+- logs `Update available; waiting for the update window` once at Info, with
+  the version, the window and when it next opens;
+- reports it in the twin's fleet health as `health.update`, with `available`,
+  the pending `version`, the `window` and `window_opens_at` (see "Fleet Health
+  in the Device Twin");
+- waits until the window opens, at most a day, without downloading anything
+  or holding any command. It re-reads the wall clock at least every 15
+  minutes, so a clock step or a daylight-saving change moves the opening it
+  waits for. A service stop ends the wait at once
+  (`Update window wait abandoned: updater stopping`);
+- ends the wait at once when the device twin changes `update_window` or
+  `release_channel`, and checks again under the new settings;
+- when the window opens, logs `Update window open; checking for the release
+  again`, checks again so it installs what the channel points at by then, and
+  proceeds as before: download and verify, then the in-flight command hold of
+  "Updating Only Between Commands".
+
+The 48-hour interval is why the updater waits instead of skipping to the next
+check: a check every two days would rarely land inside a two-hour window.
+Inside the window, or with no window, nothing changes.
+
+**Proven end to end by** `TestUpdateWindow` in `test/e2e`, part of the
+`e2e-go` merge gate on all three platforms. The integration build is updated
+with a window that opens two to three minutes later, against a release stub
+that publishes a newer full release. The test asserts the window is saved in
+the config file and the first check logs the wait with the version and the
+window. Until just before the window opens, the agent must not decide to
+update. It must then decide to update, at a log timestamp no earlier than the
+opening, after logging that the window opened. The window is minute-granular,
+so the story's "a window that opens in 30 s" became the next whole minute that
+leaves the restart and the 30-second first check room to land before it.
+
 ### Capped and Jittered Auto-Update Retries
 
 When an update check or download fails, the agent retries on an exponential
@@ -2330,7 +2403,7 @@ The end-to-end workflow (`e2e.yml`, manual dispatch with an `os` input; concurre
 
 #### Go e2e scenarios (`test/e2e`)
 
-The scenarios that need nothing but stubs the repository owns - the auto-update retry schedule and its recovery mid-sequence, the schedule's shape (capped, jittered, never immediate), a service stop during a backoff, the tampered- and missing-digest rejections, the release channels (a `beta` agent follows a pre-release and a `stable` one ignores it, sc-129692), the startup script and installer sweeps, the install refused when the config endpoint answers without a `device_id` (sc-126322), and on Windows the update and uninstall that abort on a wedged `StopPending` service and the uninstall that continues past a locked directory - run as a Go test package against the real binary (sc-126321). `test/e2e` sits behind the `e2e` build tag: the config endpoint the agent installs from and the release endpoint its auto-updater polls are `httptest` servers inside the test process (the served configuration points the hub host at the loopback address with nothing listening, so the agent installs, starts and lives in its connect/backoff loop, which is all these scenarios need from it), the binary is installed as a real service and driven as a subprocess, and every wait is a bounded poll on a log-line count, a service state or a file - `sleeplint` applies. Each top-level test installs fresh and uninstalls on cleanup. Until this package the same scenarios were about ninety workflow steps across four jobs - start a fixture, capture a baseline, install, poll the log, assert through a composite action - and could only be run by dispatching the whole workflow; a scenario here runs on a developer machine in about a minute with the assertions CI makes. The `e2e-go` job compiles the package with `go test -c` as the runner user and runs the test binary elevated through the `run-e2e-package` action, one step per platform: on Linux and macOS under `sudo env` with the `E2E_*` variables passed as `NAME=VALUE` arguments (Ubuntu 26.04's sudo-rs ignores `-E`, sc-129246), directly on Windows. The run passes `-e2e.required`, so variables that fail to reach the test binary fail the job instead of skipping every scenario and reporting green - which is exactly what the first gate run did on ubuntu. It gates the merge with the hermetic jobs, since nothing in it reaches the hub or the engine.
+The scenarios that need nothing but stubs the repository owns - the auto-update retry schedule and its recovery mid-sequence, the schedule's shape (capped, jittered, never immediate), a service stop during a backoff, the tampered- and missing-digest rejections, the release channels (a `beta` agent follows a pre-release and a `stable` one ignores it, sc-129692), the update window (a newer release is waited for until the window opens, sc-132993), the startup script and installer sweeps, the install refused when the config endpoint answers without a `device_id` (sc-126322), and on Windows the update and uninstall that abort on a wedged `StopPending` service and the uninstall that continues past a locked directory - run as a Go test package against the real binary (sc-126321). `test/e2e` sits behind the `e2e` build tag: the config endpoint the agent installs from and the release endpoint its auto-updater polls are `httptest` servers inside the test process (the served configuration points the hub host at the loopback address with nothing listening, so the agent installs, starts and lives in its connect/backoff loop, which is all these scenarios need from it), the binary is installed as a real service and driven as a subprocess, and every wait is a bounded poll on a log-line count, a service state or a file - `sleeplint` applies. Each top-level test installs fresh and uninstalls on cleanup. Until this package the same scenarios were about ninety workflow steps across four jobs - start a fixture, capture a baseline, install, poll the log, assert through a composite action - and could only be run by dispatching the whole workflow; a scenario here runs on a developer machine in about a minute with the assertions CI makes. The `e2e-go` job compiles the package with `go test -c` as the runner user and runs the test binary elevated through the `run-e2e-package` action, one step per platform: on Linux and macOS under `sudo env` with the `E2E_*` variables passed as `NAME=VALUE` arguments (Ubuntu 26.04's sudo-rs ignores `-E`, sc-129246), directly on Windows. The run passes `-e2e.required`, so variables that fail to reach the test binary fail the job instead of skipping every scenario and reporting green - which is exactly what the first gate run did on ubuntu. It gates the merge with the hermetic jobs, since nothing in it reaches the hub or the engine.
 
 To run one scenario locally against built binaries (the integration-test binary from `scripts/build_integration_test.ps1` is required: it is what shortens the update interval and retry schedule to seconds and honours the release-url override file):
 

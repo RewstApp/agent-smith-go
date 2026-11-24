@@ -250,6 +250,13 @@ const (
 	// that window.
 	maxInstallerDownloadSize int64 = 200 * 1024 * 1024
 
+	// updateWindowRecheck is the longest the updater sleeps at a time while it
+	// waits for the update window (sc-132993): each wake re-reads the wall
+	// clock, so a clock step or a daylight-saving change moves the opening it
+	// waits for within this long, rather than leaving a timer armed for a
+	// moment that no longer means the window's start.
+	updateWindowRecheck = 15 * time.Minute
+
 	// assetDigestPrefix is the algorithm prefix GitHub's Releases API uses on
 	// an asset's digest field, e.g. "sha256:<64 hex chars>". See
 	// parseAssetDigest.
@@ -285,6 +292,42 @@ type defaultUpdater struct {
 	// proxy is the outbound proxy for the release and download requests;
 	// nil resolves the device's own (sc-129691).
 	proxy utils.ProxyFunc
+	// reportStatus receives what each check learned and whether the update
+	// is waiting for its window (sc-132993); nil reports nothing.
+	reportStatus func(UpdateStatus)
+	// wake ends a wait for the update window early, when the settings that
+	// decide it (the window, the channel) change; nil never wakes it.
+	wake <-chan struct{}
+	// now and windowRecheck are the window wait's clock and re-read cadence;
+	// zero values select time.Now and updateWindowRecheck. Tests only.
+	now           func() time.Time
+	windowRecheck time.Duration
+}
+
+// UpdateStatus is what the updater last learned about a newer release, for
+// the fleet-health object (sc-132993).
+type UpdateStatus struct {
+	CheckedAt time.Time
+	// Available is whether the release the channel points at is newer than
+	// this agent, and Version is that release's tag when it is.
+	Available bool
+	Version   string
+	// WindowOpensAt is when the update window next opens while the updater
+	// waits for it with a newer release in hand; zero otherwise.
+	WindowOpensAt time.Time
+}
+
+// WithUpdateStatus makes the updater report each check's outcome and its
+// waits for the update window to report (sc-132993).
+func WithUpdateStatus(report func(UpdateStatus)) UpdaterOption {
+	return func(u *defaultUpdater) { u.reportStatus = report }
+}
+
+// WithSettingsWake ends a wait for the update window as soon as wake
+// delivers, so a window or channel the device twin changed is acted on at once
+// rather than at the next re-read (sc-132993).
+func WithSettingsWake(wake <-chan struct{}) UpdaterOption {
+	return func(u *defaultUpdater) { u.wake = wake }
 }
 
 // UpdaterOption configures an optional behaviour of the updater.
@@ -657,27 +700,48 @@ func parseAssetDigest(asset Asset) (string, error) {
 }
 
 func (u *defaultUpdater) Run(ctx context.Context) error {
-	channel := u.currentDevice().ResolvedReleaseChannel()
-	latestRelease, err := u.check(ctx, channel)
-	if err != nil {
-		return err
-	}
+	var latestRelease Release
+	for {
+		device := u.currentDevice()
+		channel := device.ResolvedReleaseChannel()
+		release, err := u.check(ctx, channel)
+		if err != nil {
+			return err
+		}
 
-	u.logger.Info(
-		"Latest release",
-		"tag_name", latestRelease.TagName,
-		"channel", channel,
-		"prerelease", latestRelease.Prerelease,
-	)
+		u.logger.Info(
+			"Latest release",
+			"tag_name", release.TagName,
+			"channel", channel,
+			"prerelease", release.Prerelease,
+		)
 
-	isNewer, err := isNewerVersion(version.Version, latestRelease.TagName)
-	if err != nil {
-		return fmt.Errorf("failed to compare current version %q against latest release %q: %w",
-			version.Version, latestRelease.TagName, err)
-	}
-	if !isNewer {
-		u.logger.Info("No updates available")
-		return nil
+		isNewer, err := isNewerVersion(version.Version, release.TagName)
+		if err != nil {
+			return fmt.Errorf("failed to compare current version %q against latest release %q: %w",
+				version.Version, release.TagName, err)
+		}
+		checkedAt := u.clock()
+		if !isNewer {
+			u.report(UpdateStatus{CheckedAt: checkedAt})
+			u.logger.Info("No updates available")
+			return nil
+		}
+
+		// The update window (sc-132993) gates the download and the restart,
+		// not the check: a newer release found outside it is reported and
+		// waited for, then checked again once the window opens - or the
+		// settings that decide it change - so what is installed is what the
+		// channel points at then, inside the window in effect then.
+		window := device.ResolvedUpdateWindow()
+		if window.Contains(checkedAt) {
+			u.report(UpdateStatus{CheckedAt: checkedAt, Available: true, Version: release.TagName})
+			latestRelease = release
+			break
+		}
+		if err := u.waitForWindow(ctx, window, release.TagName, checkedAt); err != nil {
+			return err
+		}
 	}
 
 	u.logger.Info("Updating agent", "version", latestRelease.TagName)
@@ -705,6 +769,91 @@ func (u *defaultUpdater) Run(ctx context.Context) error {
 		return err
 	}
 	return nil
+}
+
+// clock is the wall clock the update window is read against.
+func (u *defaultUpdater) clock() time.Time {
+	if u.now != nil {
+		return u.now()
+	}
+	return time.Now()
+}
+
+// report hands a check's outcome to the fleet-health object, when wired.
+func (u *defaultUpdater) report(status UpdateStatus) {
+	if u.reportStatus != nil {
+		u.reportStatus(status)
+	}
+}
+
+// waitForWindow waits for the update window to open with a newer release in
+// hand (sc-132993). It logs once at Info, reports when the window opens, and
+// returns nil when it has opened or when the settings that decide it changed
+// (the wake channel, or a live window that differs from the one waited for),
+// so Run checks again; it returns ctx's error when the updater stops. The
+// wait is bounded by the next opening, at most a day away, and re-reads the
+// wall clock at least every updateWindowRecheck so a clock step cannot leave
+// it waiting for a moment that is no longer the window's start.
+func (u *defaultUpdater) waitForWindow(
+	ctx context.Context,
+	window UpdateWindow,
+	version string,
+	now time.Time,
+) error {
+	// A wake delivered while nothing was waiting is stale: the check that
+	// led here already read the settings it signalled.
+	select {
+	case <-u.wake:
+	default:
+	}
+	opens := window.NextOpen(now)
+	u.report(UpdateStatus{CheckedAt: now, Available: true, Version: version, WindowOpensAt: opens})
+	u.logger.Info(
+		"Update available; waiting for the update window",
+		"version", version,
+		"window", window.String(),
+		"opens_at", opens.Format(time.RFC3339),
+		"in", opens.Sub(now).Round(time.Second),
+	)
+	recheck := u.windowRecheck
+	if recheck <= 0 {
+		recheck = updateWindowRecheck
+	}
+	started := now
+	for {
+		now := u.clock()
+		wait := window.NextOpen(now).Sub(now)
+		if wait <= 0 {
+			u.logger.Info(
+				"Update window open; checking for the release again",
+				"window", window.String(),
+				"waited", now.Sub(started).Round(time.Second),
+			)
+			return nil
+		}
+		timer := time.NewTimer(min(wait, recheck))
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			u.logger.Info(
+				"Update window wait abandoned: updater stopping",
+				"waited", u.clock().Sub(started).Round(time.Second),
+			)
+			return ctx.Err()
+		case <-u.wake:
+			timer.Stop()
+			u.logger.Info("Update settings changed while waiting for the window; checking again")
+			return nil
+		case <-timer.C:
+		}
+		if live := u.currentDevice().ResolvedUpdateWindow(); live != window {
+			u.logger.Info(
+				"Update window changed while waiting; checking again",
+				"window", live.String(),
+			)
+			return nil
+		}
+	}
 }
 
 // waitForIdle defers launching the update helper until no command is

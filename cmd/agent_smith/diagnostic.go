@@ -1106,6 +1106,7 @@ func printFleetHealth(props *mqtt.ReportedProperties, err error, withOutput bool
 	} else {
 		dprintln("    process: not in this report (written by an agent that does not sample it)")
 	}
+	printUpdateHealth(health.Update)
 	if len(health.Plugins) == 0 {
 		dprintln("    plugins: none")
 	}
@@ -1131,6 +1132,33 @@ func printFleetHealth(props *mqtt.ReportedProperties, err error, withOutput bool
 			last,
 		)
 	}
+}
+
+// printUpdateHealth prints the auto-updater's last finding (sc-132993): a
+// newer release, the window it waits for and when that opens.
+func printUpdateHealth(u *mqtt.UpdateHealth) {
+	if u == nil {
+		dprintln("    update: not checked yet, no update window")
+		return
+	}
+	line := fmt.Sprintf("    update: available=%t", u.Available)
+	if u.Version != "" {
+		line += " version=" + u.Version
+	}
+	window := u.Window
+	if window == "" {
+		window = "any time"
+	}
+	line += fmt.Sprintf(" window=%q", window)
+	if u.WindowOpensAt != "" {
+		line += " waiting until " + u.WindowOpensAt
+	}
+	if u.CheckedAt != "" {
+		line += " checked_at=" + u.CheckedAt
+	} else {
+		line += " (not checked yet)"
+	}
+	dprintln(line)
 }
 
 // ── Check 7: Host information ──

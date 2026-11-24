@@ -182,6 +182,9 @@ func runUpdate(params *updateContext) {
 	if params.ReleaseChannelProvided {
 		device.ReleaseChannel = params.ReleaseChannel
 	}
+	if params.UpdateWindowProvided {
+		device.UpdateWindow = params.UpdateWindow
+	}
 
 	if params.MqttQos != -1 {
 		qos := byte(params.MqttQos)
