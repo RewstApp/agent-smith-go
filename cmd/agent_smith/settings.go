@@ -148,6 +148,19 @@ var runtimeSettings = map[string]runtimeSetting{
 		get: func(d agent.Device) any { return d.ResolvedUpdateWindow().String() },
 		set: func(d *agent.Device, v any) { d.UpdateWindow = v.(string) },
 	},
+	// Applies at once: the log writer starts or stops compressing rotated
+	// copies (sc-132996); turning it on also compresses the plain ones there.
+	"log_compress": {
+		parse: func(raw json.RawMessage) (any, error) {
+			var b bool
+			if err := json.Unmarshal(raw, &b); err != nil {
+				return nil, errors.New("invalid log_compress: must be true or false")
+			}
+			return b, nil
+		},
+		get: func(d agent.Device) any { return d.LogCompress },
+		set: func(d *agent.Device, v any) { d.LogCompress = v.(bool) },
+	},
 }
 
 // intSetting is a positive-integer setting validated like its CLI flag.
@@ -435,6 +448,9 @@ func (svc *serviceContext) applyDesired(
 	}
 	if slices.Contains(changed, "worker_count") {
 		svc.requestReconfigure()
+	}
+	if slices.Contains(changed, "log_compress") && svc.logWriter != nil {
+		svc.logWriter.SetCompress(update.device.LogCompress)
 	}
 	if slices.Contains(changed, "update_window") || slices.Contains(changed, "release_channel") {
 		svc.wakeUpdater()

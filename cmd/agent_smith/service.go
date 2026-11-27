@@ -230,6 +230,10 @@ func (svc *serviceContext) Execute(
 	defer func() {
 		_ = logFile.Close()
 	}()
+	// Rotated copies are gzipped when log_compress is on (sc-132996); the
+	// twin can change it while the service runs.
+	logFile.SetCompress(device.LogCompress)
+	svc.logWriter = logFile
 
 	logger := utils.ConfigureLogger(agentLoggerName, logFile, device.LoggingLevel)
 

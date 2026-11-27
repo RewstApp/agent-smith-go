@@ -185,6 +185,9 @@ func runUpdate(params *updateContext) {
 	if params.UpdateWindowProvided {
 		device.UpdateWindow = params.UpdateWindow
 	}
+	if params.LogCompressProvided {
+		device.LogCompress = params.LogCompress
+	}
 
 	if params.MqttQos != -1 {
 		qos := byte(params.MqttQos)

@@ -653,6 +653,20 @@ $diag | Set-Content (Join-Path $stage 'diagnostic.txt')
 $line = if ($null -ne $env:FAKE_HEALTH_LINE) { $env:FAKE_HEALTH_LINE } else { '(withheld from the bundle)' }
 (@{ commands = @{ in_flight = @(@{ post_id = 'progress-1'; last_output_line = $line }) } } | ConvertTo-Json -Depth 5) | Set-Content (Join-Path $stage 'health.json')
 'tail' | Set-Content (Join-Path $stage 'logs/rewst_agent.log')
+foreach ($entry in @(($env:FAKE_ROTATED -split ',') | Where-Object { $_ })) {
+  $text = '2026-11-27T12:00:00Z [INFO]  agent_smith: rotated line'
+  if ($entry.EndsWith('!gzip')) {
+    $entry = $entry.Substring(0, $entry.Length - 5)
+    $ms = [IO.MemoryStream]::new()
+    $gz = [IO.Compression.GZipStream]::new($ms, [IO.Compression.CompressionMode]::Compress)
+    $raw = [Text.Encoding]::UTF8.GetBytes($text)
+    $gz.Write($raw, 0, $raw.Length)
+    $gz.Dispose()
+    [IO.File]::WriteAllBytes((Join-Path $stage "logs/$entry"), $ms.ToArray())
+  } else {
+    $text | Set-Content (Join-Path $stage "logs/$entry")
+  }
+}
 $zip = Join-Path ([IO.Path]::GetTempPath()) ([guid]::NewGuid().ToString() + '.zip')
 Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $zip
 if ($path -eq '-') {
@@ -777,6 +791,26 @@ Write-Output "Diagnostic bundle written: $path ($((Get-Item $path).Length) bytes
 	}
 	if got, _ := os.ReadFile(filepath.Join(dir, "config.json")); string(got) != config {
 		t.Errorf("the config was not restored after a failing run: %s", got)
+	}
+
+	// EXPECT_ROTATED_LOGS (sc-132996): the compressed copies must be carried
+	// as plain text named without .gz.
+	rotated := append(base, "EXPECT_ROTATED_LOGS=2", "FAKE_DIAGNOSTIC=all clean")
+	if code, out := run(
+		t, "hermetic-assert-bundle.ps1",
+		append(rotated, "FAKE_ROTATED=rewst_agent.log.1,rewst_agent.log.2")...,
+	); code != 0 || !strings.Contains(out, "2 compressed log cop(ies) as plain text") {
+		t.Errorf("a bundle with two plain copies failed: exit %d\n%s", code, out)
+	}
+	for _, tc := range []struct{ fake, want string }{
+		{"FAKE_ROTATED=rewst_agent.log.1", "expected at least 2"},
+		{"FAKE_ROTATED=rewst_agent.log.1,rewst_agent.log.2!gzip", "is still gzip"},
+		{"FAKE_ROTATED=rewst_agent.log.1,rewst_agent.log.2,rewst_agent.log.3.gz", "names compressed log entries"},
+	} {
+		code, out := run(t, "hermetic-assert-bundle.ps1", append(rotated, tc.fake)...)
+		if code == 0 || !strings.Contains(out, tc.want) {
+			t.Errorf("%s passed or failed for another reason: exit %d\n%s", tc.fake, code, out)
+		}
 	}
 }
 

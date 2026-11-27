@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -100,11 +101,26 @@ type RotatingFile struct {
 	pendingNote   string
 	droppedWrites int
 
+	// Compression (sc-132996): see SetCompress. compress is read without the
+	// lock by the worker; the rest is guarded by mu. owedNote is a compression
+	// diagnostic waiting for the active file to be at a line boundary.
+	compress        atomic.Bool
+	compressing     bool
+	compressPending bool
+	compressFailing bool
+	owedNote        string
+	compressWG      sync.WaitGroup
+
 	// Injectable for tests: forcing a rename or open failure exercises the two
 	// failure paths without depending on platform-specific sharing semantics.
 	rename   func(oldpath, newpath string) error
 	openFile func(name string, flag int, perm os.FileMode) (*os.File, error)
 	now      func() time.Time
+	// gzipFile compresses src into dst; injectable to force a failure.
+	gzipFile func(src, dst string) error
+	// compressRetryDelay is how long the worker waits before another pass
+	// when a copy changed under it (still being appended to, or rotated).
+	compressRetryDelay time.Duration
 }
 
 // NewRotatingFile opens (creating if necessary) path for appending with the
@@ -128,14 +144,16 @@ func NewRotatingFile(
 	}
 
 	r := &RotatingFile{
-		path:     path,
-		maxBytes: maxBytes,
-		maxFiles: maxFiles,
-		mode:     mode,
-		source:   source,
-		rename:   os.Rename,
-		openFile: os.OpenFile,
-		now:      time.Now,
+		path:               path,
+		maxBytes:           maxBytes,
+		maxFiles:           maxFiles,
+		mode:               mode,
+		source:             source,
+		rename:             os.Rename,
+		openFile:           os.OpenFile,
+		now:                time.Now,
+		gzipFile:           gzipFile,
+		compressRetryDelay: time.Second,
 	}
 	if err := r.open(); err != nil {
 		return nil, err
@@ -181,6 +199,7 @@ func (r *RotatingFile) Write(p []byte) (int, error) {
 	}
 
 	r.refreshSizeLocked()
+	r.flushOwedNoteLocked()
 
 	var note string
 	if r.shouldRotateLocked(int64(len(p))) {
@@ -306,6 +325,9 @@ func (r *RotatingFile) rotateLocked() string {
 	}
 
 	renameErr := r.shiftAndRename()
+	if renameErr == nil && r.compress.Load() {
+		r.kickCompressLocked()
+	}
 
 	// Reopen regardless of the outcome: after a successful rename this creates
 	// the new active file; after a failed one it reopens the same file so
@@ -336,17 +358,33 @@ func (r *RotatingFile) rotateLocked() string {
 // maximum, and the enumeration has no pattern semantics a path containing glob
 // metacharacters could defeat.
 func (r *RotatingFile) shiftAndRename() error {
-	indices := r.existingBackupIndices()
+	copies := r.existingBackups()
+	indices := make([]int, 0, len(copies))
+	for i := range copies {
+		indices = append(indices, i)
+	}
 
 	// Descending, so a shift never overwrites a copy that has not moved yet.
+	// A slot may hold a plain copy, a compressed one, or (between a crash and
+	// the next compression pass) both; each form moves with its slot.
 	sort.Sort(sort.Reverse(sort.IntSlice(indices)))
 	for _, i := range indices {
-		src := r.backupPath(i)
+		c := copies[i]
 		if i >= r.maxFiles {
-			_ = os.Remove(src)
+			if c.plain {
+				_ = os.Remove(r.backupPath(i))
+			}
+			if c.gzip {
+				_ = os.Remove(r.gzipPath(i))
+			}
 			continue
 		}
-		_ = r.rename(src, r.backupPath(i+1))
+		if c.plain {
+			_ = r.rename(r.backupPath(i), r.backupPath(i+1))
+		}
+		if c.gzip {
+			_ = r.rename(r.gzipPath(i), r.gzipPath(i+1))
+		}
 	}
 
 	if err := r.rename(r.path, r.backupPath(1)); err != nil {
@@ -355,29 +393,48 @@ func (r *RotatingFile) shiftAndRename() error {
 	return nil
 }
 
-// existingBackupIndices returns the numeric suffixes of the rotated copies
-// currently beside the active file.
-func (r *RotatingFile) existingBackupIndices() []int {
+// backupForms is which forms of one rotated slot exist: path.N, path.N.gz.
+type backupForms struct {
+	plain bool
+	gzip  bool
+}
+
+// existingBackups returns the rotated copies currently beside the active
+// file, by slot.
+func (r *RotatingFile) existingBackups() map[int]backupForms {
 	entries, err := os.ReadDir(filepath.Dir(r.path))
 	if err != nil {
 		return nil
 	}
 	prefix := filepath.Base(r.path) + "."
-	var indices []int
+	copies := map[int]backupForms{}
 	for _, e := range entries {
 		if e.IsDir() || !strings.HasPrefix(e.Name(), prefix) {
 			continue
 		}
-		n, convErr := strconv.Atoi(strings.TrimPrefix(e.Name(), prefix))
-		if convErr == nil && n >= 1 {
-			indices = append(indices, n)
+		suffix := strings.TrimPrefix(e.Name(), prefix)
+		compressed := strings.HasSuffix(suffix, gzipSuffix)
+		n, convErr := strconv.Atoi(strings.TrimSuffix(suffix, gzipSuffix))
+		if convErr != nil || n < 1 {
+			continue
 		}
+		c := copies[n]
+		if compressed {
+			c.gzip = true
+		} else {
+			c.plain = true
+		}
+		copies[n] = c
 	}
-	return indices
+	return copies
 }
 
 func (r *RotatingFile) backupPath(i int) string {
 	return fmt.Sprintf("%s.%d", r.path, i)
+}
+
+func (r *RotatingFile) gzipPath(i int) string {
+	return r.backupPath(i) + gzipSuffix
 }
 
 // recordRotationResult folds one rename outcome into the degraded-rotation

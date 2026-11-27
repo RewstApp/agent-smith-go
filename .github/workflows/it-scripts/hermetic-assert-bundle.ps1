@@ -10,7 +10,8 @@
 # is not installed: it must fail with a clear message and leave no file.
 # Env: AGENT_BINARY, ORG_ID, LOG_FILE, BUNDLE_PATH, ABSENT (newline-separated).
 #
-# Two modes check one guarantee each on the file form alone (sc-133003):
+# Three modes check one guarantee each on the file form alone (sc-133003,
+# sc-132996):
 #   EXPECT_WITHHELD=<line>: a command is running and <line> is its last output
 #     line. It must appear in no entry, and every in-flight entry in the
 #     bundle's health.json must carry "(withheld from the bundle)" in its place.
@@ -18,6 +19,10 @@
 #     config.json for the run (restored byte for byte afterwards, whatever
 #     happens), and diagnostic.txt must open with a Configuration section that
 #     names it, before the Service Status section.
+#   EXPECT_ROTATED_LOGS=<n>: the log has rotated with log_compress on
+#     (sc-132996), so its copies on disk are <log>.N.gz. The bundle must carry
+#     at least <n> of them as logs/<log>.N - named without .gz, plain text (not
+#     gzip bytes) holding the agent's own log lines.
 # In every mode the service manager's account of the service must be there
 # (sc-132999): service.txt names the service without an error, and the
 # Service Status section reports it RUNNING - both come from the service
@@ -75,6 +80,25 @@ function Assert-Bundle([string]$path, [string]$label) {
     }
     Write-Output "the $label withholds the running command's output line: $($inFlight.Count) in-flight entr(ies) carry the marker"
   }
+  if ($env:EXPECT_ROTATED_LOGS) {
+    $logBase = Split-Path $env:LOG_FILE -Leaf
+    $gzNamed = @($names | Where-Object { $_ -like 'logs/*.gz' })
+    if ($gzNamed.Count -gt 0) { Write-Error "the $label names compressed log entries: $($gzNamed -join ', ')"; exit 1 }
+    $rotated = @($names | Where-Object { $_ -match ('^logs/' + [regex]::Escape($logBase) + '\.[0-9]+$') })
+    if ($rotated.Count -lt [int]$env:EXPECT_ROTATED_LOGS) {
+      Write-Error "the $label carries $($rotated.Count) rotated log cop(ies), expected at least $($env:EXPECT_ROTATED_LOGS)"; exit 1
+    }
+    foreach ($entry in $rotated) {
+      $bytes = [IO.File]::ReadAllBytes((Join-Path $dir $entry))
+      if ($bytes.Length -ge 2 -and $bytes[0] -eq 0x1f -and $bytes[1] -eq 0x8b) {
+        Write-Error "$entry in the $label is still gzip"; exit 1
+      }
+      if (-not [Text.Encoding]::UTF8.GetString($bytes).Contains('agent_smith')) {
+        Write-Error "$entry in the $label does not hold the agent's log lines"; exit 1
+      }
+    }
+    Write-Output "the $label carries $($rotated.Count) compressed log cop(ies) as plain text: $($rotated -join ', ')"
+  }
   if ($env:CORRUPT_CONFIG_FIELD) {
     $diag = [IO.File]::ReadAllText((Join-Path $dir 'diagnostic.txt'))
     $section = $diag.IndexOf('Configuration')
@@ -114,7 +138,7 @@ try {
     Write-Output "restored $configPath"
   }
 }
-if ($env:EXPECT_WITHHELD -or $env:CORRUPT_CONFIG_FIELD) { exit 0 }
+if ($env:EXPECT_WITHHELD -or $env:CORRUPT_CONFIG_FIELD -or $env:EXPECT_ROTATED_LOGS) { exit 0 }
 
 # The hand-over (sc-132995).
 $written = ($out -split "`r?`n" | Where-Object { $_ -like 'Diagnostic bundle written:*' }) -join ''
