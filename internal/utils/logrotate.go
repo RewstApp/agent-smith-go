@@ -166,6 +166,33 @@ func (r *RotatingFile) Path() string {
 	return r.path
 }
 
+// SetLimits changes the rotation ceiling and how many rotated copies are kept,
+// for the service whose device twin changed log_max_bytes or log_max_files
+// while it runs (sc-132991). It takes effect from the next write: an active
+// file already past a lowered ceiling rotates at the next write that starts a
+// line, and the next rotation discards the copies past a lowered count (see
+// shiftAndRename). Both must be positive, as at construction.
+func (r *RotatingFile) SetLimits(maxBytes int64, maxFiles int) error {
+	if maxBytes <= 0 {
+		return fmt.Errorf("log rotation: max bytes must be positive, got %d", maxBytes)
+	}
+	if maxFiles <= 0 {
+		return fmt.Errorf("log rotation: max files must be positive, got %d", maxFiles)
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.maxBytes = maxBytes
+	r.maxFiles = maxFiles
+	return nil
+}
+
+// Limits returns the rotation ceiling and the number of rotated copies kept.
+func (r *RotatingFile) Limits() (int64, int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.maxBytes, r.maxFiles
+}
+
 // OpenAppendHandle returns a fresh append-mode handle on the active log file,
 // for a consumer that needs a real file descriptor rather than an io.Writer -
 // the detached --update helper inherits it as its stdout/stderr and must keep

@@ -235,7 +235,12 @@ func (svc *serviceContext) Execute(
 	logFile.SetCompress(device.LogCompress)
 	svc.logWriter = logFile
 
-	logger := utils.ConfigureLogger(agentLoggerName, logFile, device.LoggingLevel)
+	// The logger writes through a sink the syslog setting switches, so the
+	// twin can turn forwarding to the system log on and off (sc-132991).
+	svc.logSink = newLogSink(logFile, func(out io.Writer) (syslog.Syslog, error) {
+		return syslog.New(svc.Name(), out)
+	})
+	logger := utils.ConfigureLogger(agentLoggerName, svc.logSink, device.LoggingLevel)
 
 	// Migrate the data directory and config file to owner-only permissions for
 	// installations that pre-date this hardening (sc-108849), so an endpoint
@@ -264,8 +269,7 @@ func (svc *serviceContext) Execute(
 
 	// Configure syslogger if needed
 	if device.UseSyslog {
-		sysLogger, err := syslog.New(svc.Name(), logFile)
-		if err != nil {
+		if err := svc.logSink.SetSyslog(true); err != nil {
 			// Neither platform's writer fails here any more (the Windows one
 			// used to, on any event-source error, and this exit was the only
 			// trace: an empty log file, sc-133002). Should one ever fail
@@ -273,15 +277,13 @@ func (svc *serviceContext) Execute(
 			logger.Error("Failed to open the system log; the service cannot start", "error", err)
 			return service.LogFileError
 		}
-		defer func() {
-			err = sysLogger.Close()
-			if err != nil {
-				logger.Error("Failed to close sys logger handle", "error", err)
-			}
-		}()
-
-		logger = utils.ConfigureLogger(agentLoggerName, sysLogger, device.LoggingLevel)
 	}
+	defer func() {
+		// Whether the config or the twin turned it on.
+		if err := svc.logSink.SetSyslog(false); err != nil {
+			logger.Error("Failed to close sys logger handle", "error", err)
+		}
+	}()
 
 	// The settings in effect start as the config file has them; the device
 	// twin can change some of them at run time (sc-129688). This also resolves
@@ -290,8 +292,10 @@ func (svc *serviceContext) Execute(
 	// Outbound proxy (sc-129691): every connection resolves it the same way
 	// (utils.ResolveProxy). An invalid proxy_url would otherwise fail every
 	// connection cycle, so it is reported and set aside instead.
-	// It is resolved once, here, and handed to everything that dials; this is
-	// the one place an invalid value is handled.
+	// It is resolved here, at startup, and again only when the twin changes
+	// proxy_url (sc-132991, validated before it is applied); everything that
+	// dials reads the one in effect (currentProxy, liveProxy). This is the one
+	// place an invalid saved value is handled.
 	device.ReleaseChannel = validReleaseChannel(device.ReleaseChannel, logger)
 	device.UpdateWindow = validUpdateWindow(device.UpdateWindow, logger)
 	device.ProxyURL = strings.TrimSpace(device.ProxyURL)
@@ -304,9 +308,9 @@ func (svc *serviceContext) Execute(
 		device.ProxyURL = ""
 		proxy, _ = utils.ResolveProxy("")
 	}
-	svc.proxy = proxy
+	svc.proxyFn.Store(&proxy)
 	if svc.HTTPClient != nil && svc.HTTPClient.Transport == nil {
-		svc.HTTPClient.Transport = utils.ProxyTransport(proxy)
+		svc.HTTPClient.Transport = utils.ProxyTransport(svc.liveProxy)
 	}
 	if device.ProxyURL != "" {
 		logger.Info(
@@ -319,6 +323,7 @@ func (svc *serviceContext) Execute(
 	svc.setLiveDevice(device)
 	svc.rootLogger = logger
 	svc.reconfigure = make(chan struct{}, 1)
+	svc.healthRetime = make(chan struct{}, 1)
 
 	// Create the durable command journal so an inbound command is persisted
 	// before it is acknowledged to the broker. Without it, paho sent the QoS 1
@@ -420,7 +425,7 @@ func (svc *serviceContext) Execute(
 			},
 			svc, // the updater waits for in-flight commands before restarting us
 			agent.WithLiveDevice(svc.currentDevice),
-			agent.WithProxy(svc.proxy),
+			agent.WithProxy(svc.liveProxy),
 			agent.WithUpdateStatus(svc.recordUpdateStatus),
 			agent.WithSettingsWake(svc.updateWake),
 		)
@@ -754,7 +759,10 @@ func (svc *serviceContext) runCycle(
 	// Create a channel to wait for lost connection
 	lost := make(chan struct{}, 1)
 
-	opts, err := mqtt.NewClientOptions(device, svc.proxy)
+	// The proxy in effect when the cycle starts; a proxy_url the twin changes
+	// ends the cycle, so the next one connects through the new one.
+	proxy := svc.currentProxy()
+	opts, err := mqtt.NewClientOptions(device, proxy)
 	if err != nil {
 		logger.Error("Failed to create client options", "error", err)
 		return true, false, service.GenericError
@@ -860,7 +868,7 @@ func (svc *serviceContext) runCycle(
 		logger.Info(
 			"Connected to the broker",
 			"transport", mqtt.Transport(broker),
-			"proxy", utils.DescribeProxy(mqtt.BrokerProxy(svc.proxy, broker)),
+			"proxy", utils.DescribeProxy(mqtt.BrokerProxy(proxy, broker)),
 		)
 	}
 
@@ -997,12 +1005,15 @@ func (svc *serviceContext) runCycle(
 		_ = notifier.Notify("AgentStatus:Offline") // Best effort notification
 		return false, true, 0
 	case <-svc.reconfigure:
-		// A worker count from the device twin: end this cycle the way a SAS
-		// renewal does, so the next one starts its pool at the new size while
-		// this one's workers finish what they are running (sc-129688).
+		// A worker count or proxy_url from the device twin: end this cycle the
+		// way a SAS renewal does, so the next one starts its pool at the new
+		// size and connects through the proxy now in effect while this one's
+		// workers finish what they are running (sc-129688, sc-132991).
+		live := svc.liveDeviceOr(device)
 		logger.Info(
-			"Ending the connection cycle to apply the new worker count",
-			"worker_count", svc.liveDeviceOr(device).ResolvedWorkerCount(),
+			"Ending the connection cycle to apply new runtime settings",
+			"worker_count", live.ResolvedWorkerCount(),
+			"proxy_url", utils.RedactURL(live.ProxyURL),
 		)
 		_ = notifier.Notify("AgentStatus:Reconnecting") // Best effort notification
 		return false, true, 0

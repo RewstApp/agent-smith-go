@@ -528,3 +528,47 @@ func TestRotatingFile_ConcurrentWritesLoseNothing(t *testing.T) {
 		)
 	}
 }
+
+// SetLimits (sc-132991): a lowered ceiling rotates the active file at the
+// next write that starts a line, a lowered count discards the copies past it
+// at that rotation (compressed ones too), and a non-positive bound is refused
+// with the limits in effect kept.
+func TestRotatingFile_SetLimitsAppliesFromTheNextWrite(t *testing.T) {
+	r, path := newTestRotator(t, 1<<20, 4)
+	mustWrite(t, r, "first line\n")
+	for _, name := range []string{".1", ".2", ".3.gz", ".4"} {
+		if err := os.WriteFile(path+name, []byte("old\n"), DefaultFileMod); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := r.SetLimits(0, 2); err == nil {
+		t.Error("a zero ceiling was accepted")
+	}
+	if err := r.SetLimits(8, -1); err == nil {
+		t.Error("a negative count was accepted")
+	}
+	if maxBytes, maxFiles := r.Limits(); maxBytes != 1<<20 || maxFiles != 4 {
+		t.Fatalf("a refused change moved the limits: %d %d", maxBytes, maxFiles)
+	}
+
+	if err := r.SetLimits(8, 2); err != nil {
+		t.Fatal(err)
+	}
+	mustWrite(t, r, "next\n") // the active file is past the new ceiling: rotates first
+
+	if got := readFile(t, path+".1"); got != "first line\n" {
+		t.Errorf("copy .1 = %q, want the file that crossed the new ceiling", got)
+	}
+	if got := readFile(t, path); got != "next\n" {
+		t.Errorf("active file = %q", got)
+	}
+	if !exists(path + ".2") {
+		t.Error("copy .2 missing")
+	}
+	for _, name := range []string{".3", ".3.gz", ".4", ".4.gz", ".5"} {
+		if exists(path + name) {
+			t.Errorf("copy %s past the lowered count survived the rotation", name)
+		}
+	}
+}

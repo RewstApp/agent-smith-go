@@ -911,7 +911,11 @@ jobs:
           device_id: hermetic-${{ github.run_id }}-${{ matrix.os }}-runtime-settings
           service: ${{ matrix.service }}
           log_file: ${{ matrix.log_file }}
-          extra_args: --command-timeout-seconds 120
+          # An hour-long health interval, so only the twin's shorter one can
+          # publish a changed counter within the step's timeout (sc-132991);
+          # the stub proxy is up for the twin's proxy_url.
+          extra_args: --command-timeout-seconds 120 --health-report-interval-seconds 3600
+          proxy: "true"
 
       - name: Assert the agent subscribed to the twin's desired properties
         timeout-minutes: 5
@@ -1048,6 +1052,136 @@ jobs:
           log_file: ${{ matrix.log_file }}
           patterns: "[DEBUG]"
 
+      # ---- sc-132991: the reporter's interval and proxy_url while running ----
+      - name: Set a 2 s health interval through the twin
+        timeout-minutes: 5
+        uses: ./.github/actions/it-script
+        with:
+          script: hermetic-set-desired
+        env:
+          ENGINE_URL: ${{ steps.setup.outputs.engine_url }}
+          DEVICE_ID: ${{ steps.setup.outputs.device_id }}
+          DESIRED: '{"health_report_interval_seconds": 2}'
+
+      - name: Assert the twin acknowledges the health interval as applied
+        timeout-minutes: 5
+        uses: ./.github/actions/it-script
+        with:
+          script: hermetic-assert-twin
+        env:
+          ENGINE_URL: ${{ steps.setup.outputs.engine_url }}
+          DEVICE_ID: ${{ steps.setup.outputs.device_id }}
+          PROPERTY: settings_ack.health_report_interval_seconds.value
+          EXPECTED: "2"
+          TIMEOUT_SECONDS: "60"
+
+      - name: Enqueue a quick command
+        timeout-minutes: 5
+        uses: ./.github/actions/it-script
+        with:
+          script: hermetic-enqueue-commands
+        env:
+          ENGINE_URL: ${{ steps.setup.outputs.engine_url }}
+          DEVICE_ID: ${{ steps.setup.outputs.device_id }}
+          SCENARIO: quick
+          COUNT: 1
+          POST_ID_PREFIX: interval
+
+      - name: Assert the running reporter publishes the counter on the twin's interval, not the installed hour
+        timeout-minutes: 5
+        uses: ./.github/actions/it-script
+        with:
+          script: hermetic-assert-twin
+        env:
+          ENGINE_URL: ${{ steps.setup.outputs.engine_url }}
+          DEVICE_ID: ${{ steps.setup.outputs.device_id }}
+          PROPERTY: health.commands.completed_total
+          MIN: "1"
+          TIMEOUT_SECONDS: "20"
+
+      - name: Baseline proxied connections before the twin's proxy_url
+        id: bl_proxied
+        uses: ./.github/actions/capture-log-count
+        with:
+          log_file: ${{ matrix.log_file }}
+          pattern: 'Connected to the broker: transport="MQTT over WebSocket (443)" proxy=http://agent:xxxxx@127.0.0.1:3128'
+
+      - name: Set proxy_url to the stub proxy through the twin
+        timeout-minutes: 5
+        uses: ./.github/actions/it-script
+        with:
+          script: hermetic-set-desired
+        env:
+          ENGINE_URL: ${{ steps.setup.outputs.engine_url }}
+          DEVICE_ID: ${{ steps.setup.outputs.device_id }}
+          DESIRED: '{"proxy_url": "http://agent:s3cret-proxy@127.0.0.1:3128"}'
+
+      - name: Assert the twin acknowledges proxy_url with the password masked
+        timeout-minutes: 5
+        uses: ./.github/actions/it-script
+        with:
+          script: hermetic-assert-twin
+        env:
+          ENGINE_URL: ${{ steps.setup.outputs.engine_url }}
+          DEVICE_ID: ${{ steps.setup.outputs.device_id }}
+          PROPERTY: settings_ack.proxy_url.value
+          EXPECTED: http://agent:xxxxx@127.0.0.1:3128
+          TIMEOUT_SECONDS: "60"
+
+      - name: Wait for the next connection to go over WebSocket through the proxy
+        timeout-minutes: 5
+        uses: ./.github/actions/wait-for-log-line
+        with:
+          log_file: ${{ matrix.log_file }}
+          pattern: 'Connected to the broker: transport="MQTT over WebSocket (443)" proxy=http://agent:xxxxx@127.0.0.1:3128'
+          baseline_count: ${{ steps.bl_proxied.outputs.count }}
+          max_attempts: "60"
+          interval_seconds: "2"
+
+      - name: Assert the proxy tunnelled the MQTT WebSocket
+        timeout-minutes: 5
+        uses: ./.github/actions/it-script
+        with:
+          script: hermetic-assert-proxy-stats
+        env:
+          ENGINE_URL: ${{ steps.setup.outputs.engine_url }}
+          KIND: tunnels
+          TARGET: 127.0.0.1:443
+          MIN: "1"
+          TIMEOUT_SECONDS: "30"
+
+      - name: Enqueue a command after the proxy change
+        timeout-minutes: 5
+        uses: ./.github/actions/it-script
+        with:
+          script: hermetic-enqueue-commands
+        env:
+          ENGINE_URL: ${{ steps.setup.outputs.engine_url }}
+          DEVICE_ID: ${{ steps.setup.outputs.device_id }}
+          SCENARIO: quick
+          COUNT: 1
+          POST_ID_PREFIX: proxied
+
+      - name: Assert its postback went through the proxy without a restart
+        timeout-minutes: 5
+        uses: ./.github/actions/it-script
+        with:
+          script: hermetic-assert-proxy-stats
+        env:
+          ENGINE_URL: ${{ steps.setup.outputs.engine_url }}
+          KIND: tunnels
+          TARGET: 127.0.0.1:8443
+          MIN: "1"
+          TIMEOUT_SECONDS: "120"
+
+      - name: Assert the proxy password never reached the log
+        timeout-minutes: 5
+        uses: ./.github/actions/assert-log-missing
+        with:
+          log_file: ${{ matrix.log_file }}
+          pattern: s3cret-proxy
+          baseline_count: "0"
+
       - name: Baseline "Subscribed to messages" before the restart
         id: bl_sub
         uses: ./.github/actions/capture-log-count
@@ -1107,6 +1241,16 @@ jobs:
           LOG_FILE: ${{ matrix.log_file }}
           KEY: worker_count
           EXPECTED: "1"
+
+      - name: Assert the config file kept the twin's proxy_url
+        timeout-minutes: 5
+        uses: ./.github/actions/it-script
+        with:
+          script: hermetic-assert-config-value
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+          KEY: proxy_url
+          EXPECTED: http://agent:s3cret-proxy@127.0.0.1:3128
 
       - name: Dump agent log on failure
         if: failure()

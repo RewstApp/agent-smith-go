@@ -382,9 +382,11 @@ func (svc *serviceContext) healthLoop(
 		svc.healthKick = nil
 		svc.healthMu.Unlock()
 	}()
-	healthTicker := time.NewTicker(device.ResolvedHealthReportInterval())
+	healthInterval := device.ResolvedHealthReportInterval()
+	healthTicker := time.NewTicker(healthInterval)
 	defer healthTicker.Stop()
-	heartbeatTicker := time.NewTicker(device.ResolvedCommandHeartbeatInterval())
+	heartbeatInterval := device.ResolvedCommandHeartbeatInterval()
+	heartbeatTicker := time.NewTicker(heartbeatInterval)
 	defer heartbeatTicker.Stop()
 	var deferred *time.Timer
 	var deferredC <-chan time.Time
@@ -420,6 +422,24 @@ func (svc *serviceContext) healthLoop(
 		case <-deferredC:
 			deferredC = nil
 			svc.reportHealth(ctx, client, notifier, logger, reportFinished)
+		case <-svc.healthRetime:
+			// The twin changed an interval (sc-132991): re-arm the ticker
+			// whose interval changed, counting from now, so a shorter one
+			// does not wait out the rest of the old period.
+			live := svc.liveDeviceOr(device)
+			if d := live.ResolvedHealthReportInterval(); d != healthInterval {
+				healthInterval = d
+				healthTicker.Reset(d)
+			}
+			if d := live.ResolvedCommandHeartbeatInterval(); d != heartbeatInterval {
+				heartbeatInterval = d
+				heartbeatTicker.Reset(d)
+			}
+			logger.Debug(
+				"Twin reporter intervals in effect",
+				"health_report_interval", healthInterval,
+				"command_heartbeat_interval", heartbeatInterval,
+			)
 		}
 	}
 }
