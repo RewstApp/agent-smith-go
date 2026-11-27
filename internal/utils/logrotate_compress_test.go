@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -147,9 +148,11 @@ func TestRotatingFile_CompressFailureKeepsThePlainCopyAndWarnsOnce(t *testing.T)
 	r, path := newTestRotator(t, 2, 5)
 	r.compressRetryDelay = time.Millisecond
 	t.Cleanup(r.waitCompression)
-	failing := true
+	// Read by the compression worker, flipped by the test: atomic.
+	var failing atomic.Bool
+	failing.Store(true)
 	r.gzipFile = func(src, dst string) error {
-		if failing {
+		if failing.Load() {
 			_ = os.WriteFile(dst, []byte("partial"), 0o600)
 			return errors.New("disk full")
 		}
@@ -162,6 +165,7 @@ func TestRotatingFile_CompressFailureKeepsThePlainCopyAndWarnsOnce(t *testing.T)
 	mustWrite(t, r, "c\n")
 	r.waitCompression()
 	mustWrite(t, r, "d\n") // flushes the owed note at a line boundary
+	r.waitCompression()
 
 	if !exists(path+".1") || !exists(path+".2") {
 		t.Fatalf("the plain copies were not kept: %v", rotatedFiles(t, path))
@@ -184,7 +188,7 @@ func TestRotatingFile_CompressFailureKeepsThePlainCopyAndWarnsOnce(t *testing.T)
 		t.Errorf("the note does not say why:\n%s", all.String())
 	}
 
-	failing = false
+	failing.Store(false)
 	r.SetCompress(true) // a later rotation or this retries every plain copy
 	r.waitCompression()
 	mustWrite(t, r, "e\n")
