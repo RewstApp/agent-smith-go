@@ -18,6 +18,9 @@ type diagnosticContext struct {
 	// or bundleStdoutPath (sc-132995).
 	Bundle     bool
 	BundlePath string
+	// JSON runs the non-interactive checks and prints one JSON document
+	// instead of showing the menu (sc-132994).
+	JSON bool
 
 	Sys    agent.SystemInfoProvider
 	Domain agent.DomainInfoProvider
@@ -45,6 +48,12 @@ func newDiagnosticFlagSet(params *diagnosticContext) *flag.FlagSet {
 		"",
 		"With --bundle: where to write the zip: a file, a directory (the default name inside it), or - for stdout with the console output on stderr (default diagnostic-<org>-<timestamp>.zip in the working directory)",
 	)
+	fs.BoolVar(
+		&params.JSON,
+		"json",
+		false,
+		"With --diagnostic: run every non-interactive check and print one JSON report on stdout; exit 0 when every check passed, 2 when one failed, 1 when no report could be written",
+	)
 	fs.SetOutput(io.Discard)
 	return fs
 }
@@ -71,6 +80,10 @@ func newDiagnosticContext(
 
 	if params.BundlePath != "" && !params.Bundle {
 		return nil, fmt.Errorf("bundle-path requires bundle")
+	}
+
+	if params.JSON && params.Bundle {
+		return nil, fmt.Errorf("json and bundle cannot be combined")
 	}
 
 	params.Sys = sys

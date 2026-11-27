@@ -51,13 +51,15 @@ const (
 	bundleStdoutPath = "-"
 )
 
-// bundleEnv is what writing a bundle depends on, injectable for tests.
-type bundleEnv struct {
+// diagnosticEnv is what the non-interactive diagnostics - the bundle and
+// --diagnostic --json (sc-132994) - depend on, injectable for tests.
+type diagnosticEnv struct {
 	root     string
 	fallback agentFallbackScan
 	dialer   tlsDialer
 	now      func() time.Time
-	// stdout receives the zip for --bundle-path -; nil is the process's.
+	// stdout receives the zip for --bundle-path -, and the JSON document;
+	// nil is the process's.
 	stdout io.Writer
 	// handOver gives the written file to the user who asked for it
 	// (sc-132995) and describes what it did; nil is the platform's
@@ -93,7 +95,7 @@ func (r bundleReport) String() string {
 func runDiagnosticBundle(
 	ctx context.Context,
 	params *diagnosticContext,
-	env bundleEnv,
+	env diagnosticEnv,
 ) (bundleReport, error) {
 	if env.now == nil {
 		env.now = time.Now
@@ -104,16 +106,13 @@ func runDiagnosticBundle(
 	if env.handOver == nil {
 		env.handOver = defaultBundleHandOver
 	}
-	target, err := bundleTarget(ctx, params, env)
+	target, err := diagnosticTarget(ctx, params, env, bundleRun)
 	if err != nil {
 		return bundleReport{}, err
 	}
 	dataDir := target.DataDir
-	if _, err := os.ReadDir(dataDir); err != nil {
-		return bundleReport{}, fmt.Errorf(
-			"cannot read the agent's data directory %s (run --diagnostic --bundle elevated): %w",
-			dataDir, err,
-		)
+	if err := bundleRun.readDataDir(dataDir); err != nil {
+		return bundleReport{}, err
 	}
 	configBytes, err := os.ReadFile(target.ConfigFile)
 	if err != nil {
@@ -152,19 +151,7 @@ func runDiagnosticBundle(
 	}
 	fixed["host.txt"] = captureSections(func() { runHostInfo(ctx, params, target) })
 	fixed["diagnostic.txt"] = captureSections(func() {
-		if configErr != nil {
-			printSection("Configuration")
-			printResult(false, fmt.Sprintf(
-				"config.json does not load as the agent's configuration: %v", configErr,
-			))
-		}
-		runCheckServiceStatus(ctx, params, target)
-		runCommandTest()
-		runConnectivityTestWith(target, env.dialer)
-		runEngineTestWith(target, env.dialer, now)
-		runTempDirTest(target)
-		props, err := readHealthFileFrom(dataDir)
-		printFleetHealth(props, err, false)
+		runReportSections(ctx, params, target, env.dialer, now, configErr)
 	})
 
 	logs := logFiles(target.LogFile)
@@ -260,21 +247,49 @@ func sudoInvoker(getenv func(string) string) (uid, gid int, ok bool) {
 	return uid, gid, true
 }
 
-// bundleTarget is the agent to bundle: the one --org-id names, or the only one
-// installed.
-func bundleTarget(
+// diagnosticRun names a non-interactive diagnostic in the messages it fails
+// with: the bundle, or the JSON report (sc-132994), which find their agent
+// the same way.
+type diagnosticRun struct {
+	// flags is how the operator ran it, for "run ... elevated".
+	flags string
+	// nothing ends the message for an agent that is not there.
+	nothing string
+}
+
+var (
+	bundleRun = diagnosticRun{flags: "--diagnostic --bundle", nothing: "nothing to bundle"}
+	jsonRun   = diagnosticRun{flags: "--diagnostic --json", nothing: "nothing to diagnose"}
+)
+
+// readDataDir fails when the agent's data directory cannot be listed, which
+// without elevation it cannot: it is owner-only.
+func (r diagnosticRun) readDataDir(dir string) error {
+	if _, err := os.ReadDir(dir); err != nil {
+		return fmt.Errorf(
+			"cannot read the agent's data directory %s (run %s elevated): %w",
+			dir, r.flags, err,
+		)
+	}
+	return nil
+}
+
+// diagnosticTarget is the agent a non-interactive diagnostic reports on: the
+// one --org-id names, or the only one installed.
+func diagnosticTarget(
 	ctx context.Context,
 	params *diagnosticContext,
-	env bundleEnv,
+	env diagnosticEnv,
+	run diagnosticRun,
 ) (agentInfo, error) {
 	orgId := params.OrgId
 	// A directory this process cannot read is reported as that, not as "no
 	// agent": the data root and each org's directory are owner-only, so a
-	// bundle run without elevation would otherwise be told nothing is there.
+	// run without elevation would otherwise be told nothing is there.
 	if _, err := os.ReadDir(env.root); errors.Is(err, os.ErrPermission) {
 		return agentInfo{}, fmt.Errorf(
-			"cannot read the agents' data root %s (run --diagnostic --bundle elevated): %w",
-			env.root, err,
+			"cannot read the agents' data root %s (run %s elevated): %w",
+			env.root, run.flags, err,
 		)
 	}
 	agents := scanAgentsFrom(ctx, env.root, params.ServiceManager)
@@ -295,14 +310,14 @@ func bundleTarget(
 			return info, nil
 		}
 		return agentInfo{}, fmt.Errorf(
-			"no agent for org %s is installed under %s; nothing to bundle", orgId, env.root,
+			"no agent for org %s is installed under %s; %s", orgId, env.root, run.nothing,
 		)
 	}
 	switch len(agents) {
 	case 0:
 		return agentInfo{}, fmt.Errorf(
-			"no installed agent found under %s; nothing to bundle",
-			env.root,
+			"no installed agent found under %s; %s",
+			env.root, run.nothing,
 		)
 	case 1:
 		return agents[0], nil
@@ -383,13 +398,7 @@ func healthEntry(raw []byte) []byte {
 			"%s is not a fleet-health report and is withheld: %v\n", healthFileName, err,
 		))
 	}
-	if props.Commands != nil {
-		for i := range props.Commands.InFlight {
-			if props.Commands.InFlight[i].LastOutputLine != "" {
-				props.Commands.InFlight[i].LastOutputLine = bundleWithheld
-			}
-		}
-	}
+	withholdOutput(&props, bundleWithheld)
 	out, err := json.MarshalIndent(props, "", "  ")
 	if err != nil {
 		return []byte(fmt.Sprintf(
@@ -397,6 +406,19 @@ func healthEntry(raw []byte) []byte {
 		))
 	}
 	return append(out, '\n')
+}
+
+// withholdOutput replaces each running command's last output line with
+// marker: neither the bundle nor the JSON report carries command output.
+func withholdOutput(props *mqtt.ReportedProperties, marker string) {
+	if props == nil || props.Commands == nil {
+		return
+	}
+	for i := range props.Commands.InFlight {
+		if props.Commands.InFlight[i].LastOutputLine != "" {
+			props.Commands.InFlight[i].LastOutputLine = marker
+		}
+	}
 }
 
 // bundleEntry is one zip entry, already scrubbed. A log tail is trimmed from

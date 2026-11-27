@@ -124,8 +124,8 @@ func newBundleRoot(t *testing.T) (root, dataDir string) {
 	return root, dataDir
 }
 
-func bundleTestEnv(root string) bundleEnv {
-	return bundleEnv{
+func bundleTestEnv(root string) diagnosticEnv {
+	return diagnosticEnv{
 		root:   root,
 		dialer: &mockTLSDialer{},
 		now:    func() time.Time { return time.Date(2026, 11, 3, 12, 0, 0, 0, time.UTC) },
@@ -269,7 +269,12 @@ func TestRunDiagnosticBundle_ContentsAndRedaction(t *testing.T) {
 	if !bytes.Contains(entries["version.txt"], []byte("agent version v1.7.0-test")) {
 		t.Errorf("version.txt %s", entries["version.txt"])
 	}
-	for _, s := range []string{"Reported at 2026-11-03T11:59:00Z", "in flight running-1", bundleWithheld} {
+	for _, s := range []string{
+		"[PASS] config.json loads as the agent's configuration",
+		"Reported at 2026-11-03T11:59:00Z",
+		"in flight running-1",
+		bundleWithheld,
+	} {
 		if !bytes.Contains(entries["diagnostic.txt"], []byte(s)) {
 			t.Errorf("diagnostic.txt lacks %q:\n%s", s, entries["diagnostic.txt"])
 		}

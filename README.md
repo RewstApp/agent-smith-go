@@ -463,7 +463,7 @@ sudo ./rewst_agent_config.linux.bin --diagnostic --bundle --bundle-path - | curl
 | `spool.txt` | The postback spool's files - name, size, modification time, and for each entry its post id, `created_at`, age, attempts, `last_attempt_at`, `next_attempt_at` (the time the engine's last throttle allowed the next attempt, sc-132997) and `last_error` (why the engine kept rejecting it) - never a result |
 | `service.txt` | The service manager's own account of the service, rendered by the service package's `Describe` (sc-132999): `systemctl status` and `show` on Linux, `launchctl print` on macOS, and on Windows the SCM's status and registration read through the same handle the agent manages the service with (what `sc queryex` and `sc qc` show, never the configured password); bounded by 30 seconds |
 | `host.txt` | The host information section |
-| `diagnostic.txt` | The console output of the other checks: a `config.json` that is JSON but does not load as the agent's configuration (reported first, with the parse error), service status, command execution, connectivity, temp directory and fleet health |
+| `diagnostic.txt` | The console output of the other checks: whether `config.json` loads as the agent's configuration (first; one that is JSON but does not load is reported with the parse error), service status, command execution, connectivity, temp directory and fleet health - the same checks, in the same order, as `--diagnostic --json` |
 | `health.json` | The fleet-health report the service last published, when there is one, with each running command's `last_output_line` replaced by `(withheld from the bundle)` - the Fleet Health section withholds it the same way, so the bundle never carries command output |
 | `version.txt` | The agent version the service reports, and the bundling tool's version and platform |
 
@@ -524,6 +524,99 @@ file. Every bundle it checks (and the one `hermetic-fleet-health` writes
 under a running command) must also carry the service manager's account of
 the service: `service.txt` names it without an error and the Service Status
 section reports it `RUNNING` (sc-132999), on all three platforms.
+
+### Scripting the diagnostic
+
+An RMM script or a Rewst workflow that wants to know whether the agent on an
+endpoint is healthy should not scrape `[PASS]`/`[FAIL]` lines.
+`--diagnostic --json` (sc-132994) runs the bundle's checks plus the host
+information without the menu and prints one JSON document on stdout, and
+nothing else there:
+
+```bash
+sudo ./rewst_agent_config.linux.bin --org-id YOUR_ORG_ID --diagnostic --json
+```
+
+The exit code is the verdict, so a script can branch without parsing:
+
+| Exit | Meaning |
+|---|---|
+| `0` | Every check passed (`"ok": true`) |
+| `2` | At least one check failed (`"ok": false`, the failures named in `"failed"`) |
+| `1` | No document was written: a usage error, no agent installed (or several without `--org-id`), or a data directory this process cannot read - run it elevated, like the bundle. The reason is on stderr |
+
+```json
+{
+  "org_id": "a1b2c3d4-...",
+  "agent_version": "v1.11.0",
+  "diagnostic_version": "v1.11.0",
+  "platform": "linux/amd64",
+  "generated_at": "2026-11-27T12:00:00Z",
+  "ok": true,
+  "failed": [],
+  "checks": [
+    {"name": "config.load", "section": "Configuration", "ok": true, "advisory": false, "detail": "config.json loads as the agent's configuration"},
+    {"name": "service.status", "section": "Service Status", "ok": true, "advisory": false, "detail": "a1b2c3d4-... - RUNNING: active (running) (rewst_remote_agent_a1b2c3d4-...)", "raw": "active (running)", "service": "rewst_remote_agent_a1b2c3d4-...", "state": "running"},
+    {"name": "hub.direct_8883", "section": "MQTT/WebSocket Connectivity", "ok": false, "advisory": true, "detail": "MQTT TLS connection to hub.example:8883 (direct)", "host": "hub.example"},
+    {"name": "hub.proxy_443", "section": "MQTT/WebSocket Connectivity", "ok": true, "advisory": true, "detail": "WebSocket connection to hub.example:443 through the proxy", "host": "hub.example", "proxy": "http://agent:xxxxx@proxy:3128", "proxy_source": "proxy_url"},
+    {"name": "hub.transport", "section": "MQTT/WebSocket Connectivity", "ok": true, "advisory": false, "detail": "The agent connects with MQTT over WebSocket (443) through http://agent:xxxxx@proxy:3128", "transport": "MQTT over WebSocket (443) through http://agent:xxxxx@proxy:3128"}
+  ],
+  "health": {"agent_version": "v1.11.0", "health": {"...": "..."}, "commands": {"in_flight": []}},
+  "host": {"hostname": "...", "operating_system": "...", "org_id": "a1b2c3d4-...", "...": "..."}
+}
+```
+
+(`checks` is abridged above.) Every check has `name`, `section`, `ok`,
+`advisory` and `detail`, then its own fields. `detail` is the text the
+console prints after `[PASS]` or `[FAIL]`: each check is recorded where it
+prints, so the menu, the bundle's `diagnostic.txt` and the document are
+three renderings of one result rather than parallel code paths. The names
+are stable:
+
+| Check | Passes when | Fields |
+|---|---|---|
+| `config.load` | `config.json` loads as the agent's configuration; a file that does not is reported here, not refused | |
+| `service.status` | The service manager reports the service running | `service`, `state` (`running`, `stopped`, `pending`, `paused`, `unknown`), `raw` (the manager's own words) |
+| `command.execution` | The platform shell runs a test command | `shell`, `elapsed_ms`, `output` |
+| `hub.configured` | Only reported when it fails: no configuration or no hub host, and no hub checks follow | |
+| `hub.proxy_url` | Only reported when it fails: the saved `proxy_url` is invalid and ignored | |
+| `hub.direct_8883`, `hub.direct_443` | A TLS handshake to the hub on that port, directly (**advisory**) | `host` |
+| `hub.proxy_443` | The same on 443 through the proxy in effect, when one applies (**advisory**) | `host`, `proxy` (credentials masked), `proxy_source` |
+| `hub.transport` | One of those paths is the one the agent would use, in its own order | `transport` |
+| `engine.configured`, `engine.proxy_url` | As for the hub, for `rewst_engine_host` | |
+| `engine.direct`, `engine.proxy` | A TLS handshake to the engine host, directly and through the proxy (**advisory**) | `host`, and for the proxy `proxy`, `proxy_source` |
+| `engine.reachable` | A `HEAD` along the path the postback client would take gets any answer | `url`, `via`, `status` |
+| `engine.spool` | No result is waiting in the postback spool | `waiting`, `oldest_created_at` |
+| `scripts_dir.secure`, `scripts_dir.write`, `scripts_dir.read_back` | The scripts directory is hardened, writable and reads back | |
+| `data_dir.exists` | The agent's data directory exists | |
+| `fleet_health.report` | The service has written its fleet-health report | |
+| `host.info` | The host information the agent reports at install could be gathered | |
+
+An **advisory** result is evidence for another check's verdict, not a
+verdict itself: `hub.transport` and `engine.reachable` decide whether the
+agent gets through, so a direct port that a proxy-only network blocks shows
+`"ok": false` without failing the document or the exit code. A section that
+cannot run reports only the check that says why (no configuration: the
+`*.configured` checks, and no path checks).
+
+`health` is the fleet-health report the service last wrote (`null` before
+its first one) with each running command's `last_output_line` replaced by
+`(withheld from the report)`, and `host` is the host information (`null`
+when it could not be gathered); `agent_version` is the version the running
+service reported, `diagnostic_version` the binary that ran the checks. The
+document is scrubbed like the bundle: the proxy is shown through the same
+masking as the console, and the secret values in `config.json` (the shared
+access key, the GitHub token, the proxy credential) are replaced by `***`
+anywhere they would appear. The console rendering is not printed beside it,
+so stdout parses whole: `jq -e .ok` or `ConvertFrom-Json` read it directly.
+
+**Proven end to end by** `hermetic-proxy`, whose agent reaches everything
+only through an authenticated proxy: it runs `--diagnostic --json` and
+asserts the exit is `0`, the document's `ok` agrees, `hub.proxy_443`,
+`hub.transport`, `engine.proxy` and `engine.reachable` pass, `hub.direct_8883`
+fails (as an advisory result), and the proxy password appears on neither
+stdout nor stderr (`hermetic-assert-diagnostic-json`, driven by
+`test/hermeticscripts` against a fake).
 
 ### Example output
 
@@ -2399,7 +2492,7 @@ A unit test may not synchronise with a goroutine, or assert that nothing happene
 
 #### Bounding the e2e jobs
 
-The end-to-end workflow (`e2e.yml`, manual dispatch with an `os` input; concurrency group `e2e`) is split into scenario-scoped jobs that each start from a fresh install (sc-126317). The **live** jobs install from the Rewst config endpoint through the shared `e2e-setup` action and run **one after another**: the live config endpoint gives every install on a platform the same device id, so two live agents at once kick each other off IoT Hub and commands land on whichever holds the connection (the first parallel run proved it on every platform). Each live job is chained behind the previous one with `needs` and `if: !cancelled()`, so a failing scenario never skips the ones after it. The **hermetic** jobs (sc-126319) install from the stub config endpoint through `hermetic-setup` under a per-job device id (`hermetic-<run>-<os>-<job>`) and talk only to the stub broker and stand-in engine on the runner, so they run in parallel with everything, cost the IoT Hub nothing, and gate the merge from day one. The jobs: live: `live-lifecycle` (install, success/failure commands, logging level, syslog, uninstall), `live-auto-update` (the happy path against the real release endpoint), `live-wedged-broker` (SUBACK withheld: bounded subscribe, prompt stop, recovery), `live-service-user` (install and update as a dedicated service account) and the Windows-only `live-windows-only` job (the `--disable-agent-postback` check; skipped outright when windows-latest is not dispatched); hermetic: `hermetic-command-timeouts` (default and configured), `hermetic-output-bounds` (stdout/stderr floods), `hermetic-timeout-composition` (a flooding command that then hangs: bounded output and the timeout together), `hermetic-connection` (the broker drops the device and refuses it for 45 s through the fixture's `/_control/devices/{id}/offline` control, then readmits it; SAS renewal) and the Windows-only `hermetic-child-process` (the kill through the job object), `hermetic-postback-spool` (a result spooled on 5xx and delivered later; a rejected result passed over, then abandoned), `hermetic-journal` (redelivery after a lost PUBACK acknowledged without execution; the journal full and recovered) and `hermetic-clock-step` (a queued command replayed across a 25 h forward step; a backward step reported once), all driven through the fixture's control surface (sc-126322), `hermetic-runtime-settings` (desired properties applied live, acknowledged and kept across a restart, sc-129688) and `hermetic-fleet-health` (heartbeat last line past the output ceiling, no phantom in-flight entry after a restart, the command counters, `--diagnostic`'s Fleet Health, sc-131253) and `hermetic-proxy` (only an authenticated HTTP proxy as egress: config fetch, MQTT over WebSocket and postbacks through it, credentials never logged, sc-129691; and the redacted `--diagnostic --bundle`, sc-129690); plus `test-hermetic` (kill-and-replay), `test-config-response-cap`, and `e2e-go`, which runs the Go e2e scenarios of `test/e2e` (auto-update retries, digest checks and release channels, startup sweeps, the install refused for a configuration without a `device_id`, and on Windows the wedged stop and the locked directory - see "Go e2e scenarios" below). Every scenario that only needed a command to reach a device and a result to come back now runs hermetically; the live suite keeps the install, update, uninstall and service-account paths that need a real hub and engine, and `test/workflowlint` refuses a live trigger URL inside any hermetic job. Until the split one `test` job ran all of it serially - 247 steps, 27 minutes at p95 - so a failure was a step number deep in the chain, every scenario inherited the state the previous ones left, and the run took the sum of the scenarios rather than the longest. The commands the scenarios send live in one catalog, `.github/workflows/e2e-commands.json`, keyed by scenario name and platform family (`unix` for Linux and macOS, `windows`); `send-command` and `assert-log-contains` take a `scenario` input and the helper scripts a `SCENARIO` variable, so neither the workflow nor the matrix carries per-platform command text and a command cannot drift between platforms inside the workflow (sc-126318). The matrix describes an install - binary, config, log, service and script paths per platform - and nothing else; `test/workflowlint` enforces the allow-list. The workflow itself carries no platform conditions. Inside the actions, the helpers whose logic is the same everywhere (the log asserts and waits, the count and fixture scripts, config validation) are one pwsh step each, run through `.github/actions/_lib/Invoke-Elevated.ps1`, which runs the script in its own `pwsh -File` process on every platform (plain on Windows, under sudo on Linux and macOS, so a helper that ends on a native call expected to fail exits 0 everywhere rather than leaking `$LASTEXITCODE` on Windows alone) - forwarding the step's whole environment explicitly, as `NAME=VALUE` arguments to `env(1)` between `sudo` and `pwsh`, because Ubuntu 26.04's sudo-rs (which `ubuntu-latest` moved to on 2026-10-22) ignores `-E` and resets the environment, which turned every elevated helper's `LOG_FILE` null and the ubuntu half of the gate red for a reason that was not the agent (sc-129246); the workflow's own helper steps go through the `it-script` action, which does the same for `.github/workflows/it-scripts`. Those two are the only places the shared helpers branch on the platform. Actions whose logic genuinely differs per service manager or platform keep their own per-platform steps on purpose: `check-service`, `start-service`, `stop-service`, `kill-service` (`systemctl`, `launchctl`, `sc.exe`), `disrupt-connection` (`iptables`, `pfctl`, `netsh`), `provision-service-user`/`remove-service-user`, the `stub-*` launchers (`nohup` versus a detached WMI process), `install-agent`/`run-agent`/`update-as-service-user`/`run-e2e-package` (sudo versus direct invocation, the Windows-only service password), `delete-log`, `dump-agent-log`, `assert-syslog-contains` and the profile-noise pair. `test/workflowlint` pins the job list, caps every scenario job at 40 steps, and refuses `runner.os`, `matrix.os ==` and `(Unix)`/`(Windows)` twin steps in the workflow. The price of the per-job fresh install is one runner provisioning, checkout and install per scenario, about a minute each.
+The end-to-end workflow (`e2e.yml`, manual dispatch with an `os` input; concurrency group `e2e`) is split into scenario-scoped jobs that each start from a fresh install (sc-126317). The **live** jobs install from the Rewst config endpoint through the shared `e2e-setup` action and run **one after another**: the live config endpoint gives every install on a platform the same device id, so two live agents at once kick each other off IoT Hub and commands land on whichever holds the connection (the first parallel run proved it on every platform). Each live job is chained behind the previous one with `needs` and `if: !cancelled()`, so a failing scenario never skips the ones after it. The **hermetic** jobs (sc-126319) install from the stub config endpoint through `hermetic-setup` under a per-job device id (`hermetic-<run>-<os>-<job>`) and talk only to the stub broker and stand-in engine on the runner, so they run in parallel with everything, cost the IoT Hub nothing, and gate the merge from day one. The jobs: live: `live-lifecycle` (install, success/failure commands, logging level, syslog, uninstall), `live-auto-update` (the happy path against the real release endpoint), `live-wedged-broker` (SUBACK withheld: bounded subscribe, prompt stop, recovery), `live-service-user` (install and update as a dedicated service account) and the Windows-only `live-windows-only` job (the `--disable-agent-postback` check; skipped outright when windows-latest is not dispatched); hermetic: `hermetic-command-timeouts` (default and configured), `hermetic-output-bounds` (stdout/stderr floods), `hermetic-timeout-composition` (a flooding command that then hangs: bounded output and the timeout together), `hermetic-connection` (the broker drops the device and refuses it for 45 s through the fixture's `/_control/devices/{id}/offline` control, then readmits it; SAS renewal) and the Windows-only `hermetic-child-process` (the kill through the job object), `hermetic-postback-spool` (a result spooled on 5xx and delivered later; a rejected result passed over, then abandoned), `hermetic-journal` (redelivery after a lost PUBACK acknowledged without execution; the journal full and recovered) and `hermetic-clock-step` (a queued command replayed across a 25 h forward step; a backward step reported once), all driven through the fixture's control surface (sc-126322), `hermetic-runtime-settings` (desired properties applied live, acknowledged and kept across a restart, sc-129688) and `hermetic-fleet-health` (heartbeat last line past the output ceiling, no phantom in-flight entry after a restart, the command counters, `--diagnostic`'s Fleet Health, sc-131253) and `hermetic-proxy` (only an authenticated HTTP proxy as egress: config fetch, MQTT over WebSocket and postbacks through it, credentials never logged, sc-129691; and the redacted `--diagnostic --bundle`, sc-129690, and `--diagnostic --json`'s exit code and checks, sc-132994); plus `test-hermetic` (kill-and-replay), `test-config-response-cap`, and `e2e-go`, which runs the Go e2e scenarios of `test/e2e` (auto-update retries, digest checks and release channels, startup sweeps, the install refused for a configuration without a `device_id`, and on Windows the wedged stop and the locked directory - see "Go e2e scenarios" below). Every scenario that only needed a command to reach a device and a result to come back now runs hermetically; the live suite keeps the install, update, uninstall and service-account paths that need a real hub and engine, and `test/workflowlint` refuses a live trigger URL inside any hermetic job. Until the split one `test` job ran all of it serially - 247 steps, 27 minutes at p95 - so a failure was a step number deep in the chain, every scenario inherited the state the previous ones left, and the run took the sum of the scenarios rather than the longest. The commands the scenarios send live in one catalog, `.github/workflows/e2e-commands.json`, keyed by scenario name and platform family (`unix` for Linux and macOS, `windows`); `send-command` and `assert-log-contains` take a `scenario` input and the helper scripts a `SCENARIO` variable, so neither the workflow nor the matrix carries per-platform command text and a command cannot drift between platforms inside the workflow (sc-126318). The matrix describes an install - binary, config, log, service and script paths per platform - and nothing else; `test/workflowlint` enforces the allow-list. The workflow itself carries no platform conditions. Inside the actions, the helpers whose logic is the same everywhere (the log asserts and waits, the count and fixture scripts, config validation) are one pwsh step each, run through `.github/actions/_lib/Invoke-Elevated.ps1`, which runs the script in its own `pwsh -File` process on every platform (plain on Windows, under sudo on Linux and macOS, so a helper that ends on a native call expected to fail exits 0 everywhere rather than leaking `$LASTEXITCODE` on Windows alone) - forwarding the step's whole environment explicitly, as `NAME=VALUE` arguments to `env(1)` between `sudo` and `pwsh`, because Ubuntu 26.04's sudo-rs (which `ubuntu-latest` moved to on 2026-10-22) ignores `-E` and resets the environment, which turned every elevated helper's `LOG_FILE` null and the ubuntu half of the gate red for a reason that was not the agent (sc-129246); the workflow's own helper steps go through the `it-script` action, which does the same for `.github/workflows/it-scripts`. Those two are the only places the shared helpers branch on the platform. Actions whose logic genuinely differs per service manager or platform keep their own per-platform steps on purpose: `check-service`, `start-service`, `stop-service`, `kill-service` (`systemctl`, `launchctl`, `sc.exe`), `disrupt-connection` (`iptables`, `pfctl`, `netsh`), `provision-service-user`/`remove-service-user`, the `stub-*` launchers (`nohup` versus a detached WMI process), `install-agent`/`run-agent`/`update-as-service-user`/`run-e2e-package` (sudo versus direct invocation, the Windows-only service password), `delete-log`, `dump-agent-log`, `assert-syslog-contains` and the profile-noise pair. `test/workflowlint` pins the job list, caps every scenario job at 40 steps, and refuses `runner.os`, `matrix.os ==` and `(Unix)`/`(Windows)` twin steps in the workflow. The price of the per-job fresh install is one runner provisioning, checkout and install per scenario, about a minute each.
 
 #### Go e2e scenarios (`test/e2e`)
 
