@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"net/http"
+	"net/url"
 	"os"
 	"slices"
 	"sort"
@@ -46,11 +48,23 @@ const maxUnsupportedAcks = 32
 const twinGetTimeout = 30 * time.Second
 
 // runtimeSetting is one key on the allow-list: how to parse a desired value
-// (validated like the CLI flag), read the value in effect, and set it.
+// (validated like the CLI flag), read the value in effect, and set it. shown,
+// when set, renders a value for the acknowledgement, which the hub stores and
+// anyone who can read the twin sees: proxy_url's credentials are masked there.
 type runtimeSetting struct {
 	parse func(raw json.RawMessage) (any, error)
 	get   func(d agent.Device) any
 	set   func(d *agent.Device, v any)
+	shown func(v any) any
+}
+
+// ackValue renders the value in effect for an acknowledgement.
+func (s runtimeSetting) ackValue(d agent.Device) json.RawMessage {
+	v := s.get(d)
+	if s.shown != nil {
+		v = s.shown(v)
+	}
+	return settingValue(v)
 }
 
 // runtimeSettings is the allow-list. The keys are the config file's own keys,
@@ -160,6 +174,62 @@ var runtimeSettings = map[string]runtimeSetting{
 		},
 		get: func(d agent.Device) any { return d.LogCompress },
 		set: func(d *agent.Device, v any) { d.LogCompress = v.(bool) },
+	},
+	// sc-132991. The reporter re-arms its tickers at once (svc.retimeHealth).
+	"health_report_interval_seconds": intSetting(
+		"health-report-interval-seconds",
+		func(d agent.Device) int { return int(d.ResolvedHealthReportInterval() / time.Second) },
+		func(d *agent.Device, v *int) { d.HealthReportIntervalSeconds = v },
+	),
+	"command_heartbeat_seconds": intSetting(
+		"command-heartbeat-seconds",
+		func(d agent.Device) int { return int(d.ResolvedCommandHeartbeatInterval() / time.Second) },
+		func(d *agent.Device, v *int) { d.CommandHeartbeatSeconds = v },
+	),
+	// The log writer takes both at once; the next rotation uses them.
+	"log_max_bytes": intSetting(
+		"log-max-bytes",
+		func(d agent.Device) int { return d.ResolvedLogMaxBytes() },
+		func(d *agent.Device, v *int) { d.LogMaxBytes = v },
+	),
+	"log_max_files": intSetting(
+		"log-max-files",
+		func(d agent.Device) int { return d.ResolvedLogMaxFiles() },
+		func(d *agent.Device, v *int) { d.LogMaxFiles = v },
+	),
+	// Applies at once: the logger's sink starts or stops forwarding to the
+	// system log; the log file keeps every line either way.
+	"syslog": {
+		parse: func(raw json.RawMessage) (any, error) {
+			var b bool
+			if err := json.Unmarshal(raw, &b); err != nil {
+				return nil, errors.New("invalid syslog: must be true or false")
+			}
+			return b, nil
+		},
+		get: func(d agent.Device) any { return d.UseSyslog },
+		set: func(d *agent.Device, v any) { d.UseSyslog = v.(bool) },
+	},
+	// Validated like --proxy-url, then resolved with utils.ResolveProxy; ""
+	// returns to the environment's proxy. Applied by ending the connection
+	// cycle the way worker_count is, so the next connection dials through
+	// it; the postback client and the updater read it per request. The ack
+	// masks the credentials (utils.RedactURL); the config file keeps them.
+	"proxy_url": {
+		parse: func(raw json.RawMessage) (any, error) {
+			var text string
+			if err := json.Unmarshal(raw, &text); err != nil {
+				return nil, errors.New("invalid proxy-url: must be a string")
+			}
+			text = strings.TrimSpace(text)
+			if _, err := utils.ResolveProxy(text); err != nil {
+				return nil, err
+			}
+			return text, nil
+		},
+		get:   func(d agent.Device) any { return d.ProxyURL },
+		set:   func(d *agent.Device, v any) { d.ProxyURL = v.(string) },
+		shown: func(v any) any { return utils.RedactURL(v.(string)) },
 	},
 }
 
@@ -345,7 +415,7 @@ func (svc *serviceContext) readDesired(payload []byte, full bool) (*desiredUpdat
 		}
 		if string(raw) == "null" {
 			update.acks[key] = mqtt.SettingAck{
-				Value:          settingValue(setting.get(update.device)),
+				Value:          setting.ackValue(update.device),
 				Status:         settingCleared,
 				DesiredVersion: version,
 				Detail:         "desired property removed; the value in effect is kept",
@@ -355,7 +425,7 @@ func (svc *serviceContext) readDesired(payload []byte, full bool) (*desiredUpdat
 		value, err := setting.parse(raw)
 		if err != nil {
 			update.acks[key] = mqtt.SettingAck{
-				Value:          settingValue(setting.get(update.device)),
+				Value:          setting.ackValue(update.device),
 				Status:         settingRejected,
 				DesiredVersion: version,
 				Detail:         err.Error(),
@@ -367,7 +437,7 @@ func (svc *serviceContext) readDesired(payload []byte, full bool) (*desiredUpdat
 			update.changed[key] = settingValue(value)
 		}
 		update.acks[key] = mqtt.SettingAck{
-			Value:          settingValue(setting.get(update.device)),
+			Value:          setting.ackValue(update.device),
 			Status:         settingApplied,
 			DesiredVersion: version,
 		}
@@ -455,6 +525,30 @@ func (svc *serviceContext) applyDesired(
 	if slices.Contains(changed, "update_window") || slices.Contains(changed, "release_channel") {
 		svc.wakeUpdater()
 	}
+	if slices.Contains(changed, "health_report_interval_seconds") ||
+		slices.Contains(changed, "command_heartbeat_seconds") {
+		svc.retimeHealth()
+	}
+	if (slices.Contains(changed, "log_max_bytes") || slices.Contains(changed, "log_max_files")) &&
+		svc.logWriter != nil {
+		// Both are positive once resolved, so this cannot fail.
+		_ = svc.logWriter.SetLimits(
+			int64(update.device.ResolvedLogMaxBytes()),
+			update.device.ResolvedLogMaxFiles(),
+		)
+	}
+	if slices.Contains(changed, "syslog") && svc.logSink != nil {
+		if err := svc.logSink.SetSyslog(update.device.UseSyslog); err != nil {
+			logger.Error("Failed to switch forwarding to the system log", "error", err)
+			ack := update.acks["syslog"]
+			ack.Detail = "the system log could not be opened; lines still reach the log file: " +
+				err.Error()
+			update.acks["syslog"] = ack
+		}
+	}
+	if slices.Contains(changed, "proxy_url") {
+		svc.applyProxy(update.device.ProxyURL, logger)
+	}
 	logger.Info(
 		"Applied runtime settings from the device twin",
 		"settings", changed,
@@ -486,6 +580,76 @@ func (svc *serviceContext) persistSettings(changed map[string]json.RawMessage) e
 		return err
 	}
 	return utils.WriteFileAtomic(utils.NewFileSystem(), svc.ConfigFile, out, utils.SecureFileMode)
+}
+
+// applyProxy puts a proxy_url the twin changed into effect (sc-132991): the
+// postback client and the updater read it from their next request
+// (liveProxy), and the connection cycle ends at its next safe point so the
+// next one connects through it - the way a worker_count change does, with no
+// running command killed. readDesired has already validated the value.
+func (svc *serviceContext) applyProxy(raw string, logger hclog.Logger) {
+	proxy, err := utils.ResolveProxy(raw)
+	if err != nil {
+		// Not reachable: the same check passed when the value was read.
+		logger.Error("Ignoring the proxy_url from the device twin", "error", err)
+		return
+	}
+	svc.proxyFn.Store(&proxy)
+	if svc.HTTPClient != nil {
+		// Pooled connections are keyed by proxy and never reused across a
+		// change; closing them returns the sockets now.
+		svc.HTTPClient.CloseIdleConnections()
+	}
+	if raw != "" {
+		logger.Info(
+			"Outbound connections go through a proxy from the next connection",
+			"proxy", utils.RedactURL(raw),
+			"source", "proxy_url",
+		)
+	} else {
+		logger.Info(
+			"proxy_url cleared; outbound connections use the environment's proxy settings " +
+				"from the next connection",
+		)
+	}
+	svc.requestReconfigure()
+}
+
+// currentProxy is the outbound proxy in effect, nil before Execute resolves
+// it (MQTT then reads the environment).
+func (svc *serviceContext) currentProxy() utils.ProxyFunc {
+	if p := svc.proxyFn.Load(); p != nil {
+		return *p
+	}
+	return nil
+}
+
+// liveProxy is a utils.ProxyFunc that asks the proxy in effect at each
+// request, for the clients built once at startup - the postback client and
+// the updater - so a proxy_url the twin changes reaches them without a
+// restart (sc-132991).
+func (svc *serviceContext) liveProxy(req *http.Request) (*url.URL, error) {
+	proxy := svc.currentProxy()
+	if proxy == nil {
+		var err error
+		if proxy, err = utils.ResolveProxy(""); err != nil {
+			return nil, err
+		}
+	}
+	return proxy(req)
+}
+
+// retimeHealth tells the twin reporter to re-read its intervals (sc-132991).
+// Never blocks; with no reporter running the next one starts from the
+// settings in effect anyway.
+func (svc *serviceContext) retimeHealth() {
+	if svc.healthRetime == nil {
+		return
+	}
+	select {
+	case svc.healthRetime <- struct{}{}:
+	default:
+	}
 }
 
 // wakeUpdater ends an auto-updater's wait for its update window so it checks

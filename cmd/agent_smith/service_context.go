@@ -148,9 +148,19 @@ type serviceContext struct {
 	// log_compress twin setting turns on and off (sc-132996); nil in tests
 	// that never open the log.
 	logWriter *utils.RotatingFile
-	// proxy is the outbound proxy resolved once at startup (sc-129691); nil
+	// logSink is what the logger writes through, which the syslog twin
+	// setting switches (sc-132991); nil in tests that never open the log.
+	logSink *logSink
+	// proxyFn is the outbound proxy in effect (sc-129691): resolved at
+	// startup and replaced when the twin changes proxy_url (sc-132991). Empty
 	// before Execute, which leaves MQTT and the updater on the environment.
-	proxy utils.ProxyFunc
+	// Read it through currentProxy, or liveProxy for a client built once.
+	proxyFn atomic.Pointer[utils.ProxyFunc]
+	// healthRetime tells the twin reporter to re-read its intervals when the
+	// twin changes health_report_interval_seconds or command_heartbeat_seconds
+	// (sc-132991); buffered, never blocks the settings path. nil before the
+	// service starts.
+	healthRetime chan struct{}
 }
 
 // newServiceFlagSet builds the flag set for service mode, binding flags to the

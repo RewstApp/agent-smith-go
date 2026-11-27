@@ -184,7 +184,7 @@ Answer `200` with the configuration under one key:
 | `plugins` | no | `[{"name": "...", "executable_path": "..."}]` notification plugins; paths are not validated, a plugin that cannot launch is a Warn |
 | `mqtt_qos` | no | `0` or `1`, kept unless `--mqtt-qos` was given; `2` passes the install and fails when the service starts |
 | `broker` | no | leave empty: IoT Hub is the only broker the agent speaks to |
-| `logging_level`, `syslog`, `disable_agent_postback`, `disable_auto_updates`, `github_token`, `proxy_url`, `release_channel` and the tuning keys (`command_timeout_seconds`, `worker_count`, `max_output_bytes`, `postback_*`, `log_max_*`, `health_report_interval_seconds`, `command_heartbeat_seconds`, `mqtt_*_timeout_seconds`, `sas_token_lifetime_hours`, `message_queue_size`) | no | **not taken from the endpoint**: at install they are written from the install flags (a tuning key with no flag is left unset, so its documented default applies). Set them with the flags or with `--update`; of these, only `logging_level`, `command_timeout_seconds`, `worker_count`, `max_output_bytes`, `postback_max_attempts`, `postback_base_retry_backoff_seconds`, `disable_auto_updates` and `release_channel` can later be changed through the device twin |
+| `logging_level`, `syslog`, `disable_agent_postback`, `disable_auto_updates`, `github_token`, `proxy_url`, `release_channel`, `update_window`, `log_compress` and the tuning keys (`command_timeout_seconds`, `worker_count`, `max_output_bytes`, `postback_*`, `log_max_*`, `health_report_interval_seconds`, `command_heartbeat_seconds`, `mqtt_*_timeout_seconds`, `sas_token_lifetime_hours`, `message_queue_size`) | no | **not taken from the endpoint**: at install they are written from the install flags (a tuning key with no flag is left unset, so its documented default applies). Set them with the flags or with `--update`; of these, only `logging_level`, `command_timeout_seconds`, `worker_count`, `max_output_bytes`, `postback_max_attempts`, `postback_base_retry_backoff_seconds`, `disable_auto_updates`, `release_channel`, `update_window`, `log_compress`, `syslog`, `proxy_url`, `log_max_*`, `health_report_interval_seconds` and `command_heartbeat_seconds` can later be changed through the device twin |
 
 A `200` whose configuration lacks any of the four required values (what
 the Rewst endpoint answers when its token has expired) is refused at once
@@ -943,7 +943,9 @@ line's overshoot — 60 MiB at the defaults.
 Both fall back to their defaults when omitted or set to a non-positive value,
 so existing deployments need no config change. They can be set at install time
 with `--log-max-bytes <N>` / `--log-max-files <N>`, or changed later with
-`--update`. Lowering `log_max_files` also removes any copies numbered above the
+`--update` or, without a restart, through the device twin's `log_max_bytes` /
+`log_max_files` (sc-132991; see "Runtime Settings from the Device Twin").
+Lowering `log_max_files` also removes any copies numbered above the
 new value on the next rotation. A pre-existing oversized log left by an agent
 that never rotated is rotated on the first write that crosses the threshold
 after upgrade, rather than left in place.
@@ -1814,7 +1816,8 @@ version=... window="..." waiting until ... checked_at=...`.
 
 The object is published after every successful subscribe and then re-checked
 every `health_report_interval_seconds` (default 60; `--health-report-interval-seconds`
-at install or `--update`) on its own ticker for the life of the connection: it
+at install or `--update`, or the device twin's key while the agent runs,
+sc-132991) on its own ticker for the life of the connection: it
 is re-published only when something other than the clock changed since the
 last publish, whichever publish that was, so a burst of drops or plugin
 restarts becomes at most one twin update per interval, well inside IoT Hub's
@@ -1877,8 +1880,8 @@ with bare carriage returns reports its latest frame, and reading it never
 scans the buffer under the lock the output copier needs (sc-130762).
 
 While anything is running the object is republished every
-`command_heartbeat_seconds` (default 30; `--command-heartbeat-seconds`) on
-its own ticker by the same reporter that publishes the fleet health - one
+`command_heartbeat_seconds` (default 30; `--command-heartbeat-seconds`, or
+the device twin's key while the agent runs, sc-132991) on its own ticker by the same reporter that publishes the fleet health - one
 PATCH carries both, so the two can never race. The `commands` object is sent
 on *every* publish, empty when nothing runs, so the list a previous process
 left in the twin is overwritten by the next connection rather than surviving
@@ -1919,7 +1922,9 @@ result postbacks, the install-time config fetch and the auto-update release
 and download requests - resolves its proxy the same way:
 
 1. **`proxy_url`** in the config file (`--proxy-url` at install or
-   `--update`, where a blank value removes it), an `http://` or `https://`
+   `--update`, where a blank value removes it, or the device twin's
+   `proxy_url` while the agent runs, sc-132991 - see "Runtime Settings from
+   the Device Twin"), an `http://` or `https://`
    URL with optional credentials. It applies to every destination, loopback
    included, except those `NO_PROXY` names, read with Go's semantics:
    `example.com` matches the name and its subdomains, `.example.com` and
@@ -2003,6 +2008,12 @@ these settings from the device twin's **desired properties**:
 | `release_channel` | `--release-channel` (`stable`, `beta`) | from the next update check; ends a wait for the update window |
 | `update_window` | `--update-window` (`HH:MM-HH:MM`, or `""` for any time) | at once: an updater waiting for the window checks again under the new one (sc-132993) |
 | `log_compress` | `--log-compress` (`true`/`false`) | at once: rotated copies are gzipped from now on, and turning it on compresses the plain ones there (sc-132996) |
+| `health_report_interval_seconds` | `--health-report-interval-seconds` (positive integer) | at once: the running reporter re-arms its health ticker from now (sc-132991) |
+| `command_heartbeat_seconds` | `--command-heartbeat-seconds` (positive integer) | at once: the running reporter re-arms its heartbeat ticker from now (sc-132991) |
+| `log_max_bytes` | `--log-max-bytes` (positive integer) | from the next write: an active file already past a lowered ceiling rotates at the next line (sc-132991) |
+| `log_max_files` | `--log-max-files` (positive integer) | at the next rotation, which discards the copies past a lowered count, plain and gzipped (sc-132991) |
+| `syslog` | `--syslog` (`true`/`false`) | at once: lines also go to the system log (Windows Event Log, `logger` on Linux and macOS) or stop going there; the log file keeps every line either way (sc-132991) |
+| `proxy_url` | `--proxy-url` (`http`/`https` with a host, or `""` for the environment's `HTTPS_PROXY`/`HTTP_PROXY`) | postbacks and the updater from their next request; MQTT at the next safe point (below) (sc-132991) |
 
 On every connection the agent subscribes to
 `$iothub/twin/PATCH/properties/desired/#` and the twin response topic
@@ -2019,14 +2030,20 @@ a config file carrying more is clamped - because each worker is started
 before the agent connects, and an absurd value would otherwise fail every
 start before the twin could correct it. A running command is never killed to apply a
 setting: a new timeout or output ceiling applies from the next command, and a
-new `worker_count` ends the connection cycle the way a SAS renewal does - the
-next cycle starts its pool at the new size while the old one finishes what it
-is running. An applied setting is written into the config file through
+new `worker_count` or `proxy_url` ends the connection cycle the way a SAS
+renewal does - the next cycle starts its pool at the new size and connects
+through the proxy now in effect (WebSocket first when a proxy applies to the
+hub, as at install) while the old one finishes what it is running. A
+`proxy_url` is acknowledged, and logged, with its password masked
+(`http://agent:xxxxx@proxy:3128`, as `utils.RedactURL` renders it everywhere
+else); the config file keeps it as given, as the installer writes it. A
+value that fails validation is `rejected` and the proxy in effect is kept, so
+a mistyped URL cannot cut an endpoint off. An applied setting is written into the config file through
 `utils.WriteFileAtomic`, every other key left as it was, so a restart keeps
 it; with no desired property set the config file stays the source of truth.
 A failed write is a Warn and the setting still applies to the running
-process. The auto-update helper is started with the logging level and
-auto-update toggle in effect, so an update does not undo them.
+process. The auto-update helper is started with the logging level, the
+auto-update toggle and `syslog` in effect, so an update does not undo them.
 
 Each key is acknowledged under `reported.settings_ack.<key>`, with every
 field always present - IoT Hub merges reported properties recursively, so a
@@ -2052,8 +2069,8 @@ effect is kept, so set a key explicitly to change it again. `desired_version`
 is the desired properties' `$version` the acknowledgement answers, which is
 how Rewst tells applied from pending: a key whose acknowledgement carries an
 older version than the twin's desired `$version` has not been read yet.
-Credentials, endpoints and every other config key cannot be changed this
-way. The twin subscription is best effort: if it fails the agent logs a Warn
+Credentials, the hub and engine endpoints and every other config key cannot
+be changed this way. The twin subscription is best effort: if it fails the agent logs a Warn
 and runs on its config file, and the command path is never affected. Since
 the agent now listens on the twin response topic it also logs a Warn when the
 hub refuses a fleet-health update (a throttled or oversized PATCH), once per
@@ -2070,7 +2087,15 @@ an invalid `worker_count` and an unknown key and asserts the
 acknowledgements (`applied`, `rejected`, `unsupported`) and debug lines in
 the log without a restart, then restarts the service and asserts the config
 file carries the timeout and the logging level while the rejected worker
-count was never written.
+count was never written. Since sc-132991 it also installs the agent with a
+one-hour `--health-report-interval-seconds`, sets the twin's to 2 and asserts
+a quick command's `completed_total` reaches the twin within 20 s (the
+installed hour could not publish it), then sets `proxy_url` to the stub
+broker's proxy on an agent installed without one and asserts the masked
+acknowledgement, the next connection over WebSocket through the proxy (the
+log line and the proxy's own tunnel count), a postback tunnelled through it
+without a restart, no password in the log, and the config file keeping the
+URL across the restart.
 
 ### Verified, Version-Gated Auto-Updates
 
