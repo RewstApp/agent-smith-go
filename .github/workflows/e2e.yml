@@ -1035,23 +1035,6 @@ jobs:
           EXPECTED: debug
           TIMEOUT_SECONDS: "60"
 
-      - name: Wait for debug lines in the log
-        timeout-minutes: 5
-        uses: ./.github/actions/wait-for-log-line
-        with:
-          log_file: ${{ matrix.log_file }}
-          pattern: "[DEBUG]"
-          baseline_count: ${{ steps.bl_debug.outputs.count }}
-          max_attempts: "60"
-          interval_seconds: "2"
-
-      - name: Assert the log switched to debug without a restart
-        timeout-minutes: 5
-        uses: ./.github/actions/assert-log-contains
-        with:
-          log_file: ${{ matrix.log_file }}
-          patterns: "[DEBUG]"
-
       # ---- sc-132991: the reporter's interval and proxy_url while running ----
       - name: Set a 2 s health interval through the twin
         timeout-minutes: 5
@@ -1098,6 +1081,26 @@ jobs:
           PROPERTY: health.commands.completed_total
           MIN: "1"
           TIMEOUT_SECONDS: "20"
+
+      # The quick command above logs from its worker at Debug at once; this
+      # wait used to rely on the 60 s health tick, which the hour-long
+      # installed interval no longer provides (sc-132991).
+      - name: Wait for debug lines in the log
+        timeout-minutes: 5
+        uses: ./.github/actions/wait-for-log-line
+        with:
+          log_file: ${{ matrix.log_file }}
+          pattern: "[DEBUG]"
+          baseline_count: ${{ steps.bl_debug.outputs.count }}
+          max_attempts: "60"
+          interval_seconds: "2"
+
+      - name: Assert the log switched to debug without a restart
+        timeout-minutes: 5
+        uses: ./.github/actions/assert-log-contains
+        with:
+          log_file: ${{ matrix.log_file }}
+          patterns: "[DEBUG]"
 
       - name: Baseline proxied connections before the twin's proxy_url
         id: bl_proxied
