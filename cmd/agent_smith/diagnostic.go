@@ -178,24 +178,32 @@ func getAgentDataRoot() string {
 }
 
 func runDiagnostic(params *diagnosticContext) {
+	env := diagnosticEnv{
+		root:     getAgentDataRoot(),
+		fallback: fallbackScanAgents,
+		dialer:   &defaultTLSDialer{},
+		stdout:   os.Stdout,
+	}
+	if params.JSON {
+		code, err := runDiagnosticJSON(context.Background(), params, env)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "Diagnostic report failed:", err)
+		}
+		os.Exit(code)
+	}
 	if params.Bundle {
 		if params.BundlePath == bundleStdoutPath {
 			// The zip owns stdout: every section and the closing line go
 			// to stderr (sc-132995).
 			diagOut = os.Stderr
 		}
-		report, err := runDiagnosticBundle(context.Background(), params, bundleEnv{
-			root:     getAgentDataRoot(),
-			fallback: fallbackScanAgents,
-			dialer:   &defaultTLSDialer{},
-			stdout:   os.Stdout,
-		})
+		written, err := runDiagnosticBundle(context.Background(), params, env)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "Diagnostic bundle failed:", err)
 			os.Exit(1)
 		}
 		dprintln()
-		dprintf("Diagnostic bundle written: %s\n", report)
+		dprintf("Diagnostic bundle written: %s\n", written)
 		return
 	}
 	runDiagnosticFull(
@@ -429,7 +437,11 @@ func runCheckServiceStatus(ctx context.Context, params *diagnosticContext, targe
 
 	status, err := queryService(ctx, params.ServiceManager, target.ServiceName)
 	if err != nil {
-		printResult(false, fmt.Sprintf("Service not found (%s): %v", target.ServiceName, err))
+		report(checkResult{
+			Name:   checkServiceStatus,
+			Detail: fmt.Sprintf("Service not found (%s): %v", target.ServiceName, err),
+			Fields: map[string]any{"service": target.ServiceName},
+		})
 		return
 	}
 
@@ -440,10 +452,16 @@ func runCheckServiceStatus(ctx context.Context, params *diagnosticContext, targe
 		// "StopPending".
 		state += ": " + status.Raw
 	}
-	printResult(
-		status.State == service.StateRunning,
-		fmt.Sprintf("%s - %s (%s)", target.OrgId, state, target.ServiceName),
-	)
+	report(checkResult{
+		Name:   checkServiceStatus,
+		OK:     status.State == service.StateRunning,
+		Detail: fmt.Sprintf("%s - %s (%s)", target.OrgId, state, target.ServiceName),
+		Fields: map[string]any{
+			"service": target.ServiceName,
+			"state":   status.State.String(),
+			"raw":     status.Raw,
+		},
+	})
 }
 
 // ── Check 2: Command execution test ──
@@ -460,15 +478,29 @@ func runCommandTest() {
 	output, err := cmd.CombinedOutput()
 	elapsed := time.Since(start)
 
+	fields := map[string]any{
+		"shell":      shell,
+		"elapsed_ms": elapsed.Milliseconds(),
+		"output":     strings.TrimSpace(string(output)),
+	}
 	if err != nil {
-		printResult(false, fmt.Sprintf("Command execution failed: %v", err))
+		report(checkResult{
+			Name:   checkCommandExecution,
+			Detail: fmt.Sprintf("Command execution failed: %v", err),
+			Fields: fields,
+		})
 		if len(output) > 0 {
 			dprintf("    Output: %s\n", strings.TrimSpace(string(output)))
 		}
 		return
 	}
 
-	printResult(true, fmt.Sprintf("Command executed successfully (%s)", elapsed))
+	report(checkResult{
+		Name:   checkCommandExecution,
+		OK:     true,
+		Detail: fmt.Sprintf("Command executed successfully (%s)", elapsed),
+		Fields: fields,
+	})
 	dprintf("    Output: %s\n", strings.TrimSpace(string(output)))
 }
 
@@ -478,14 +510,14 @@ func runConnectivityTestWith(target agentInfo, dialer tlsDialer) {
 	printSection("MQTT/WebSocket Connectivity")
 
 	if target.Device == nil {
-		printResult(false, "No config loaded - cannot determine MQTT host")
+		printResult(checkHubConfigured, false, "No config loaded - cannot determine MQTT host")
 		dprintln("    Ensure the agent has been configured and config.json exists.")
 		return
 	}
 
 	host := target.Device.AzureIotHubHost
 	if host == "" {
-		printResult(false, "Azure IoT Hub host not configured")
+		printResult(checkHubConfigured, false, "Azure IoT Hub host not configured")
 		return
 	}
 
@@ -493,18 +525,44 @@ func runConnectivityTestWith(target agentInfo, dialer tlsDialer) {
 	r := checkConnectivity(*target.Device, dialer)
 	dprintf("    Proxy: %s\n", r.proxyLine())
 	if r.proxyErr != nil {
-		printResult(false, fmt.Sprintf("proxy_url is invalid and is ignored: %v", r.proxyErr))
-	}
-	printResult(r.direct8883, fmt.Sprintf("MQTT TLS connection to %s:8883 (direct)", host))
-	printResult(r.direct443, fmt.Sprintf("WebSocket connection to %s:443 (direct)", host))
-	if r.proxy != nil {
 		printResult(
-			r.proxied443,
-			fmt.Sprintf("WebSocket connection to %s:443 through the proxy", host),
+			checkHubProxyURL,
+			false,
+			fmt.Sprintf("proxy_url is invalid and is ignored: %v", r.proxyErr),
 		)
 	}
+	// Each path is evidence for the transport verdict below, which is what
+	// decides whether the agent reaches the hub: a path the agent does not
+	// need failing (8883 behind a proxy-only egress) is advisory.
+	report(checkResult{
+		Name:     checkHubDirect8883,
+		OK:       r.direct8883,
+		Advisory: true,
+		Detail:   fmt.Sprintf("MQTT TLS connection to %s:8883 (direct)", host),
+		Fields:   map[string]any{"host": host},
+	})
+	report(checkResult{
+		Name:     checkHubDirect443,
+		OK:       r.direct443,
+		Advisory: true,
+		Detail:   fmt.Sprintf("WebSocket connection to %s:443 (direct)", host),
+		Fields:   map[string]any{"host": host},
+	})
+	if r.proxy != nil {
+		report(checkResult{
+			Name:     checkHubProxy443,
+			OK:       r.proxied443,
+			Advisory: true,
+			Detail:   fmt.Sprintf("WebSocket connection to %s:443 through the proxy", host),
+			Fields: map[string]any{
+				"host":         host,
+				"proxy":        utils.DescribeProxy(r.proxy),
+				"proxy_source": r.proxySource,
+			},
+		})
+	}
 	if r.chosen == "" {
-		printResult(false, "No transport reaches the hub")
+		printResult(checkHubTransport, false, "No transport reaches the hub")
 		dprintln()
 		dprintln("    Troubleshooting tips:")
 		dprintln("    - Check firewall rules for outbound ports 8883 and 443")
@@ -512,7 +570,12 @@ func runConnectivityTestWith(target agentInfo, dialer tlsDialer) {
 		dprintln("    - Set proxy_url (--proxy-url on --update) if egress needs a proxy")
 		return
 	}
-	printResult(true, "The agent connects with "+r.chosen)
+	report(checkResult{
+		Name:   checkHubTransport,
+		OK:     true,
+		Detail: "The agent connects with " + r.chosen,
+		Fields: map[string]any{"transport": r.chosen},
+	})
 }
 
 // connectivityResult is what the connectivity check found: the proxy in
@@ -623,12 +686,16 @@ func runEngineTestWith(target agentInfo, dialer tlsDialer, now time.Time) {
 	printSection("Engine Connectivity")
 
 	if target.Device == nil {
-		printResult(false, "No config loaded - cannot determine the engine host")
+		printResult(
+			checkEngineConfigured,
+			false,
+			"No config loaded - cannot determine the engine host",
+		)
 		dprintln("    Ensure the agent has been configured and config.json exists.")
 		return
 	}
 	if strings.TrimSpace(target.Device.RewstEngineHost) == "" {
-		printResult(false, "Rewst engine host not configured")
+		printResult(checkEngineConfigured, false, "Rewst engine host not configured")
 		return
 	}
 
@@ -636,26 +703,62 @@ func runEngineTestWith(target agentInfo, dialer tlsDialer, now time.Time) {
 	r := checkEngine(*target.Device, dialer)
 	dprintf("    Proxy: %s\n", r.proxyLine())
 	if r.proxyErr != nil {
-		printResult(false, fmt.Sprintf("proxy_url is invalid and is ignored: %v", r.proxyErr))
+		printResult(
+			checkEngineProxyURL,
+			false,
+			fmt.Sprintf("proxy_url is invalid and is ignored: %v", r.proxyErr),
+		)
 	}
-	printResult(r.direct, fmt.Sprintf("TLS connection to %s (direct)", r.hostPort))
+	// The handshakes are evidence for the HEAD below, which takes the path the
+	// postback client would and decides whether results get through.
+	report(checkResult{
+		Name:     checkEngineDirect,
+		OK:       r.direct,
+		Advisory: true,
+		Detail:   fmt.Sprintf("TLS connection to %s (direct)", r.hostPort),
+		Fields:   map[string]any{"host": r.hostPort},
+	})
 	if r.proxy != nil {
-		printResult(r.proxied, fmt.Sprintf("TLS connection to %s through the proxy", r.hostPort))
+		report(checkResult{
+			Name:     checkEngineProxy,
+			OK:       r.proxied,
+			Advisory: true,
+			Detail:   fmt.Sprintf("TLS connection to %s through the proxy", r.hostPort),
+			Fields: map[string]any{
+				"host":         r.hostPort,
+				"proxy":        utils.DescribeProxy(r.proxy),
+				"proxy_source": r.source,
+			},
+		})
+	}
+	reachable := checkResult{
+		Name:   checkEngineReachable,
+		OK:     r.headErr == nil,
+		Fields: map[string]any{"url": r.pingURL, "via": r.via},
 	}
 	if r.headErr != nil {
-		printResult(
-			false,
-			fmt.Sprintf("Engine unreachable at %s %s: %v", r.pingURL, r.via, r.headErr),
+		reachable.Detail = fmt.Sprintf(
+			"Engine unreachable at %s %s: %v", r.pingURL, r.via, r.headErr,
 		)
 	} else {
-		printResult(
-			true,
-			fmt.Sprintf("Engine answers HTTP %d at %s %s", r.status, r.pingURL, r.via),
+		reachable.Detail = fmt.Sprintf(
+			"Engine answers HTTP %d at %s %s", r.status, r.pingURL, r.via,
 		)
+		reachable.Fields["status"] = r.status
 	}
+	report(reachable)
 	spool := filepath.Join(target.DataDir, "postback_spool")
-	waiting, summary := spoolSummary(spool, now)
-	printResult(!waiting, "Postback spool: "+summary)
+	state := readSpoolState(spool)
+	spoolFields := map[string]any{"waiting": state.count}
+	if state.count > 0 {
+		spoolFields["oldest_created_at"] = stamp(state.oldest)
+	}
+	report(checkResult{
+		Name:   checkEngineSpool,
+		OK:     state.count == 0,
+		Detail: "Postback spool: " + state.summary(spool, now),
+		Fields: spoolFields,
+	})
 	if r.headErr == nil {
 		return
 	}
@@ -747,12 +850,39 @@ func checkEngine(device agent.Device, dialer tlsDialer) engineResult {
 // spoolSummary describes the postback spool at dir: how many results are
 // waiting and how old the oldest is. waiting is true when any result is.
 func spoolSummary(dir string, now time.Time) (waiting bool, summary string) {
+	state := readSpoolState(dir)
+	return state.count > 0, state.summary(dir, now)
+}
+
+// spoolState is what the postback spool holds: how many results wait and when
+// the oldest was spooled, or why the directory could not be listed.
+type spoolState struct {
+	count  int
+	oldest time.Time
+	err    error
+}
+
+func (s spoolState) summary(dir string, now time.Time) string {
+	switch {
+	case errors.Is(s.err, os.ErrNotExist):
+		return "empty (nothing has ever spooled)"
+	case s.err != nil:
+		return fmt.Sprintf("%s cannot be read: %v", dir, s.err)
+	case s.count == 0:
+		return "empty"
+	}
+	return fmt.Sprintf(
+		"%d result(s) waiting to be posted back, the oldest for %s (%s)",
+		s.count, age(now, s.oldest), dir,
+	)
+}
+
+// readSpoolState counts the spool's entries through a projection that leaves
+// the result undecoded.
+func readSpoolState(dir string) spoolState {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return false, "empty (nothing has ever spooled)"
-		}
-		return false, fmt.Sprintf("%s cannot be read: %v", dir, err)
+		return spoolState{err: err}
 	}
 	count := 0
 	var oldest time.Time
@@ -776,13 +906,7 @@ func spoolSummary(dir string, now time.Time) (waiting bool, summary string) {
 			oldest = e.CreatedAt
 		}
 	}
-	if count == 0 {
-		return false, "empty"
-	}
-	return true, fmt.Sprintf(
-		"%d result(s) waiting to be posted back, the oldest for %s (%s)",
-		count, age(now, oldest), dir,
-	)
+	return spoolState{count: count, oldest: oldest}
 }
 
 // headRequest sends one HEAD to rawURL through proxy (nil for direct) with
@@ -860,29 +984,45 @@ func runTempDirTest(target agentInfo) {
 
 	err := utils.EnsureSecureDir(scriptsDir)
 	if err != nil {
-		printResult(false, fmt.Sprintf("Cannot create scripts directory: %v", err))
+		printResult(
+			checkScriptsDirSecure,
+			false,
+			fmt.Sprintf("Cannot create scripts directory: %v", err),
+		)
 		return
 	}
-	printResult(true, "Scripts directory created/exists with hardened permissions")
+	printResult(
+		checkScriptsDirSecure,
+		true,
+		"Scripts directory created/exists with hardened permissions",
+	)
 
 	// Test writing a temp file
 	testFile := filepath.Join(scriptsDir, "diagnostic-test.tmp")
 	testContent := []byte("agent_smith diagnostic test")
 	err = os.WriteFile(testFile, testContent, 0o644)
 	if err != nil {
-		printResult(false, fmt.Sprintf("Cannot write to scripts directory: %v", err))
+		printResult(
+			checkScriptsDirWrite,
+			false,
+			fmt.Sprintf("Cannot write to scripts directory: %v", err),
+		)
 		return
 	}
-	printResult(true, "File write successful")
+	printResult(checkScriptsDirWrite, true, "File write successful")
 
 	// Test reading it back
 	readBack, err := os.ReadFile(testFile)
 	if err != nil {
-		printResult(false, fmt.Sprintf("Cannot read back test file: %v", err))
+		printResult(
+			checkScriptsDirReadBack,
+			false,
+			fmt.Sprintf("Cannot read back test file: %v", err),
+		)
 	} else if string(readBack) != string(testContent) {
-		printResult(false, "File content mismatch after read-back")
+		printResult(checkScriptsDirReadBack, false, "File content mismatch after read-back")
 	} else {
-		printResult(true, "File read-back verified")
+		printResult(checkScriptsDirReadBack, true, "File read-back verified")
 	}
 
 	// Clean up
@@ -891,11 +1031,15 @@ func runTempDirTest(target agentInfo) {
 	// Also check the data directory
 	dprintf("    Data directory: %s\n", dataDir)
 	if info, err := os.Stat(dataDir); err != nil {
-		printResult(false, fmt.Sprintf("Data directory does not exist: %v", err))
+		printResult(
+			checkDataDirExists,
+			false,
+			fmt.Sprintf("Data directory does not exist: %v", err),
+		)
 	} else if !info.IsDir() {
-		printResult(false, "Data path exists but is not a directory")
+		printResult(checkDataDirExists, false, "Data path exists but is not a directory")
 	} else {
-		printResult(true, "Data directory exists")
+		printResult(checkDataDirExists, true, "Data directory exists")
 	}
 }
 
@@ -911,7 +1055,7 @@ func runLiveLogsWith(ctx context.Context, target agentInfo, opener logFileOpener
 
 	rc, err := opener.Open(logFile)
 	if err != nil {
-		printResult(false, fmt.Sprintf("Cannot open log file: %v", err))
+		printResult(checkLogOpen, false, fmt.Sprintf("Cannot open log file: %v", err))
 		dprintln("    The agent may not have been started yet, or the log file path is incorrect.")
 		return
 	}
@@ -1053,6 +1197,7 @@ func printFleetHealth(props *mqtt.ReportedProperties, err error, withOutput bool
 	printSection("Fleet Health")
 	if err != nil {
 		printResult(
+			checkFleetHealth,
 			false,
 			fmt.Sprintf(
 				"No fleet-health report yet (%v); the service writes one after it subscribes",
@@ -1063,6 +1208,7 @@ func printFleetHealth(props *mqtt.ReportedProperties, err error, withOutput bool
 	}
 	health := props.Health
 	printResult(
+		checkFleetHealth,
 		true,
 		fmt.Sprintf(
 			"Reported at %s, up %ds, connected at %q, last connection error %q",
@@ -1163,12 +1309,19 @@ func printUpdateHealth(u *mqtt.UpdateHealth) {
 
 // ── Check 7: Host information ──
 
-func runHostInfo(ctx context.Context, params *diagnosticContext, target agentInfo) {
+// runHostInfo prints the host information the agent reports at install and
+// returns it, or nil when it could not be gathered (--diagnostic --json
+// carries it as the document's host object).
+func runHostInfo(
+	ctx context.Context,
+	params *diagnosticContext,
+	target agentInfo,
+) *agent.HostInfo {
 	printSection("Host Information")
 
 	if params.Sys == nil || params.Domain == nil {
-		printResult(false, "System or domain provider not available")
-		return
+		printResult(checkHostInfo, false, "System or domain provider not available")
+		return nil
 	}
 
 	info, err := agent.NewHostInfo(
@@ -1179,11 +1332,15 @@ func runHostInfo(ctx context.Context, params *diagnosticContext, target agentInf
 		params.Domain,
 	)
 	if err != nil {
-		printResult(false, fmt.Sprintf("Failed to gather host information: %v", err))
-		return
+		printResult(
+			checkHostInfo,
+			false,
+			fmt.Sprintf("Failed to gather host information: %v", err),
+		)
+		return nil
 	}
 
-	printResult(true, "Host information collected")
+	printResult(checkHostInfo, true, "Host information collected")
 	dprintf("      Hostname:                 %s\n", strOrNA(info.HostName))
 	dprintf("      MAC Address:              %s\n", ptrOrNA(info.MacAddress))
 	dprintf("      Operating System:         %s\n", strOrNA(info.OperatingSystem))
@@ -1199,6 +1356,7 @@ func runHostInfo(ctx context.Context, params *diagnosticContext, target agentInf
 	dprintf("      Entra Connect Server:     %v\n", info.IsEntraConnectServer)
 	dprintf("      Entra Domain:             %s\n", ptrOrNA(info.EntraDomain))
 	dprintf("      Org ID:                   %s\n", strOrNA(info.OrgId))
+	return info
 }
 
 func strOrNA(s string) string {
@@ -1218,15 +1376,14 @@ func ptrOrNA(s *string) string {
 // ── Formatting helpers ──
 
 func printSection(title string) {
+	diagSection = title
 	dprintln()
 	dprintf("  ── %s ──\n", title)
 	dprintln()
 }
 
-func printResult(pass bool, message string) {
-	if pass {
-		dprintf("    [PASS] %s\n", message)
-	} else {
-		dprintf("    [FAIL] %s\n", message)
-	}
+// printResult prints one check's [PASS]/[FAIL] line and records it under name
+// (see report).
+func printResult(name string, pass bool, message string) {
+	report(checkResult{Name: name, OK: pass, Detail: message})
 }

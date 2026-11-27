@@ -1536,6 +1536,27 @@ jobs:
             [PASS] Postback spool: empty
           ABSENT: s3cret-proxy
 
+      - name: Assert --diagnostic --json passes the proxy path, fails direct MQTT as advisory, and exits 0 (sc-132994)
+        timeout-minutes: 5
+        uses: ./.github/actions/it-script
+        with:
+          script: hermetic-assert-diagnostic-json
+        env:
+          AGENT_BINARY: ${{ github.workspace }}/dist/${{ matrix.binary }}
+          ORG_ID: ${{ vars.IT_ORG_ID }}
+          EXPECT_EXIT: "0"
+          CHECKS: |-
+            config.load=true
+            service.status=true
+            hub.direct_8883=false
+            hub.proxy_443=true
+            hub.transport=true
+            engine.proxy=true
+            engine.reachable=true
+            engine.spool=true
+            fleet_health.report=true
+          ABSENT: s3cret-proxy
+
       - name: Assert --diagnostic --bundle writes a redacted support archive (sc-129690)
         timeout-minutes: 5
         uses: ./.github/actions/it-script
