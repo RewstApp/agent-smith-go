@@ -34,6 +34,14 @@
 #                     reached the workflow. Retried on the same schedule.
 #   engine-refusal    Any other non-2xx. The request itself was refused (bad
 #                     trigger URL, secret, or payload). Not retried.
+#   command-timed-out 2xx with this command's postback, but the device killed
+#                     the command at its per-command timeout (command_results
+#                     carries timed_out: true) before it printed
+#                     EXPECTED_OUTPUT. The result is this command's; a slow
+#                     runner against a short timeout is the usual cause
+#                     (sc-138191). Not retried. Only checked where the output
+#                     does not match, so a scenario that expects no output
+#                     (the hanging command) still passes.
 #   wrong-result      2xx, but the body is not the device's postback for this
 #                     command: no command_results object, or its output does
 #                     not contain EXPECTED_OUTPUT. Another agent on the same
@@ -111,6 +119,33 @@ result_output() {
       | grep -oE '"output"[[:space:]]*:[[:space:]]*"([^"\\]|\\.)*"' \
       | head -n 1 \
       | sed -E 's/^"output"[[:space:]]*:[[:space:]]*"//; s/"$//'
+  fi
+}
+
+# Whether command_results says the device killed the command at its
+# per-command timeout ("true"/"false"), and the error it gave, from a 2xx body.
+# The fallback without jq reads the raw JSON of the command_results object.
+result_timed_out() {
+  if [ "$have_jq" = "true" ]; then
+    printf '%s' "$1" | jq -r '.output.output.command_results.timed_out // false' 2>/dev/null
+  elif printf '%s' "$1" \
+    | grep -oE '"command_results"[[:space:]]*:[[:space:]]*\{[^}]*' \
+    | grep -qE '"timed_out"[[:space:]]*:[[:space:]]*true'; then
+    echo true
+  else
+    echo false
+  fi
+}
+
+result_error() {
+  if [ "$have_jq" = "true" ]; then
+    printf '%s' "$1" | jq -r '.output.output.command_results.error // empty' 2>/dev/null
+  else
+    printf '%s' "$1" \
+      | grep -oE '"command_results"[[:space:]]*:[[:space:]]*\{[^}]*' \
+      | grep -oE '"error"[[:space:]]*:[[:space:]]*"([^"\\]|\\.)*"' \
+      | head -n 1 \
+      | sed -E 's/^"error"[[:space:]]*:[[:space:]]*"//; s/"$//'
   fi
 }
 
@@ -226,6 +261,9 @@ for attempt in $(seq 1 "$attempts"); do
           echo "send-command: dispatched (HTTP $http_code, attempt $attempt of $attempts, class: success-after-timeout)"
           emit_outputs "$attempt" "success-after-timeout"
           exit 0
+        fi
+        if [ "$(result_timed_out "$body")" = "true" ]; then
+          fail "command-timed-out" "HTTP $http_code: this is the device's result for this command, but the agent killed it at its per-command timeout ($(result_error "$body")) before it printed the expected $(printf '%q' "$EXPECTED_OUTPUT"). A slow runner against a short command timeout is the usual cause, not another agent on the device_id."
         fi
         fail "wrong-result" "HTTP $http_code with command_results.output $(printf '%q' "$actual_output"), which does not contain the expected $(printf '%q' "$EXPECTED_OUTPUT"). The engine returned a result, but not this command's - another agent on the same device_id is the usual cause."
         ;;

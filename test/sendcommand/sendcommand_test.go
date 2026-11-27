@@ -26,6 +26,9 @@ const (
 	noResults   = `{"output":{"output":{"device_execution_results":""}},"errors":[],"options":[]}`
 	nginx502    = "<html>\n<head><title>502 Bad Gateway</title></head>\n<body>\n<center><h1>502 Bad Gateway</h1></center>\n</body>\n</html>"
 	notFound    = `{"error":"Workflow was not found"}`
+	// timedOutBody is the agent's postback for a command it killed at its
+	// per-command timeout, as the stub engine returned it on run 44742334484.
+	timedOutBody = `{"errors":[],"options":[],"output":{"output":{"command_results":{"error":"command timed out after 5s","output":"","timed_out":true},"device_execution_results":""}}}`
 )
 
 type response struct {
@@ -321,6 +324,46 @@ func TestWrongResult_MismatchedOutputFailsAtThisStep(t *testing.T) {
 	if n := engine.count(); n != 1 {
 		t.Errorf("engine saw %d requests, want 1 (a wrong result must not be retried)", n)
 	}
+}
+
+// A result the device killed at its per-command timeout is this command's,
+// not another agent's (sc-138191): it fails at once under its own class,
+// quoting the agent's error, instead of sending the reader after a device-id
+// collision.
+func TestCommandTimedOut_IsNamedAsATimeoutNotAForeignResult(t *testing.T) {
+	for _, noJq := range []bool{false, true} {
+		engine := newStubEngine(t, response{200, timedOutBody})
+		env := []string{"EXPECTED_OUTPUT=hello world"}
+		if noJq {
+			env = append(env, "SEND_COMMAND_FORCE_NO_JQ=1")
+		}
+		code, out := run(t, engine.server.URL, env...)
+		if code != 1 {
+			t.Fatalf("jq=%t: exit %d, want 1\n%s", !noJq, code, out)
+		}
+		wantContains(t, out,
+			"::error title=send-command: command-timed-out::HTTP 200: this is the device's result",
+			"killed it at its per-command timeout (command timed out after 5s)",
+			"not another agent on the device_id",
+		)
+		wantNotContains(t, out, "wrong-result")
+		if n := engine.count(); n != 1 {
+			t.Errorf("jq=%t: engine saw %d requests, want 1 (a timed-out command is not retried)",
+				!noJq, n)
+		}
+	}
+}
+
+// The hanging-command steps expect no output: a timed-out result is what they
+// send for, and it still passes.
+func TestCommandTimedOut_WithoutExpectedOutputPasses(t *testing.T) {
+	engine := newStubEngine(t, response{200, timedOutBody})
+	code, out := run(t, engine.server.URL)
+	if code != 0 {
+		t.Fatalf("exit %d, want 0\n%s", code, out)
+	}
+	wantContains(t, out, "class: success")
+	wantNotContains(t, out, "::error")
 }
 
 func TestWrongResult_BodyWithoutCommandResultsFails(t *testing.T) {

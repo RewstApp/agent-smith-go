@@ -2,8 +2,9 @@ name: Send command
 description: >-
   Send a command to the agent via the Rewst trigger webhook and classify the
   engine's answer. Every outcome is one of: request-failed, engine-timeout,
-  engine-transient, engine-refusal, wrong-result, success - named in the
-  step's annotation so triage never needs the raw log. See send-command.sh.
+  engine-transient, engine-refusal, command-timed-out, wrong-result, success -
+  named in the step's annotation so triage never needs the raw log. See
+  send-command.sh.
 
 inputs:
   trigger_url:
