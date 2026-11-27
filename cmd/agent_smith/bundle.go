@@ -3,6 +3,7 @@ package main
 import (
 	"archive/zip"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"errors"
@@ -453,7 +454,9 @@ func buildBundle(
 			data = []byte(fmt.Sprintf("could not read %s: %v\n", path, err))
 		}
 		entries = append(entries, bundleEntry{
-			name: "logs/" + filepath.Base(path),
+			// A compressed copy (sc-132996) is carried decompressed, under
+			// the name its plain form would have.
+			name: "logs/" + strings.TrimSuffix(filepath.Base(path), logGzipSuffix),
 			data: scrub(data, secrets),
 			log:  true,
 		})
@@ -513,6 +516,9 @@ func readTail(path string, max int) ([]byte, error) {
 		return nil, err
 	}
 	defer func() { _ = f.Close() }()
+	if strings.HasSuffix(path, logGzipSuffix) {
+		return readGzipTail(f, max)
+	}
 	info, err := f.Stat()
 	if err != nil {
 		return nil, err
@@ -530,6 +536,45 @@ func readTail(path string, max int) ([]byte, error) {
 		return nil, err
 	}
 	return cutToLine(data), nil
+}
+
+// readGzipTail is readTail for a copy log_compress gzipped (sc-132996): the
+// last max bytes of the decompressed text, cut to a line boundary the same
+// way. The copy is decompressed as a stream keeping only the tail, so memory
+// stays bounded by max whatever its size; a corrupt copy is an error, which
+// the bundle reports in the entry rather than failing.
+func readGzipTail(r io.Reader, max int) ([]byte, error) {
+	zr, err := gzip.NewReader(r)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = zr.Close() }()
+	// One byte before the cut tells cutToLine whether the cut sits on a line
+	// boundary, as in readTail.
+	keep := max + 1
+	buf := make([]byte, 0, 2*keep)
+	chunk := make([]byte, 32<<10)
+	total := 0
+	for {
+		n, err := zr.Read(chunk)
+		if n > 0 {
+			buf = append(buf, chunk[:n]...)
+			total += n
+			if len(buf) > 2*keep {
+				buf = buf[:copy(buf, buf[len(buf)-keep:])]
+			}
+		}
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+	}
+	if total <= max {
+		return buf, nil
+	}
+	return cutToLine(buf[len(buf)-keep:]), nil
 }
 
 // trimTail keeps the last max bytes of data, cut to a line boundary.
@@ -555,26 +600,39 @@ func cutToLine(data []byte) []byte {
 	return data[1:]
 }
 
+// logGzipSuffix names a rotated copy log_compress gzipped (sc-132996).
+const logGzipSuffix = ".gz"
+
 // logFiles is the active log and every rotated copy that exists, newest first.
+// A slot log_compress gzipped is path.N.gz (sc-132996); a slot holding both
+// forms - a compression interrupted before it removed the plain copy - is read
+// from the plain one, which is certainly whole.
 func logFiles(active string) []string {
 	files := []string{}
 	if _, err := os.Stat(active); err == nil {
 		files = append(files, active)
 	}
 	matches, _ := filepath.Glob(active + ".*")
-	type rotated struct {
-		path string
-		n    int
-	}
-	var copies []rotated
+	slots := map[int]string{}
 	for _, m := range matches {
-		if n, err := strconv.Atoi(strings.TrimPrefix(m, active+".")); err == nil {
-			copies = append(copies, rotated{m, n})
+		suffix := strings.TrimPrefix(m, active+".")
+		compressed := strings.HasSuffix(suffix, logGzipSuffix)
+		n, err := strconv.Atoi(strings.TrimSuffix(suffix, logGzipSuffix))
+		if err != nil || n < 1 {
+			continue
 		}
+		if _, taken := slots[n]; taken && compressed {
+			continue
+		}
+		slots[n] = m
 	}
-	sort.Slice(copies, func(i, j int) bool { return copies[i].n < copies[j].n })
-	for _, c := range copies {
-		files = append(files, c.path)
+	indices := make([]int, 0, len(slots))
+	for n := range slots {
+		indices = append(indices, n)
+	}
+	sort.Ints(indices)
+	for _, n := range indices {
+		files = append(files, slots[n])
 	}
 	return files
 }

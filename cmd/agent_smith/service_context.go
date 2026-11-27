@@ -144,6 +144,10 @@ type serviceContext struct {
 	autoUpdate   *autoUpdateControl
 	reconfigure  chan struct{}
 	twinRequests atomic.Int64
+	// logWriter is the agent log's rotating writer, whose compression the
+	// log_compress twin setting turns on and off (sc-132996); nil in tests
+	// that never open the log.
+	logWriter *utils.RotatingFile
 	// proxy is the outbound proxy resolved once at startup (sc-129691); nil
 	// before Execute, which leaves MQTT and the updater on the environment.
 	proxy utils.ProxyFunc

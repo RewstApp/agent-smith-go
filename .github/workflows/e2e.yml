@@ -1602,6 +1602,102 @@ jobs:
         with:
           mode: stop
 
+  # log_compress (sc-132996): a small log rotates several times under a burst
+  # of commands, every rotated copy is gzipped beside it within the retention
+  # bound, and the bundle carries the compressed copies as plain text.
+  hermetic-log-rotation:
+    permissions:
+      contents: read
+    needs: [build, build-integration-test, set-matrix]
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.set-matrix.outputs.matrix) }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Set up the hermetic scenario with a small, compressed log
+        timeout-minutes: 20
+        id: setup
+        uses: ./.github/actions/hermetic-setup
+        with:
+          os: ${{ matrix.os }}
+          binary: ${{ matrix.binary }}
+          org_id: ${{ vars.IT_ORG_ID }}
+          device_id: hermetic-${{ github.run_id }}-${{ matrix.os }}-log-rotation
+          service: ${{ matrix.service }}
+          log_file: ${{ matrix.log_file }}
+          extra_args: --log-max-bytes 8192 --log-max-files 2 --log-compress
+
+      - name: Enqueue enough commands to rotate the log several times
+        timeout-minutes: 5
+        uses: ./.github/actions/it-script
+        with:
+          script: hermetic-enqueue-commands
+        env:
+          ENGINE_URL: ${{ steps.setup.outputs.engine_url }}
+          DEVICE_ID: ${{ steps.setup.outputs.device_id }}
+          SCENARIO: quick
+          COUNT: 100
+          POST_ID_PREFIX: rotate
+
+      - name: Assert the last command's result was posted back
+        timeout-minutes: 5
+        uses: ./.github/actions/it-script
+        with:
+          script: hermetic-assert-postback-responses
+        env:
+          ENGINE_URL: ${{ steps.setup.outputs.engine_url }}
+          POST_ID: rotate-100
+          RECORDED: "true"
+          MIN_ATTEMPTS: "1"
+          TIMEOUT_SECONDS: "180"
+
+      - name: Assert every rotated copy is compressed and within the retention bound (sc-132996)
+        timeout-minutes: 5
+        uses: ./.github/actions/it-script
+        with:
+          script: hermetic-assert-log-rotation
+        env:
+          LOG_FILE: ${{ matrix.log_file }}
+          MAX_FILES: "2"
+          MIN_COMPRESSED: "2"
+          TIMEOUT_SECONDS: "60"
+
+      - name: Assert the bundle carries the compressed copies as plain text (sc-132996)
+        timeout-minutes: 5
+        uses: ./.github/actions/it-script
+        with:
+          script: hermetic-assert-bundle
+        env:
+          AGENT_BINARY: ${{ github.workspace }}/dist/${{ matrix.binary }}
+          ORG_ID: ${{ vars.IT_ORG_ID }}
+          LOG_FILE: ${{ matrix.log_file }}
+          BUNDLE_PATH: ${{ runner.temp }}/diagnostic-bundle-rotated.zip
+          EXPECT_ROTATED_LOGS: "2"
+
+      - name: Dump agent log on failure
+        if: failure()
+        uses: ./.github/actions/dump-agent-log
+        with:
+          log_file: ${{ matrix.log_file }}
+
+      - name: Stop stub config endpoint
+        timeout-minutes: 15
+        if: always()
+        uses: ./.github/actions/stub-config
+        with:
+          mode: stop
+
+      - name: Stop stub broker and engine
+        timeout-minutes: 15
+        if: always()
+        uses: ./.github/actions/stub-broker
+        with:
+          mode: stop
+
   e2e-go:
     permissions:
       contents: read

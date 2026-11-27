@@ -267,6 +267,8 @@ type configContext struct {
 	// UpdateWindow is the auto-update window saved into the config file
 	// (sc-132993), canonical "HH:MM-HH:MM"; empty is any time.
 	UpdateWindow string
+	// LogCompress gzips rotated log copies (sc-132996), saved as log_compress.
+	LogCompress bool
 
 	// ConfigMaxAttempts and ConfigBaseRetryBackoffSeconds bound the retry of the
 	// install-time config fetch on a transient endpoint answer (sc-118306).
@@ -332,6 +334,7 @@ func newConfigFlagSet(params *configContext) *flag.FlagSet {
 	bindProxyFlag(fs, &params.ProxyURL)
 	bindReleaseChannelFlag(fs, &params.ReleaseChannel, agent.ReleaseChannelStable)
 	bindUpdateWindowFlag(fs, &params.UpdateWindow)
+	bindLogCompressFlag(fs, &params.LogCompress)
 	fs.StringVar(
 		&params.ServiceUsername,
 		"service-username",
@@ -450,6 +453,18 @@ func bindUpdateWindowFlag(fs *flag.FlagSet, target *string) {
 		"",
 		"Local time of day auto-updates may restart the agent, HH:MM-HH:MM "+
 			"(may cross midnight, e.g. 22:00-04:00); empty means any time",
+	)
+}
+
+// bindLogCompressFlag registers --log-compress, shared by config and update
+// modes (sc-132996).
+func bindLogCompressFlag(fs *flag.FlagSet, target *bool) {
+	fs.BoolVar(
+		target,
+		"log-compress",
+		false,
+		"Gzip each rotated agent log copy (rewst_agent.log.N.gz); "+
+			"on --update, --log-compress=false turns it off and leaving it out keeps the saved value",
 	)
 }
 

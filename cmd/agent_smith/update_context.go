@@ -36,6 +36,11 @@ type updateContext struct {
 	// time, and absent, the saved one stays.
 	UpdateWindow         string
 	UpdateWindowProvided bool
+	// LogCompress replaces the saved log_compress when LogCompressProvided
+	// (sc-132996); absent, the saved one stays, so an update never turns it
+	// off by leaving the flag out.
+	LogCompress         bool
+	LogCompressProvided bool
 
 	Sys    agent.SystemInfoProvider
 	Domain agent.DomainInfoProvider
@@ -76,6 +81,7 @@ func newUpdateFlagSet(params *updateContext) *flag.FlagSet {
 	bindProxyFlag(fs, &params.ProxyURL)
 	bindReleaseChannelFlag(fs, &params.ReleaseChannel, "")
 	bindUpdateWindowFlag(fs, &params.UpdateWindow)
+	bindLogCompressFlag(fs, &params.LogCompress)
 	fs.StringVar(
 		&params.ServiceUsername,
 		"service-username",
@@ -124,6 +130,7 @@ func newUpdateContext(
 		}
 		params.UpdateWindow = window.String()
 	}
+	params.LogCompressProvided = flagProvided(fs, "log-compress")
 
 	if params.OrgId == "" {
 		return nil, fmt.Errorf("missing org-id")

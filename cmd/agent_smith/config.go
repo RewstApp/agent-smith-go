@@ -94,6 +94,7 @@ func runConfig(params *configContext) error {
 	response.Configuration.ProxyURL = params.ProxyURL
 	response.Configuration.ReleaseChannel = params.ReleaseChannel
 	response.Configuration.UpdateWindow = params.UpdateWindow
+	response.Configuration.LogCompress = params.LogCompress
 
 	if params.MqttQos != -1 {
 		qos := byte(params.MqttQos)

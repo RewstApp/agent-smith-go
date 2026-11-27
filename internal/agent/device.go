@@ -104,6 +104,13 @@ type Device struct {
 	// rotation once this many exist; lowering it between runs also removes any
 	// copies numbered above the new value.
 	LogMaxFiles *int `json:"log_max_files,omitempty"`
+	// LogCompress gzips each rotated log copy into rewst_agent.log.N.gz shortly
+	// after it is rotated (sc-132996, utils.RotatingFile.SetCompress); agent
+	// logs compress about 10:1, so more history fits the same footprint. Off
+	// by default, which leaves the files on disk as they were. Set with
+	// --log-compress at install or --update, or through the device twin, which
+	// applies it at once.
+	LogCompress bool `json:"log_compress,omitempty"`
 	// SasTokenLifetimeHours optionally overrides the lifetime of the Azure IoT
 	// Hub SAS token minted for each MQTT connection, in hours. When unset (or
 	// non-positive) the agent falls back to utils.DefaultSasTokenLifetime. Azure
